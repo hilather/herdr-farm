@@ -816,7 +816,7 @@ fn row(t: &Thread, view: Option<&SessionView>, now: jiff::Timestamp) -> Row {
     } else if !live.pane_exists {
         "pane closed".to_string()
     } else {
-        live.agent_state.map(|s| if s == "blocked" { "blocked: possible trust or permission prompt; inspect the pane".into() } else { s }).unwrap_or_else(|| "no agent".into())
+        live.agent_state.unwrap_or_else(|| "no agent".into())
     };
     Row { thread: t.clone(), group, note }
 }
@@ -824,7 +824,8 @@ fn row(t: &Thread, view: Option<&SessionView>, now: jiff::Timestamp) -> Row {
 pub fn print_list(ctx: &Ctx, slug: &str) -> Result<()> {
     let project = Project::load(&ctx.root, slug)?;
     for row in rows(ctx, &project) {
-        println!("{}\t{}\t{}\t{}", row.thread.id, row.group.label(), row.note, row.thread.title);
+        let hint = if row.note == "blocked" { "possible trust or permission prompt; inspect the pane" } else { "" };
+        println!("{}\t{}\t{}\t{}\t{}", row.thread.id, row.group.label(), row.note, row.thread.title, hint);
     }
     Ok(())
 }

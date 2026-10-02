@@ -50,10 +50,12 @@ elif request is not None:
     if mode=='lost':sys.exit(1)
     if mode=='hang':time.sleep(120);sys.exit(1)
     params=request['params']
+    if request['method']=='agent.start':
+        with open(home/'starts','a') as f:f.write(json.dumps(params)+'\n')
     if request['method']=='agent.prompt':agent=next(a for a in read('agents') if a['pane_id']==params['target'])
-    else:agent=dict(next(p for p in read('panes') if p['pane_id']==params['pane_id']),name=params['name'],launch_pending=True,agent_status='unknown',agent=None if mode=='null' else 'claude')
+    else:agent=dict(next(p for p in read('panes') if p['pane_id']==params['pane_id']),name=params['name'],launch_pending=True,agent_status='unknown',agent=None if mode=='null' else params['kind'])
     kind={'agent.prompt':'agent_prompted','agent.start':'agent_started'}[request['method']]
-    print(json.dumps({'id':request['id'],'result':{'type':kind,'agent':agent,'argv':['claude']}}))
+    print(json.dumps({'id':request['id'],'result':{'type':kind,'agent':agent,'argv':[params.get('kind', 'claude')]+params.get('args', [])}}))
 elif args[:2] in (['agent','prompt'],['agent','start']):print('{"error":{"code":"unsupported","message":"synchronous effect"}}');sys.exit(2)
 else:print('{"result":{}}')
 "#;
@@ -478,9 +480,50 @@ fn a_thread_start_is_confirmed_on_acknowledgement_without_waiting_for_the_agent(
         ticker.stop();
         let record = thread();
         assert_eq!(lab.times("demo", "agent.start").len(), 1, "{reply}");
+        let starts: Vec<Value> = fs::read_to_string(lab.path("starts")).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(starts[0]["args"], json!(["--permission-mode", "acceptEdits"]));
         assert_eq!((record["prompt_pending"].as_bool(), record["status"].as_str()), (Some(true), Some("open")), "{reply}: {record}");
         assert!(lab.times("demo", "agent.prompt").is_empty(), "{reply}");
     }
+}
+
+/// A real linked Git worktree receives both trust paths, and the exact command
+/// acknowledged by the bridge matches the durable launch claim.
+#[test]
+fn linked_worktree_start_acknowledges_the_recorded_default_arguments() {
+    use sha2::Digest;
+    let mut lab = Lab::new();
+    let project = lab.project_in_session("demo", json!({"prime_pending": false}));
+    let repository = lab.path("repo.with.dots");
+    let work = lab.path("linked.worktree");
+    fs::create_dir(&repository).unwrap();
+    for args in [vec!["init"], vec!["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "initial"]] {
+        let out = Command::new("git").env_clear().env("HOME", lab.home.path()).env("PATH", "/usr/bin:/bin")
+            .arg("-C").arg(&repository).args(args).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    }
+    let out = Command::new("git").env_clear().env("HOME", lab.home.path()).env("PATH", "/usr/bin:/bin")
+        .arg("-C").arg(&repository).args(["worktree", "add", "-b", "worker"]).arg(&work).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    fs::write(project.join("threads/t-0001.toml"), toml::to_string(&json!({"id": "t-0001", "title": "task", "status": "open", "kind": "worktree",
+        "created": jiff::Timestamp::now().to_string(), "agent": "codex", "agent_name": "worker", "workspace_id": "w", "tab_id": "w:t", "pane_id": "pw",
+        "cwd": work, "thread_dir": work, "worktree_path": work, "repo": repository, "prompt_pending": true})).unwrap()).unwrap();
+    lab.session("demo", &[agent_at("p", &project, "coordinator", "idle")], &[pane_at("p", &project), pane_at("pw", &work)]);
+    let record = || -> toml::Value { toml::from_str(&fs::read_to_string(project.join("threads/t-0001.toml")).unwrap()).unwrap() };
+    let mut ticker = lab.run_ticker(&[]);
+    ticker.wait_for("the linked worktree start", 60, || record().get("launch_claim").and_then(|c| c.get("phase")).and_then(|p| p.as_str()) == Some("confirmed"));
+    ticker.next_pass();
+    ticker.stop();
+    let starts: Vec<Value> = fs::read_to_string(lab.path("starts")).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    assert_eq!(starts.len(), 1);
+    let args: Vec<String> = serde_json::from_value(starts[0]["args"].clone()).unwrap();
+    assert_eq!(args[0], "-c");
+    assert_eq!(&args[2..], ["--sandbox", "workspace-write", "--ask-for-approval", "on-request"]);
+    let overrides: toml::Value = toml::from_str(&args[1]).unwrap();
+    let trusted = overrides["projects"].as_table().unwrap();
+    assert_eq!(trusted.len(), 2);
+    for path in [&repository, &work] { assert_eq!(trusted[path.to_str().unwrap()]["trust_level"].as_str(), Some("trusted")); }
+    assert_eq!(record()["launch_claim"]["arguments_digest"].as_str(), Some(format!("{:x}", sha2::Sha256::digest(serde_json::to_vec(&args).unwrap())).as_str()));
 }
 
 /// Replaces `ticker_offers_without_advancing_until_worker_claim_and_then_delivers`.

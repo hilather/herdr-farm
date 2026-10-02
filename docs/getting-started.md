@@ -59,8 +59,9 @@ a workspace-write sandbox and on-request approval. Network is off; set
 `thread_network = true` in the project's safety settings when workers need
 downloads. Claude workers use `--permission-mode acceptEdits`, but the first
 thread in a new repository may still need you to answer Claude's folder-trust
-dialog in its pane. `thread status` and `doctor` flag blocked panes as possible
-trust or permission prompts. An explicit `thread_agent_args` replaces the defaults,
+dialog in its pane. `thread list` preserves the `blocked` state and shows a
+separate hint column; `doctor` flags possible trust or permission prompts.
+An explicit `thread_agent_args` replaces the defaults,
 including an empty array. See [Operations](operations.md#safety-settings).
 
 When a thread finishes it writes a report. The report is copied to `threads/<id>.md` in the project folder and the thread moves to Ready for review. Tell the coordinator you've looked (it runs `thread ack`), or resolve the thread:

@@ -44,7 +44,7 @@ elif request is not None:
     if request['method']=='agent.prompt':agent=next(a for a in read('agents') if a['pane_id']==params['target'])
     else:agent=dict(next(p for p in read('panes') if p['pane_id']==params['pane_id']),name=params['name'],launch_pending=True,agent_status='unknown')
     kind={'agent.prompt':'agent_prompted','agent.start':'agent_started'}[request['method']]
-    print(json.dumps({'id':request['id'],'result':{'type':kind,'agent':agent,'argv':['claude']}}))
+    print(json.dumps({'id':request['id'],'result':{'type':kind,'agent':agent,'argv':[params.get('kind', 'claude')]+params.get('args', [])}}))
 elif args[:2] in (['agent','prompt'],['agent','start']):print('{"error":{"code":"unsupported","message":"synchronous effect"}}');sys.exit(2)
 else:print('{"result":{}}')
 "#;

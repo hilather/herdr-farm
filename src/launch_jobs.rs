@@ -51,7 +51,8 @@ fn execute_with(input:&Input,control:&Control,after_claim:impl FnOnce()->Result<
     // explicit detected kind must match, and briefs still require exact kind.
     ensure!(agent["agent"].as_str()==Some(&t.agent)||(agent["agent"].is_null()&&agent["launch_pending"].as_bool()==Some(true)),"launch acknowledgement has a foreign or unavailable agent kind");
     let argv:Vec<String>=serde_json::from_value(result["argv"].clone()).map_err(|_|anyhow::anyhow!("launch acknowledgement lacks a valid command vector (contents withheld)"))?;
-    ensure!(argv.len()==arguments.len()+1&&!argv[0].is_empty()&&argv[0].len()<=4096&&!argv[0].chars().any(char::is_control)&&argv[1..]==arguments,"launch acknowledgement command arguments changed");
+    // Verify the immutable launch intent; never resolve defaults or Git paths again.
+    ensure!(argv.len()==arguments.len()+1&&!argv[0].is_empty()&&argv[0].len()<=4096&&!argv[0].chars().any(char::is_control)&&thread::sha256_hex(&serde_json::to_vec(&argv[1..])?)==claim.arguments_digest,"launch acknowledgement command arguments changed");
     check_route(input,control,&locks)?;ensure!(socket(&project)?==input.socket&&socket_identity(&input.socket)?==input.socket_identity,"launch session changed during dispatch");
     thread::launch_delivery::confirm(&project,&guard,&t.id,&claim,control)
 }

@@ -30,7 +30,7 @@ elif args==['remote-api-bridge']:
         (home/'agents.json').write_text(json.dumps([agent]))
         if (home/'lost').exists():sys.exit(1)
         agent=dict(agent,agent_status='unknown');del agent['agent']
-        result={'type':'agent_started','agent':agent,'argv':['claude']}
+        result={'type':'agent_started','agent':agent,'argv':['claude']+r['params']['args']}
     else:
         print(json.dumps({'id':r['id'],'error':{'code':'unsupported','message':'not in fixture'}}));sys.exit(0)
     print(json.dumps({'id':r['id'],'result':result}))
@@ -137,6 +137,7 @@ fn a_lost_start_is_reported_once_and_only_a_restart_starts_the_agent_again() {
     let _ = fs::remove_file(lab.path("root/.ticker.stop"));
     let starts = lab.starts();
     assert_eq!(starts.len(), 2, "{starts:?}");
+    for start in &starts { assert_eq!(start["args"], json!(["--permission-mode", "acceptEdits"])); }
     assert_eq!(starts[1]["name"], "hp-demo-t-0001");
     assert_eq!((lab.get(&["status"]), lab.get(&["launch_sequence"])), (Some("open".into()), Some(2.into())));
     assert_eq!(lab.get(&["launch_claim", "generation"]), lab.get(&["lifecycle_generation"]));

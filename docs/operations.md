@@ -96,8 +96,9 @@ It has no effect on explicit argument arrays or other agents.
 Claude workers default to `--permission-mode acceptEdits`. A first Claude thread
 in a new repository may still show its folder-trust dialog once; inspect the pane
 and answer it yourself. Herdr never writes the owner's `.claude.json`.
-`thread status` and `doctor` identify a blocked pane as a possible trust or
-permission prompt. Other kinds receive no built-in arguments. `safety show`,
+`thread list` keeps the state `blocked` and adds a fifth, hint column for possible
+trust or permission prompts; `doctor` reports the hint with the pane identity.
+Other kinds receive no built-in arguments. `safety show`,
 project context/show and `doctor` mark the effective per-kind built-in defaults;
 trust paths are placeholders in project-level reports and resolved for each launch.
 An explicit `thread_agent_args`, including `[]`, replaces all built-in arguments.
@@ -199,7 +200,10 @@ without copying launch arguments into the record.
 
 Both transports use the JSON API bridge and require a typed `agent_started`
 acknowledgement naming the same terminal and agent name, with the expected command
-arguments. Native pending-start replies may omit detected kind; an explicit kind
+arguments. Worker arguments are resolved once before the launch claim; the
+acknowledgement is checked against its recorded argument digest, without resolving
+repository paths or defaults again. Native pending-start replies may omit detected
+kind; an explicit kind
 must match, and briefs still require a fresh exact kind. This confirms submission,
 not interactive readiness. A trust dialog or startup delay can leave the agent
 blocked while the brief remains pending; fresh readiness observations still govern

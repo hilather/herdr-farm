@@ -186,6 +186,12 @@ fn thread_list_groups_every_record_and_live_state() {
     }).collect();
     assert!(mismatches.is_empty(), "{mismatches:#?}");
     assert_eq!(listed.len(), cases.len());
+    let output = lab.ok(&["thread", "list", "demo"]);
+    for line in output.lines() {
+        let fields: Vec<_> = line.split('\t').collect();
+        assert_eq!(fields.len(), 5, "{line}");
+        assert_eq!(fields[4], if fields[2] == "blocked" { "possible trust or permission prompt; inspect the pane" } else { "" });
+    }
     // Listing observes; it never rewrites a record.
     let after = fs::read_dir(lab.project().join("threads")).unwrap().map(|e| fs::read(e.unwrap().path()).unwrap()).collect::<Vec<_>>();
     assert_eq!(before, after);
