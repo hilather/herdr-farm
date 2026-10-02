@@ -12,6 +12,22 @@ const BIN: &str = env!("CARGO_BIN_EXE_herdr-farm");
 const FAKE_HERDR: &str = r#"#!/bin/sh
 printf '%s\n' "$*" >> "$HOME/herdr-calls"
 case "$1 $2" in
+ 'agent send-keys'|'pane close'|'workspace close')
+  python3 - "$HOME" "$1" "$2" "$3" <<'PYFIX'
+import json, pathlib, sys
+root, kind, action, target = pathlib.Path(sys.argv[1]), *sys.argv[2:]
+file = root / {'agent': 'agents.json', 'pane': 'panes.json', 'workspace': 'workspaces.json'}[kind]
+data = json.loads(file.read_text())
+key = {'agent': 'agents', 'pane': 'panes', 'workspace': 'workspaces'}[kind]
+field = 'workspace_id' if kind == 'workspace' else 'pane_id'
+data['result'][key] = [r for r in data['result'][key] if r[field] != target]
+file.write_text(json.dumps(data))
+PYFIX
+  if [ "$1 $2" = 'pane close' ] && [ -e "$HOME/crash-pane" ]; then
+    rm "$HOME/crash-pane"; touch "$HOME/crashed"; kill -KILL "$PPID"
+  fi
+  echo '{"result":{}}';;
+ 'workspace list') cat "$HOME/workspaces.json";;
 'agent list') cat "$HOME/agents.json";;
 'pane list') cat "$HOME/panes.json";;
 'worktree create')
@@ -64,6 +80,8 @@ impl Lab {
     fn session(&self, agents: &[Value], panes: &[Value]) {
         let mut all = vec![json!({"workspace_id": "w0", "tab_id": "w0:t1", "pane_id": "w0:p1", "cwd": self.project()})];
         all.extend(panes.iter().cloned());
+        let workspaces: std::collections::BTreeSet<_> = all.iter().map(|p| p["workspace_id"].as_str().unwrap()).collect();
+        fs::write(self.path("workspaces.json"), json!({"result": {"workspaces": workspaces.into_iter().map(|w| json!({"workspace_id":w})).collect::<Vec<_>>()}}).to_string()).unwrap();
         fs::write(self.path("panes.json"), json!({"result": {"panes": all}}).to_string()).unwrap();
         fs::write(self.path("agents.json"), json!({"result": {"agents": agents}}).to_string()).unwrap();
     }
@@ -550,4 +568,146 @@ fn thread_start_uses_agent_arguments_only_for_the_kind_they_are_bound_to() {
         lab.ok_beside_ticker(&["thread", "start", "demo", "--title", kind, "--agent", kind, "--task-file", task.to_str().unwrap()]);
     }
     assert_eq!((lab.record("t-0002")["agent"].as_str(), lab.record("t-0003")["agent"].as_str()), (Some("codex"), Some("muse")));
+}
+
+// Real Git worktree and persisted reports; all cleanup is exercised by resolve
+// and a foreground ticker through the compiled CLI, never internal helpers.
+fn cleanup_thread(lab: &Lab, state: &str) -> (PathBuf, PathBuf) {
+    let repo = lab.path("cleanup-repo");
+    let work = lab.path("cleanup-work");
+    fs::create_dir(&repo).unwrap();
+    lab.git(&repo, &["init", "-q", "-b", "main"]);
+    lab.git(&repo, &["commit", "-q", "--allow-empty", "-m", "base"]);
+    lab.git(&repo, &["worktree", "add", "-q", "-b", "retained", work.to_str().unwrap()]);
+    fs::write(repo.join(".git/info/exclude"), ".herdr-project/\n").unwrap();
+    let dir = work.join(".herdr-project/demo-t-0001");
+    fs::create_dir_all(dir.join("library")).unwrap();
+    fs::write(dir.join("report.md"), "finished report\n").unwrap();
+    fs::write(dir.join("brief.md"), "generated instructions\n").unwrap();
+    fs::write(dir.join("library/result.txt"), "preserved result\n").unwrap();
+    let pane = json!({"workspace_id":"w1", "tab_id":"w1:t1", "pane_id":"w1:p1", "cwd":work});
+    let mut record = json!({"id":"t-0001", "title":"Cleanup", "status":"open", "kind":"worktree", "created":ago(3600),
+        "agent":"claude", "agent_name":"hp-demo-t-0001", "repo":repo, "branch":"retained", "worktree_path":work, "thread_dir":dir});
+    for (key, value) in pane.as_object().unwrap() { record[key] = value.clone(); }
+    lab.write_record("t-0001", &record);
+    let mut agent = pane.clone();
+    agent["name"] = json!("hp-demo-t-0001");
+    agent["agent_status"] = json!(state);
+    lab.session(&[agent], &[pane]);
+    (repo, work)
+}
+fn cleanup_safety(lab: &Lab, cleanup: &str, resolve: &str) {
+    let config = lab.path(".config/herdr-projects");
+    fs::create_dir_all(&config).unwrap();
+    fs::write(config.join("config.toml"), format!("[safety.{:?}]\ncleanup_resolved = {cleanup:?}\nresolve_threads = {resolve:?}\n", lab.project().to_str().unwrap())).unwrap();
+}
+fn wait_cleanup(lab: &Lab, expected: &str) {
+    let deadline = Instant::now() + Duration::from_secs(100);
+    loop {
+        let note = lab.list()["t-0001"].1.clone();
+        if note.contains(expected) { return; }
+        assert!(Instant::now() < deadline, "cleanup did not reach {expected}: {note}; calls: {}", lab.calls());
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+#[test]
+fn resolved_done_thread_cleans_its_pane_and_worktree_but_keeps_branch_and_report() {
+    let lab = Lab::new();
+    let (repo, work) = cleanup_thread(&lab, "done");
+    let head = lab.git(&repo, &["rev-parse", "retained"]);
+    let safety = lab.ok(&["safety", "show", "demo"]);
+    assert!(safety.contains("cleanup_resolved = \"auto\"") && safety.contains("resolve_threads = \"propose\""));
+    lab.ok(&["thread", "resolve", "demo", "t-0001"]);
+    let ticker = lab.ticker();
+    wait_cleanup(&lab, "cleanup complete");
+    drop(ticker);
+    assert!(!work.exists());
+    assert!(!lab.git(&repo, &["worktree", "list", "--porcelain"]).contains(work.to_str().unwrap()));
+    assert_eq!(lab.git(&repo, &["rev-parse", "retained"]), head);
+    assert_eq!(fs::read_to_string(lab.project().join("threads/t-0001.md")).unwrap(), "finished report\n");
+    assert_eq!(fs::read_to_string(lab.project().join("library/t-0001/result.txt")).unwrap(), "preserved result\n");
+    assert_eq!(fs::read_to_string(lab.project().join("threads/t-0001.brief.md")).unwrap(), "generated instructions\n");
+    assert_eq!(lab.calls().lines().filter(|l| *l == "pane close w1:p1").count(), 1);
+    assert_eq!(lab.calls().lines().filter(|l| *l == "workspace close w1").count(), 1);
+    let spaces: Value = serde_json::from_str(&fs::read_to_string(lab.path("workspaces.json")).unwrap()).unwrap();
+    assert!(spaces["result"]["workspaces"].as_array().unwrap().iter().all(|w| w["workspace_id"] != "w1"));
+    let panes: Value = serde_json::from_str(&fs::read_to_string(lab.path("panes.json")).unwrap()).unwrap();
+    assert!(panes["result"]["panes"].as_array().unwrap().iter().all(|p| p["pane_id"] != "w1:p1"));
+}
+#[test]
+fn unsafe_resolved_threads_are_kept_and_cleanup_keep_opts_out() {
+    for (mode, reason) in [("dirty", "dirty worktree"), ("ignored", "ignored worktree content"), ("working", "working"), ("blocked", "blocked"), ("keep", "")] {
+        let lab = Lab::new();
+        let (_, work) = cleanup_thread(&lab, if matches!(mode, "working" | "blocked") { mode } else { "done" });
+        if mode == "dirty" { fs::write(work.join("untracked.txt"), "do not lose").unwrap(); }
+        if mode == "ignored" { fs::write(work.join(".herdr-project/demo-t-0001/uncopied.txt"), "do not lose ignored data").unwrap(); }
+        if mode == "keep" { cleanup_safety(&lab, "keep", "propose"); }
+        lab.ok(&["thread", "resolve", "demo", "t-0001"]);
+        let ticker = lab.ticker();
+        if mode == "keep" {
+            let before = lab.calls().lines().filter(|l| *l == "pane list").count();
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while lab.calls().lines().filter(|l| *l == "pane list").count() < before + 3 {
+                assert!(Instant::now() < deadline, "ticker did not observe the kept thread");
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            assert_eq!(lab.list()["t-0001"].1, "manual");
+        } else {
+            wait_cleanup(&lab, reason);
+            let output = lab.cli(&["doctor"]);
+            assert!(String::from_utf8_lossy(&output.stdout).contains(reason));
+            let log = fs::read_to_string(lab.root().join(".ticker.log")).unwrap();
+            assert_eq!(log.lines().filter(|l| l.contains("cleanup kept:")).count(), 1);
+        }
+        drop(ticker);
+        assert!(work.is_dir());
+        assert!(!lab.calls().contains("pane close w1:p1") && !lab.calls().contains("agent send-keys w1:p1"));
+        if mode == "dirty" { assert_eq!(fs::read_to_string(work.join("untracked.txt")).unwrap(), "do not lose"); }
+    }
+}
+#[test]
+fn integrated_resolution_enforces_policy_readiness_and_git_ancestry() {
+    let lab = Lab::new();
+    let (repo, work) = cleanup_thread(&lab, "done");
+    let args = ["thread", "resolve-integrated", "demo", "t-0001"];
+    let refused = lab.cli(&args);
+    assert!(!refused.status.success() && String::from_utf8_lossy(&refused.stderr).contains("resolve_threads=propose"));
+    cleanup_safety(&lab, "keep", "auto");
+    lab.git(&work, &["commit", "-q", "--allow-empty", "-m", "thread change"]);
+    let refused = lab.cli(&args);
+    assert!(!refused.status.success() && String::from_utf8_lossy(&refused.stderr).contains("not merged"));
+    assert_eq!(lab.record("t-0001")["status"].as_str(), Some("open"));
+    lab.git(&repo, &["merge", "--ff-only", "retained"]);
+    let pane = json!({"workspace_id":"w1", "tab_id":"w1:t1", "pane_id":"w1:p1", "cwd":work});
+    let mut agent = pane.clone();
+    agent["name"] = json!("hp-demo-t-0001"); agent["agent_status"] = json!("working");
+    lab.session(std::slice::from_ref(&agent), std::slice::from_ref(&pane));
+    assert!(!lab.cli(&args).status.success());
+    agent["agent_status"] = json!("idle"); lab.session(&[agent], &[pane]);
+    assert!(lab.ok(&args).contains("t-0001 resolved"));
+    assert_eq!(lab.record("t-0001")["status"].as_str(), Some("resolved"));
+    assert_eq!(fs::read_to_string(lab.project().join("threads/t-0001.md")).unwrap(), "finished report\n");
+}
+#[test]
+fn ticker_crash_after_pane_close_resumes_without_repeating_it() {
+    let lab = Lab::new();
+    let (repo, work) = cleanup_thread(&lab, "done");
+    lab.ok(&["thread", "resolve", "demo", "t-0001"]);
+    fs::write(lab.path("crash-pane"), "once").unwrap();
+    let mut ticker = lab.ticker();
+    let deadline = Instant::now() + Duration::from_secs(45);
+    while !lab.path("crashed").exists() {
+        assert!(Instant::now() < deadline, "fixture never reached pane close");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(ticker.0.wait().unwrap().code().is_none());
+    drop(ticker);
+    let ticker = lab.ticker();
+    wait_cleanup(&lab, "cleanup complete");
+    drop(ticker);
+    assert!(!work.exists());
+    assert_eq!(lab.calls().lines().filter(|l| *l == "pane close w1:p1").count(), 1);
+    assert_eq!(lab.calls().lines().filter(|l| *l == "agent send-keys w1:p1 ctrl-c ctrl-c ctrl-d").count(), 1);
+    assert!(!lab.git(&repo, &["rev-parse", "retained"]).is_empty());
+    assert_eq!(fs::read_to_string(lab.project().join("threads/t-0001.md")).unwrap(), "finished report\n");
 }

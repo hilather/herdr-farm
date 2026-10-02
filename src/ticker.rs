@@ -1264,6 +1264,7 @@ fn tick_slow(ctx: &Ctx, project: &Project, seen: &Seen, memory: &mut Memory) -> 
         Err(error) => return vec![error],
     };
     let before = state.clone();
+    errors.extend(crate::resolved_cleanup::pass(ctx, project).err());
     errors.extend(crate::legacy_routine_jobs::deliver(project,&mut state).err());
     if let Some(error) = &seen.notification_error { errors.push(anyhow::anyhow!("{error}")); }
     let herdr = Herdr::new(ctx.env.herdr_bin(), &seen.socket, ctx.runner);

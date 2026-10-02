@@ -576,6 +576,10 @@ pub struct ResolveArgs {
 
 pub fn resolve(ctx: &Ctx, slug: &str, id: &str, args: &ResolveArgs) -> Result<()> {
     let _lease = crate::cleanup::lease(&ctx.root)?;
+    resolve_leased(ctx, slug, id, args, false)
+}
+
+fn resolve_leased(ctx: &Ctx, slug: &str, id: &str, args: &ResolveArgs, integrated: bool) -> Result<()> {
     let project = Project::load(&ctx.root, slug)?;
     let record = thread::load(&project, id)?;
     anyhow::ensure!((record.pending_live_copy.is_none()&&record.pending_final_copy.is_none()),"recover the pending live projection before resolving");
@@ -619,6 +623,23 @@ pub fn resolve(ctx: &Ctx, slug: &str, id: &str, args: &ResolveArgs) -> Result<()
         }
     }
 
+    // Manual resolve invalidates delivery claims by advancing the generation.
+    // Commit a matching preservation receipt with that lifecycle transition.
+    let resolved_snapshot = if !args.skip_copy && !args.remove_worktree && !record.is_remote() {
+        let current = thread::load(&project, id)?;
+        if current.artifact_snapshot.is_empty() { None } else {
+            let retained = crate::artifacts::load(&project, &current, &current.artifact_snapshot)?;
+            // Partial final copies must not reuse an older complete snapshot.
+            if crate::artifacts::verify_source(&current, &retained).is_ok() {
+                let mut next = current.clone();
+                next.lifecycle_generation = next.lifecycle_generation.checked_add(1).context("thread lifecycle generation exhausted")?;
+                let snapshot = crate::artifacts::capture_local(&project, &next)?;
+                anyhow::ensure!(retained.same_contents(&snapshot.manifest), "artifacts changed after the final copy; not resolving");
+                Some(snapshot.id)
+            } else { None }
+        }
+    } else { None };
+    if integrated { check_integrated(ctx, &project, &thread::load(&project, id)?)?; }
     if args.remove_worktree {
         remove_worktree(ctx, &project, &record, args.writers_stopped)?;
 
@@ -630,6 +651,7 @@ pub fn resolve(ctx: &Ctx, slug: &str, id: &str, args: &ResolveArgs) -> Result<()
         thread::invalidate_finalization(t)?;
         t.status = Status::Resolved;
         t.resolved_reason = "manual".into();
+        if let Some(snapshot) = &resolved_snapshot { t.artifact_snapshot = snapshot.clone(); } else if !args.remove_worktree { t.artifact_snapshot.clear(); }
         if args.remove_worktree { t.worktree_path.clear(); t.cwd.clear(); }
         t.prompt_pending = false;
         Ok(())
@@ -642,7 +664,7 @@ pub fn resolve(ctx: &Ctx, slug: &str, id: &str, args: &ResolveArgs) -> Result<()
         match resolved.kind {
             Kind::Worktree if resolved.worktree_path.is_empty() => println!("No worktree was recorded for it, so there is nothing to close or remove."),
             Kind::Worktree => println!(
-                "Its pane, workspace, worktree ({}) and branch ({}) were left alone. Automatic cleanup is unavailable until writer shutdown can be verified.",
+                "Its pane, workspace, worktree ({}) and branch ({}) were left alone. The ticker will attempt verified cleanup unless cleanup_resolved=keep.",
                 resolved.worktree_path, resolved.branch
             ),
             _ => println!("Its pane and tab were left alone; close them in herdr."),
@@ -705,6 +727,7 @@ pub fn copy_for_finalization(ctx: &Ctx, project: &Project, record: &Thread) -> t
                 if record.thread_dir.is_empty() || !Path::new(&record.thread_dir).try_exists()? {
                     bail!("artifact source is missing; restore it before finalization, or explicitly resolve with --skip-copy");
                 }
+                preserve_brief(project, record)?;
                 let snapshot = crate::artifacts::capture_local(project, record)?;
                 if snapshot.manifest.report_hash() != copied.report_hash.as_deref() { bail!("report changed between live copy and preservation snapshot"); }
                 Ok(Some(snapshot.id))
@@ -720,7 +743,7 @@ pub fn copy_for_finalization(ctx: &Ctx, project: &Project, record: &Thread) -> t
 
 /// Validate preservation and exclusive ownership before the writer checkpoint.
 /// No force-removal fallback exists.
-fn remove_worktree(ctx: &Ctx, project: &Project, record: &Thread, writers_stopped: bool) -> Result<()> {
+pub(crate) fn remove_worktree(ctx: &Ctx, project: &Project, record: &Thread, writers_stopped: bool) -> Result<()> {
     if record.worktree_path.is_empty() {
         bail!("{} has no recorded worktree", record.id);
     }
@@ -733,33 +756,7 @@ fn remove_worktree(ctx: &Ctx, project: &Project, record: &Thread, writers_stoppe
     if current.is_remote() {
         bail!("remote writer quiescence cannot be established; resolve without --remove-worktree");
     }
-    let worktree = std::fs::canonicalize(&current.worktree_path)?;
-    if !std::fs::symlink_metadata(&current.worktree_path)?.is_dir() || worktree == std::fs::canonicalize(&current.repo)? {
-        bail!("cleanup target is not a distinct, real worktree directory");
-    }
-    // Read every record explicitly: malformed references cannot be treated as
-    // evidence that ownership is exclusive.
-    #[cfg(feature="state-store")]
-    crate::runtime_ownership::check_worktree_references(ctx,&project.dir(),&current.id,&worktree)?;
-    #[cfg(not(feature="state-store"))]
-    for slug in project::list_slugs(&ctx.root) {
-        let owner = Project::load(&ctx.root, &slug)?;
-        for entry in std::fs::read_dir(owner.dir().join("threads"))? {
-            let path = entry?.path();
-            if path.extension().is_none_or(|e| e != "toml") { continue; }
-            let text = std::fs::read_to_string(&path)?;
-            let other: Thread = toml::from_str(&text).with_context(|| format!("cannot establish cleanup ownership: {} is invalid", path.display()))?;
-            if owner.canonical_dir() == project.canonical_dir() && other.id == current.id { continue; }
-            if other.is_remote() { continue; }
-            for location in [&other.worktree_path, &other.cwd] {
-                if location.is_empty() { continue; }
-                let resolved = std::fs::canonicalize(location).with_context(|| format!("cannot verify workspace reference for {} in {slug}", other.id))?;
-                if resolved.starts_with(&worktree) || worktree.starts_with(&resolved) {
-                    bail!("worktree is also referenced by {} in {slug}; keeping shared/adopted workspace", other.id);
-                }
-            }
-        }
-    }
+    let worktree = cleanup_ownership(ctx, project, &current)?;
     let view = require_session(ctx, project)?;
     let (agents, panes) = lists_for(&view, &current)?;
     let inside = |cwd: &str| !cwd.is_empty() && std::fs::canonicalize(cwd).is_ok_and(|p| p.starts_with(&worktree));
@@ -786,15 +783,15 @@ pub fn rows(ctx: &Ctx, project: &Project) -> Vec<Row> {
     let now = jiff::Timestamp::now();
     thread::list(project)
         .into_iter()
-        .map(|t| row(&t, view.as_ref(), now))
+        .map(|t| row(project, &t, view.as_ref(), now))
         .collect()
 }
 
-fn row(t: &Thread, view: Option<&SessionView>, now: jiff::Timestamp) -> Row {
+fn row(project: &Project, t: &Thread, view: Option<&SessionView>, now: jiff::Timestamp) -> Row {
     // Before the first poll a thread that is waiting for its launch is Working.
     let recorded = Group::from_token(&t.last_group).unwrap_or(if t.prompt_pending { Group::Working } else { Group::Idle });
     if t.status == Status::Resolved {
-        return Row { thread: t.clone(), group: Group::Resolved, note: t.resolved_reason.clone() };
+        return Row { thread: t.clone(), group: Group::Resolved, note: format!("{}{}", t.resolved_reason, crate::resolved_cleanup::note(project, t)) };
     }
     let Some(view) = view else {
         // Records are still printed; panes are not treated as gone.
@@ -834,13 +831,94 @@ pub fn print_show(ctx: &Ctx, slug: &str, id: &str) -> Result<()> {
     let project = Project::load(&ctx.root, slug)?;
     let record = thread::load(&project, id)?;
     let view = session_view(ctx, &project);
-    let row = row(&record, view.as_ref(), jiff::Timestamp::now());
+    let row = row(&project, &record, view.as_ref(), jiff::Timestamp::now());
     println!("group = {:?}", row.group.label());
     println!("live = {:?}", row.note);
     print!("{}", toml::to_string(&record)?);
     let report = thread::home_report_path(&project, id);
     if report.is_file() {
         println!("# home copy of the report: {}", report.display());
+    }
+    Ok(())
+}
+
+/// Coordinator entry point: no flags can bypass readiness or Git ancestry.
+pub fn resolve_integrated(ctx: &Ctx, slug: &str, id: &str) -> Result<()> {
+    let _lease = crate::cleanup::lease(&ctx.root)?;
+    let project = Project::load(&ctx.root, slug)?;
+    anyhow::ensure!(project.status() == project::Status::Active, "project is not active");
+    anyhow::ensure!(project.safety(&ctx.config_dir)?.resolve_threads == "auto", "resolve_threads=propose; propose resolution to the owner");
+    let record = thread::load(&project, id)?;
+    anyhow::ensure!(record.kind == Kind::Worktree && !record.is_remote() && !record.branch.is_empty(), "integrated resolution requires a local worktree branch");
+    check_integrated(ctx, &project, &record)?;
+    resolve_leased(ctx, slug, id, &ResolveArgs::default(), true)
+}
+
+/// Reused before any automatic terminal action as well as removal.
+pub(crate) fn cleanup_ownership(ctx: &Ctx, project: &Project, current: &Thread) -> Result<std::path::PathBuf> {
+    anyhow::ensure!(current.kind == Kind::Worktree && !current.is_remote(), "only exclusively owned local worktree threads can be cleaned automatically");
+    let worktree = std::fs::canonicalize(&current.worktree_path)?;
+    if !std::fs::symlink_metadata(&current.worktree_path)?.is_dir() || worktree == std::fs::canonicalize(&current.repo)? {
+        bail!("cleanup target is not a distinct, real worktree directory");
+    }
+    // Read every record explicitly: malformed references cannot be treated as
+    // evidence that ownership is exclusive.
+    #[cfg(feature="state-store")]
+    crate::runtime_ownership::check_worktree_references(ctx,&project.dir(),&current.id,&worktree)?;
+    #[cfg(not(feature="state-store"))]
+    for slug in project::list_slugs(&ctx.root) {
+        let owner = Project::load(&ctx.root, &slug)?;
+        for entry in std::fs::read_dir(owner.dir().join("threads"))? {
+            let path = entry?.path();
+            if path.extension().is_none_or(|e| e != "toml") { continue; }
+            let text = std::fs::read_to_string(&path)?;
+            let other: Thread = toml::from_str(&text).with_context(|| format!("cannot establish cleanup ownership: {} is invalid", path.display()))?;
+            if owner.canonical_dir() == project.canonical_dir() && other.id == current.id { continue; }
+            if other.is_remote() { continue; }
+            for location in [&other.worktree_path, &other.cwd] {
+                if location.is_empty() { continue; }
+                let resolved = std::fs::canonicalize(location).with_context(|| format!("cannot verify workspace reference for {} in {slug}", other.id))?;
+                if resolved.starts_with(&worktree) || worktree.starts_with(&resolved) {
+                    bail!("worktree is also referenced by {} in {slug}; keeping shared/adopted workspace", other.id);
+                }
+            }
+        }
+    }
+    Ok(worktree)
+}
+
+fn check_integrated(ctx: &Ctx, project: &Project, record: &Thread) -> Result<()> {
+    anyhow::ensure!(project.safety(&ctx.config_dir)?.resolve_threads == "auto", "resolve_threads=propose; propose resolution to the owner");
+    let view = require_session(ctx, project)?;
+    let agent = view.agents.iter().find(|a| thread::agent_matches(record, a)).context("cannot verify an idle or done agent")?;
+    anyhow::ensure!(agent.ready() && !record.prompt_pending && record.launch_claim.is_none() && record.prompt_claim.is_none(), "thread agent is not idle or done, or has pending delivery");
+    let (settings, _) = project.read_project_md()?;
+    let target = if settings.integration_target.is_empty() {
+        match git(ctx.runner, &record.repo, &["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"], GIT_TIMEOUT) {
+            Ok(reference) => reference,
+            Err(_) => {
+                let reference = git(ctx.runner, &record.repo, &["symbolic-ref", "--quiet", "HEAD"], GIT_TIMEOUT)?;
+                anyhow::ensure!(matches!(reference.as_str(), "refs/heads/main" | "refs/heads/master"), "repository default branch is unverifiable; configure integration_target in PROJECT.md");
+                reference
+            }
+        }
+    } else { settings.integration_target };
+    let target = git(ctx.runner, &record.repo, &["rev-parse", "--symbolic-full-name", "--verify", "--end-of-options", &target], GIT_TIMEOUT)?;
+    anyhow::ensure!(target.starts_with("refs/heads/") || target.starts_with("refs/remotes/"), "integration_target must name a branch ref");
+    anyhow::ensure!(target != format!("refs/heads/{}", record.branch), "integration target is the thread branch itself");
+    let branch = git(ctx.runner, &record.repo, &["rev-parse", "--verify", &format!("refs/heads/{}^{{commit}}", record.branch)], GIT_TIMEOUT)?;
+    let target = git(ctx.runner, &record.repo, &["rev-parse", "--verify", &format!("{target}^{{commit}}")], GIT_TIMEOUT)?;
+    git(ctx.runner, &record.repo, &["merge-base", "--is-ancestor", &branch, &target], GIT_TIMEOUT)
+        .context("thread branch is not merged into the integration target")?;
+    Ok(())
+}
+
+/// Generated briefs are ignored by Git too. Preserve their bounded text before
+/// permitting cleanup; the final snapshot covers report.md and library/.
+fn preserve_brief(project: &Project, record: &Thread) -> Result<()> {
+    if let Some(text) = crate::paths::read_control_text(&Path::new(&record.thread_dir).join("brief.md"), 1024 * 1024)? {
+        project::write_atomic(&project.dir().join("threads").join(format!("{}.brief.md", record.id)), text.as_bytes())?;
+        std::fs::File::open(project.dir().join("threads"))?.sync_all()?;
     }
     Ok(())
 }

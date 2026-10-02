@@ -399,6 +399,10 @@ fn report(
         for diagnostic in crate::thread::list_with_diagnostics(&project).1 {
             check(&mut out, Some(false), &label, format!("thread record: {diagnostic}; preserve and repair the file"));
         }
+        for record in crate::thread::list(&project) {
+            let note = crate::resolved_cleanup::note(&project, &record);
+            if !note.is_empty() { check(&mut out, None, &format!("{label} thread {}", record.id), note); }
+        }
         for diagnostic in crate::inbox::unhandled_with_diagnostics(&project).1 {
             check(&mut out, Some(false), &label, format!("inbox record: {diagnostic}; preserve and repair the file"));
         }

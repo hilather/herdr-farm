@@ -30,9 +30,9 @@ How Herdr Projects works, what it writes where, what its safety settings do and 
 ~/.config/herdr-projects/approved-routines.json  written only by `routine approve`
 ```
 
-Every thread works from `<its working directory>/.herdr-project/<project>-<id>/`: `brief.md` (written by the binary), `report.md` and `library/` (written by the agent). In a git repository that folder is added to `info/exclude`, so nothing in it is committed. **Git therefore treats it as clean: removing a worktree deletes it**, so a copy alone is insufficient to justify removal. `--remove-worktree --writers-stopped` can remove an exclusively owned local Linux worktree after verified preservation, managed-operation exclusion and process checks. Stop all known artifact writers before asserting `--writers-stopped`; idle alone is insufficient. Remote and unsupported-platform cleanup refuse. Plain resolve keeps the worktree and branch. `--discard-uncopied` cannot bypass writer or ownership checks.
+Every thread works from `<its working directory>/.herdr-project/<project>-<id>/`: `brief.md` (written by the binary), `report.md` and `library/` (written by the agent). In a git repository that folder is added to `info/exclude`, so nothing in it is committed. **Git therefore treats it as clean: removing a worktree deletes it**, so a copy alone is insufficient to justify removal. `--remove-worktree --writers-stopped` can remove an exclusively owned local Linux worktree after verified preservation, managed-operation exclusion and process checks. Stop all known artifact writers before asserting `--writers-stopped`; idle alone is insufficient. Remote and unsupported-platform cleanup refuse. Plain resolve keeps the branch and schedules verified ticker cleanup by default; set `cleanup_resolved = "keep"` to retain its resources. `--discard-uncopied` cannot bypass writer or ownership checks.
 
-`PROJECT.md` settings: `name`, `goal`, `repos` (`path`, optional `machine`), `coordinator_agent`, `thread_agent` (default `claude`), `max_parallel_threads` (3), `auto_resolve_days` (7), `nudge` (`false`).
+`PROJECT.md` settings: `name`, `goal`, `repos` (`path`, optional `machine`), `coordinator_agent`, `thread_agent` (default `claude`), `max_parallel_threads` (3), `auto_resolve_days` (7), `nudge` (`false`), and optional `integration_target` (a Git ref for guarded legacy resolution).
 
 ## Commands
 
@@ -72,6 +72,8 @@ Set per project in `~/.config/herdr-farm/config.toml`; `safety show <project>` p
 ```toml
 [safety."/Users/you/.herdr-projects/billing"]
 start_threads = "propose"          # or "auto": the coordinator starts threads without asking
+cleanup_resolved = "auto"          # or "keep": retain resolved thread resources
+resolve_threads = "propose"        # or "auto": allow guarded integrated resolution
 coordinator_agent_args = []        # arguments for the bound coordinator kind
 coordinator_agent_args_kind = "claude" # required when the array is nonempty
 
@@ -137,9 +139,10 @@ The coordinator runs the binary every turn, so allow-list it in your agent **by 
 These patterns also cover the here-document form the coordinator uses to pass text on standard input (checked with Claude Code 2.1). A root with spaces is printed shell-quoted; write the pattern for that quoted form.
 
 - **Allow `thread start` only where you've set `start_threads = "auto"`.** Left off the list, every thread start meets your agent's own permission prompt, which turns "propose first" from skill text into a real confirmation.
+- **Allow `thread resolve-integrated` only with `resolve_threads = "auto"`.** Add the exact pattern `Bash(<binary> --root <root> thread resolve-integrated:*)`. It checks local Git ancestry against `integration_target` in `PROJECT.md`, or the repository default ref (`origin/HEAD`, falling back to the main checkout's symbolic `HEAD` only when it is `main` or `master`; otherwise configure the target explicitly), and requires an idle/done agent with no pending delivery. An unmerged branch is refused.
 - **Never allow** `thread resolve` (with any flag), `thread adopt`, `delete`, `archive`, `pause`, `routine approve`, `new`, `open` or `ticker stop`.
 
-For other agents the principle is the same: allow reading and steering, keep anything that starts, ends or deletes on a prompt.
+For other agents, allow reading and steering plus only the guarded start/integrated-resolution subcommands enabled by the project safety table. Keep owner-only lifecycle commands on a prompt.
 
 ## What the safety settings do and don't stop
 
@@ -762,3 +765,41 @@ runtime bindings and joined/coordinator provenance, observations, ownership and
 project control. Scheduler, input/cancellation records, approvals, budgets and
 routine readers remain outside this accounting. Runtime route validation reserves
 an additional payload-copy allowance before cloning identity strings.
+
+
+## Resolved legacy thread cleanup
+
+With `cleanup_resolved = "auto"` (the default), the active project's ticker handles
+at most one resolved thread and one terminal action per pass. It first requires a
+verified final artifact snapshot, clean Git status, no ignored files outside the
+preserved report, library and generated brief, exclusive registered worktree ownership and matching
+pane identity. It submits one graceful interrupt/EOF sequence only to an idle/done
+agent. Working, blocked, unknown and foreign agents are kept. If the agent remains
+or Linux process inspection cannot prove writer shutdown, cleanup stops.
+
+After writer shutdown is proved, cleanup closes the thread's pane, closes its owned
+workspace only when empty, then uses the same verified-preservation and non-force
+Git removal path as `--remove-worktree --writers-stopped`. The branch is always
+kept. Missing preservation evidence, partial copies without a verified snapshot,
+remote/adopted/shared worktrees, dirty content and uncertain outcomes are retained.
+Explicit acceptance of a partial copy never overrides preservation or writer checks.
+Generated `brief.md` is retained as `threads/<id>.brief.md` and verified before
+removal too. Manual resolve commits a content-equivalent preservation receipt for
+its new lifecycle generation, so the writer checkpoint can verify it without
+weakening generation checks.
+
+The version-1 `.state/resolved-cleanup-<id>.json` journal records lifecycle generation,
+execution fingerprint and a checkpoint before each action. Journal writes sync both
+file and directory. Recovery inspects the pane/workspace or Git registration and
+retained branch; it never repeats an uncertain close, stop or removal. It also
+reconciles a crash after Git removal but before receipt acknowledgement. A skipped
+operation logs once, appears in `thread list` and `doctor`, and names the inspection
+and owner cleanup commands. Fix the reason, stop writers and close the recorded
+pane/workspace before explicitly running the printed removal command. Reopening
+starts a new lifecycle; retained removal receipts continue to support safe restart.
+
+This journal is legacy lifecycle control metadata, not a telemetry stream or a new
+canonical database table. Retain it with the project's `.state` in backups and
+repairs; telemetry retention must not delete it. Existing journals need no upgrade;
+unknown versions refuse cleanup. `cleanup_resolved = "keep"` suspends automatic
+cleanup, including pending checkpoints, without changing logical resolution.

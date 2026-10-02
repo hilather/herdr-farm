@@ -5542,3 +5542,74 @@ fn fleet_action_opens_the_fleet_pane() {
     assert!(text.lines().any(|l|l=="usage: collection not run (no telemetry sidecar)"),"{text}");
     assert!(!text.lines().any(|l|l.starts_with("error:")),"the handoff is consumed once, as given: {text}");
 }
+
+#[test]
+fn thread_cleanup_safety_defaults_overrides_and_invalid_values_through_cli() {
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().join("root");
+    let r = root.to_str().unwrap();
+    assert!(hp(home.path(), &["--root", r, "new", "demo"]).status.success());
+    let args = ["--root", r, "safety", "show", "demo"];
+    let output = hp(home.path(), &args);
+    assert!(output.status.success());
+    let shown = String::from_utf8(output.stdout).unwrap();
+    assert!(shown.contains("cleanup_resolved = \"auto\"") && shown.contains("resolve_threads = \"propose\""));
+    let config = home.path().join(".config/herdr-farm");
+    std::fs::create_dir_all(&config).unwrap();
+    let project = root.join("demo").canonicalize().unwrap();
+    for (cleanup, resolve, valid) in [("keep", "auto", true), ("typo", "auto", false), ("auto", "typo", false)] {
+        std::fs::write(config.join("config.toml"), format!("[safety.{:?}]\ncleanup_resolved = {cleanup:?}\nresolve_threads = {resolve:?}\n", project.to_str().unwrap())).unwrap();
+        let output = hp(home.path(), &args);
+        assert_eq!(output.status.success(), valid, "{}", String::from_utf8_lossy(&output.stderr));
+        if valid {
+            let shown = String::from_utf8(output.stdout).unwrap();
+            assert!(shown.contains("cleanup_resolved = \"keep\"") && shown.contains("resolve_threads = \"auto\""));
+        }
+    }
+}
+
+#[test]
+fn legacy_manual_resolution_preserves_artifacts_for_the_resolved_generation() {
+    use std::fs;
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().join("root");
+    let r = root.to_str().unwrap();
+    assert!(hp(home.path(), &["--root", r, "new", "demo"]).status.success());
+    let repo = home.path().join("repo");
+    let work = home.path().join("work");
+    fs::create_dir(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let output = Command::new("/usr/bin/git").env_clear().env("HOME", home.path()).env("PATH", "/usr/bin:/bin")
+            .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "fixture").env("GIT_AUTHOR_EMAIL", "fixture@example.invalid")
+            .env("GIT_COMMITTER_NAME", "fixture").env("GIT_COMMITTER_EMAIL", "fixture@example.invalid")
+            .arg("-C").arg(&repo).args(args).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "base"]);
+    git(&["worktree", "add", "-q", "-b", "retained", work.to_str().unwrap()]);
+    fs::write(repo.join(".git/info/exclude"), ".herdr-project/\n").unwrap();
+    let source = work.join(".herdr-project/demo-t-0001");
+    fs::create_dir_all(source.join("library")).unwrap();
+    fs::write(source.join("report.md"), "completed report\n").unwrap();
+    fs::write(source.join("library/output.txt"), "completed output\n").unwrap();
+    fs::write(source.join("brief.md"), "generated instructions\n").unwrap();
+    let project = root.join("demo");
+    let record = project.join("threads/t-0001.toml");
+    fs::write(&record, toml::to_string(&serde_json::json!({"id":"t-0001", "status":"open", "kind":"worktree", "repo":repo,
+        "branch":"retained", "worktree_path":work, "cwd":work, "thread_dir":source})).unwrap()).unwrap();
+    let output = hp(home.path(), &["--root", r, "thread", "resolve", "demo", "t-0001"]);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let resolved: toml::Value = toml::from_str(&fs::read_to_string(&record).unwrap()).unwrap();
+    assert_eq!(resolved["status"].as_str(), Some("resolved"));
+    assert!(resolved["lifecycle_generation"].as_integer().unwrap() > 0);
+    let snapshot = project.join(".state/artifacts/t-0001").join(resolved["artifact_snapshot"].as_str().unwrap());
+    let manifest: serde_json::Value = serde_json::from_slice(&fs::read(snapshot.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest["generation"].as_u64().unwrap(), resolved["lifecycle_generation"].as_integer().unwrap() as u64);
+    assert_eq!(fs::read_to_string(snapshot.join("report.md")).unwrap(), "completed report\n");
+    assert_eq!(fs::read_to_string(project.join("threads/t-0001.md")).unwrap(), "completed report\n");
+    assert_eq!(fs::read_to_string(project.join("library/t-0001/output.txt")).unwrap(), "completed output\n");
+    assert_eq!(fs::read_to_string(project.join("threads/t-0001.brief.md")).unwrap(), "generated instructions\n");
+    assert!(work.is_dir());
+}

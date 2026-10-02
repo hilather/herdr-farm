@@ -274,3 +274,30 @@ mod tests {
         assert!(no_process_references(dir.path()).is_err());
     }
 }
+
+/// Read-only reconciliation after a removal reservation. Never resubmit Git.
+pub fn acknowledge_absent(ctx: &Ctx, project: &Project, record: &Thread) -> Result<()> {
+    let removal = record.removal.as_ref().context("missing removal checkpoint")?;
+    ensure!(record.lifecycle_generation == removal.generation && record.artifact_snapshot == removal.snapshot, "removal generation or preservation changed");
+    ensure!(record.worktree_path.is_empty() || record.worktree_path == removal.path, "removal path changed");
+    ensure!(record.branch == removal.branch && fs::canonicalize(&record.repo)? == Path::new(&removal.repo), "removal identity changed");
+    ensure!(git(ctx, &removal.repo, &["rev-parse", "--verify", &format!("refs/heads/{}", removal.branch)])? == removal.head, "retained branch changed");
+    ensure!(!Path::new(&removal.path).try_exists()? && !registered(ctx, record, &removal.path, &removal.head)?, "removal outcome is uncertain; inspect before retrying");
+    crate::artifacts::load(project, record, &removal.snapshot)?;
+    thread::update_checked(project, &record.id, |current| {
+        ensure!(current.removal.as_ref() == Some(removal), "removal checkpoint changed");
+        current.removal.as_mut().unwrap().removed = true;
+        current.worktree_path.clear();
+        current.cwd.clear();
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// Prove this is the registered retained branch before terminal cleanup begins.
+pub fn verify_registration(ctx: &Ctx, record: &Thread) -> Result<()> {
+    let path = fs::canonicalize(&record.worktree_path)?.to_str().context("non-UTF-8 worktree")?.to_string();
+    let head = git(ctx, &record.repo, &["rev-parse", "--verify", &format!("refs/heads/{}", record.branch)])?;
+    ensure!(registered(ctx, record, &path, &head)?, "worktree is not registered to this repository and branch");
+    Ok(())
+}

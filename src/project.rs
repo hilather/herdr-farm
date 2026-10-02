@@ -105,6 +105,8 @@ pub struct Settings {
     pub max_parallel_threads: u32,
     pub auto_resolve_days: u32,
     pub nudge: bool,
+    /// Optional Git ref used by guarded legacy integrated resolution.
+    pub integration_target: String,
     pub repos: Vec<Repo>,
 }
 
@@ -121,6 +123,7 @@ impl Default for Settings {
             // text the user has half-typed (docs/herdr-notes.md, stage 2). With
             // `false` the ticker shows a herdr notification instead.
             nudge: false,
+            integration_target: String::new(),
             repos: Vec::new(),
         }
     }
@@ -196,6 +199,8 @@ pub struct Coordinator {
 #[serde(default)]
 pub struct Safety {
     pub start_threads: String,
+    pub cleanup_resolved: String,
+    pub resolve_threads: String,
     pub coordinator_agent_args: Vec<String>,
     pub coordinator_agent_args_kind: Option<String>,
     pub thread_agent_args: Vec<String>,
@@ -255,6 +260,8 @@ impl Default for Safety {
     fn default() -> Self {
         Safety {
             start_threads: "propose".into(),
+            cleanup_resolved: "auto".into(),
+            resolve_threads: "propose".into(),
             coordinator_agent_args: Vec::new(),
             coordinator_agent_args_kind: None,
             thread_agent_args: Vec::new(),
@@ -440,6 +447,8 @@ pub fn parse_safety(text:&str,canonical_project_dir:&Path)->Result<Safety> {
             safety.start_threads
         );
     }
+    anyhow::ensure!(matches!(safety.cleanup_resolved.as_str(), "auto" | "keep"), "cleanup_resolved must be auto or keep");
+    anyhow::ensure!(matches!(safety.resolve_threads.as_str(), "propose" | "auto"), "resolve_threads must be propose or auto");
     Ok(safety)
 }
 
