@@ -24,7 +24,10 @@ impl Project {
         p
     }
     fn cli(&self, args: &[&str]) -> Output {
-        Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin")
+        let mut command=Command::new(BIN);
+        command.env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim());
+        if self.home.path().join("herdr").exists() { command.env("HERDR_BIN_PATH",self.home.path().join("herdr")); }
+        command.env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin")
             .args(["--root", self.home.path().join("root").to_str().unwrap()]).args(args).output().unwrap()
     }
     fn ok(&self, args: &[&str]) -> Value {
@@ -373,7 +376,7 @@ fn preflight_observes_the_recorded_session_and_fingerprints_config_without_mutat
         let text = String::from_utf8(out.stdout).unwrap();
         let report: Value = serde_json::from_str(&text).unwrap();
         assert_eq!(report["observations"][0]["state"], state, "{text}");
-        assert!(!report["blockers"].as_array().unwrap().is_empty(), "{text}");
+        assert_eq!(report["blockers"].as_array().unwrap().is_empty(),matches!(state,"absent"|"present_pane"),"{text}");
         let config = &report["references"][0];
         assert_eq!((&config["present"], &config["keys"]), (&json!(true), &json!(["private_value"])));
         assert_eq!(config["sha256"].as_str().map(str::len), Some(64));
@@ -422,4 +425,64 @@ fn canonical_root_relocation_is_actionable_and_reversible() {
     let out = cli(&root, &["doctor"]);
     let report = String::from_utf8_lossy(&out.stdout);
     assert!(!report.contains("[FAIL] project demo: migration journal:"), "{report}");
+}
+
+#[test]
+fn used_legacy_evidence_migrates_and_restores_without_live_routes() {
+    use sha2::{Digest,Sha256};
+    use std::os::unix::fs::PermissionsExt;
+    let p=Project::new("pause");
+    fs::write(p.home.path().join("herdr"), "#!/bin/sh\ncase \"$*\" in\n--version) echo 'herdr 0.9.1';;\n'pane list') echo '{\"result\":{\"panes\":[]}}';;\n'agent list') cat \"$HOME/agents.json\";;\n*) exit 9;;\nesac\n").unwrap();
+    fs::set_permissions(p.home.path().join("herdr"),fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(p.home.path().join("agents.json"),r#"{"result":{"agents":[]}}"#).unwrap();
+    p.write(".state/coordinator.json",json!({"socket":p.home.path().join("session.sock"),"pane_id":"c1","cwd":p.project}).to_string());
+    p.thread("t-0001",&[("status",toml::Value::String("open".into())),("pane_id",toml::Value::String("p1".into()))]);
+    assert!(p.ok(&["migration","demo","inspect"])["blockers"].as_array().unwrap().iter().any(|b|b.as_str().unwrap().contains("active/uncertain execution")));
+    p.thread("t-0001",&[("pane_id",toml::Value::String("p1".into()))]);
+    p.write("threads/t-0001.md","## Report\n\nFinished.\n\n## Remember\n\nKeep retained evidence.\n");
+    p.ok(&["memory-review","demo","ingest","--all"]);
+    let reviews=p.ok(&["memory-review","demo","list"]);
+    let id=reviews[0]["id"].as_str().unwrap();
+    let body=p.route("decision.md","Keep retained evidence.\n");
+    p.ok(&["memory-review","demo","propose",id,"--file",&body,"--title","Evidence"]);
+    p.ok(&["memory-review","demo","record","--file",&body,"--title","Evidence","--provenance","owner test decision"]);
+    p.write("threads/t-0002.md","## Report\n\nFinished.\n\n## Remember\n\nReview this separately.\n");
+    p.ok(&["memory-review","demo","ingest","--all"]);
+    let library=b"{\"opaque\":\"$(never-execute)\"}";
+    let manifest=json!({"schema":1,"thread":"t-0001","generation":0,"source":"","entries":[{"path":"library","directory":true,"bytes":0,"sha256":""},{"path":"library/engine-download.json","directory":false,"bytes":library.len(),"sha256":format!("{:x}",Sha256::digest(library))}]});
+    let bytes=serde_json::to_vec(&manifest).unwrap();
+    let root=format!(".state/artifacts/t-0001/{:x}",Sha256::digest(&bytes));
+    fs::create_dir_all(p.project.join(&root).join("library")).unwrap();
+    p.write(&format!("{root}/manifest.json"),&bytes);
+    p.write(&format!("{root}/library/engine-download.json"),library);
+    // A live agent keeps the exact same source inventory blocked.
+    fs::write(p.home.path().join("agents.json"),r#"{"result":{"agents":[{"pane_id":"c1","tab_id":"ct","workspace_id":"cw","agent":"codex","agent_status":"running"}]}}"#).unwrap();
+    assert!(!p.ok(&["migration","demo","inspect"])["blockers"].as_array().unwrap().is_empty());
+    fs::write(p.home.path().join("agents.json"),r#"{"result":{"agents":[]}}"#).unwrap();
+    let preflight=p.ok(&["migration","demo","preflight"]);
+    assert!(preflight["blockers"].as_array().unwrap().is_empty(),"{preflight}");
+    let plan=p.ok(&["migration","demo","inspect"]);
+    let originals=plan["sources"].as_array().unwrap().iter().map(|s|{let path=s["path"].as_str().unwrap().to_owned();let bytes=p.read(&path);(path,bytes)}).collect::<Vec<_>>();
+    let planned=p.plan();
+    let mut writer=Command::new("sleep").arg("30").current_dir(&p.project).spawn().unwrap();
+    let blocked=p.apply(&planned);
+    writer.kill().unwrap();writer.wait().unwrap();
+    assert!(!blocked.status.success(),"apply must repeat process checks");
+    assert!(!p.project.join(".state/state.db").exists());
+    p.migrate();
+    p.ok(&["task","demo","list"]);
+    p.ok(&["telemetry","demo","attempts","--json"]);
+    let runtime=p.ok(&["runtime","demo","inspect"]);
+    assert!(runtime["bindings"].as_array().unwrap().iter().all(|b|b["identity"]["pane_id"]==""));
+    let db=migration::open_active(&p.project).unwrap();
+    let retained=db.imported_sources().unwrap();
+    assert!(retained.iter().any(|s|s.path==format!("{root}/library/engine-download.json") && s.bytes==library));
+    assert!(retained.iter().any(|s|s.path==".state/memory-review.json"));
+    assert_eq!(retained.iter().find(|s|s.path==".state/memory-review.json").unwrap().bytes,p.read(".state/memory-review.json"));
+    assert!(p.snapshot()["inbox"].as_array().unwrap().iter().any(|i|i["content"]["kind"]=="memory-review" && i["seen"]==false));
+    assert!(retained.iter().any(|s|s.path.starts_with("memory/candidates/")));
+    drop(db);
+    let destination=p.home.path().join("restored");
+    p.ok(&["migration","demo","restore","--destination",destination.to_str().unwrap()]);
+    for (path,bytes) in originals {assert_eq!(fs::read(destination.join(path)).unwrap(),bytes);}
 }

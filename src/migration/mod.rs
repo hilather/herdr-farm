@@ -109,7 +109,7 @@ fn inventory(project: &Path, relative: &Path, sources: &mut Vec<Source>, total: 
             let bytes = read(&entry.path()).with_context(||format!("source {name}"))?;
             *total += bytes.len() as u64; ensure!(*total<=TOTAL,"source inventory exceeds 128 MiB");
             ensure!(sources.len()<10_000,"source inventory exceeds 10,000 files");
-            let kind = if name=="TASKS.md" {"task"} else if name.starts_with("threads/") && name.ends_with(".toml") {"thread"} else if name.starts_with("inbox/") {"inbox"} else if name.starts_with(".state/") && name.ends_with(".json") {"runtime"} else {"backup"};
+            let kind = if name=="TASKS.md" {"task"} else if name.starts_with("threads/") && name.ends_with(".toml") {"thread"} else if name.starts_with("inbox/") {"inbox"} else if evidence::retained(name) || name.starts_with(".state/") && name.ends_with(".json") {"runtime"} else {"backup"};
             sources.push(Source { path:name.into(),digest:hash(&bytes),bytes:bytes.len() as u64,kind:kind.into() });
         }
     }
@@ -123,6 +123,7 @@ fn front(text: &str) -> Result<toml::Value> {
 fn analyze(project: &Path, source: &Source, tasks: &mut Vec<Task>, blockers: &mut Vec<String>, warnings: &mut Vec<String>, ids: &mut BTreeSet<String>) -> Result<()> {
     let bytes=read(&project.join(&source.path))?;
     ensure!(hash(&bytes)==source.digest,"source changed during inspect: {}",source.path);
+    if evidence::retained(&source.path) || source.path==".state/memory-review.json" { return evidence::validate(project, source, &bytes); }
     let text=std::str::from_utf8(&bytes).context("record is not UTF-8")?;
     match source.kind.as_str() {
         "thread" => {
@@ -134,7 +135,12 @@ fn analyze(project: &Path, source: &Source, tasks: &mut Vec<Task>, blockers: &mu
             let status=value.get("status").and_then(|v|v.as_str()).context("missing thread status")?;
             ensure!(matches!(status,"starting"|"open"|"failed"|"resolved"),"unknown thread status");
             if matches!(status,"starting"|"open") { blockers.push(format!("{}: active/uncertain execution; quiesce and resolve before migration",source.path)); }
-            for field in ["pane_id","machine"] { if value.get(field).and_then(|v|v.as_str()).is_some_and(|s|!s.is_empty()) { blockers.push(format!("{}: {field} identity requires live reconciliation; this importer cannot certify it",source.path)); } }
+            if value.get("machine").and_then(|v|v.as_str()).is_some_and(|s|!s.is_empty()) { blockers.push(format!("{}: remote identity requires live reconciliation",source.path)); }
+            if value.get("pane_id").and_then(|v|v.as_str()).is_some_and(|s|!s.is_empty()) {
+                let record=serde_json::to_value(&value)?;
+                if status != "resolved" || evidence::quiesced(project, &record).is_err() { blockers.push(format!("{}: pane_id identity requires live reconciliation; writer quiescence is unverified",source.path)); }
+            }
+            if status=="resolved" && ["cwd","worktree_path","thread_dir"].iter().any(|field|value.get(*field).and_then(|v|v.as_str()).is_some_and(|s|!s.is_empty())) && value.get("pane_id").and_then(|v|v.as_str()).is_none_or(|s|s.is_empty()) && evidence::writer_paths(project,&serde_json::to_value(&value)?).is_err() { blockers.push(format!("{}: writer quiescence is unverified",source.path)); }
             let title=value.get("title").and_then(|v|v.as_str()).unwrap_or(id);
             tasks.push(Task { id:TaskId::new(format!("legacy-{id}")).map_err(anyhow::Error::msg)?,revision:1,state:if status=="failed" {TaskState::Failed}else{TaskState::AwaitingReview},title:title.into(),active_attempt:None });
         },
@@ -142,7 +148,7 @@ fn analyze(project: &Path, source: &Source, tasks: &mut Vec<Task>, blockers: &mu
             let value:serde_json::Value=serde_json::from_str(text)?;
             validate_runtime(&source.path,&value)?;
             if source.path==".state/project.json" { ensure!(matches!(value.get("status").and_then(|v|v.as_str()),Some("paused"|"archived")),"pause/archive project before migration"); }
-            if source.path==".state/coordinator.json" && value.get("pane_id").and_then(|v|v.as_str()).is_some_and(|s|!s.is_empty()) { blockers.push(".state/coordinator.json: coordinator identity requires live reconciliation; remove no evidence to bypass this check".into()); }
+            if source.path==".state/coordinator.json" && value.get("pane_id").and_then(|v|v.as_str()).is_some_and(|s|!s.is_empty()) && evidence::quiesced(project,&value).is_err() { blockers.push(".state/coordinator.json: coordinator identity requires live reconciliation; remove no evidence to bypass this check".into()); }
             warnings.push(format!("{}: preserved losslessly; pending obligations require reconciliation before dispatch",source.path));
         },
         "inbox" => { if source.path.ends_with(".md") {
@@ -337,7 +343,7 @@ fn advance(project:&Path,journal:&mut Journal)->Result<()> {
             SqliteStore::open(&staged).context("staged store initialization interrupted or invalid; use migration abort to preserve it and return to legacy mode")?
         } else { SqliteStore::create(&staged)? };
         if !db.has_import()? {
-            db.import_legacy_with_operations(&journal.plan.digest,&expected_import(project,&journal.plan)?,&journal.plan.tasks,&journal.plan.operations)?;
+            db.import_quiesced_legacy(&journal.plan.digest,&expected_import(project,&journal.plan)?,&journal.plan.tasks,&journal.plan.operations)?;
         }
         drop(db);
         verify_db(project,&staged,&journal.plan)?;
@@ -460,6 +466,20 @@ fn validate_runtime(path:&str,value:&serde_json::Value)->Result<()> {
             for field in ["socket","session","workspace_id","tab_id","pane_id","agent_name","cwd","updated"] { if let Some(v)=value.get(field) { ensure!(v.is_string(),"invalid coordinator string field"); } }
             if let Some(v)=value.get("prime_pending") { ensure!(v.is_boolean(),"invalid prime_pending"); }
             if let Some(v)=value.get("launch_attempts") { ensure!(v.as_u64().is_some_and(|n|n<=u32::MAX as u64),"invalid launch_attempts"); }
+        },
+        ".state/memory-review.json"=>{
+            ensure!(value.get("version").and_then(|v|v.as_u64())==Some(1),"unsupported memory-review version");
+            let obligations=value.get("obligations").and_then(|v|v.as_array()).context("missing obligations")?;
+            ensure!(obligations.len()<=512,"too many obligations");
+            let mut ids=BTreeSet::new();
+            for item in obligations {
+                let id=item.get("id").and_then(|v|v.as_str()).filter(|s|!s.is_empty()).context("missing obligation id")?;
+                ensure!(ids.insert(id),"duplicate obligation");
+                ensure!(matches!(item.get("status").and_then(|v|v.as_str()),Some("pending"|"proposed"|"rejected"|"deferred")),"unsupported disposition");
+                for field in ["thread_id","report_path","report_hash","remember_hash","excerpt","created","updated"] { ensure!(item.get(field).is_some_and(|v|v.is_string()),"missing obligation field"); }
+                ensure!(item.get("notified").and_then(|v|v.as_u64()).is_some_and(|n|n<=u32::MAX as u64),"invalid notification count");
+                for field in ["candidate","candidate_digest","reason","last_notified","source_notice"] { if let Some(v)=item.get(field).filter(|v|!v.is_null()) {ensure!(v.is_string(),"invalid optional obligation field");} }
+            }
         },
         ".state/ticker.json"=>{
             ensure!(value.is_object(),"invalid ticker record");
@@ -625,3 +645,5 @@ pub(crate) use identity_inventory::read_pane_bindings;
 pub(crate) use identity_inventory::read_pane_targets;
 
 pub(crate) use identity_inventory::read_worktree_bindings;
+
+mod evidence;

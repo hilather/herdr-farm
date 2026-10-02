@@ -16,7 +16,9 @@ fn identity(value:&serde_json::Value,is_thread:bool)->Result<RuntimeIdentity> {
         legacy_status:thread_field("status")?,execution_fingerprint:None,
     })
 }
-pub(super) fn import_sources(db:&Connection)->Result<()> {
+pub(super) fn import_sources(db:&Connection)->Result<()> { import_bindings(db,false) }
+pub(super) fn import_quiesced_sources(db:&Connection)->Result<()> { import_bindings(db,true) }
+fn import_bindings(db:&Connection,historical:bool)->Result<()> {
     let sources=super::import::read_sources(db)?;
     let coordinator=sources.iter().find(|s|s.path==".state/coordinator.json"&&s.kind=="runtime");
     let session_digest=coordinator.map(|s|s.digest.clone());
@@ -30,10 +32,15 @@ pub(super) fn import_sources(db:&Connection)->Result<()> {
             let task=TaskId::new(format!("legacy-{id}")).map_err(StoreError::Corrupt)?;
             let value=serde_json::to_value(&thread).map_err(|_|StoreError::Corrupt("invalid thread identity".into()))?;
             let mut identity=identity(&value,true)?;identity.socket=socket.clone();
+            if !matches!(identity.legacy_status.as_str(),"starting"|"open"|"failed"|"resolved") {return Err(StoreError::Invalid("unsupported imported thread status".into()));}
+            // Exact original identities remain in legacy_sources. They are not live routes.
+            if historical && identity.legacy_status=="resolved" && (!identity.pane_id.is_empty()||!identity.worktree_path.is_empty()) {
+                identity.legacy_status="historical-resolved".into();identity.pane_id.clear();identity.workspace_id.clear();identity.tab_id.clear();
+            }
             identity.execution_fingerprint=Some(crate::operations::receipts::legacy_execution_fingerprint(&thread).ok_or_else(||StoreError::Corrupt("invalid execution identity".into()))?);
             RuntimeBinding{id:format!("thread:{id}"),task:Some(task),revision:1,source_path:Some(source.path.clone()),source_digest:Some(source.digest.clone()),session_source_digest:session_digest.clone(),verification:RuntimeVerification::Unverified,identity}
         } else if source.path==".state/coordinator.json"&&source.kind=="runtime" {
-            RuntimeBinding{id:"coordinator".into(),task:None,revision:1,source_path:Some(source.path.clone()),source_digest:Some(source.digest.clone()),session_source_digest:None,verification:RuntimeVerification::Unverified,identity:identity(coordinator.as_ref().ok_or_else(||StoreError::Corrupt("coordinator missing".into()))?,false)?}
+            RuntimeBinding{id:"coordinator".into(),task:None,revision:1,source_path:Some(source.path.clone()),source_digest:Some(source.digest.clone()),session_source_digest:None,verification:RuntimeVerification::Unverified,identity:{let mut retained=identity(coordinator.as_ref().ok_or_else(||StoreError::Corrupt("coordinator missing".into()))?,false)?;if historical { retained.pane_id.clear();retained.workspace_id.clear();retained.tab_id.clear();retained.legacy_status="historical".into(); } retained}}
         } else {continue;};
         let payload=serde_json::to_string(&binding).map_err(|e|StoreError::Invalid(e.to_string()))?;
         db.execute("INSERT INTO runtime_bindings VALUES(?1,?2,?3,?4,?5,?6)",params![binding.id,binding.task.as_ref().map(TaskId::as_str),integer(binding.revision)?,binding.source_path,payload,format!("{:x}",Sha256::digest(payload.as_bytes()))])?;

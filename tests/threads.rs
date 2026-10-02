@@ -720,3 +720,51 @@ fn ticker_crash_after_pane_close_resumes_without_repeating_it() {
     assert!(!lab.git(&repo, &["rev-parse", "retained"]).is_empty());
     assert_eq!(fs::read_to_string(lab.project().join("threads/t-0001.md")).unwrap(), "finished report\n");
 }
+
+/// A real legacy CLI lifecycle retains final artifacts and user memory across cutover.
+#[cfg(feature="state-store")]
+#[test]
+fn used_quiesced_project_migrates_after_final_copy_and_memory_record() {
+    let lab=Lab::new();
+    // Add the version probe to the deterministic local service fixture.
+    let fake=FAKE_HERDR.replace("case \"$1 $2\" in", "case \"$1 $2\" in\n'--version ') echo 'herdr 0.9.1';;");
+    fs::write(&lab.fake,fake).unwrap();
+    let repo=lab.path("repo");fs::create_dir(&repo).unwrap();
+    lab.git(&repo,&["init","-q","-b","main"]);
+    lab.git(&repo,&["commit","-q","--allow-empty","-m","base"]);
+    let task=lab.path("task.md");fs::write(&task,"Keep evidence.").unwrap();
+    let ticker=lab.ticker();
+    lab.ok_beside_ticker(&["thread","start","demo","--title","Evidence","--repo",repo.to_str().unwrap(),"--task-file",task.to_str().unwrap()]);
+    drop(ticker);
+    let record=lab.record("t-0001");
+    let dir=Path::new(record["thread_dir"].as_str().unwrap());
+    fs::create_dir_all(dir.join("library")).unwrap();
+    fs::write(dir.join("report.md"),"## Report\n\nFinished.\n\n## Remember\n\nKeep evidence.\n").unwrap();
+    fs::write(dir.join("library/engine-download.json"),"{\"opaque\":true}").unwrap();
+    lab.ok(&["thread","resolve","demo","t-0001"]);
+    lab.ok(&["memory-review","demo","ingest","--all"]);
+    let reviews:Value=serde_json::from_str(&lab.ok(&["memory-review","demo","list"])).unwrap();
+    let id=reviews[0]["id"].as_str().unwrap();
+    lab.ok(&["memory-review","demo","propose",id,"--title","Evidence","--file",task.to_str().unwrap()]);
+    lab.ok(&["memory-review","demo","record","--title","Evidence","--file",task.to_str().unwrap(),"--provenance","owner fixture decision"]);
+    lab.ok(&["pause","demo"]);
+    fs::write(lab.path("panes.json"),"{\"result\":{\"panes\":[]}}").unwrap();
+    fs::write(lab.path("agents.json"),"{\"result\":{\"agents\":[]}}").unwrap();
+    let preflight:Value=serde_json::from_str(&lab.ok(&["migration","demo","preflight"])).unwrap();
+    assert_eq!(preflight["blockers"],json!([]));
+    let plan=lab.path("plan.json");
+    lab.ok(&["migration","demo","plan","--output",plan.to_str().unwrap()]);
+    let inventory:Value=serde_json::from_slice(&fs::read(&plan).unwrap()).unwrap();
+    let originals=inventory["sources"].as_array().unwrap().iter().map(|s|{let path=s["path"].as_str().unwrap().to_string();let bytes=fs::read(lab.project().join(&path)).unwrap();(path,bytes)}).collect::<Vec<_>>();
+    lab.ok(&["migration","demo","apply","--plan",plan.to_str().unwrap(),"--writers-stopped"]);
+    for args in [["task","demo","list"],["runtime","demo","inspect"]] {lab.ok(&args);}
+    lab.ok(&["telemetry","demo","attempts","--json"]);
+    let db=herdr_farm::migration::open_active(&lab.project()).unwrap();
+    let sources=db.imported_sources().unwrap();
+    assert!(sources.iter().any(|s|s.path.ends_with("library/engine-download.json")&&s.bytes==b"{\"opaque\":true}"));
+    assert!(sources.iter().any(|s|s.path.starts_with("memory/")&&s.bytes.windows(b"owner fixture decision".len()).any(|w|w==b"owner fixture decision")));
+    drop(db);
+    let restored=lab.path("restored");
+    lab.ok(&["migration","demo","restore","--destination",restored.to_str().unwrap()]);
+    for (path,bytes) in originals {assert_eq!(fs::read(restored.join(path)).unwrap(),bytes);}
+}
