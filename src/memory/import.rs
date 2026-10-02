@@ -162,10 +162,17 @@ fn save_journal(project: &Path, journal: &MemoryJournal) -> Result<()> {
     sync_dir(path.parent().context("no parent")?)
 }
 
+pub(crate) fn check_journal(project: &Path) -> Result<()> {
+    if exists(&memory_journal_path(project)) {
+        load_journal(project)?;
+    }
+    Ok(())
+}
+
 fn load_journal(project: &Path) -> Result<MemoryJournal> {
     let journal: MemoryJournal = serde_json::from_slice(&read(&memory_journal_path(project))?)?;
     ensure!(journal.version == 1, "unknown memory journal version");
-    ensure!(Path::new(&journal.plan.project) == project, "memory journal project identity mismatch");
+    crate::migration::check_project_identity(&journal.plan.project, project)?;
     ensure!(journal.plan.expected_memory_owner == MEMORY_LEGACY, "memory journal expected owner mismatch");
     Ok(journal)
 }

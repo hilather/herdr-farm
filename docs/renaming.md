@@ -14,16 +14,15 @@ Root selection is `--root`, then `HERDR_FARM_ROOT`, then `HERDR_PROJECTS_ROOT`, 
 
 Re-install the plugin from this checkout: the id change creates a distinct Herdr plugin registration. Remove the old registration through Herdr's plugin management before enabling the replacement, so two tickers are not started. Old plugin state is not automatically migrated. Existing scripts that invoke the old binary need their command updated or an operator-managed compatibility symlink.
 
-## Manual migration
+## Existing installations
 
-Stop workers and tickers using the installation before changing paths. Inspect `herdr-farm doctor` and back up the selected data. If the new destinations do not exist:
+No root move is needed: the old location keeps working through the root and config fallback described above. Keep existing canonical projects at their recorded location.
 
-```sh
-mv ~/.herdr-projects ~/.herdr-farm
-mv ~/.config/herdr-projects ~/.config/herdr-farm
-```
+Moving a root that contains canonical projects is unsupported. Their migration journals, worktrees and bindings record absolute paths; a symlink at the old location does not relocate those identities. If a root was moved and commands report that a project was recorded at a different path, move the root back and run `herdr-farm doctor`.
 
-If both locations exist, inspect and reconcile them before any move; do not overwrite either store. Update explicit `root` settings, scripts, service definitions and exported environment variables to the chosen location. Then run `herdr-farm doctor` and inspect projects before restarting workers. Absolute paths in retained launch evidence and pinned configurations can require continuing to use the old path for those launches; a rename does not rewrite recorded evidence.
+A root with no canonical projects (including one containing only legacy projects) can be moved. Stop its workers and tickers first, back up the selected data, and ensure the destination does not exist. Update explicit `root` settings, scripts, service definitions and exported environment variables after the move. Inspect `herdr-farm doctor` and the projects before restarting workers. Do not overwrite or merge existing stores. Retained launch evidence and pinned configurations can still require the old absolute paths; moving a legacy root does not rewrite them.
+
+The legacy config directory also remains usable through the fallback; renaming it is optional. Keep any configured root pointing at the existing canonical projects.
 
 Worker submission environments set `HERDR_FARM_SUBMISSION_SPOOL` and the legacy `HERDR_PROJECTS_SUBMISSION_SPOOL` to the same directory, so retained briefs and scripts continue to submit. New briefs invoke `herdr-farm`. New popup bindings use `HERDR_FARM_ROOT` and `HERDR_FARM_HANDOFF`; reads accept the legacy names.
 
