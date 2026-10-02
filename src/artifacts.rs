@@ -38,6 +38,11 @@ pub struct Manifest {
 }
 
 impl Manifest {
+    /// Compare preservation bytes while carrying a receipt into a new lifecycle.
+    pub fn same_contents(&self, other: &Self) -> bool {
+        self.schema == other.schema && self.thread == other.thread && self.source == other.source
+            && self.machine == other.machine && self.entries == other.entries
+    }
     #[cfg(feature="state-store")]
     pub fn matches_canonical_execution(&self,record:&Thread)->bool {
         self.schema==1&&self.thread==record.id&&self.generation==record.lifecycle_generation&&self.machine.is_empty()&&self.source==record.thread_dir

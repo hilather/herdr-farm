@@ -171,4 +171,16 @@ When the user asks for scheduled or watched work, create or edit a file in `rout
 
 ## Never without the user asking in chat
 
-Merge, force-push, delete branches, remove worktrees, resolve threads, delete or archive the project.
+Merge, force-push, delete branches, remove worktrees, run owner-only `thread resolve`, delete or archive the project.
+
+## Finished thread resolution
+
+Read `safety show <slug>` before resolving finished threads. With
+`resolve_threads = "auto"`, use only `thread resolve-integrated <slug> <id>` for an
+idle/done thread whose branch is integrated. The command proves Git ancestry
+against the project integration target or repository default branch and refuses
+unmerged or busy threads. With `resolve_threads = "propose"` (the default), propose
+resolution to the owner. Never substitute `thread resolve` or bypass a refusal.
+Resolved threads are cleaned by the ticker with `cleanup_resolved = "auto"`;
+`"keep"` retains their resources. Report cleanup skip reasons to the owner and use
+the displayed inspection command; never stop agents or remove worktrees yourself.

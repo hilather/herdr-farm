@@ -240,6 +240,25 @@ impl<'a> Herdr<'a> {
         })
     }
 
+    /// One graceful interruption/EOF attempt, only after readiness checks.
+    pub fn agent_finish(&self, pane: &str) -> Result<(), HerdrError> {
+        self.call(&["agent", "send-keys", pane, "ctrl-c", "ctrl-c", "ctrl-d"], CALL_TIMEOUT).map(|_| ())
+    }
+
+    pub fn pane_close(&self, pane: &str) -> Result<(), HerdrError> {
+        self.call(&["pane", "close", pane], CALL_TIMEOUT).map(|_| ())
+    }
+
+    pub fn workspace_close(&self, workspace: &str) -> Result<(), HerdrError> {
+        self.call(&["workspace", "close", workspace], CALL_TIMEOUT).map(|_| ())
+    }
+
+    pub fn workspace_exists(&self, workspace: &str) -> Result<bool, HerdrError> {
+        let result = self.call(&["workspace", "list"], CALL_TIMEOUT)?;
+        let rows = result["workspaces"].as_array().ok_or_else(|| HerdrError { code: "failed".into(), message: "workspace list reply changed".into() })?;
+        Ok(rows.iter().any(|row| row["workspace_id"].as_str() == Some(workspace)))
+    }
+
     pub fn pane_list(&self) -> Result<Vec<Pane>, HerdrError> {
         self.call_as(&["pane", "list"], "panes")
     }

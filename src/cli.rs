@@ -644,6 +644,8 @@ enum ThreadCommand {
     },
     /// Record that the user has seen the current report
     Ack { slug: String, id: String },
+    /// Resolve an idle/done thread only after its branch is integrated
+    ResolveIntegrated { slug: String, id: String },
     /// Resolve a thread (final copy first), or reopen a resolved one
     Resolve {
         slug: String,
@@ -1945,6 +1947,7 @@ pub fn run() -> Result<()> {
             ThreadCommand::List { slug } => threads::print_list(&ctx, &slug),
             ThreadCommand::Show { slug, id } => threads::print_show(&ctx, &slug, &id),
             ThreadCommand::Ack { slug, id } => threads::ack(&ctx, &slug, &id),
+            ThreadCommand::ResolveIntegrated { slug, id } => threads::resolve_integrated(&ctx, &slug, &id),
             ThreadCommand::Resolve { slug, id, reopen, remove_worktree, writers_stopped, skip_copy, discard_uncopied } => {
                 threads::resolve(&ctx, &slug, &id, &ResolveArgs { reopen, remove_worktree, writers_stopped, skip_copy, discard_uncopied })
             }
@@ -1982,6 +1985,8 @@ pub fn run() -> Result<()> {
                 let safety = project.safety(&ctx.config_dir)?;
                 println!("Effective safety settings for `{slug}`:");
                 println!("  start_threads = {:?}", safety.start_threads);
+                println!("  cleanup_resolved = {:?}", safety.cleanup_resolved);
+                println!("  resolve_threads = {:?}", safety.resolve_threads);
                 println!("  coordinator_agent_args = {:?}", safety.coordinator_agent_args);
                 println!("  thread_agent_args = {:?}", safety.thread_agent_args);
                 println!("  coordinator_agent_args_kind = {:?}", safety.coordinator_agent_args_kind);
