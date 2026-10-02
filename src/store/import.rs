@@ -106,6 +106,12 @@ impl SqliteStore {
         self.import_legacy_with_operations(digest,sources,tasks,&[])
     }
     pub fn import_legacy_with_operations(&mut self,digest:&str,sources:&[ImportedSource],tasks:&[Task],operations:&[Operation])->Result<()> {
+        self.import_records(digest,sources,tasks,operations,false)
+    }
+    pub(crate) fn import_quiesced_legacy(&mut self,digest:&str,sources:&[ImportedSource],tasks:&[Task],operations:&[Operation])->Result<()> {
+        self.import_records(digest,sources,tasks,operations,true)
+    }
+    fn import_records(&mut self,digest:&str,sources:&[ImportedSource],tasks:&[Task],operations:&[Operation],quiesced:bool)->Result<()> {
         if digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit()) { return Err(StoreError::Invalid("invalid import digest".into())); }
         let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         check_schema(&tx)?;
@@ -127,7 +133,7 @@ impl SqliteStore {
             tx.execute("INSERT INTO tasks VALUES(?1,1,?2,?3,NULL)", params![task.id.as_str(),task.state.as_str(),task.title])?;
             tx.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES('task.imported',?1,1,1,?2)",params![task.id.as_str(),serde_json::to_string(task).map_err(|e|StoreError::Invalid(e.to_string()))?])?;
         }
-        super::runtime::import_sources(&tx)?;
+        if quiesced {super::runtime::import_quiesced_sources(&tx)?;} else {super::runtime::import_sources(&tx)?;}
         super::control::import_status(&tx)?;
         for op in operations {
             if op.expected_revision!=1 || op.payload_version!=1 || !matches!(op.kind.as_str(),"legacy.inbox"|"legacy.notify"|"legacy.finalize") { return Err(StoreError::Invalid("invalid imported operation".into())); }

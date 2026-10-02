@@ -381,6 +381,15 @@ fn an_imported_record_made_a_hard_rule_is_active_and_survives_collection() {
 fn cutover_hands_memory_to_the_store_and_never_overwrites_an_edited_projection() {
     let p = Project::new();
     p.legacy_memory("# API\nobservation body\n");
+    fs::write(p.project.join("threads/t-0001.md"),"## Report\n\nFinished.\n\n## Remember\n\nKeep recorded provenance.\n").unwrap();
+    p.ok(&["memory-review","demo","ingest","--all"]);
+    let reviews=p.ok(&["memory-review","demo","list"]);
+    let obligation=reviews[0]["id"].as_str().unwrap();
+    let body=p.path("owner-decision.md");fs::write(&body,"Keep recorded provenance.").unwrap();
+    p.ok(&["memory-review","demo","propose",obligation,"--file",body.to_str().unwrap(),"--title","Evidence"]);
+    p.ok(&["memory-review","demo","record","--file",body.to_str().unwrap(),"--title","Evidence","--provenance","owner fixture decision"]);
+
+    let legacy_index=fs::read(p.project.join("MEMORY.md")).unwrap();
     let plan_file = p.path("memory-plan.json");
     let plan = p.ok(&["memory", "demo", "plan", "--output", plan_file.to_str().unwrap()]);
     p.ok(&["memory", "demo", "import"]);
@@ -403,7 +412,7 @@ fn cutover_hands_memory_to_the_store_and_never_overwrites_an_edited_projection()
     assert_eq!(fs::read_to_string(p.project.join("MEMORY.md")).unwrap(), "manual edit");
 
     // With the original bytes back, recovery completes and later replays are stable.
-    fs::write(p.project.join("MEMORY.md"), "# Memory\nindex body\n").unwrap();
+    fs::write(p.project.join("MEMORY.md"), &legacy_index).unwrap();
     for _ in 0..2 {
         let out = cutover();
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
@@ -412,6 +421,8 @@ fn cutover_hands_memory_to_the_store_and_never_overwrites_an_edited_projection()
     let format: Value = serde_json::from_slice(&fs::read(p.project.join(".state/format.json")).unwrap()).unwrap();
     assert_eq!((&format["memory"], &format["runtime"]), (&json!("sqlite-v1"), &json!("sqlite-v2")));
     assert_eq!(p.ok(&["memory", "demo", "inspect"])["authority"], "sqlite-v1");
+    assert!(p.record("memory/evidence.md").is_some());
+    assert_eq!(p.ok(&["memory-review","demo","show",obligation])["status"],"proposed");
     let projected = fs::read_to_string(p.project.join("MEMORY.md")).unwrap();
     assert!(projected.contains("memory projection") && projected.contains("index body"), "{projected}");
     // The runtime store still takes work after the owner changed.

@@ -167,6 +167,15 @@ pub fn candidate_dir(project_dir: &Path) -> Result<PathBuf> {
     })
 }
 
+/// Previously linked legacy candidates remain retained evidence after memory cutover.
+/// Reads still verify the obligation's pinned digest; new writes use candidate_dir.
+fn linked_candidate_path(project_dir: &Path, id: &str) -> Result<PathBuf> {
+    validate_candidate_id(id)?;
+    let current=candidate_dir(project_dir)?.join(format!("{id}.md"));
+    if current.try_exists()? || memory_owner(project_dir)?==MemoryOwner::Legacy {return Ok(current);}
+    Ok(project_dir.join(LEGACY_CANDIDATE_DIR).join(format!("{id}.md")))
+}
+
 fn bounded_read(path: &Path, limit: u64) -> Result<Vec<u8>> {
     use std::io::Read;
     let file = std::fs::File::open(path)?;
@@ -500,7 +509,7 @@ pub fn get(project_dir: &Path, id: &str) -> Result<Obligation> {
         let candidate = obligation.candidate.as_deref().context("proposed obligation has no candidate; preserve and repair the store")?;
         let digest = obligation.candidate_digest.as_deref().context("proposed obligation has no pinned digest; preserve and repair the store")?;
         validate_candidate_id(candidate)?;
-        let path = candidate_dir(project_dir)?.join(format!("{candidate}.md"));
+        let path = linked_candidate_path(project_dir,candidate)?;
         let current = verify_candidate_file(&path, candidate, &obligation)?;
         ensure!(
             current == digest,
@@ -701,13 +710,11 @@ pub fn propose_with_body(
 pub fn dispose_proposed(project_dir: &Path, obligation_id: &str, candidate_id: &str) -> Result<Obligation> {
     validate_obligation_id(obligation_id)?;
     validate_candidate_id(candidate_id)?;
-    let dir = candidate_dir(project_dir)?;
-
     let _lock = lock_state(project_dir)?;
     let mut state = load_locked(project_dir)?;
     let position = state.obligations.iter().position(|o| o.id == obligation_id).with_context(|| format!("no memory-review obligation `{obligation_id}`"))?;
     let obligation = state.obligations[position].clone();
-    let path = dir.join(format!("{candidate_id}.md"));
+    let path = linked_candidate_path(project_dir,candidate_id)?;
     let digest = verify_candidate_file(&path, candidate_id, &obligation)?;
     if obligation.status == Status::Proposed && obligation.candidate.as_deref() == Some(candidate_id) {
         // Idempotent relink: still fail closed when the file changed after

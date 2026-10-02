@@ -29,8 +29,43 @@ an unchanged plan, a paused/archived project, explicit stopped-writer confirmati
 and exclusive ticker, root execution and project locks. It does not stop processes
 on the operator's behalf or migrate any actual user project during implementation.
 
-This importer deliberately blocks active/uncertain threads, coordinator pane
-identities, remote identities, removal receipts and unsupported ticker state. Supported pending
+A used legacy project can migrate after it is paused and quiesced. A resolved
+thread's pane identity and a stopped coordinator's identity become historical:
+exact original records (including prime claims) remain in digest-verified SQLite
+provenance and the backup, while imported bindings have no live pane route.
+Fresh coordinator routing requires canonical `runtime rebind` and reconciliation.
+Legacy `open --reprime` remains fenced after cutover: a canonical coordinator
+launch adapter is still required before that command can open a new coordinator.
+Resolved narratives remain awaiting review, never verified results.
+
+Quiesced means the recorded absolute session socket can be queried successfully
+with a supported Herdr version, no agent is listed for the recorded pane, and any
+remaining pane matches workspace/tab/cwd. Linux process inspection must find no
+same-user process cwd, open descriptor or mapped content under the recorded cwd,
+worktree, output directory or project. The importer's own maintenance record lock
+is excluded from its descriptor check. Idle UI is insufficient. Missing or failed
+session observations, remote identities, open/starting threads and live agents
+block. Inspect, plan and exact-plan apply repeat these checks; the operator must
+also confirm all known writers stopped. No processes are stopped by migration.
+
+Final-copy artifact manifests are typed and checked against thread/generation,
+manifest digest and retained file digests. Artifact files, including nested library
+JSON, are preserved verbatim as retained evidence; nested JSON is never evaluated
+or interpreted as runtime control. Memory review obligations of all four
+statuses, notification history, candidate links and candidate digests remain
+lossless legacy evidence. Pending/deferred decisions surface in the canonical
+inbox without fabricated worker proposal identities. Candidate links must match
+the retained candidate bytes. Candidates and recorded `memory/*.md` files are
+retained in SQLite provenance with their original paths and digests.
+
+Runtime migration keeps memory authority `legacy-markdown`. Use the separate
+signed `memory plan` / `memory cutover` workflow to import recorded Markdown into
+SQLite memory with its provenance. The `memory/candidates` directory is retained
+evidence, excluded from authoritative memory import; candidates never become
+facts automatically. Previously linked proposed candidates remain readable after
+memory cutover, with their original pinned digest checked on every read.
+
+This importer still blocks removal receipts and unsupported ticker state. Supported pending
 inbox/finalization/notification obligations now convert into ambiguous durable
 intents; see [delivery semantics](operation-delivery.md). Do not erase blocked
 records to bypass preflight: unsupported state and live identities still need

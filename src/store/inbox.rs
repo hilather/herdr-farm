@@ -45,6 +45,20 @@ pub(super) fn import_sources(db:&Connection)->Result<()> {
         if expected!=path{return Err(StoreError::Corrupt("inbox source path/identity mismatch".into()));}
         let item=InboxItem{revision:1,seen:seen.contains(&content.id),done:path.starts_with("inbox/done/"),content};insert(db,&item)?;
     }
+    // Legacy review decisions have no canonical worker proposal identity. Retain
+    // their bytes and surface unresolved decisions without inventing one.
+    let review:Option<Vec<u8>>=db.query_row("SELECT bytes FROM legacy_sources WHERE path='.state/memory-review.json'",[],|r|r.get(0)).optional()?;
+    if let Some(bytes)=review {
+        let state:serde_json::Value=serde_json::from_slice(&bytes).map_err(|e|StoreError::Corrupt(e.to_string()))?;
+        for obligation in state["obligations"].as_array().ok_or_else(||StoreError::Corrupt("invalid legacy reviews".into()))? {
+            if !matches!(obligation["status"].as_str(),Some("pending"|"deferred")) {continue;}
+            let id=format!("legacy-memory-review-{:x}",Sha256::digest(obligation["id"].as_str().unwrap_or_default().as_bytes()));
+            if db.query_row("SELECT EXISTS(SELECT 1 FROM inbox_items WHERE id=?1)",[&id],|r|r.get::<_,bool>(0))? {continue;}
+            let content=InboxContent{id,kind:"memory-review".into(),subject:obligation["thread_id"].as_str().unwrap_or_default().into(),
+                created:obligation["created"].as_str().unwrap_or_default().into(),summary:format!("Retained legacy memory review {} ({}) requires an explicit decision",obligation["id"].as_str().unwrap_or_default(),obligation["status"].as_str().unwrap_or_default()),body:String::new()};
+            insert(db,&InboxItem{revision:1,content,seen:false,done:false})?;
+        }
+    }
     Ok(())
 }
 impl SqliteStore {

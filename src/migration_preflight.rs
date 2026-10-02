@@ -75,14 +75,14 @@ pub fn inspect(ctx:&Ctx,project:&Path)->Result<Report> {
             Err(error)=>("unknown",error.clone()),
             Ok((panes,agents))=>match panes.iter().find(|p|p.pane_id==pane) {
                 None if agents.iter().any(|a|a.pane_id==pane)=>("unknown","inconsistent pane/agent snapshots; repeat observation".into()),
-                None=>("absent","pane absent from successfully queried recorded session; historical ownership still requires reconciliation".into()),
+                None=>("absent","pane absent from successfully queried recorded session; identity retained as historical after local writer checks".into()),
                 Some(p)if workspace.is_empty()||tab.is_empty()||p.workspace_id!=workspace||p.tab_id!=tab||(!cwd.is_empty()&&p.cwd!=cwd)=>("mismatch","pane identity/cwd differs; do not reuse it".into()),
-                Some(_)=>if agents.iter().any(|a|a.pane_id==pane){("present_agent","matching pane has an agent; idle UI does not prove quiescence".into())}else{("present_pane","matching pane exists; shell/process writer status remains unverified".into())},
+                Some(_)=>if agents.iter().any(|a|a.pane_id==pane){("present_agent","matching pane has an agent; idle UI does not prove quiescence".into())}else{("present_pane","matching pane has no listed agent; local writer checks determine migration eligibility".into())},
             },
         };
         observations.push(Observation{record,machine,pane,state:state.into(),diagnostic});
     }
-    warnings.push("Observations are a read-only snapshot, not cutover authorization; live identities remain blocked. Config fingerprints are diagnostic references, not copied settings or an authority grant.".into());
+    warnings.push("Observations are a read-only snapshot; exact-plan apply repeats quiescence checks under maintenance locks. Live agents remain blocked. Config fingerprints are diagnostic references, not copied settings or an authority grant.".into());
     if migration::inspect(project)?.digest!=plan.digest{blockers.push("project sources changed during preflight; repeat inspection".into());}
     Ok(Report{source_digest:plan.digest,storage,references,herdr_version:version,observations,blockers,warnings})
 }
