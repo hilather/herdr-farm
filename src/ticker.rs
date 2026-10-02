@@ -1034,10 +1034,10 @@ fn launch_pass(ctx: &Ctx, project: &Project, herdr: &Herdr, threads: &[thread::T
         }
         let launched = (|| -> Result<()> {
             let safety = project.safety(&ctx.config_dir)?;
-            let agent_args=safety.worker_arguments(&t.agent)?;
+            let agent_args=crate::agents::worker_arguments(&safety,t,ctx.runner)?;
             *may_start=false;
             thread::update(project, &t.id, |t| t.launch_attempts += 1)?;
-            herdr.on_machine(&t.machine).agent_start(&t.agent_name, &t.agent, &t.pane_id, agent_args)?;
+            herdr.on_machine(&t.machine).agent_start(&t.agent_name, &t.agent, &t.pane_id, &agent_args)?;
             Ok(())
         })();
         errors.extend(launched.err().map(|e| e.context(format!("{}: launch", t.id))));

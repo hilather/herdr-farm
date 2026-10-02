@@ -200,11 +200,54 @@ pub struct Safety {
     pub coordinator_agent_args_kind: Option<String>,
     pub thread_agent_args: Vec<String>,
     pub thread_agent_args_kind: Option<String>,
+    pub thread_network: bool,
+    #[serde(skip)]
+    pub thread_agent_args_explicit: bool,
     pub routine_commands: bool,
 }
 
 impl Safety {
     pub fn worker_arguments(&self,kind:&str)->Result<&[String]> {crate::agents::arguments(kind,self.thread_agent_args_kind.as_deref(),&self.thread_agent_args,"thread_agent_args")}
+    pub fn effective_worker_arguments(&self, kind: &str, cwd: &str, repository: &str) -> Result<Vec<String>> {
+        let explicit = self.worker_arguments(kind)?;
+        if self.thread_agent_args_explicit || !explicit.is_empty() { return Ok(explicit.to_vec()); }
+        let mut args = Vec::new();
+        match kind {
+            "codex" => {
+                let mut projects = toml::map::Map::new();
+                for path in [cwd, repository] {
+                    if path.is_empty() { continue; }
+                    projects.insert(path.into(), toml::Value::Table(toml::map::Map::from_iter([("trust_level".into(), toml::Value::String("trusted".into()))])));
+                }
+                // Codex 0.159 splits override keys on every dot, ignoring quotes.
+                // Keep paths in the TOML value, whose quoted keys are parsed correctly.
+                args.extend(["-c".into(), format!("projects={}", toml::Value::Table(projects))]);
+                args.extend(["--sandbox", "workspace-write", "--ask-for-approval", "on-request"].map(String::from));
+                if self.thread_network { args.extend(["-c".into(), "sandbox_workspace_write.network_access=true".into()]); }
+            }
+            "claude" => args.extend(["--permission-mode", "acceptEdits"].map(String::from)),
+            _ => {}
+        }
+        Ok(args)
+    }
+    pub fn worker_summary(&self) -> String {
+        let mut kinds = vec!["codex", "claude", "other"];
+        if let Some(kind) = self.thread_agent_args_kind.as_deref()
+            && !kinds.contains(&kind) { kinds.push(kind); }
+        kinds.into_iter().map(|kind| {
+            let origin = if self.thread_agent_args_explicit || !self.thread_agent_args.is_empty() {
+                "configured"
+            } else if matches!(kind, "codex" | "claude") {
+                "built-in defaults"
+            } else {
+                "no built-in arguments"
+            };
+            match self.effective_worker_arguments(kind, "<launch directory>", "<repository root>") {
+                Ok(args) => format!("{kind}: {args:?} ({origin})"),
+                Err(e) => format!("{kind}: {e}"),
+            }
+        }).collect::<Vec<_>>().join("; ")
+    }
     pub fn coordinator_arguments(&self,kind:&str)->Result<&[String]> {crate::agents::arguments(kind,self.coordinator_agent_args_kind.as_deref(),&self.coordinator_agent_args,"coordinator_agent_args")}
 }
 
@@ -216,6 +259,8 @@ impl Default for Safety {
             coordinator_agent_args_kind: None,
             thread_agent_args: Vec::new(),
             thread_agent_args_kind: None,
+            thread_network: false,
+            thread_agent_args_explicit: false,
             routine_commands: false,
         }
     }
@@ -383,10 +428,12 @@ pub fn parse_safety(text:&str,canonical_project_dir:&Path)->Result<Safety> {
     }
     let mut config: Config =
         toml::from_str(text).context("safety configuration does not parse")?;
-    let safety = config
+    let mut safety = config
         .safety
         .remove(&*canonical_project_dir.to_string_lossy())
         .unwrap_or_default();
+    let raw: toml::Value = toml::from_str(text)?;
+    safety.thread_agent_args_explicit = raw.get("safety").and_then(|v| v.get(canonical_project_dir.to_string_lossy().as_ref())).and_then(|v| v.get("thread_agent_args")).is_some();
     if !matches!(safety.start_threads.as_str(), "propose" | "auto") {
         bail!(
             "start_threads must be \"propose\" or \"auto\", not {:?}",

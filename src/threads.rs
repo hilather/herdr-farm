@@ -816,7 +816,7 @@ fn row(t: &Thread, view: Option<&SessionView>, now: jiff::Timestamp) -> Row {
     } else if !live.pane_exists {
         "pane closed".to_string()
     } else {
-        live.agent_state.unwrap_or_else(|| "no agent".into())
+        live.agent_state.map(|s| if s == "blocked" { "blocked: possible trust or permission prompt; inspect the pane".into() } else { s }).unwrap_or_else(|| "no agent".into())
     };
     Row { thread: t.clone(), group, note }
 }
