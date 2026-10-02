@@ -386,3 +386,40 @@ fn preflight_observes_the_recorded_session_and_fingerprints_config_without_mutat
         assert!(!p.project.join(".state/migration").exists() && !p.project.join(".state/state.db").exists());
     }
 }
+
+/// A physical root move refuses canonical access without rewriting identity;
+/// returning to the recorded root restores the same persisted task state.
+#[test]
+fn canonical_root_relocation_is_actionable_and_reversible() {
+    let p = Project::new("pause");
+    p.migrate();
+    let before = p.snapshot();
+    let herdr = p.home.path().join("herdr-fixture");
+    fs::write(&herdr, "#!/bin/sh\ncase \"$*\" in\n--version) echo 'herdr 0.9.1';;\n'session list --json') echo '{\"sessions\":[]}';;\n*) exit 1;;\nesac\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
+    let root = p.home.path().join("root");
+    let moved = p.home.path().join("moved-root");
+    fs::rename(&root, &moved).unwrap();
+    let cli = |selected_root: &std::path::Path, args: &[&str]| {
+        Command::new(BIN).env_clear().env("HOME", p.home.path()).env("PATH", "/usr/bin:/bin")
+            .env("HERDR_BIN_PATH", &herdr).arg("--root").arg(selected_root).args(args).output().unwrap()
+    };
+    let expected = format!(
+        "project was recorded at {} but is now at {}; canonical projects cannot be relocated — move it back (see docs/renaming.md)",
+        p.project.display(), moved.join("demo").display()
+    );
+    let out = cli(&moved, &["task", "demo", "list"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains(&expected), "{out:?}");
+    let out = cli(&moved, &["doctor"]);
+    assert!(!out.status.success());
+    let report = String::from_utf8_lossy(&out.stdout);
+    assert!(report.contains(&format!("[FAIL] project demo: migration journal: {expected}")), "{report}");
+    fs::rename(&moved, &root).unwrap();
+    assert_eq!(p.snapshot(), before);
+    assert_eq!(p.ok(&["migration", "demo", "status"])["phase"], "active");
+    let out = cli(&root, &["doctor"]);
+    let report = String::from_utf8_lossy(&out.stdout);
+    assert!(!report.contains("[FAIL] project demo: migration journal:"), "{report}");
+}

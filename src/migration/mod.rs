@@ -210,11 +210,25 @@ fn save(project:&Path,journal:&Journal)->Result<()> {
     }
     Ok(())
 }
+pub(crate) fn check_project_identity(recorded: &str, project: &Path) -> Result<()> {
+    ensure!(Path::new(recorded) == project,
+        "project was recorded at {} but is now at {}; canonical projects cannot be relocated — move it back (see docs/renaming.md)",
+        recorded, project.display());
+    Ok(())
+}
+
+/// Read-only validation of retained runtime and memory migration journals.
+pub fn check_project_journals(project: &Path) -> Result<()> {
+    let project = checked_project(project)?;
+    load(&project)?;
+    crate::memory::check_journal(&project)
+}
+
 fn load(project:&Path)->Result<Journal> {
     ensure!(fs::symlink_metadata(project.join(".state/migration"))?.is_dir(),"migration directory must not be a symlink");
     let journal:Journal=serde_json::from_slice(&read(&journal_path(project))?)?;
     ensure!(journal.version==1,"unknown migration journal version");
-    ensure!(Path::new(&journal.plan.project)==project,"journal project identity mismatch");
+    check_project_identity(&journal.plan.project, project)?;
     ensure!(references::plan_digest(&journal.plan)?==journal.plan.digest,"journal inventory digest mismatch");
     ensure!(journal.plan.sources.iter().all(|s|safe_relative(&s.path)),"unsafe journal path");
     Ok(journal)

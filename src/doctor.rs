@@ -264,6 +264,12 @@ fn report(
                     check(&mut out, Some(false), &label, "project load failed without migration markers; preserve and repair the record".into());
                     continue;
                 }
+                #[cfg(feature="state-store")]
+                if journal.exists()
+                    && let Err(error) = herdr_farm::migration::check_project_journals(&dir)
+                {
+                    check(&mut out, Some(false), &label, format!("migration journal: {error:#}"));
+                }
                 if journal.exists() && !format_path.exists() {
                     check(&mut out, Some(false), &label, "migration is incomplete (journal without format); run `migration status` then `migration recover --writers-stopped`".into());
                     continue;
