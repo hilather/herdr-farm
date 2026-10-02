@@ -149,6 +149,9 @@ fn safety_overrides_are_keyed_by_canonical_project_path() {
     home.ok(&["new", "other"]);
     let defaults = "  start_threads = \"propose\"\n  coordinator_agent_args = []\n  thread_agent_args = []\n";
     assert!(home.ok(&["safety", "show", "demo"]).contains(defaults));
+    let shown = home.ok(&["safety", "show", "demo"]);
+    assert!(shown.contains("--sandbox") && shown.contains("workspace-write") && shown.contains("on-request") && shown.contains("acceptEdits") && shown.contains("built-in defaults"), "{shown}");
+    assert!(!shown.contains("network_access=true"), "{shown}");
 
     let canonical = fs::canonicalize(home.root().join("demo")).unwrap();
     let config = home.0.path().join(".config/herdr-farm");
@@ -160,6 +163,14 @@ fn safety_overrides_are_keyed_by_canonical_project_path() {
     assert!(shown.ends_with(&format!("[safety.{:?}]\n", canonical.to_str().unwrap())), "{shown}");
     assert!(home.ok(&["context", "demo"]).contains("Safety: start_threads=auto routine_commands=false thread_agent_args=[\"--x\"]"));
     assert!(home.ok(&["safety", "show", "other"]).contains(defaults));
+
+    fs::write(config.join("config.toml"), format!("[safety.{:?}]\nthread_network = true\n", canonical.to_str().unwrap())).unwrap();
+    let shown = home.ok(&["safety", "show", "demo"]);
+    assert!(shown.contains("network_access=true"), "{shown}");
+    fs::write(config.join("config.toml"), format!("[safety.{:?}]\nthread_agent_args = []\nthread_network = true\n", canonical.to_str().unwrap())).unwrap();
+    let shown = home.ok(&["safety", "show", "demo"]);
+    assert!(shown.contains("codex: [] (configured)") && shown.contains("claude: [] (configured)"), "{shown}");
+    assert!(!shown.contains("network_access=true"), "{shown}");
 
     fs::write(config.join("config.toml"), format!("[safety.{:?}]\nstart_threads = \"yolo\"\n", canonical.to_str().unwrap())).unwrap();
     let error = home.refused(&["safety", "show", "demo"]);

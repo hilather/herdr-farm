@@ -1604,16 +1604,38 @@ fn ticker_local_and_remote_launches_acknowledge_once_and_recover_lost_replies() 
     use std::{fs,time::{Duration,Instant},process::Stdio,os::unix::{fs::PermissionsExt,net::UnixListener}};
     for is_remote in [false,true] {
     for outcome in ["confirmed","lost"] {
+    for case in ["claude", "codex", "network", "explicit", "empty", "empty-bound", "other"] {
+        if is_remote && case != "claude" { continue; }
         let home=tempfile::tempdir().unwrap();let root=home.path().join("root");let r=root.to_str().unwrap();
         assert!(hp(home.path(),&["--root",r,"new","demo"]).status.success());let project=root.join("demo");
         let socket=home.path().join("session.sock");let _listener=UnixListener::bind(&socket).unwrap();
         fs::write(project.join(".state/coordinator.json"),serde_json::json!({"socket":socket}).to_string()).unwrap();
-        let source=home.path().join("source");fs::create_dir(&source).unwrap();
-        let agent=serde_json::json!({"workspace_id":"w","tab_id":"tab","pane_id":"p","cwd":source,"name":"worker","agent":"claude","agent_status":"blocked","terminal_id":"terminal","launch_pending":true});
-        let record=project.join("threads/t-0001.toml");fs::write(&record,toml::to_string(&serde_json::json!({"id":"t-0001","status":"open","kind":"adopted","prompt_pending":true,"machine":if is_remote{"saved"}else{""},"thread_dir":source,"cwd":source,"workspace_id":"w","tab_id":"tab","pane_id":"p","agent":"claude","agent_name":"worker","created":jiff::Timestamp::now().to_string()})).unwrap()).unwrap();
+        let repository=home.path().join("repo.with dots");fs::create_dir(&repository).unwrap();
+        for args in [vec!["init", "-q"], vec!["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-qm", "initial"]] {
+            assert!(Command::new("git").arg("-C").arg(&repository).args(args).status().unwrap().success());
+        }
+        let source=home.path().join("linked.worktree space");
+        assert!(Command::new("git").arg("-C").arg(&repository).args(["worktree","add","-qb","worker"]).arg(&source).status().unwrap().success());
+        let kind=match case {"claude"=>"claude", "other"=>"gemini", _=>"codex"};
+        let expected: Vec<String> = match case {
+            "claude" => vec!["--permission-mode".into(),"acceptEdits".into()],
+            "empty" | "empty-bound" | "other" => Vec::new(),
+            "explicit" => vec!["--custom".into()],
+            _ => {
+                let paths=format!("projects={{ {} = {{ trust_level = \"trusted\" }}, {} = {{ trust_level = \"trusted\" }} }}",serde_json::to_string(source.to_str().unwrap()).unwrap(),serde_json::to_string(repository.to_str().unwrap()).unwrap());
+                let mut args=vec!["-c".into(),paths,"--sandbox".into(),"workspace-write".into(),"--ask-for-approval".into(),"on-request".into()];
+                if case=="network" {args.extend(["-c".into(),"sandbox_workspace_write.network_access=true".into()]);} args
+            }
+        };
+        let config=home.path().join(".config/herdr-farm");fs::create_dir_all(&config).unwrap();
+        let setting=match case {"network"=>"thread_network=true", "explicit"=>"thread_agent_args=['--custom']\nthread_agent_args_kind='codex'\nthread_network=true", "empty"=>"thread_agent_args=[]", "empty-bound"=>"thread_agent_args=[]\nthread_agent_args_kind='codex'", _=>""};
+        fs::write(config.join("config.toml"),format!("[safety.{:?}]\n{setting}\n",project.to_str().unwrap())).unwrap();
+        fs::write(home.path().join("expected.json"),serde_json::json!({"name":"worker","kind":kind,"pane_id":"p","args":expected,"timeout_ms":20000}).to_string()).unwrap();
+        let agent=serde_json::json!({"workspace_id":"w","tab_id":"tab","pane_id":"p","cwd":source,"name":"worker","agent":kind,"agent_status":"blocked","terminal_id":"terminal","launch_pending":true});
+        let record=project.join("threads/t-0001.toml");fs::write(&record,toml::to_string(&serde_json::json!({"id":"t-0001","status":"open","kind":"adopted","prompt_pending":true,"machine":if is_remote{"saved"}else{""},"thread_dir":source,"cwd":source,"workspace_id":"w","tab_id":"tab","pane_id":"p","agent":kind,"agent_name":"worker","created":jiff::Timestamp::now().to_string()})).unwrap()).unwrap();
         fs::write(home.path().join("agents.json"),serde_json::json!({"result":{"agents":[agent.clone()]}}).to_string()).unwrap();
         fs::write(home.path().join("panes.json"),serde_json::json!({"result":{"panes":[{"workspace_id":"w","tab_id":"tab","pane_id":"p","terminal_id":"terminal","cwd":source}]}}).to_string()).unwrap();
-        fs::write(home.path().join("ack.json"),serde_json::json!({"result":{"type":"agent_started","agent":agent,"argv":["claude"]}}).to_string()).unwrap();
+        fs::write(home.path().join("ack.json"),serde_json::json!({"result":{"type":"agent_started","agent":agent,"argv":std::iter::once(kind.to_string()).chain(expected.clone()).collect::<Vec<_>>()}}).to_string()).unwrap();
         let route=serde_json::json!([{"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","label":"saved","target":"fixture.invalid","session":"named-session","enabled":true,"selected":false}]);
         fs::write(home.path().join("routes.json"),route.to_string()).unwrap();fs::write(home.path().join("outcome"),outcome).unwrap();fs::write(home.path().join("remote-mode"),if is_remote{"yes"}else{"no"}).unwrap();
         let fake=home.path().join("herdr");fs::write(&fake,r#"#!/usr/bin/python3
@@ -1642,7 +1664,8 @@ r=json.loads(sys.stdin.readline())
 if r['method']=='agent.list':result=json.loads((root/'agents.json').read_text())['result'] if (root/'started').exists() else {'agents':[]}
 elif r['method']=='pane.list':result=json.loads((root/'panes.json').read_text())['result']
 elif r['method']=='agent.start':
- assert r['params']=={'name':'worker','kind':'claude','pane_id':'p','args':[],'timeout_ms':20000}
+ assert r['params']==json.loads((root/'expected.json').read_text()), r['params']
+ (root/'actual.json').write_text(json.dumps(r['params']))
  with open(root/'started','a') as f:f.write('start')
  if (root/'outcome').read_text()=='lost':sys.exit(1)
  result=json.loads((root/'ack.json').read_text())['result'];del result['agent']['agent'];result['agent']['agent_status']='unknown'
@@ -1663,9 +1686,11 @@ sys.exit(subprocess.call(sys.argv[-1],shell=True))
         let mut child=spawn();wait(&mut child,&||fs::read(home.path().join("started")).is_ok_and(|b|b==b"start")&&read().get("launch_claim").is_some_and(|c|c.get("phase").and_then(|p|p.as_str())==Some(if outcome=="confirmed"{"confirmed"}else{"pending"})));stop(&mut child);
         let polls=fs::read(home.path().join("polls")).unwrap().len();let mut child=spawn();
         wait(&mut child,&||fs::read(home.path().join("polls")).unwrap().len()>polls&&read()["launch_claim"]["notified"].as_bool()==Some(true));stop(&mut child);
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&fs::read(home.path().join("actual.json")).unwrap()).unwrap()["args"],serde_json::json!(expected));
         assert!(!home.path().join("WRONG_SYNC_EFFECT").exists());assert_eq!(fs::read(home.path().join("started")).unwrap(),b"start");assert_eq!(read()["launch_sequence"].as_integer(),Some(1));
         if outcome=="confirmed" {assert_eq!(read()["prompt_pending"].as_bool(),Some(true));assert_eq!(read()["launch_claim"]["phase"].as_str(),Some("confirmed"));}
         else {assert_eq!(read()["status"].as_str(),Some("failed"));assert_eq!(read()["launch_claim"]["phase"].as_str(),Some("uncertain"));let notices=fs::read_dir(project.join("inbox")).unwrap().filter_map(Result::ok).filter(|e|e.file_name().to_string_lossy().starts_with("launch-")).count();assert_eq!(notices,1);}
+    }
     }
 }
 
@@ -5204,6 +5229,16 @@ fn doctor_checks_coordinator_identity_priming_and_memory_owner_without_writing()
     let (text, _) = doctor();
     assert!(text.contains("[ok  ] project demo: active; socket"), "{text}");
     assert!(text.contains("coordinator identity: live agent `hp-demo-coordinator` matches w1:w1:t1:w1:p1 (kind `claude`)"), "{text}");
+    // Live pane state identifies a worker waiting for a first-launch prompt.
+    let thread_record=project.join("threads/t-0001.toml");
+    fs::write(&thread_record,toml::to_string(&serde_json::json!({"id":"t-0001","status":"open","kind":"adopted","cwd":cwd,"thread_dir":cwd,"workspace_id":"w1","tab_id":"w1:t1","pane_id":"w1:p1","agent":"claude","agent_name":"hp-demo-coordinator","created":jiff::Timestamp::now().to_string()})).unwrap()).unwrap();
+    agents("hp-demo-coordinator", "claude", "blocked");
+    let text=doctor().0;
+    assert!(text.contains("thread t-0001 blocked: possible trust or permission prompt"), "{text}");
+    let out=Command::new(BIN).env_clear().env("HOME",h).env("PATH","/usr/bin:/bin").env("HERDR_BIN_PATH",&herdr).args(["--root",r,"thread","status","demo"]).output().unwrap();
+    assert!(out.status.success(), "{}",String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("possible trust or permission prompt"));
+    fs::remove_file(thread_record).unwrap();
     // A matching agent that is not ready yet is normal startup.
     fs::write(project.join(".state/coordinator.json"), record(true)).unwrap();
     agents("hp-demo-coordinator", "claude", "working");

@@ -3,7 +3,7 @@ use super::*;
 fn arguments_from(input:&Input,project:&Project,t:&Thread,text:Option<&str>)->Result<Vec<String>> {
     ensure!(text.map(|s|thread::sha256_hex(s.as_bytes()))==input.config_digest,"launch argument configuration changed");
     let safety=project::parse_safety(text.unwrap_or(""),&project.canonical_dir()).map_err(|_|anyhow::anyhow!("invalid launch safety configuration (contents withheld)"))?;
-    let args=safety.worker_arguments(&t.agent)?.to_vec();ensure!(args.len()<=128&&args.iter().map(String::len).sum::<usize>()<=32768,"launch arguments exceed bounds");Ok(args)
+    let args=crate::agents::worker_arguments(&safety,t,&crate::runner::RealRunner)?;ensure!(args.len()<=128&&args.iter().map(String::len).sum::<usize>()<=32768,"launch arguments exceed bounds");Ok(args)
 }
 pub(super) fn execute(input:&Input,control:&Control)->Result<()> {execute_with(input,control,||Ok(()))}
 fn execute_with(input:&Input,control:&Control,after_claim:impl FnOnce()->Result<()>)->Result<()> {
@@ -77,14 +77,14 @@ elif sys.argv[1:]==['pane','list']:
  if mode=='no-terminal':del a['terminal_id']
  print(json.dumps({{'result':{{'panes':[a,a] if mode=='ambiguous' else [a]}}}}))
 elif sys.argv[1:]==['remote-api-bridge']:
- r=json.loads(sys.stdin.readline());assert r['method']=='agent.start';assert r['params']=={{'name':'worker','kind':'claude','pane_id':'p','args':[],'timeout_ms':20000}}
+ r=json.loads(sys.stdin.readline());assert r['method']=='agent.start';assert r['params']=={{'name':'worker','kind':'claude','pane_id':'p','args':['--permission-mode','acceptEdits'],'timeout_ms':20000}}
  with open(root/'started','a') as f:f.write('start')
  if mode=='lost':sys.exit(1)
  if mode=='blocked':time.sleep(60)
  if mode=='foreign-terminal':a['terminal_id']='other'
  if mode=='foreign-kind':a['agent']='codex'
  if mode=='native-pending':del a['agent'];a['agent_status']='unknown'
- print(json.dumps({{'id':'other' if mode=='wrong-id' else r['id'],'result':{{'type':'wrong' if mode=='wrong-type' else 'agent_started','agent':a,'argv':['claude','wrong'] if mode=='wrong-args' else ['claude']}}}}))
+ print(json.dumps({{'id':'other' if mode=='wrong-id' else r['id'],'result':{{'type':'wrong' if mode=='wrong-type' else 'agent_started','agent':a,'argv':['claude','wrong'] if mode=='wrong-args' else ['claude','--permission-mode','acceptEdits']}}}}))
 else:sys.exit(3)
 "#,root=root.path().display().to_string());
             fs::write(&binary,script).unwrap();fs::set_permissions(&binary,fs::Permissions::from_mode(0o700)).unwrap();

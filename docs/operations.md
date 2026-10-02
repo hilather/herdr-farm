@@ -67,17 +67,40 @@ User instructions in chat ("remember ...") are recorded promptly with provenance
 
 ## Safety settings
 
-Set per project in `~/.config/herdr-projects/config.toml`; `safety show <project>` prints the table header to use.
+Set per project in `~/.config/herdr-farm/config.toml`; `safety show <project>` prints the table header to use.
 
 ```toml
 [safety."/Users/you/.herdr-projects/billing"]
 start_threads = "propose"          # or "auto": the coordinator starts threads without asking
 coordinator_agent_args = []        # arguments for the bound coordinator kind
 coordinator_agent_args_kind = "claude" # required when the array is nonempty
-thread_agent_args = []             # arguments for the bound worker kind
-thread_agent_args_kind = "claude"   # required when the array is nonempty
+
+# Optional: omit these to use built-in worker defaults.
+# thread_agent_args = []           # replaces defaults, even when empty
+# thread_agent_args_kind = "claude" # required when the array is nonempty
+thread_network = false            # optional: enable Codex worker downloads
 routine_commands = false           # true lets approved routines run shell commands
 ```
+
+When `thread_agent_args` is absent, Codex workers get `--sandbox workspace-write
+--ask-for-approval on-request` and launch-only trust overrides for the launch
+directory and the main repository root of a linked worktree. Nothing is written
+to the owner's Codex config. [Codex 0.159.0's override parser](https://github.com/openai/codex/blob/rust-v0.159.0/codex-rs/config/src/overrides.rs) splits `-c` keys on every dot without
+interpreting quotes, so paths are quoted TOML keys inside one inline-table
+argument: `-c 'projects={"/path/to/worktree"={trust_level="trusted"},"/path/to/repo"={trust_level="trusted"}}'`.
+The displayed shell quotes are illustrative; launch sends separate argv elements.
+Network is off by default; `thread_network = true` adds
+`-c sandbox_workspace_write.network_access=true` to built-in Codex arguments.
+It has no effect on explicit argument arrays or other agents.
+
+Claude workers default to `--permission-mode acceptEdits`. A first Claude thread
+in a new repository may still show its folder-trust dialog once; inspect the pane
+and answer it yourself. Herdr never writes the owner's `.claude.json`.
+`thread status` and `doctor` identify a blocked pane as a possible trust or
+permission prompt. Other kinds receive no built-in arguments. `safety show`,
+project context/show and `doctor` mark the effective per-kind built-in defaults;
+trust paths are placeholders in project-level reports and resolved for each launch.
+An explicit `thread_agent_args`, including `[]`, replaces all built-in arguments.
 
 Nonempty argument arrays now require their matching `*_agent_args_kind` field.
 When upgrading an existing config, set that field to the kind the existing flags

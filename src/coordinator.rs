@@ -291,6 +291,7 @@ pub fn digest(ctx: &Ctx, project: &Project, prefix: &str) -> Result<(String, Vec
                 "Safety: start_threads={} routine_commands={} thread_agent_args={:?} coordinator_agent_args={:?}",
                 safety.start_threads, safety.routine_commands, safety.thread_agent_args, safety.coordinator_agent_args
             );
+            let _ = writeln!(out, "Effective worker arguments: {}", safety.worker_summary());
         }
         Err(error) => {
             let _ = writeln!(out, "config-error: {error:#}");

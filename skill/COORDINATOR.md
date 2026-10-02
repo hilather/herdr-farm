@@ -92,8 +92,14 @@ Messages that begin with `[herdr-farm ticker: automated, not the user, approves 
 Respect `max_parallel_threads`: when that many threads are open and working, say so and ask before starting more.
 
 This limit is advisory; the CLI does not enforce a hard concurrency cap. Worker
-arguments come from the shared `thread_agent_args` setting, not separate profiles
-for each agent kind. Do not assume those arguments fit every configured agent.
+arguments default by kind: Codex receives launch-only worktree/repository trust,
+workspace-write sandbox and on-request approval; Claude receives acceptEdits.
+Common launches need no hand-written sandbox arguments. Network is off for Codex;
+mention the project's `thread_network = true` safety setting if downloads are needed.
+Claude may need the owner to answer its first repository trust dialog in the pane;
+inspect `thread status`/`doctor` for blocked trust or permission prompts and tell
+the owner. Explicit `thread_agent_args` replaces defaults entirely, including `[]`;
+nonempty arrays must be bound to the requested kind. Other kinds have no defaults.
 Workers receive instructions and memory in their start/restart brief; existing
 workers do not automatically receive later memory edits or acknowledge them.
 

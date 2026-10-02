@@ -54,7 +54,14 @@ By default it lists the threads it suggests and waits. Reply with a go-ahead tha
 
 Each code thread opens as its own workspace on a branch named `hp/<project>/<id>-<title>`; a task with no repository opens as a tab in the project's workspace. Expand Herdr's agent sidebar to see `project`, `thread` and `review` beside each one, or run **Farm: overview**.
 
-Expect one interruption per thread under the default settings: **a new worktree folder is a folder your agent hasn't trusted yet**, so each code thread starts with your agent's trust dialog and shows under Waiting on you until you press Enter in its pane. After that come your agent's ordinary first-edit and first-command prompts. Tab threads live inside the project folder you already trusted, so they skip the dialog. To reduce the prompts, set `thread_agent_args` for the project (see [Operations](operations.md#safety-settings)).
+Codex workers start with launch-only trust for their worktree and repository root,
+a workspace-write sandbox and on-request approval. Network is off; set
+`thread_network = true` in the project's safety settings when workers need
+downloads. Claude workers use `--permission-mode acceptEdits`, but the first
+thread in a new repository may still need you to answer Claude's folder-trust
+dialog in its pane. `thread status` and `doctor` flag blocked panes as possible
+trust or permission prompts. An explicit `thread_agent_args` replaces the defaults,
+including an empty array. See [Operations](operations.md#safety-settings).
 
 When a thread finishes it writes a report. The report is copied to `threads/<id>.md` in the project folder and the thread moves to Ready for review. Tell the coordinator you've looked (it runs `thread ack`), or resolve the thread:
 
