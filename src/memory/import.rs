@@ -111,7 +111,7 @@ fn inventory(project: &Path) -> Result<Vec<MemorySource>> {
         for entry in entries {
             let name = entry.file_name();
             let name = name.to_str().context("non-UTF-8 memory filename")?;
-            // Candidates are retained by the runtime import, never promoted as authority.
+            // Candidates stay in the legacy backup, never promoted as authority.
             if name=="candidates" { ensure!(entry.file_type()?.is_dir(),"candidates must be a real directory");continue; }
             ensure!(!name.starts_with('.'), "hidden memory file blocks import: {name}");
             ensure!(name.ends_with(".md"), "unsupported memory filename: {name}");

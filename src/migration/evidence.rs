@@ -2,11 +2,11 @@
 use super::*;
 use serde_json::Value;
 
+// Memory Markdown stays backup-only: the separate memory importer owns its
+// provenance and signed cutover. Review obligations retain their legacy links.
 pub(super) fn retained(path: &str) -> bool {
     path.starts_with(".state/artifacts/")
         || path.starts_with(".state/memory-review-evidence/")
-        || path.starts_with("memory/")
-        || path == "MEMORY.md"
         || path.starts_with("threads/") && path.ends_with(".md")
 }
 

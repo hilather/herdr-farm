@@ -439,12 +439,13 @@ fn used_legacy_evidence_migrates_and_restores_without_live_routes() {
     p.thread("t-0001",&[("status",toml::Value::String("open".into())),("pane_id",toml::Value::String("p1".into()))]);
     assert!(p.ok(&["migration","demo","inspect"])["blockers"].as_array().unwrap().iter().any(|b|b.as_str().unwrap().contains("active/uncertain execution")));
     p.thread("t-0001",&[("pane_id",toml::Value::String("p1".into()))]);
+    p.write("MEMORY.md", "# Legacy memory\nUnreviewed owner text.\n");
     p.write("threads/t-0001.md","## Report\n\nFinished.\n\n## Remember\n\nKeep retained evidence.\n");
     p.ok(&["memory-review","demo","ingest","--all"]);
     let reviews=p.ok(&["memory-review","demo","list"]);
     let id=reviews[0]["id"].as_str().unwrap();
     let body=p.route("decision.md","Keep retained evidence.\n");
-    p.ok(&["memory-review","demo","propose",id,"--file",&body,"--title","Evidence"]);
+    let proposed=p.ok(&["memory-review","demo","propose",id,"--file",&body,"--title","Evidence"]);
     p.ok(&["memory-review","demo","record","--file",&body,"--title","Evidence","--provenance","owner test decision"]);
     p.write("threads/t-0002.md","## Report\n\nFinished.\n\n## Remember\n\nReview this separately.\n");
     p.ok(&["memory-review","demo","ingest","--all"]);
@@ -480,8 +481,24 @@ fn used_legacy_evidence_migrates_and_restores_without_live_routes() {
     assert!(retained.iter().any(|s|s.path==".state/memory-review.json"));
     assert_eq!(retained.iter().find(|s|s.path==".state/memory-review.json").unwrap().bytes,p.read(".state/memory-review.json"));
     assert!(p.snapshot()["inbox"].as_array().unwrap().iter().any(|i|i["content"]["kind"]=="memory-review" && i["seen"]==false));
-    assert!(retained.iter().any(|s|s.path.starts_with("memory/candidates/")));
+    assert!(!retained.iter().any(|s|s.path == "MEMORY.md" || s.path.starts_with("memory/")));
+    for (path, bytes) in &originals {
+        assert_eq!(p.read(&format!(".state/migration/backup/{path}")), *bytes);
+    }
+    assert_eq!(p.ok(&["memory-review", "demo", "show", id])["candidate"], proposed["candidate"]);
+    assert_eq!(p.ok(&["memory", "demo", "inspect"])["authority"], "legacy-markdown");
+    assert_eq!(p.ok(&["memory", "demo", "inspect"])["active_facts"], json!([]));
     drop(db);
+    p.ok(&["memory", "demo", "import"]);
+    let memory=p.ok(&["memory", "demo", "inspect"]);
+    assert_eq!(memory["authority"], "legacy-markdown");
+    assert_eq!(memory["active_facts"], json!([]));
+    let records=memory["records"].as_array().unwrap();
+    assert!(records.iter().any(|r|r["record_key"] == "memory/evidence.md"));
+    assert!(!records.iter().any(|r|r["record_key"].as_str().unwrap().starts_with("memory/candidates/")));
+    let snapshot=migration::open_active(&p.project).unwrap().read_snapshot(None).unwrap();
+    assert!(snapshot.approvals.is_empty() && snapshot.memory_policies.is_empty());
+    assert_eq!(p.ok(&["memory-review", "demo", "show", id])["candidate"], proposed["candidate"]);
     let destination=p.home.path().join("restored");
     p.ok(&["migration","demo","restore","--destination",destination.to_str().unwrap()]);
     for (path,bytes) in originals {assert_eq!(fs::read(destination.join(path)).unwrap(),bytes);}
