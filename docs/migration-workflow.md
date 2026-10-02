@@ -55,8 +55,10 @@ or interpreted as runtime control. Memory review obligations of all four
 statuses, notification history, candidate links and candidate digests remain
 lossless legacy evidence. Pending/deferred decisions surface in the canonical
 inbox without fabricated worker proposal identities. Candidate links must match
-the retained candidate bytes. Candidates and recorded `memory/*.md` files are
-retained in SQLite provenance with their original paths and digests.
+the retained candidate bytes. `MEMORY.md` and the entire `memory/` tree, including candidates and recorded
+notes, remain backup-only sources with their original paths and digests. They
+never enter runtime `imported_sources`; backup and restore preserve their exact
+bytes. Imported review obligations keep their links to those legacy files.
 
 Runtime migration keeps memory authority `legacy-markdown`. Use the separate
 signed `memory plan` / `memory cutover` workflow to import recorded Markdown into
