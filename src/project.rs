@@ -219,7 +219,10 @@ const CLAUDE_WORKER_COMMANDS: &[&str] = &[
     "git checkout", "git switch", "git add", "git commit", "git merge",
     "git rebase", "git cherry-pick", "git restore", "git rev-parse",
     "git ls-files", "git worktree list", "ls", "cat", "head", "tail", "wc",
-    "grep", "rg", "find", "sed -n",
+    "grep",
+    // Not `find` (-exec, -delete), `sed` (GNU `e` executes commands) or `rg`
+    // (--pre runs a preprocessor): each can run an arbitrary command under an
+    // allowed prefix, and legacy Claude threads are not sandboxed.
 ];
 
 impl Safety {

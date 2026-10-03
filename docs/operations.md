@@ -100,9 +100,10 @@ Claude workers default to `--permission-mode acceptEdits` plus `--allowedTools`
 with Bash prefix rules such as `Bash(git status:*)`. The defaults allow `git`
 status, log, diff, show, branch, checkout/switch, add, commit, merge, rebase
 (for normal non-interactive use), cherry-pick, restore, rev-parse, ls-files and
-worktree list; and `ls`, `cat`, `head`, `tail`, `wc`, `grep`, `rg`, `find`, and
-`sed -n`. They do not include git stash, push, fetch, pull or clone, curl, wget,
-rm or sudo. See the [Claude CLI permission flag documentation](https://code.claude.com/docs/en/cli-reference#cli-flags).
+worktree list; and `ls`, `cat`, `head`, `tail`, `wc` and `grep`. They do not
+include git stash, push, fetch, pull or clone, curl, wget, rm or sudo, nor `find`
+(`-exec`, `-delete`), `sed` (GNU `e` runs commands) or `rg` (`--pre` runs a
+preprocessor), each of which can run an arbitrary command under an allowed prefix. See the [Claude CLI permission flag documentation](https://code.claude.com/docs/en/cli-reference#cli-flags).
 
 Under `[safety."<canonical project path>"]`, `thread_allowed_commands` appends
 project-specific prefixes to those Claude defaults, for example
@@ -116,7 +117,7 @@ Explicit `thread_agent_args` replaces the defaults and extensions together.
 
 These are command-prefix approvals, not a sandbox or argument policy. Legacy
 Claude workers run with the owner's permissions; prefixes do not restrict paths,
-Git hooks, options (including interactive rebase), or options such as `find -exec`.
+Git hooks or options (including interactive rebase). Don't add prefixes for commands that can run other commands (`find`, `sed`, `rg --pre`, `xargs`, `env`, shells, interpreters).
 Use ordinary local worktree commands; review project extensions carefully before
 adding them. Commands outside these prefixes still need approval unless allowed
 by other Claude settings. Changes apply at the next worker launch.
