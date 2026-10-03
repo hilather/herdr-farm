@@ -49,7 +49,7 @@ fn git_text(proof: &RevalidatedProfile, path: &Path, args: &[&str]) -> Result<St
     Ok(std::str::from_utf8(&output.stdout_bytes).context("repository observation is not UTF-8")?.trim_end_matches('\n').to_owned())
 }
 
-fn repository(proof: &RevalidatedProfile, path: &Path) -> Result<RepositoryInput> {
+fn repository(proof: &RevalidatedProfile, path: &Path, contract: Option<&PreparedContract>) -> Result<RepositoryInput> {
     ensure!(path.is_absolute() && path.canonicalize()? == path && path.is_dir(), "repository must be a canonical directory");
     let name = path.to_str().context("repository path is not UTF-8")?;
     ensure!(name.len() <= 4096 && !name.chars().any(char::is_control), "invalid repository path");
@@ -61,18 +61,26 @@ fn repository(proof: &RevalidatedProfile, path: &Path) -> Result<RepositoryInput
         key=="extensions.partialclone" || (key.starts_with("remote.") && key.ends_with(".promisor"))
     }), "partial clone repository requires materialized local objects");
     ensure!(git_text(proof,path,&["rev-parse", "--show-toplevel"])? == name, "repository selection is not its worktree root");
-    let commit = git_text(proof,path,&["rev-parse", "--verify", "HEAD^{commit}"])?;
+    let contract = contract.filter(|c| c.repository == name);
+    if let Some(contract) = contract {
+        ensure!(git_text(proof,path,&["rev-parse", "--show-object-format"])? == contract.object_format.as_str(), "contract base object format differs from repository");
+    }
+    let base = contract.map_or("HEAD", |c| c.base_oid.as_str());
+    let spec = format!("{base}^{{commit}}");
+    let commit = git_text(proof,path,&["rev-parse", "--verify", &spec])
+        .with_context(|| format!("cannot resolve launch base commit {base} in repository {name}"))?;
     let oid = |s: &str| matches!(s.len(),40|64) && s.bytes().all(|b|b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
     ensure!(oid(&commit), "invalid repository commit identity");
+    ensure!(contract.is_none_or(|c| c.base_oid == commit), "contract base_oid must name the resolved commit itself");
     let tree = git_text(proof,path,&["rev-parse", "--verify", &format!("{commit}^{{tree}}")])?;
     ensure!(oid(&tree), "invalid repository tree identity");
-    ensure!(git_text(proof,path,&["rev-parse", "--verify", "HEAD^{commit}"])? == commit, "repository HEAD changed during preparation");
+    ensure!(git_text(proof,path,&["rev-parse", "--verify", &spec])? == commit, "repository base commit changed during preparation");
     Ok(RepositoryInput { repository: name.into(), commit, tree })
 }
 
 fn inputs(
     proof: &RevalidatedProfile, selection: &LaunchSelection, state: &LaunchRows,
-    approval: VersionedReference,
+    approval: VersionedReference, contract: Option<&PreparedContract>,
 ) -> Result<LaunchInputs> {
     let profile = proof.launch_profile()?.clone();
     ensure!(selection.profile == *proof.reference(), "selected profile differs from live proof");
@@ -92,7 +100,8 @@ fn inputs(
     }
     if !binding.identity.repo.is_empty() { paths.insert(PathBuf::from(&binding.identity.repo)); }
     ensure!(paths.len() <= 64, "too many bound repositories");
-    let repositories = paths.iter().map(|p|repository(proof,p)).collect::<Result<Vec<_>>>()?;
+    ensure!(contract.is_none_or(|c| paths.contains(Path::new(&c.repository))), "contract repository is missing from launch selections");
+    let repositories = paths.iter().map(|p|repository(proof,p,contract)).collect::<Result<Vec<_>>>()?;
     // The grant covers these exact bindings; a still-blocked dependent is not drafted.
     let dependencies = state.dependencies.clone().context("task dependency is not satisfied; the task is not released")?;
     Ok(LaunchInputs {
@@ -180,7 +189,8 @@ pub fn draft(
     let project = project.canonicalize()?;
     let mut db = crate::migration::open_active_scoped(&project,proof.read_control())?;
     let state = db.launch_rows(expected_head,&selection.task,&selection.binding,None)?;
-    let mut inputs = inputs(&proof,selection,&state,pending_approval())?;
+    let contract = db.attempt_contract(selection.task.as_str(), None)?;
+    let mut inputs = inputs(&proof,selection,&state,pending_approval(),contract.as_ref())?;
     inputs.task_contract = db.task_contract_reference(inputs.task.as_str())?;
     db.validate_launch_draft(&inputs,expected_head,now())?;
     let issued = now();
@@ -208,7 +218,8 @@ pub fn reserve(
     let project = project.canonicalize()?;
     let mut db = crate::migration::open_active_scoped(&project,proof.read_control())?;
     let state = db.launch_rows(expected_head,&selection.task,&selection.binding,Some(approval))?;
-    let mut inputs = inputs(&proof,selection,&state,approval.clone())?;
+    let contract = db.attempt_contract(selection.task.as_str(), None)?;
+    let mut inputs = inputs(&proof,selection,&state,approval.clone(),contract.as_ref())?;
     inputs.task_contract = db.task_contract_reference(inputs.task.as_str())?;
     db.validate_launch_draft(&inputs,expected_head,now())?;
     let (grant,revoked,consumed) = state.approval.as_ref().filter(|(grant,..)|grant.reference().ok().as_ref()==Some(approval)).context("signed launch approval is not installed")?;

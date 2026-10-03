@@ -340,7 +340,11 @@ Repeat `--write` for 1–64 repository-relative files or directory prefixes endi
 in `/` (no globs), and `--output` for 1–8 exact files the result must contain.
 Each output must fall inside a write scope. An existing file the task changes or
 `<dir>/NOTES.md` can be an output. Each gets a file-exists-and-has-content policy.
-`--deliverable` overrides the title-based description. `--base` selects the base;
+`--deliverable` overrides the title-based description. `--base` (default `HEAD`)
+is resolved once to a commit for generated contracts and their worker worktrees.
+The owner checkout stays on its current branch. An installed or advanced
+`--contract-file` contract supplies its own `base_oid`; that base must exist
+locally before reservation.
 `--integration-ref` selects verify-then-integrate rather than verify-only.
 Planning (`--plan-output`), code (`--write`/`--output`) and advanced
 (`--contract-file`) forms are mutually exclusive.

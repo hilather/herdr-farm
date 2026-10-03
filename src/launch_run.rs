@@ -660,10 +660,14 @@ fn steps(run: &mut Run, args: &Args, plan: ProfilePlan) -> Result<Value> {
     } else {
         let dir = run.dir(&args.task)?;
         let document = dir.join("contract.json");
-        fs::write(&document, contract_document(args, &repository, run.head()?, &kind, &project)?)?;
+        // Resolve the base once, including across retries of the signing ingress.
+        let contract: Value = serde_json::from_slice(&contract_document(args, &repository, run.head()?, &kind, &project)?)?;
+        fs::write(&document, serde_json::to_vec_pretty(&contract)?)?;
         let key = args.sign_with.as_deref().with_context(|| format!("the contract needs the owner's signature: pass --sign-with KEY, or sign {} with `ssh-keygen -Y sign -n {} -f KEY` and install it with `task contract put`", document.display(), authority::CONTRACT_SIGNATURE_NAMESPACE))?;
         let installed = retry(|| {
-            let bytes = contract_document(args, &repository, run.head()?, &kind, &project)?;
+            let mut contract = contract.clone();
+            contract["expected_head"] = json!(run.head()?);
+            let bytes = serde_json::to_vec_pretty(&contract)?;
             fs::write(&document, &bytes)?;
             let signature = sign(key, authority::CONTRACT_SIGNATURE_NAMESPACE, &document)?;
             authority::import_contract(&project, &document, &signature)

@@ -25,7 +25,15 @@ retained references; comprehensive artifact acceptance and safe cleanup remain s
 
 The service derives one path and branch per approved repository from the actual
 attempt ID. Callers cannot supply a branch or output directory. Plans appear in
-the launch draft for review. Source HEAD movement and dirty source files do not
+the launch draft for review. For a contracted task, draft and reservation resolve
+its signed `base_oid` as a commit, check the repository object format, and retain
+that commit and its tree. A missing base refuses launch before reservation.
+The owner's checked-out branch is never changed. Generated `launch run` contracts
+resolve `--base` (default `HEAD`) once; advanced contracts use their own base.
+Capture and submission compare against the attempt's frozen contract base, and
+capture refuses a worktree whose history does not contain it without rewriting
+history. Quarantine import, preservation and verification retain these same
+commit identities. Source HEAD movement and dirty source files do not
 replace the approved commit/tree; the worker receives a new linked checkout.
 
 Before consuming approval, preparation validates the full retained brief, profile
