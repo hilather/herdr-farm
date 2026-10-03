@@ -500,7 +500,7 @@ fn a_thread_start_is_confirmed_on_acknowledgement_without_waiting_for_the_agent(
             assert_eq!(args, &if settings.contains("--vendor-option") { vec![json!("--vendor-option")] } else { vec![] });
         } else {
             let mut expected = vec!["--permission-mode".to_string(), "acceptEdits".into(), "--allowedTools".into()];
-            for prefix in ["git status", "git log", "git diff", "git show", "git branch", "git checkout", "git switch", "git add", "git commit", "git merge", "git rebase", "git cherry-pick", "git restore", "git rev-parse", "git ls-files", "git worktree list", "ls", "cat", "head", "tail", "wc", "grep", "rg", "find", "sed -n"] {
+            for prefix in ["git status", "git log", "git diff", "git show", "git branch", "git checkout", "git switch", "git add", "git commit", "git merge", "git rebase", "git cherry-pick", "git restore", "git rev-parse", "git ls-files", "git worktree list", "ls", "cat", "head", "tail", "wc", "grep"] {
                 expected.push(format!("Bash({prefix}:*)"));
             }
             if reply == "null" { expected.extend(["Bash(godot --headless:*)".into(), "Bash(tools/run_tests.sh:*)".into()]); }

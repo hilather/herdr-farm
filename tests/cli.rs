@@ -1620,7 +1620,7 @@ fn ticker_local_and_remote_launches_acknowledge_once_and_recover_lost_replies() 
         let expected: Vec<String> = match case {
             "claude" => {
                 let mut args = vec!["--permission-mode".into(), "acceptEdits".into(), "--allowedTools".into()];
-                args.extend(["git status", "git log", "git diff", "git show", "git branch", "git checkout", "git switch", "git add", "git commit", "git merge", "git rebase", "git cherry-pick", "git restore", "git rev-parse", "git ls-files", "git worktree list", "ls", "cat", "head", "tail", "wc", "grep", "rg", "find", "sed -n"].map(|prefix| format!("Bash({prefix}:*)")));
+                args.extend(["git status", "git log", "git diff", "git show", "git branch", "git checkout", "git switch", "git add", "git commit", "git merge", "git rebase", "git cherry-pick", "git restore", "git rev-parse", "git ls-files", "git worktree list", "ls", "cat", "head", "tail", "wc", "grep"].map(|prefix| format!("Bash({prefix}:*)")));
                 args
             },
             "empty" | "empty-bound" | "other" => Vec::new(),
