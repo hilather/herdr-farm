@@ -30,6 +30,20 @@ fn mapped_path(value: &str) -> std::path::PathBuf {
 }
 #[cfg(target_os = "linux")]
 pub fn no_process_references(path: &Path) -> Result<()> {
+    // Unrelated same-user processes can exit between /proc reads under load.
+    // Retry that incomplete snapshot only; a discovered writer still fails closed.
+    for attempt in 0..8 {
+        match inspect_process_references(path) {
+            Err(error) if attempt < 7 && error.to_string() == "process identity changed during writer inspection; retry the checkpoint" => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            result => return result,
+        }
+    }
+    unreachable!()
+}
+#[cfg(target_os = "linux")]
+fn inspect_process_references(path: &Path) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
     // A checkpoint observes all visible same-user processes, not merely Herdr's
     // idle indicator. The operator separately confirms other known writers stopped.
@@ -94,7 +108,7 @@ pub fn no_process_references(path: &Path) -> Result<()> {
             Err(error)
                 if error
                     .downcast_ref::<std::io::Error>()
-                    .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+                    .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(libc::ESRCH)) =>
             {
                 let gone = !proc.try_exists()?;
                 let zombie = fs::read_to_string(proc.join("status")).is_ok_and(|s| {

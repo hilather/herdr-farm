@@ -156,7 +156,7 @@ pub(super) fn validate(project: &Path, source: &Source, bytes: &[u8]) -> Result<
     Ok(())
 }
 
-/// Repeated by inspect/plan and exact-plan validation under maintenance locks.
+/// Repeated by inspect/plan and live safety validation under maintenance locks.
 /// Unreachable sessions are uncertainty, never absence. Idle UI alone is insufficient.
 pub(super) fn quiesced(project: &Path, record: &Value) -> Result<()> {
     ensure!(
