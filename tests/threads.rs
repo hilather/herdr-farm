@@ -618,10 +618,19 @@ fn resolved_done_thread_cleans_its_pane_and_worktree_but_keeps_branch_and_report
     let safety = lab.ok(&["safety", "show", "demo"]);
     assert!(safety.contains("cleanup_resolved = \"auto\"") && safety.contains("resolve_threads = \"propose\""));
     lab.ok(&["thread", "resolve", "demo", "t-0001"]);
+    let record = lab.record("t-0001");
+    let snapshot = record["artifact_snapshot"].as_str().unwrap();
+    let retained = lab.project().join(".state/artifacts/t-0001").join(snapshot);
+    let manifest_bytes = fs::read(retained.join("manifest.json")).unwrap();
+    let manifest: Value = serde_json::from_slice(&manifest_bytes).unwrap();
+    assert_eq!(manifest.as_object().unwrap().keys().map(String::as_str).collect::<std::collections::BTreeSet<_>>(),
+        ["schema", "thread", "generation", "source", "entries"].into_iter().collect());
     let ticker = lab.ticker();
     wait_cleanup(&lab, "cleanup complete");
     drop(ticker);
     assert!(!work.exists());
+    assert_eq!(fs::read(retained.join("manifest.json")).unwrap(), manifest_bytes);
+    assert_eq!(fs::read_to_string(retained.join("library/result.txt")).unwrap(), "preserved result\n");
     assert!(!lab.git(&repo, &["worktree", "list", "--porcelain"]).contains(work.to_str().unwrap()));
     assert_eq!(lab.git(&repo, &["rev-parse", "retained"]), head);
     assert_eq!(fs::read_to_string(lab.project().join("threads/t-0001.md")).unwrap(), "finished report\n");

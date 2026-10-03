@@ -651,7 +651,7 @@ fn resolve_leased(ctx: &Ctx, slug: &str, id: &str, args: &ResolveArgs, integrate
         thread::invalidate_finalization(t)?;
         t.status = Status::Resolved;
         t.resolved_reason = "manual".into();
-        if let Some(snapshot) = &resolved_snapshot { t.artifact_snapshot = snapshot.clone(); } else if !args.remove_worktree { t.artifact_snapshot.clear(); }
+        if let Some(snapshot) = &resolved_snapshot { t.artifact_snapshot = snapshot.clone(); } else if !args.remove_worktree && !record.is_remote() { t.artifact_snapshot.clear(); }
         if args.remove_worktree { t.worktree_path.clear(); t.cwd.clear(); }
         t.prompt_pending = false;
         Ok(())

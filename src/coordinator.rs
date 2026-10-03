@@ -288,8 +288,8 @@ pub fn digest(ctx: &Ctx, project: &Project, prefix: &str) -> Result<(String, Vec
         Ok(safety) => {
             let _ = writeln!(
                 out,
-                "Safety: start_threads={} cleanup_resolved={} resolve_threads={} routine_commands={} thread_agent_args={:?} coordinator_agent_args={:?}",
-                safety.start_threads, safety.cleanup_resolved, safety.resolve_threads, safety.routine_commands, safety.thread_agent_args, safety.coordinator_agent_args
+                "Safety: start_threads={} routine_commands={} thread_agent_args={:?} coordinator_agent_args={:?} cleanup_resolved={} resolve_threads={}",
+                safety.start_threads, safety.routine_commands, safety.thread_agent_args, safety.coordinator_agent_args, safety.cleanup_resolved, safety.resolve_threads
             );
             let _ = writeln!(out, "Effective worker arguments: {}", safety.worker_summary());
         }
