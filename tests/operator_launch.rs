@@ -33,12 +33,13 @@ import json,os,socket,subprocess,sys
 args=sys.argv[1:]
 if args==['--version']:print('herdr 0.9.1');sys.exit(0)
 def serve(path):
- root=os.path.dirname(path);s={}
+ root=os.path.dirname(path);s={};next_tab=0;tabs=[{'tab_id':'owner-tab','label':'Owner'}]
  server=socket.socket(socket.AF_UNIX);server.bind(path);server.listen()
  while True:
   c,_=server.accept();f=c.makefile('rw');line=f.readline()
   if not line:c.close();continue
   r=json.loads(line);m=r['method'];p=r.get('params') or {}
+  with open(os.path.join(root,'calls.jsonl'),'a') as log:log.write(json.dumps(r)+'\n')
   live='pid' in s
   kind=s.get('kind','claude')
   screen={'codex':'model: gpt-6.1-sol low   /model to change','claude':'Sonnet 5.5 · Claude Max'}[kind]
@@ -52,6 +53,16 @@ def serve(path):
    s.update(pid=child.pid,argv=p['command'],cwd=p['cwd'],label=p['label'],fifo=fifo,kind='codex' if any(a.endswith('/codex') for a in p['command']) else 'claude')
    res={'type':'workspace_created','workspace':{'workspace_id':'w1','pane_count':1},'root_pane':{'pane_id':'w1:p1'}}
   elif m=='workspace.list':res={'type':'workspace_list','workspaces':[{'workspace_id':'w1','label':s['label'],'pane_count':1,'tab_count':1}] if live else []}
+  elif m=='tab.list':res={'tabs':tabs}
+  elif m=='tab.create':
+   next_tab+=1;tab='viewer-'+str(next_tab);tabs.append({'tab_id':tab,'label':p['label']})
+   res={'root_pane':{'workspace_id':p['workspace_id'],'tab_id':tab,'pane_id':tab+':pane'}}
+  elif m=='tab.rename':
+   for t in tabs:
+    if t['tab_id']==p['tab_id']:t['label']=p['label']
+   res={'type':'ok'}
+  elif m=='tab.close':tabs[:]=[t for t in tabs if t['tab_id']!=p['tab_id']];res={'type':'ok'}
+  elif m in ['tab.focus','pane.run']:res={'type':'ok'}
   elif m=='pane.list':res={'panes':[pane] if live else []}
   elif m=='pane.get':res={'pane':dict(pane,agent=kind)}
   elif m=='pane.read':res={'type':'pane_read','text':screen}
@@ -68,8 +79,18 @@ def serve(path):
   c.close()
 if args==['server']:serve(os.environ['HERDR_SOCKET_PATH']);sys.exit(0)
 probe={('pane','list'):'pane.list',('agent','list'):'agent.list'}.get(tuple(args))
-assert probe or args==['remote-api-bridge']
-line=json.dumps({'id':'probe','method':probe}).encode()+b'\n' if probe else sys.stdin.buffer.readline()
+if args[:2] in [['tab','list'],['tab','create'],['tab','close'],['tab','focus'],['tab','rename'],['pane','run']]:
+ method='.'.join(args[:2]);params={}
+ if method=='tab.list':params={'workspace_id':args[3]}
+ elif method=='tab.create':params={'workspace_id':args[3],'cwd':args[5],'label':args[7],'focus':False}
+ elif method=='tab.rename':params={'tab_id':args[2],'label':args[3]}
+ elif method.startswith('tab.'):params={'tab_id':args[2]}
+ else:params={'pane_id':args[2],'command':args[4:]}
+ probe=None;bridge=json.dumps({'id':'viewer','method':method,'params':params}).encode()+b'\n'
+else:
+ assert probe or args==['remote-api-bridge']
+ bridge=None
+line=json.dumps({'id':'probe','method':probe}).encode()+b'\n' if probe else bridge or sys.stdin.buffer.readline()
 c=socket.socket(socket.AF_UNIX);c.connect(os.environ['HERDR_SOCKET_PATH']);c.sendall(line)
 reply=c.makefile('rb').readline()
 if not reply:sys.exit(1)
@@ -562,6 +583,7 @@ fn launch_run_retries_after_termination_but_refuses_an_unobserved_live_worker() 
         fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); }
     }
     let lab = Lab::new();
+    let owner = CoordinatorSession::start(&lab);
     // The canonical coordinator's public command surface: owner-configured
     // signing, explicit task creation, launch, then a real running attempt.
     let config=lab.home.join(".config/herdr-farm/config.toml");
@@ -631,6 +653,10 @@ fn launch_run_retries_after_termination_but_refuses_an_unobserved_live_worker() 
     assert_eq!(killed, 1, "exactly the fixture's worker agent is killed");
     wait("first attempt termination observed after the worker died", &|| herdr_farm::runtime::snapshot(&lab.project).is_ok_and(|s|
         s.attempts.iter().any(|a| a.id.as_str() == attempt && a.termination_observed)));
+    wait("ticker closes the recorded viewer", &|| owner.calls().iter().any(|c|
+        c["method"] == "tab.close" && c["params"]["tab_id"] == first["viewer"]["tab"]));
+    assert!(owner.calls().iter().filter(|c| c["method"] == "tab.close")
+        .all(|c| c["params"]["tab_id"] == first["viewer"]["tab"]));
     ticker.0.kill().unwrap();ticker.0.wait().unwrap();
     lab.ok(&["launch", "demo", "stop", "--task", "plan-retry"]);
     let old_worktree = PathBuf::from(first["worktree"].as_str().unwrap());
@@ -685,6 +711,7 @@ fn launch_run_with_a_dedicated_server_after_verify_interaction_reserves_both_kin
         args.push("--prepare-only");
         let report = lab.ok(&args);
         assert!(report["attempt"].is_null(), "{report}");
+        assert_eq!(report["viewer"]["status"], "unavailable");
         assert!(Path::new(report["herdr_socket"].as_str().unwrap()).exists(), "{report}");
     }
     let mut attempts = Vec::new();
@@ -917,6 +944,120 @@ fn advanced_launch_fills_product_fields_and_refuses_identity_mismatches() {
     assert_ne!(replaced["authority"], contract["authority"]);
 }
 
+struct CoordinatorSession {
+    child: std::process::Child,
+    socket: PathBuf,
+    calls: PathBuf,
+}
+
+impl Drop for CoordinatorSession {
+    fn drop(&mut self) { let _ = self.child.kill(); let _ = self.child.wait(); }
+}
+
+impl CoordinatorSession {
+    fn start(lab: &Lab) -> Self {
+        let directory = lab.runtime.path().join("owner");
+        fs::create_dir(&directory).unwrap();
+        let socket = directory.join("s");
+        // Fail directly with the sandbox's socket error, before spawning.
+        drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
+        fs::remove_file(&socket).unwrap();
+        let mut child = Command::new(lab.home.join("bin/herdr")).arg("server").env_clear()
+            .env("HERDR_SOCKET_PATH", &socket)
+            .env("HERDR_FARM_TEST_TIME_SCALE", include_str!("support/time-scale.txt").trim())
+            .spawn().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::os::unix::net::UnixStream::connect(&socket).is_err() {
+            assert!(child.try_wait().unwrap().is_none(), "fixture session exited");
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let snapshot = herdr_farm::runtime::snapshot(&lab.project).unwrap();
+        herdr_farm::runtime::create_binding(&lab.project, None, None, snapshot.head,
+            &RuntimeRoute { socket: socket.display().to_string(), workspace_id: "owner-workspace".into(), ..Default::default() }).unwrap();
+        Self { child, socket, calls: directory.join("calls.jsonl") }
+    }
+
+    fn calls(&self) -> Vec<Value> {
+        fs::read_to_string(&self.calls).unwrap_or_default().lines()
+            .map(|line| serde_json::from_str(line).unwrap()).collect()
+    }
+}
+
+/// socket: viewer lifecycle through launch/view/stop and persisted server records.
+#[test]
+fn canonical_worker_viewers_create_reopen_focus_and_close_only_the_recorded_tab() {
+    let lab = Lab::new();
+    let mut owner = CoordinatorSession::start(&lab);
+    lab.plant_launchable("codex-sol", "codex", "gpt-6.1-sol");
+    let prompt = lab.home.join("prompt.txt");
+    fs::write(&prompt, "Plan.").unwrap();
+    let mut args = lab.run_args("visible", "codex-sol", "docs/plan.md", prompt.to_str().unwrap());
+    args.push("--prepare-only");
+    let launched = lab.ok(&args);
+    let viewer = &launched["viewer"];
+    assert_eq!(viewer["socket"], owner.socket.display().to_string());
+    assert_eq!(viewer["workspace"], "owner-workspace");
+    assert_eq!(viewer["label"], "worker: visible");
+    let config = PathBuf::from(viewer["config"].as_str().unwrap());
+    assert_eq!(fs::metadata(&config).unwrap().mode() & 0o777, 0o600);
+    assert!(fs::read_to_string(&config).unwrap().contains("allow_nested = true"));
+    let calls = owner.calls();
+    assert_eq!(calls.iter().filter(|c| c["method"] == "tab.create").count(), 1);
+    let command = calls.iter().find(|c| c["method"] == "pane.run").unwrap()["params"]["command"].to_string();
+    assert!(command.contains(config.to_str().unwrap()));
+    assert!(command.contains(launched["herdr_socket"].as_str().unwrap()));
+    let focused = lab.ok(&["launch", "demo", "view", "--task", "visible"]);
+    assert_eq!(focused["viewer"]["tab"], viewer["tab"]);
+    assert_eq!(owner.calls().iter().filter(|c| c["method"] == "tab.create").count(), 1);
+    assert!(owner.calls().iter().any(|c| c["method"] == "tab.focus" && c["params"]["tab_id"] == viewer["tab"]));
+    // The owner closes the viewer; reopening must create a replacement.
+    let output = Command::new(lab.home.join("bin/herdr")).args(["tab", "close", viewer["tab"].as_str().unwrap()])
+        .env("HERDR_SOCKET_PATH", &owner.socket).output().unwrap();
+    assert!(output.status.success());
+    let reopened = lab.ok(&["launch", "demo", "view", "--task", "visible"]);
+    assert!(reopened["viewer"]["tab"].is_string());
+    assert_ne!(reopened["viewer"]["tab"], viewer["tab"]);
+    lab.ok(&["launch", "demo", "stop", "--task", "visible"]);
+    let closes: Vec<_> = owner.calls().into_iter().filter(|c| c["method"] == "tab.close").collect();
+    assert_eq!(closes.len(), 2);
+    assert!(closes.iter().all(|c| c["params"]["tab_id"] != "owner-tab"));
+    assert_eq!(closes[1]["params"]["tab_id"], reopened["viewer"]["tab"]);
+    lab.ok(&["launch", "demo", "stop", "--task", "visible"]);
+
+    // Old records without a viewer can be reopened, then an owner-closed tab
+    // is harmless during stop.
+    lab.ok(&args);
+    let path = lab.root.join(".herdr-run/demo-visible/herdr/server.json");
+    let mut record: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let old = record.as_object_mut().unwrap().remove("viewer").unwrap();
+    let output = Command::new(lab.home.join("bin/herdr")).args(["tab", "close", old["tab"].as_str().unwrap()])
+        .env("HERDR_SOCKET_PATH", &owner.socket).output().unwrap();
+    assert!(output.status.success());
+    fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+    let opened = lab.ok(&["launch", "demo", "view", "--task", "visible"]);
+    let output = Command::new(lab.home.join("bin/herdr")).args(["tab", "close", opened["viewer"]["tab"].as_str().unwrap()])
+        .env("HERDR_SOCKET_PATH", &owner.socket).output().unwrap();
+    assert!(output.status.success());
+    let before = owner.calls().iter().filter(|c| c["method"] == "tab.close").count();
+    lab.ok(&["launch", "demo", "stop", "--task", "visible"]);
+    assert_eq!(owner.calls().iter().filter(|c| c["method"] == "tab.close").count(), before);
+    let again = lab.ok(&args);
+    let output = Command::new(lab.home.join("bin/herdr"))
+        .args(["tab", "rename", again["viewer"]["tab"].as_str().unwrap(), "Owner kept this"])
+        .env("HERDR_SOCKET_PATH", &owner.socket).output().unwrap();
+    assert!(output.status.success());
+    lab.ok(&["launch", "demo", "stop", "--task", "visible"]);
+    assert_eq!(owner.calls().iter().filter(|c| c["method"] == "tab.close").count(), before,
+        "a tab whose label changed is never closed");
+    owner.child.kill().unwrap();
+    owner.child.wait().unwrap();
+    let unavailable = lab.ok(&args);
+    assert_eq!(unavailable["viewer"]["status"], "unavailable");
+    assert!(unavailable["viewer"]["reason"].as_str().unwrap().contains("unreachable"));
+    lab.ok(&["launch", "demo", "stop", "--task", "visible"]);
+}
+
 /// Discovery and policy refusals use the CLI and leave canonical state intact.
 #[test]
 fn automatic_signer_refusals_and_policy_limits_change_nothing() {
@@ -967,6 +1108,8 @@ fn automatic_signer_reserves_and_defaults_to_owner_capacity() {
     let args=["launch","demo","run","--task","auto","--profile","codex-sol","--repository",lab.repo.to_str().unwrap(),"--plan-output","docs/auto.md","--herdr-socket",socket.to_str().unwrap()];
     let report=lab.ok(&args);
     assert!(report["attempt"].is_string(),"{report}");
+    assert_eq!(report["viewer"]["status"], "unavailable");
+    assert!(report["viewer"]["reason"].as_str().unwrap().contains("no coordinator"));
     assert_eq!(herdr_farm::runtime::snapshot(&lab.project).unwrap().scheduler.unwrap().policy.max_active_workers,4);
     let again=lab.ok(&args);
     assert_eq!(again["attempt"],report["attempt"]);

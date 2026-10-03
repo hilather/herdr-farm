@@ -13,7 +13,7 @@ use herdr_farm::{
 use serde_json::{Value, json};
 use std::{
     fs,
-    os::unix::{fs::{DirBuilderExt, MetadataExt}, process::CommandExt},
+    os::unix::{fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt}, process::CommandExt},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     time::{Duration, Instant},
@@ -296,6 +296,9 @@ fn herdr_server(run: &mut Run, herdr: &Path, task: &str, existing: Option<&Path>
         run.skipped("herdr_server", json!({"socket":socket}));
         return Ok(socket);
     }
+    let old_record: Value = fs::read(directory.join(SERVER_RECORD)).ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or(Value::Null);
+    close_viewer(run.ctx, &old_record);
     let _ = fs::remove_file(&socket);
     fs::write(
         directory.join("config.toml"),
@@ -331,6 +334,83 @@ fn herdr_server(run: &mut Run, herdr: &Path, task: &str, existing: Option<&Path>
     }
     run.done("herdr_server", json!({"socket":socket,"log":directory.join("server.log")}));
     Ok(socket)
+}
+
+fn viewer_matches(ctx: &Ctx, viewer: &Value) -> Result<bool> {
+    let field = |name: &str| viewer[name].as_str().with_context(|| format!("viewer missing {name}"));
+    let h = crate::herdr::Herdr::new(ctx.env.herdr_bin(), field("socket")?, ctx.runner);
+    Ok(h.tab_matches(field("workspace")?, field("tab")?, field("label")?)?)
+}
+
+fn close_viewer(ctx: &Ctx, record: &Value) {
+    let viewer = &record["viewer"];
+    if viewer_matches(ctx, viewer).unwrap_or(false) {
+        let h = crate::herdr::Herdr::new(ctx.env.herdr_bin(), viewer["socket"].as_str().unwrap_or_default(), ctx.runner);
+        let _ = h.tab_close(viewer["tab"].as_str().unwrap_or_default());
+    }
+}
+
+fn open_viewer(ctx: &Ctx, project: &Path, directory: &Path, task: &str, socket: &Path, focus: bool) -> Result<Value> {
+    let path = directory.join(SERVER_RECORD);
+    let mut record: Value = fs::read(&path).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_else(|| json!({"socket":socket,"managed_by":"operator"}));
+    let viewer = &record["viewer"];
+    if viewer_matches(ctx, viewer).unwrap_or(false) {
+        if focus {
+            crate::herdr::Herdr::new(ctx.env.herdr_bin(), viewer["socket"].as_str().context("viewer socket missing")?, ctx.runner)
+                .tab_focus(viewer["tab"].as_str().context("viewer tab missing")?)?;
+        }
+        return Ok(viewer.clone());
+    }
+    let snapshot = runtime::snapshot(project)?;
+    let binding = snapshot.runtime_bindings.iter().find(|b| b.id == "coordinator")
+        .context("no coordinator session is bound")?;
+    ensure!(binding.identity.machine.is_empty(), "coordinator session is remote");
+    ensure!(!binding.identity.workspace_id.is_empty(), "coordinator workspace is missing");
+    std::os::unix::net::UnixStream::connect(&binding.identity.socket)
+        .context("coordinator session is unreachable")?;
+    fs::DirBuilder::new().recursive(true).mode(0o700).create(directory)?;
+    let config = directory.join("viewer.toml");
+    use std::io::Write;
+    let mut file = fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&config)?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    file.write_all(b"onboarding = false\n[update]\nversion_check = false\nmanifest_check = false\n[experimental]\nallow_nested = true\n")?;
+    let h = crate::herdr::Herdr::new(ctx.env.herdr_bin(), &binding.identity.socket, ctx.runner);
+    let label = format!("worker: {task}");
+    let created = h.tab_create(&binding.identity.workspace_id, project, &label, false)?;
+    let viewer = json!({"socket":binding.identity.socket,"workspace":created.workspace_id,
+        "tab":created.tab_id,"pane":created.pane_id,"label":label,"config":config});
+    record["viewer"] = viewer.clone();
+    if let Err(error) = fs::write(&path, serde_json::to_vec_pretty(&record)?) {
+        close_viewer(ctx, &record);
+        return Err(error.into());
+    }
+    let command = herdr_farm::worker_supervision::posix_command(&[
+        "/usr/bin/env".into(), format!("HERDR_CONFIG_PATH={}", config.display()),
+        format!("HERDR_SOCKET_PATH={}", socket.display()), ctx.env.herdr_bin().to_string(),
+    ])?;
+    if let Err(error) = h.pane_run(&created.pane_id, &command) {
+        close_viewer(ctx, &record);
+        record.as_object_mut().context("invalid server record")?.remove("viewer");
+        fs::write(&path, serde_json::to_vec_pretty(&record)?)?;
+        return Err(error.into());
+    }
+    if focus { h.tab_focus(&created.tab_id)?; }
+    Ok(viewer)
+}
+
+fn viewer_report(result: Result<Value>) -> Value {
+    result.unwrap_or_else(|error| json!({"status":"unavailable","reason":format!("{error:#}")}))
+}
+
+pub fn view(ctx: &Ctx, slug: &str, task: &str) -> Result<Value> {
+    TaskId::new(task.to_owned()).map_err(anyhow::Error::msg)?;
+    let project = ctx.root.join(slug).canonicalize()?;
+    let directory = ctx.root.join(".herdr-run").join(format!("{slug}-{task}")).join("herdr");
+    let record: Value = serde_json::from_slice(&fs::read(directory.join(SERVER_RECORD))?)?;
+    let socket = PathBuf::from(record["socket"].as_str().context("server socket missing")?);
+    std::os::unix::net::UnixStream::connect(&socket).context("task server is not running")?;
+    Ok(json!({"task":task,"viewer":viewer_report(open_viewer(ctx, &project, &directory, task, &socket, true))}))
 }
 
 struct ProbeDirectory(PathBuf);
@@ -616,6 +696,9 @@ fn steps(run: &mut Run, args: &Args, plan: ProfilePlan) -> Result<Value> {
     // 5. Herdr server, binding, reconciliation and activation.
     eprintln!("launch run: herdr_server");
     let socket = herdr_server(run, &herdr, &args.task, args.herdr_socket.as_deref())?;
+    let directory = run.ctx.root.join(".herdr-run").join(format!("{}-{}", run.slug, args.task)).join("herdr");
+    let viewer = viewer_report(open_viewer(run.ctx, &project, &directory, &args.task, &socket, false));
+    run.done("viewer", viewer);
     eprintln!("launch run: binding");
     let snapshot = runtime::snapshot(&project)?;
     if let Some(old) = snapshot.runtime_bindings.iter().find(|b| b.task.as_ref() == Some(&task_id)) {
@@ -751,6 +834,7 @@ fn report(run: &Run, task: &str, profile: &VersionedReference, kind: &str, herdr
         "outputs":contract["outputs"].as_array().map(|outputs| outputs.iter().map(|o| o["path"].clone()).collect::<Vec<_>>()),
         "project":run.slug,"task":task,"kind":kind,"profile":profile,"attempt":attempt,"worktree":worktree,
         "herdr_socket":socket,
+        "viewer":run.steps.iter().find(|s| s.name == "viewer").map(|s| &s.detail),
         "steps":run.steps.iter().map(|s| json!({"step":s.name,"outcome":s.outcome,"detail":s.detail})).collect::<Vec<_>>(),
         "next":[
             format!("The ticker launches the worker using the verified profile Herdr {}.", herdr.display()),
@@ -794,6 +878,11 @@ pub fn stop(ctx: &Ctx, slug: &str, task: &str, force: bool) -> Result<Value> {
         .and_then(|id| snapshot.attempts.iter().find(|a| &a.id == id)).filter(|a| a.retains_capacity());
     if let (Some(attempt), false) = (held, force) {
         bail!("attempt {} of task {task} still holds its worker; stop it first (or pass --force)", attempt.id.as_str());
+    }
+    close_viewer(ctx, &record_value);
+    if record_value["managed_by"] == "operator" {
+        fs::remove_file(&record)?;
+        return Ok(json!({"task":task,"stopped":false,"reason":"operator-managed server left running"}));
     }
     let pid = record_value["pid"].as_i64().context("server record has no pid")? as i32;
     let socket = PathBuf::from(record_value["socket"].as_str().context("server record has no socket")?);

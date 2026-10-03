@@ -834,6 +834,8 @@ pub fn commands(root: &Path, slug: &str) -> Result<String> {
 {p} task {slug} add TASK --title TITLE --expected-head HEAD\n\
 {p} launch {slug} run --task TASK --profile PROFILE --repository REPO --plan-output docs/PLAN.md\n\
 {p} launch {slug} run --task TASK --profile PROFILE --repository REPO --write src/ --write tests/ --output src/lib.rs --prompt-file BRIEF\n\
+{p} launch {slug} view --task TASK\n\
+{p} result {slug} submit-captured ATTEMPT\n\
 {p} result {slug} show\n\
 {p} result {slug} jobs\n\
 {p} result {slug} verify SUBMISSION --policy-id POLICY --policy-file FILE --idempotency-key KEY --work-dir SCRATCH\n\
@@ -841,6 +843,7 @@ pub fn commands(root: &Path, slug: &str) -> Result<String> {
 {p} operations {slug} inspect\n\
 {p} inbox list {slug}\n\
 {p} inbox done {slug} ITEM\n\
+Workers appear as worker: <task> tabs beside the coordinator. Use launch {slug} view --task TASK to reopen one. The profile's max_wall_seconds ends a worker that runs out of time. After attempt.ended_without_submission, run result {slug} submit-captured ATTEMPT to submit what it produced, then review it. Tell the owner before launching a task that looks longer than the budget.\n\
 After launching workers, start `{p} inbox {slug} wait` as a background Bash command. When it returns, run context, review result data, relaunch rejected tasks or report to the owner, mark handled items done, and start the wait again. A timeout also restarts the wait.\n\
 Herdr Farm signs launches automatically within owner policy; the coordinator never handles key files or edits config.toml. Use a background command or long timeout and rerun after interruption. Thread commands are legacy-only. Start requires user authorization and owner-signed contracts and approvals; verification is evidence, integration requires the configured target; cleanup requires canonical finalization and proven worker termination. Never edit TASKS.md or old thread records as live state."
     ))
