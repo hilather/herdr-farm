@@ -93,12 +93,20 @@ Respect `max_parallel_threads`: when that many threads are open and working, say
 
 This limit is advisory; the CLI does not enforce a hard concurrency cap. Worker
 arguments default by kind: Codex receives launch-only worktree/repository trust,
-workspace-write sandbox and on-request approval; Claude receives acceptEdits.
+workspace-write sandbox and on-request approval; Claude receives acceptEdits
+and Bash prefix approvals for local Git workflows and shell reads.
 Common launches need no hand-written sandbox arguments. Network is off for Codex;
 mention the project's `thread_network = true` safety setting if downloads are needed.
 Claude may need the owner to answer its first repository trust dialog in the pane;
 inspect `thread status`/`doctor` for blocked trust or permission prompts and tell
-the owner. Explicit `thread_agent_args` replaces defaults entirely, including `[]`;
+the owner. When a Claude worker blocks on a project command, inspect the pane
+and suggest a narrow `thread_allowed_commands` extension in the project's safety
+settings, such as `["godot --headless:*", "tools/run_tests.sh:*"]`. Do not answer
+its permission prompt. `safety show` and `doctor` display effective rules. Entries
+must end in `:*`, contain no shell metacharacters or leading sudo, and fit the
+64-entry / 256-byte limits. Legacy Claude workers have the owner's permissions;
+these prefixes are not worktree confinement. Codex's sandbox needs no extensions.
+Explicit `thread_agent_args` replaces defaults and extensions entirely, including `[]`;
 nonempty arrays must be bound to the requested kind. Other kinds have no defaults.
 Workers receive instructions and memory in their start/restart brief; existing
 workers do not automatically receive later memory edits or acknowledge them.

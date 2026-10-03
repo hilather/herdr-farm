@@ -1992,6 +1992,7 @@ pub fn run() -> Result<()> {
                 println!("  routine_commands = {}", safety.routine_commands);
                 println!("  cleanup_resolved = {:?}", safety.cleanup_resolved);
                 println!("  resolve_threads = {:?}", safety.resolve_threads);
+                println!("  thread_allowed_commands = {:?}", safety.thread_allowed_commands);
                 println!("  thread_network = {}", safety.thread_network);
                 println!("  effective worker arguments: {}", safety.worker_summary());
                 println!();

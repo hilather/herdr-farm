@@ -468,9 +468,17 @@ fn a_primed_coordinator_is_primed_again_only_after_an_explicit_reprime() {
 /// agent appears: later passes neither start it again nor brief it.
 #[test]
 fn a_thread_start_is_confirmed_on_acknowledgement_without_waiting_for_the_agent() {
-    for reply in ["ack", "null"] {
+    for (reply, settings, explicit) in [
+        ("ack", "", false),
+        ("null", "thread_allowed_commands=['godot --headless:*','tools/run_tests.sh:*']", false),
+        ("ack", "thread_allowed_commands=['godot --headless:*']\nthread_agent_args=['--vendor-option']\nthread_agent_args_kind='claude'", true),
+        ("ack", "thread_allowed_commands=['godot --headless:*']\nthread_agent_args=[]", true),
+    ] {
         let mut lab = Lab::new();
         let project = lab.project_in_session("demo", json!({"prime_pending": false}));
+        let config = lab.path(".config/herdr-farm/config.toml");
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        fs::write(config, format!("[safety.{:?}]\n{settings}\n", project.canonicalize().unwrap().display().to_string())).unwrap();
         let work = lab.path("work");
         fs::create_dir(&work).unwrap();
         fs::write(project.join("threads/t-0001.toml"), toml::to_string(&json!({"id": "t-0001", "title": "task", "status": "open", "kind": "tab",
@@ -487,7 +495,17 @@ fn a_thread_start_is_confirmed_on_acknowledgement_without_waiting_for_the_agent(
         let record = thread();
         assert_eq!(lab.times("demo", "agent.start").len(), 1, "{reply}");
         let starts: Vec<Value> = fs::read_to_string(lab.path("starts")).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
-        assert_eq!(starts[0]["args"], json!(["--permission-mode", "acceptEdits"]));
+        let args = starts[0]["args"].as_array().unwrap();
+        if explicit {
+            assert_eq!(args, &if settings.contains("--vendor-option") { vec![json!("--vendor-option")] } else { vec![] });
+        } else {
+            let mut expected = vec!["--permission-mode".to_string(), "acceptEdits".into(), "--allowedTools".into()];
+            for prefix in ["git status", "git log", "git diff", "git show", "git branch", "git checkout", "git switch", "git add", "git commit", "git merge", "git rebase", "git cherry-pick", "git restore", "git rev-parse", "git ls-files", "git worktree list", "ls", "cat", "head", "tail", "wc", "grep", "rg", "find", "sed -n"] {
+                expected.push(format!("Bash({prefix}:*)"));
+            }
+            if reply == "null" { expected.extend(["Bash(godot --headless:*)".into(), "Bash(tools/run_tests.sh:*)".into()]); }
+            assert_eq!(starts[0]["args"], json!(expected));
+        }
         assert_eq!((record["prompt_pending"].as_bool(), record["status"].as_str()), (Some(true), Some("open")), "{reply}: {record}");
         assert!(lab.times("demo", "agent.prompt").is_empty(), "{reply}");
     }

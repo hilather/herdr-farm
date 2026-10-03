@@ -80,6 +80,7 @@ coordinator_agent_args_kind = "claude" # required when the array is nonempty
 # Optional: omit these to use built-in worker defaults.
 # thread_agent_args = []           # replaces defaults, even when empty
 # thread_agent_args_kind = "claude" # required when the array is nonempty
+thread_allowed_commands = ["godot --headless:*", "tools/run_tests.sh:*"] # Claude extensions
 thread_network = false            # optional: enable Codex worker downloads
 routine_commands = false           # true lets approved routines run shell commands
 ```
@@ -95,11 +96,37 @@ Network is off by default; `thread_network = true` adds
 `-c sandbox_workspace_write.network_access=true` to built-in Codex arguments.
 It has no effect on explicit argument arrays or other agents.
 
-Claude workers default to `--permission-mode acceptEdits`. A first Claude thread
-in a new repository may still show its folder-trust dialog once; inspect the pane
+Claude workers default to `--permission-mode acceptEdits` plus `--allowedTools`
+with Bash prefix rules such as `Bash(git status:*)`. The defaults allow `git`
+status, log, diff, show, branch, checkout/switch, add, commit, merge, rebase
+(for normal non-interactive use), cherry-pick, restore, rev-parse, ls-files and
+worktree list; and `ls`, `cat`, `head`, `tail`, `wc`, `grep`, `rg`, `find`, and
+`sed -n`. They do not include git stash, push, fetch, pull or clone, curl, wget,
+rm or sudo. See the [Claude CLI permission flag documentation](https://code.claude.com/docs/en/cli-reference#cli-flags).
+
+Under `[safety."<canonical project path>"]`, `thread_allowed_commands` appends
+project-specific prefixes to those Claude defaults, for example
+`["godot --headless:*", "tools/run_tests.sh:*"]`. Each entry must end in `:*`;
+the prefix accepts only ASCII letters, digits, spaces, `/`, `.`, `_` and `-`,
+with no surrounding whitespace, shell metacharacters or leading `sudo`
+(including an executable path ending in `/sudo`). Limits are 64 entries and
+256 bytes per entry. Invalid entries refuse safety configuration and launch.
+Codex workers use their sandbox and do not need or receive these extensions.
+Explicit `thread_agent_args` replaces the defaults and extensions together.
+
+These are command-prefix approvals, not a sandbox or argument policy. Legacy
+Claude workers run with the owner's permissions; prefixes do not restrict paths,
+Git hooks, options (including interactive rebase), or options such as `find -exec`.
+Use ordinary local worktree commands; review project extensions carefully before
+adding them. Commands outside these prefixes still need approval unless allowed
+by other Claude settings. Changes apply at the next worker launch.
+
+A first Claude thread in a new repository may still show its folder-trust dialog once; inspect the pane
 and answer it yourself. Herdr never writes the owner's `.claude.json`.
 `thread list` keeps the state `blocked` and adds a fifth, hint column for possible
-trust or permission prompts; `doctor` reports the hint with the pane identity.
+trust or permission prompts and commands outside the Claude allow-list; `doctor`
+reports the hint with the pane identity. Both `safety show` and `doctor` print
+the effective Claude allow-list in the worker arguments.
 Other kinds receive no built-in arguments. `safety show`,
 project context/show and `doctor` mark the effective per-kind built-in defaults;
 trust paths are placeholders in project-level reports and resolved for each launch.

@@ -78,14 +78,14 @@ elif sys.argv[1:]==['pane','list']:
  if mode=='no-terminal':del a['terminal_id']
  print(json.dumps({{'result':{{'panes':[a,a] if mode=='ambiguous' else [a]}}}}))
 elif sys.argv[1:]==['remote-api-bridge']:
- r=json.loads(sys.stdin.readline());assert r['method']=='agent.start';assert r['params']=={{'name':'worker','kind':'claude','pane_id':'p','args':['--permission-mode','acceptEdits'],'timeout_ms':20000}}
+ r=json.loads(sys.stdin.readline());assert r['method']=='agent.start';assert r['params']=={{'name':'worker','kind':'claude','pane_id':'p','args':r['params']['args'],'timeout_ms':20000}}
  with open(root/'started','a') as f:f.write('start')
  if mode=='lost':sys.exit(1)
  if mode=='blocked':time.sleep(60)
  if mode=='foreign-terminal':a['terminal_id']='other'
  if mode=='foreign-kind':a['agent']='codex'
  if mode=='native-pending':del a['agent'];a['agent_status']='unknown'
- print(json.dumps({{'id':'other' if mode=='wrong-id' else r['id'],'result':{{'type':'wrong' if mode=='wrong-type' else 'agent_started','agent':a,'argv':['claude','wrong'] if mode=='wrong-args' else ['claude','--permission-mode','acceptEdits']}}}}))
+ print(json.dumps({{'id':'other' if mode=='wrong-id' else r['id'],'result':{{'type':'wrong' if mode=='wrong-type' else 'agent_started','agent':a,'argv':['claude','wrong'] if mode=='wrong-args' else ['claude']+r['params']['args']}}}}))
 else:sys.exit(3)
 "#,root=root.path().display().to_string());
             fs::write(&binary,script).unwrap();fs::set_permissions(&binary,fs::Permissions::from_mode(0o700)).unwrap();
