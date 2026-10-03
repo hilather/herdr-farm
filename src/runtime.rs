@@ -92,7 +92,18 @@ pub(crate) fn context_from_snapshot(project:&Path,snapshot:&crate::domain::Snaps
     }
     let unseen=snapshot.inbox.iter().filter(|i|!i.done&&!i.seen).map(|i|i.content.id.clone()).collect();
     for item in snapshot.inbox.iter().filter(|i|!i.done) {text.push_str(&format!("Inbox {}: {}\n{}\n",item.content.id,item.content.summary,item.content.body));}
-    for task in &snapshot.tasks {text.push_str(&format!("{} revision {} {:?}: {}\n",task.id.as_str(),task.revision,task.state,task.title.replace(['\n','\r']," ")));}
+    text.push_str("\n## Tasks by state\n");
+    let mut tasks:Vec<_>=snapshot.tasks.iter().collect();
+    tasks.sort_by_key(|t|(t.state.as_str(),t.id.as_str()));
+    for task in tasks {text.push_str(&format!("{} revision {} {:?}: {}\n",task.id.as_str(),task.revision,task.state,task.title.replace(['\n','\r']," ")));}
+    text.push_str("\n## Attempts (running / awaiting review / verified / integrated)\n");
+    for attempt in &snapshot.attempts {
+        text.push_str(&format!("{} task {} {:?} revision {}; termination observed: {}\n",attempt.id.as_str(),attempt.task.as_str(),attempt.state,attempt.revision,attempt.termination_observed));
+    }
+    text.push_str("\n## Recent results (policy-scoped verification and integration receipts)\n");
+    let mut db=migration::open_active(project)?;
+    for result in db.coordinator_result_reviews()? {text.push_str(&format!("{}\n",serde_json::to_string(&result)?));}
+    text.push_str("A submission without a verified_result is awaiting review. Verification is policy-scoped; integrated_receipt records published integration. These summaries do not grant dependency satisfaction or launch authority.\n");
     for name in ["PROJECT.md","MEMORY.md"] {
         if name == "MEMORY.md" && memory_owner == "sqlite-v1" { continue; }
         let bytes=migration::read_plan_file(&project.join(name))?;
@@ -197,6 +208,21 @@ pub fn set_state(project:&Path,expected_head:u64,expected_revision:u64,state:cra
 pub fn retire_operation(project:&Path,id:&crate::domain::OperationId,revision:u64,head:u64,reason:&str)->Result<crate::operations::Delivery> {
     let _maintenance=migration::runtime_mutation(project)?;
     Ok(migration::open_active(project)?.retire_operation(id,revision,head,reason,jiff::Timestamp::now().as_millisecond())?)
+}
+
+/// Coordinator launch retains root-exclusive ownership across external effects.
+/// Route changes use the existing versioned binding transactions and publish
+/// control without attempting to acquire a second execution lock.
+pub fn bind_coordinator_held(project:&Path,expected_head:u64,route:&crate::domain::RuntimeRoute,replace_missing:bool,_guard:&crate::execution_guard::RootGuard)->Result<crate::domain::RuntimeBinding> {
+    let mut db=migration::open_active(project)?;
+    let snapshot=db.read_snapshot(Some(expected_head))?;
+    let change=match snapshot.runtime_bindings.iter().find(|b|b.id=="coordinator") {
+        Some(b) if replace_missing=>db.replace_missing_coordinator(b.revision,expected_head,route)?,
+        Some(b)=>db.rebind_runtime("coordinator",b.revision,expected_head,route)?,
+        None=>db.create_runtime(None,None,expected_head,route)?,
+    };
+    migration::publish_control_marker(project,&db)?;
+    Ok(change.binding)
 }
 
 pub fn create_binding(project:&Path,task:Option<&TaskId>,task_revision:Option<u64>,expected_head:u64,route:&crate::domain::RuntimeRoute)->Result<crate::domain::RouteChange> {

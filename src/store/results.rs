@@ -1091,6 +1091,25 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// Bounded coordinator review summary from persisted result receipts, not
+    /// wake events or narrative reports. Each verification is policy-scoped.
+    pub fn coordinator_result_reviews(&mut self) -> Result<Vec<serde_json::Value>> {
+        schema26(&self.connection)?;
+        let mut stmt=self.connection.prepare("SELECT s.submission_id,s.task_id,s.attempt_id,v.result_id,r.policy_id,i.integrated_id,i.commit_oid
+            FROM result_submissions s
+            LEFT JOIN verified_results v ON v.submission_id=s.submission_id
+            LEFT JOIN verification_runs r ON r.run_id=v.run_id AND r.state='accepted'
+            LEFT JOIN integration_operations o ON o.verified_result_id=v.result_id AND o.state='integrated'
+            LEFT JOIN integrated_commits i ON i.operation_id=o.operation_id
+            ORDER BY s.rowid DESC,v.created_unix_ms DESC LIMIT 20")?;
+        let rows=stmt.query_map([],|r|Ok(serde_json::json!({
+            "submission":r.get::<_,String>(0)?,"task":r.get::<_,String>(1)?,"attempt":r.get::<_,String>(2)?,
+            "verified_result":r.get::<_,Option<String>>(3)?,"policy":r.get::<_,Option<String>>(4)?,
+            "integrated_receipt":r.get::<_,Option<String>>(5)?,"integrated_commit":r.get::<_,Option<String>>(6)?
+        })))?.collect::<std::result::Result<Vec<_>,_>>()?;
+        Ok(rows)
+    }
+
     pub fn show_results(&mut self, id: Option<&str>) -> Result<Vec<ResultView>> {
         let path = store_path(&self.connection)?;
         let tx = self.connection.transaction()?;

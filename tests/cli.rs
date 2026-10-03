@@ -757,8 +757,9 @@ fn migrated_task_commands_use_revisions_and_do_not_touch_legacy_task_file() {
     let args=["--root",root_arg,"task","demo","add","operator-task","--title","Keep original","--expected-head",&head];
     let out=hp(home.path(),&args);assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stderr));assert!(!hp(home.path(),&args).status.success());
     let missing = hp(home.path(), &["--root",root_arg,"context","demo","--peek"]);
-    assert!(!missing.status.success());
-    assert!(String::from_utf8_lossy(&missing.stderr).contains("context requires profiles.planner or --profile NAME"));
+    assert!(missing.status.success(),"{}",String::from_utf8_lossy(&missing.stderr));
+    assert!(String::from_utf8_lossy(&missing.stdout).contains("operator-task revision 1 Draft: Keep original"));
+    assert!(String::from_utf8_lossy(&missing.stdout).contains("launch demo run --task TASK"));
     configure_checkpoint_profile(home.path());
     let out=hp(home.path(),&["--root",root_arg,"context","demo","--peek"]);assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stderr));assert!(String::from_utf8_lossy(&out.stdout).contains("Runtime owner: SQLite"));
     let named=hp(home.path(),&["--root",root_arg,"context","demo","--peek","--session","test-context"]);

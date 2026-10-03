@@ -18,6 +18,8 @@ unsafe extern "C" fn disable_sqlite_memstatus() {
 #[cfg(feature="state-store")]
 mod canonical_controller;
 #[cfg(feature="state-store")]
+mod canonical_coordinator;
+#[cfg(feature="state-store")]
 mod canonical_notification_jobs;
 #[cfg(feature="state-store")]
 mod attempt_token_jobs;

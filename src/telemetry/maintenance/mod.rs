@@ -133,6 +133,8 @@ pub const CLASSES: &[Class] = &[
         age_from: "-", requires: "no capture store exists (contracts §7)" },
     Class { id: "canonical.state", store: "<project>/.state/state.db", scope: "workflow history, dispatch decisions, accepted usage/budget and quality evidence including verification run load/test metadata, seeded-defect and replay registries",
         default_days: None, basis: "canonical", destructive: true, action: Action::External, age_from: "-", requires: "canonical lifecycle; telemetry never writes or deletes it" },
+    Class { id: "canonical.coordinator_journal", store: "<project>/.state/canonical-coordinator.json", scope: "version 1 coordinator layout/start/prime effect intent and acceptance receipt",
+        default_days: None, basis: "canonical", destructive: true, action: Action::External, age_from: "-", requires: "retain with project backups; never prune or replay pending effects after restore without live reconciliation" },
     Class { id: "canonical.verification_execution_slots", store: "<project>/.state/verification-load.lock", scope: "ephemeral OFD byte locks (no data)",
         default_days: None, basis: "derivable", destructive: false, action: Action::External, age_from: "-", requires: "verifier owned; never back up live locks; the empty lock file is recreated" },
     Class { id: "native.codex_rollouts", store: "<execution_home>/.codex/sessions", scope: "Codex rollout files", default_days: None, basis: "source_of_truth", destructive: true,

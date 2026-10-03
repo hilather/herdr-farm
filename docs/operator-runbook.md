@@ -193,3 +193,62 @@ suite needs Unix socket permissions; compile it with `--no-run` in a restricted
 sandbox and run it on the steward's host.
 
 Compatibility: legacy environment variables and existing data/config locations remain supported; see [renaming](renaming.md).
+
+
+## Canonical coordinator after migration (W-COORD-2)
+
+After migration, open the coordinator with `herdr-farm open PROJECT` in the
+owner's Herdr session (or pass `--socket /absolute/session.sock`). It uses
+`PROJECT.md`'s `coordinator_agent` and the project's effective
+`coordinator_agent_args`. It creates or reuses the coordinator pane, binds it as
+canonical `coordinator`, and records live observation and ownership. It never
+starts a replacement server or imports old thread records as live state.
+
+Priming runs the coordinator skill and canonical context. A prompt acknowledgement
+is insufficient: the adapter waits for working/blocked status or visible working
+evidence, using the worker brief confirmation window. Startup screens that
+swallow a prompt cause up to three deliveries after fresh verified visible idle
+checks. Repeated `open` focuses the accepted coordinator without launching or
+priming again. If its pane was closed, run `herdr-farm open PROJECT --reprime` to
+recreate and prime it. `--rebind` permits moving sessions only after the previous
+socket is gone. An interrupted start/prompt remains a durable pending effect;
+inspect the pane before explicitly requesting `--reprime`. An interrupted
+workspace creation is never automatically repeated: inspect Herdr, record the
+observed route with `runtime PROJECT rebind coordinator` (see `--help` for revision
+and head arguments), then remove the inspected coordinator journal before opening
+again. Do not remove an unresolved journal to blindly retry creation.
+
+`herdr-farm context PROJECT` prints canonical state without requiring a planner
+profile: tasks by state, attempts, inbox, recent submissions and accepted
+verification/integration receipts, safety settings and concrete CLI templates.
+A configured `profiles.planner` keeps automatic checkpoint context; `--profile NAME` also selects checkpoint/session behavior. Dispatch through
+`task PROJECT add ID --title TITLE --expected-head HEAD` and `launch PROJECT run`;
+review through `result PROJECT show`, `result PROJECT jobs` and the verification
+and integration commands printed by context. See `skill/COORDINATOR.md` for the
+complete command forms and approval semantics.
+
+Signing can be configured once in the owner's `config.toml`:
+
+```toml
+[coordinator]
+signing_key = "/absolute/path/to/owner-key"
+```
+
+`launch run --sign-with KEY` overrides this setting. Signing still uses gated
+`ssh-keygen -Y sign`; Herdr Farm does not read private key contents. A configured
+key grants no additional user authorization. The coordinator obeys
+`start_threads=propose/auto`, `resolve_threads=propose/auto` and
+`cleanup_resolved=keep/auto`; signed approvals, verified results, explicit
+integration targets and proven termination remain canonical enforcement.
+
+All `thread` commands clearly refuse on a canonical store and name canonical
+replacements. These are deliberately not aliases: legacy thread prompts and
+resolution cannot preserve sealed contracts, immutable attempts and accepted
+result evidence. Old thread state remains migration provenance.
+
+The version 1 `.state/canonical-coordinator.json` journal stores frozen route,
+socket incarnation, terminal, settings/config digests and layout/start/prime
+phases. It is effect intent and a receipt, not a second runtime owner. Retain it
+with project backups and reconcile restored pending effects before replay.
+No canonical or telemetry SQLite schema changes or new tables are introduced.
+The maintenance inventory classifies it as canonical and never prunes it.

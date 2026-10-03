@@ -944,3 +944,18 @@ budget; fetching it uses the verifier's existing 30-second Git command deadline.
 Large changes beyond these bounds need smaller task submissions.
 
 Compatibility: legacy environment variables and existing data/config locations remain supported; see [renaming](renaming.md).
+
+### Canonical coordinator launch adapter (W-COORD-2)
+
+`open PROJECT` now supports a migrated canonical project. It uses a durable
+version 1 coordinator effect journal, canonical runtime binding/observation and
+operator-authorized adoption; no new schema or tables. Priming shares native
+agent identity and visible-readiness validation with worker briefs and confirms
+acceptance only after leaving idle, with at most three sends. A closed pane is
+recreated by `open PROJECT --reprime`. Canonical context no longer requires a
+planner profile for the full state view. Thread commands deliberately refuse
+with signed task/launch and result/finalization replacements. The coordinator
+obeys the existing project safety settings; signing uses `--sign-with` or the
+owner's configured `[coordinator].signing_key`. See the
+[operator runbook](operator-runbook.md#canonical-coordinator-after-migration-w-coord-2)
+and `skill/COORDINATOR.md` for CLI forms and recovery rules.

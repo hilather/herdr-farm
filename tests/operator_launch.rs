@@ -396,6 +396,10 @@ fn verify_interaction_produces_launchable_evidence_for_codex_and_claude_from_the
 #[test]
 fn launch_run_reserves_a_planning_task_for_each_kind_and_reruns_safely() {
     let lab = Lab::with_herdr(STATIC_HERDR);
+    let config=lab.home.join(".config/herdr-farm/config.toml");
+    let mut text=fs::read_to_string(&config).unwrap();
+    text.push_str(&format!("\n[coordinator]\nsigning_key={:?}\n",lab.key));
+    fs::write(&config,text).unwrap();
     let prompt = lab.home.join("prompt.txt");
     fs::write(&prompt, "Plan the next milestone of the tactics game.").unwrap();
     let jobs = [("plan-codex", "codex-sol", "codex", "gpt-6.1-sol"), ("plan-claude", "claude-sonnet", "claude", "claude-sonnet-5-5")];
@@ -403,6 +407,8 @@ fn launch_run_reserves_a_planning_task_for_each_kind_and_reruns_safely() {
         let socket = lab.socket_inode_once(&format!("{task}.sock"));
         let mut args: Vec<String> = lab.run_args(task, profile, &format!("docs/{task}.md"), prompt).into_iter().map(str::to_owned).collect();
         args.extend(["--herdr-socket".into(), socket.display().to_string()]);
+        let key=args.iter().position(|a|a=="--sign-with").unwrap();
+        args.drain(key..key+2);
         args
     };
     // A new binding pauses the project until no attempt is unfinished, so both
@@ -555,10 +561,20 @@ fn launch_run_retries_after_termination_but_refuses_an_unobserved_live_worker() 
         fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); }
     }
     let lab = Lab::new();
+    // The canonical coordinator's public command surface: owner-configured
+    // signing, explicit task creation, launch, then a real running attempt.
+    let config=lab.home.join(".config/herdr-farm/config.toml");
+    let mut text=fs::read_to_string(&config).unwrap();
+    text.push_str(&format!("\n[coordinator]\nsigning_key={:?}\n",lab.key));
+    fs::write(&config,text).unwrap();
+    let head=herdr_farm::runtime::snapshot(&lab.project).unwrap().head.to_string();
+    lab.ok(&["task","demo","add","plan-retry","--title","Coordinator plan","--expected-head",&head]);
     lab.verify("codex-sol", "codex");
     let prompt = lab.home.join("prompt.txt");
     fs::write(&prompt, "Plan the next milestone.").unwrap();
-    let args = lab.run_args("plan-retry", "codex-sol", "docs/retry.md", prompt.to_str().unwrap());
+    let mut args = lab.run_args("plan-retry", "codex-sol", "docs/retry.md", prompt.to_str().unwrap());
+    let key=args.iter().position(|a|*a=="--sign-with").unwrap();
+    args.drain(key..key+2);
     let first = lab.ok(&args);
     let attempt = first["attempt"].as_str().unwrap();
     let mut ticker = FixtureTicker(Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", &lab.home)
@@ -579,6 +595,10 @@ fn launch_run_retries_after_termination_but_refuses_an_unobserved_live_worker() 
     };
     wait("first attempt Running", &|| herdr_farm::runtime::snapshot(&lab.project).is_ok_and(|s|
         s.attempts.iter().any(|a| a.id.as_str() == attempt && a.state == AttemptState::Running)));
+    let context=lab.cli(&["context","demo","--peek"]);
+    assert!(context.status.success(),"{}",String::from_utf8_lossy(&context.stderr));
+    let text=String::from_utf8(context.stdout).unwrap();
+    assert!(text.contains(attempt) && text.contains("Running"),"{text}");
     // Stop only this fixture's ticker: the worker remains alive and its old
     // observation cannot acknowledge edited owner configuration.
     ticker.0.kill().unwrap();ticker.0.wait().unwrap();

@@ -132,3 +132,16 @@ Your projects stay in `~/.herdr-farm/` and your settings in `~/.config/herdr-far
 - **No nudge reaches the coordinator**: that is the default. See [Operations](operations.md#nudges-and-notifications).
 
 Compatibility: legacy environment variables and existing data/config locations remain supported; see [renaming](renaming.md).
+
+## Open the coordinator after migration
+
+After migration, open the coordinator with `herdr-farm open PROJECT` in the
+owner's Herdr session, or pass `--socket /absolute/session.sock`. The canonical
+coordinator uses the configured coordinator agent and safety arguments, is bound
+with live ownership/observation, and is primed with the canonical skill and state.
+Run `herdr-farm context PROJECT` for task/attempt/inbox/result state and the exact
+commands. Dispatch uses `task PROJECT add` and owner-signed `launch PROJECT run`;
+review uses `result PROJECT show` and verification/integration jobs. `thread`
+commands refuse with canonical replacements. If the coordinator pane was closed,
+run `herdr-farm open PROJECT --reprime`. See the [operator runbook](operator-runbook.md#canonical-coordinator-after-migration-w-coord-2)
+for signing configuration, safety semantics and interrupted-effect recovery.
