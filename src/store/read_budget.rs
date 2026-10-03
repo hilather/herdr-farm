@@ -1,10 +1,15 @@
 //! Accounting before application copies/decodes SQLite-owned values. These
 //! weights bound admitted input and JSON structure, not exact peak heap usage.
-//! The budget must exceed realistic long-lived stores with retained history.
+//! Each read gets max(50 MiB, 4 × (main DB + WAL bytes)), capped at 512 MiB.
+//! Rows scale proportionally from 100,000 to 1,000,000. Fourfold headroom
+//! accommodates repeated projections and JSON weights without enlarging small
+//! stores' dense-input allowance. Field and per-row limits remain independent.
 use super::{controlled::ReadControl, Result, StoreError};
 use rusqlite::{types::ValueRef, Row};
 use std::cell::Cell;
 
+const BASE_UNITS: usize = 50 * 1024 * 1024;
+const BASE_ROWS: usize = 100_000;
 const MAX_UNITS: usize = 512 * 1024 * 1024;
 const MAX_ROWS: usize = 1_000_000;
 const MAX_FIELD: usize = 16 * 1024 * 1024;
@@ -36,19 +41,41 @@ pub(crate) fn one<T>(
 
 pub(crate) struct ReadBudget {
     control: ReadControl,
+    unit_limit: usize,
+    row_limit: usize,
     units: Cell<usize>,
     rows: Cell<usize>,
 }
 impl ReadBudget {
+    #[cfg(test)]
     pub(crate) fn new(control: ReadControl) -> Self {
-        Self { control, units: Cell::new(0), rows: Cell::new(0) }
+        Self::for_size(control, 0)
+    }
+    pub(crate) fn for_store(control: ReadControl, db: &rusqlite::Connection) -> Self {
+        Self::for_path(control, db.path().map(std::path::Path::new))
+    }
+    pub(crate) fn for_path(control: ReadControl, path: Option<&std::path::Path>) -> Self {
+        let size = path.map_or(0, |path| {
+            let mut wal = path.as_os_str().to_os_string();
+            wal.push("-wal");
+            [path, std::path::Path::new(&wal)].iter().fold(0u64, |total, path| {
+                total.saturating_add(std::fs::metadata(path).map_or(0, |m| m.len()))
+            })
+        });
+        Self::for_size(control, size)
+    }
+    fn for_size(control: ReadControl, size: u64) -> Self {
+        let unit_limit = size.saturating_mul(4).clamp(BASE_UNITS as u64, MAX_UNITS as u64) as usize;
+        let row_limit = (BASE_ROWS as u64 * unit_limit as u64 / BASE_UNITS as u64)
+            .min(MAX_ROWS as u64) as usize;
+        Self { control, unit_limit, row_limit, units: Cell::new(0), rows: Cell::new(0) }
     }
     pub(crate) fn check(&self) -> Result<()> { self.control.check() }
     pub(crate) fn bytes(&self, length: usize) -> Result<()> {
         self.check()?;
         self.charge(length)
     }
-    pub(crate) fn remaining_units(&self) -> usize { MAX_UNITS - self.units.get() }
+    pub(crate) fn remaining_units(&self) -> usize { self.unit_limit - self.units.get() }
     /// Snapshot accounting must not consume the budget of the following shadow read.
     pub(crate) fn restart(&self) {
         self.units.set(0);
@@ -56,8 +83,8 @@ impl ReadBudget {
     }
     fn charge(&self, units: usize) -> Result<()> {
         let next = self.units.get().checked_add(units)
-            .filter(|n| *n <= MAX_UNITS)
-            .ok_or_else(|| StoreError::Limit("snapshot input/structure accounting exceeds 512 MiB".into()))?;
+            .filter(|n| *n <= self.unit_limit)
+            .ok_or_else(|| StoreError::Limit(format!("snapshot input/structure accounting exceeds {:.3} MiB ({} bytes)", self.unit_limit as f64 / (1024.0 * 1024.0), self.unit_limit)))?;
         self.units.set(next);
         Ok(())
     }
@@ -65,8 +92,8 @@ impl ReadBudget {
     /// of parse/copy passes; raw provenance is deliberately not treated as JSON.
     pub(crate) fn row(&self, row: &Row<'_>, json: &[(usize, usize)]) -> Result<()> {
         self.control.check()?;
-        let count = self.rows.get().checked_add(1).filter(|n| *n <= MAX_ROWS)
-            .ok_or_else(|| StoreError::Limit("snapshot exceeds 1000000 returned rows".into()))?;
+        let count = self.rows.get().checked_add(1).filter(|n| *n <= self.row_limit)
+            .ok_or_else(|| StoreError::Limit(format!("snapshot exceeds {} returned rows", self.row_limit)))?;
         self.rows.set(count);
         let columns = row.as_ref().column_count();
         if columns > MAX_COLUMNS { return Err(StoreError::Limit("snapshot row exceeds 64 columns".into())); }
@@ -127,7 +154,7 @@ mod tests {
     use super::*;
     use crate::runner::Cancellation;
     use std::time::{Duration, Instant};
-    fn budget() -> ReadBudget { ReadBudget::new(ReadControl::new(Instant::now()+Duration::from_secs(10), Cancellation::default())) }
+    fn budget() -> ReadBudget { ReadBudget::for_size(ReadControl::new(Instant::now()+Duration::from_secs(10), Cancellation::default()), MAX_UNITS as u64) }
     #[test]
     fn dense_json_and_repeated_passes_consume_shared_budget() {
         let b=budget(); let payload=format!("[{}0]","0,".repeat(1_500_000));
@@ -169,7 +196,7 @@ pub(super) fn with_local_deadline<T>(db: &rusqlite::Connection, operation: impl 
     use std::time::{Duration, Instant};
     let deadline = Instant::now() + Duration::from_secs(2);
     let control = ReadControl::new(deadline, Default::default());
-    let budget = ReadBudget::new(control.clone());
+    let budget = ReadBudget::for_store(control.clone(), db);
     struct Deadline<'a>(&'a rusqlite::Connection);
     impl Drop for Deadline<'_> { fn drop(&mut self) { self.0.progress_handler(0, None::<fn() -> bool>); } }
     db.progress_handler(1000, Some(move || Instant::now() >= deadline));

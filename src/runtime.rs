@@ -203,6 +203,13 @@ pub fn admission(project:&Path,config:&Path)->Result<crate::domain::AdmissionRep
     let config=migration::config_reference(config)?;
     Ok(migration::open_active(project)?.admission_report(jiff::Timestamp::now().as_millisecond(),config.digest.as_deref())?)
 }
+pub fn pause_for_relaunch(project:&Path,expected_head:u64,expected_revision:u64)->Result<()> {
+    let _maintenance=migration::runtime_mutation(project)?;
+    let mut db=migration::open_active(project)?;
+    db.pause_for_relaunch(expected_head,expected_revision)?;
+    migration::publish_control_marker(project,&db)?;
+    Ok(())
+}
 pub fn set_state(project:&Path,expected_head:u64,expected_revision:u64,state:crate::domain::ProjectState,config:&Path)->Result<crate::domain::ControlChange> {
     let _maintenance=migration::runtime_mutation(project)?;
     let config=if state==crate::domain::ProjectState::Active {migration::config_reference(config)?.digest}else{None};

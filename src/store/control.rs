@@ -106,6 +106,13 @@ impl SqliteStore {
         }
         let result=ControlChange{head:head(&tx)?,control};tx.commit()?;Ok(result)
     }
+    /// Automatic relaunch pause retains owner control events unchanged.
+    pub(crate) fn pause_for_relaunch(&mut self, expected_head:u64, expected_revision:u64)->Result<()> {
+        let tx=self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;schema(&tx)?;
+        if head(&tx)?!=expected_head || read(&tx)?.revision!=expected_revision {return Err(StoreError::Conflict);}
+        if read(&tx)?.state==ProjectState::Active {invalidate_by(&tx,"project.launch_run_paused")?;}
+        tx.commit()?;Ok(())
+    }
     /// Adapters check this immediately before an effect, in addition to task and
     /// binding fences and retained resource ownership. An active state alone is
     /// not permission to adopt a pane or bypass scoped command authority.
@@ -116,12 +123,15 @@ impl SqliteStore {
 }
 
 pub(super) fn invalidate(db:&Connection)->Result<()> {
+    invalidate_by(db,"project.reconciliation_invalidated")
+}
+fn invalidate_by(db:&Connection,kind:&str)->Result<()> {
     let version:u32=db.query_row("PRAGMA user_version",[],|r|r.get(0))?;
     if version>=7 {
         let mut control=read(db)?;
         control.reconciliation_required=true;control.config_digest=None;
         if control.state==ProjectState::Active{control.state=ProjectState::Paused;}
-        control.revision=increment(control.revision)?;control.epoch=increment(control.epoch)?;write(db,&control,"project.reconciliation_invalidated")?;
+        control.revision=increment(control.revision)?;control.epoch=increment(control.epoch)?;write(db,&control,kind)?;
     }
     Ok(())
 }

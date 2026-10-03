@@ -1126,7 +1126,7 @@ fn automatic_signer_reserves_and_defaults_to_owner_capacity() {
     let report=lab.ok(&args);
     assert!(report["attempt"].is_string(),"{report}");
     assert_eq!(report["viewer"]["status"], "unavailable");
-    assert!(report["viewer"]["reason"].as_str().unwrap().contains("no coordinator"));
+    assert_eq!(report["viewer"]["reason"], "workers run in the operator-supplied Herdr session");
     assert_eq!(herdr_farm::runtime::snapshot(&lab.project).unwrap().scheduler.unwrap().policy.max_active_workers,4);
     let again=lab.ok(&args);
     assert_eq!(again["attempt"],report["attempt"]);

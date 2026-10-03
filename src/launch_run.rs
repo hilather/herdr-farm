@@ -727,8 +727,7 @@ fn steps(run: &mut Run, args: &Args, plan: ProfilePlan) -> Result<Value> {
             && (!old.identity.pane_id.is_empty() || !old.identity.worktree_path.is_empty() || old.identity.socket != socket.display().to_string()) {
             retry(|| {
                 let fresh = runtime::snapshot(&project)?;
-                runtime::set_state(&project, fresh.head, fresh.control.context("control missing")?.revision, ProjectState::Paused,
-                    &run.ctx.config_dir.join("config.toml"))
+                runtime::pause_for_relaunch(&project, fresh.head, fresh.control.context("control missing")?.revision)
             })?;
             if let Some(owned) = snapshot.ownership.iter().find(|o| o.binding == old.id) {
                 retry(|| {

@@ -276,7 +276,7 @@ impl SqliteStore {
         include_launches: bool,
         control: Option<controlled::ReadControl>,
     ) -> Result<ShadowedRead> {
-        let budget = control.map(read_budget::ReadBudget::new);
+        let budget = control.map(|control| read_budget::ReadBudget::for_store(control, &self.connection));
         let budget = budget.as_ref();
         check(budget)?;
         let snapshot = split_abort(self.read_snapshot_with_budget(None, budget))?;

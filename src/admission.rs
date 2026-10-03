@@ -404,7 +404,7 @@ fn assign(db: &SqliteStore, settings: &crate::store::AssignmentSettings, weighed
 pub fn policy_suggestion(project: &Path, task: &str) -> Result<serde_json::Value> {
     let deadline = std::time::Instant::now()+std::time::Duration::from_secs(10);
     let control = ReadControl::new(deadline,crate::runner::Cancellation::default());
-    let budget = ReadBudget::new(ReadControl::new(deadline,crate::runner::Cancellation::default()));
+    let budget = ReadBudget::for_path(control.clone(), Some(&store_file(project)?));
     let db = SqliteStore::open(&store_file(project)?)?;
     let settings = db.assignment_settings()?.filter(|s| s.mode != "off").context("assignment policies are off: configure --mode shadow, suggest or assign first")?;
     let now = jiff::Timestamp::now().as_millisecond();

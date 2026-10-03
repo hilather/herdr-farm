@@ -81,7 +81,7 @@ pub(super) fn current(
 pub(super) fn bounded<T>(db: &Connection, operation: impl FnOnce(&read_budget::ReadBudget) -> Result<T>) -> Result<T> {
     let deadline = Instant::now() + Duration::from_secs(10);
     let control = controlled::ReadControl::new(deadline, Default::default());
-    let budget = read_budget::ReadBudget::new(control.clone());
+    let budget = read_budget::ReadBudget::for_store(control.clone(), db);
     db.progress_handler(1000, Some(move || Instant::now() >= deadline));
     let _deadline = SqlDeadline(db);
     let result = operation(&budget);
