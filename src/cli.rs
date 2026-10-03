@@ -149,11 +149,11 @@ enum LaunchCommand {
     /// One operator command for a migrated project: capacity, Herdr server and
     /// binding, reconcile and activation, signed contract, knowledge snapshot,
     /// draft, signed approval, import and reservation. Idempotent; stops at the
-    /// first failing step. Signs only through `ssh-keygen -Y sign` with the key
-    /// path given to --sign-with.
+    /// first failing step. Signs through `ssh-keygen -Y sign` with the
+    /// owner key discovered in the configuration directory.
     Run {
         #[arg(long)] task: String,
-        /// Profile whose launchable evidence was retained by `profile verify-interaction --retain`
+        /// Owner profile; missing or stale interaction evidence is refreshed automatically
         #[arg(long)] profile: String,
         /// The task's repository (its worktrees branch from --base here)
         #[arg(long)] repository: PathBuf,
@@ -175,7 +175,7 @@ enum LaunchCommand {
         /// Existing, not-checked-out branch (e.g. refs/heads/integration); turns verify+integrate automation on
         #[arg(long)] integration_ref: Option<String>,
         #[arg(long, default_value="HEAD")] base: String,
-        #[arg(long, default_value_t=1)] max_active_workers: u32,
+        #[arg(long)] max_active_workers: Option<u32>,
         /// Use a Herdr server you already run for this task (its control socket) instead of starting one
         #[arg(long)] herdr_socket: Option<PathBuf>,
         /// Stop before reserving. A new binding pauses the project until no attempt is unfinished, so prepare every task first, then run each again to reserve

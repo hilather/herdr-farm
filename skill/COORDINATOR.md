@@ -82,16 +82,22 @@ herdr-farm inbox done <slug> ITEM
 ```
 
 Use the event head printed by context for `--expected-head`; refresh after a
-conflict. Launch requires retained launchable profile evidence. The normal code-task form is repeatable `--write` scopes with `--output` files and
+conflict. Launch automatically refreshes missing or stale launchable profile
+evidence. The normal code-task form is repeatable `--write` scopes with `--output`
+files and
 `--prompt-file /absolute/brief.md` instructions. Launch creates the task itself.
 Use `--contract-file /absolute/contract.json` as the advanced form for custom decisions.
-`launch run` drafts and signs the task contract and launch approval, imports
-them, and reserves the attempt; the ticker launches it. Signing uses the owner's
-configured absolute `[coordinator].signing_key`, or explicit `--sign-with KEY`.
-If neither exists, propose the unsigned documents for owner signing and use
-`task <slug> contract put`, `approval <slug> import`, and `launch <slug> reserve`
-with the exact options printed by their help. Never fabricate signatures or
-change signing configuration to grant yourself authority.
+`launch run` refreshes missing or stale profile evidence itself, then drafts and
+signs the task contract and launch approval and reserves the attempt. Herdr Farm
+signs automatically within the owner's policy: sandboxed workers only, local
+repositories listed in PROJECT.md, profiles in the current owner configuration,
+and at most `[launch] max_workers` unfinished attempts (default 4).
+The coordinator never passes `--sign-with`, never looks for or reads key files,
+and never edits config.toml. If policy refuses, tell the owner the exact rule.
+Run `launch run` as a background command or with a long timeout (at least five
+minutes); Claude Code's default Bash timeout is two minutes and a profile refresh
+can take 120 seconds. Each step prints progress to stderr. If interrupted, rerun
+the same command; finished steps, including retained profile refresh, are skipped.
 
 Respect the effective safety settings printed by context. `start_threads=propose`
 requires user approval before signing or dispatch; `auto` permits dispatch within

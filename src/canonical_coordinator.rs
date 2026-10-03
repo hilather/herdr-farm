@@ -832,8 +832,8 @@ pub fn commands(root: &Path, slug: &str) -> Result<String> {
 {p} task {slug} list\n\
 {p} task {slug} show TASK\n\
 {p} task {slug} add TASK --title TITLE --expected-head HEAD\n\
-{p} launch {slug} run --task TASK --profile PROFILE --repository REPO --sign-with OWNER_KEY --plan-output docs/PLAN.md\n\
-{p} launch {slug} run --task TASK --profile PROFILE --repository REPO --sign-with OWNER_KEY --write src/ --write tests/ --output src/lib.rs --prompt-file BRIEF\n\
+{p} launch {slug} run --task TASK --profile PROFILE --repository REPO --plan-output docs/PLAN.md\n\
+{p} launch {slug} run --task TASK --profile PROFILE --repository REPO --write src/ --write tests/ --output src/lib.rs --prompt-file BRIEF\n\
 {p} result {slug} show\n\
 {p} result {slug} jobs\n\
 {p} result {slug} verify SUBMISSION --policy-id POLICY --policy-file FILE --idempotency-key KEY --work-dir SCRATCH\n\
@@ -842,7 +842,7 @@ pub fn commands(root: &Path, slug: &str) -> Result<String> {
 {p} inbox list {slug}\n\
 {p} inbox done {slug} ITEM\n\
 After launching workers, start `{p} inbox {slug} wait` as a background Bash command. When it returns, run context, review result data, relaunch rejected tasks or report to the owner, mark handled items done, and start the wait again. A timeout also restarts the wait.\n\
-Thread commands are legacy-only. Start requires user authorization and owner-signed contracts and approvals; verification is evidence, integration requires the configured target; cleanup requires canonical finalization and proven worker termination. Never edit TASKS.md or old thread records as live state."
+Herdr Farm signs launches automatically within owner policy; the coordinator never handles key files or edits config.toml. Use a background command or long timeout and rerun after interruption. Thread commands are legacy-only. Start requires user authorization and owner-signed contracts and approvals; verification is evidence, integration requires the configured target; cleanup requires canonical finalization and proven worker termination. Never edit TASKS.md or old thread records as live state."
     ))
 }
 
@@ -867,7 +867,7 @@ pub fn surface(ctx: &Ctx, slug: &str) -> Result<String> {
     let evidence = if profiles.is_empty() { "none".into() } else { profiles.join(", ") };
     let readiness = format!("Launchable retained profile evidence: {evidence} (launch revalidates current inputs).\nControl state: {state}{automatic}.\n{}\n", permission_status(ctx.env, &p.dir(), ctx.runner)?);
     Ok(format!(
-        "{readiness}Safety: start_threads={} resolve_threads={} cleanup_resolved={}\nWith propose, request owner approval before dispatch or integration. With keep, retain artifacts and worktrees; never run destructive cleanup. Signing uses --sign-with OWNER_KEY or [coordinator].signing_key.\n{}",
+        "{readiness}Safety: start_threads={} resolve_threads={} cleanup_resolved={}\nWith propose, request owner approval before dispatch or integration. With keep, retain artifacts and worktrees; never run destructive cleanup. Herdr Farm signs launches automatically within owner policy: sandboxed workers, project repositories, owner profiles, and the owner cap (default 4). Never pass --sign-with, look for or read key files, or edit config.toml. Report the exact policy rule to the owner on refusal. Run launch run in the background or with a long timeout; rerun the same command after interruption.\n{}",
         safety.start_threads,
         safety.resolve_threads,
         safety.cleanup_resolved,

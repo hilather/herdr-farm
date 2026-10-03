@@ -80,7 +80,7 @@ five-second timeout, process-group cleanup and 4 KiB capture limits. Verificatio
 files are copied into a private temporary directory and removed afterward; raw
 verifier errors are withheld. Document/signature bounds are 64 KiB/8 KiB. Wrong keys,
 namespaces, changed bytes and invalid signatures cannot install grants. The app
-never opens private keys or invokes signing. Tests use disposable keys only.
+never opens private keys. `launch run` invokes gated `ssh-keygen -Y sign` automatically within the owner policy (sandboxed workers, project repositories, owner profiles, and the owner worker cap). Tests use disposable keys only.
 
 This route authenticates possession of the configured signing key; it does not
 certify agent capabilities or create a launch preparation. Keep that private key
