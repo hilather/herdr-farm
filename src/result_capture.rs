@@ -43,7 +43,8 @@ pub fn capture(project: &Path, attempt: &AttemptId, message: Option<&str>, deadl
     let record = state.attempt_inputs.iter().find(|r| &r.attempt == attempt)
         .context("capture requires the attempt's retained launch inputs")?;
     ensure!(record.inputs.repositories.len() == 1, "capture requires exactly one repository worktree");
-    let scopes = db.attempt_contract(record.inputs.task.as_str(), record.inputs.task_contract.as_ref())?.and_then(|contract| contract.write_scopes());
+    let contract = db.attempt_contract(record.inputs.task.as_str(), record.inputs.task_contract.as_ref())?;
+    let scopes = contract.as_ref().and_then(|contract| contract.write_scopes());
     drop(db);
     // Exact provenance: the worktree, its gitdir, lock and branch are the ones
     // recorded when this attempt's worktree was prepared.
@@ -63,9 +64,10 @@ pub fn capture(project: &Path, attempt: &AttemptId, message: Option<&str>, deadl
         let bytes = git.capture(path, &all, None, 4 * 1024 * 1024)?;
         Ok(String::from_utf8(bytes).context("capture Git output is not UTF-8")?.trim_end_matches('\n').to_owned())
     };
-    let base = plan.source.commit.clone();
+    let base = contract.as_ref().map_or_else(|| plan.source.commit.clone(), |c| c.base_oid.clone());
+    ensure!(contract.as_ref().is_none_or(|c| c.repository == plan.source.repository), "capture repository differs from contract");
     let head = run(&["rev-parse", "--verify", &format!("{branch}^{{commit}}")])?;
-    run(&["merge-base", "--is-ancestor", &base, &head]).context("attempt branch no longer descends from its base")?;
+    run(&["merge-base", "--is-ancestor", &base, &head]).context("attempt worktree history does not contain the contract base")?;
 
     // Stage tracked and untracked files (honouring .gitignore). Whatever the
     // outcome, the index is reset to the branch tip afterwards; files are never touched.

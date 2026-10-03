@@ -1151,3 +1151,104 @@ fn stale_profile_evidence_is_refreshed_by_launch_run() {
     assert!(report["attempt"].is_string(),"{report}");
     assert!(report["steps"].as_array().unwrap().iter().any(|s|s["step"]=="profile_evidence" && s["outcome"]=="refreshed"),"{report}");
 }
+
+#[test]
+fn contracted_launch_starts_at_an_unchecked_out_base_and_captures_only_worker_changes() {
+    for mode in ["code", "planning", "advanced"] {
+        let lab = Lab::with_herdr(r#"#!/usr/bin/python3
+import json,sys
+args=sys.argv[1:]
+if args==['--version']:print('herdr 0.9.1')
+elif args==['pane','list']:print('{"result":{"panes":[]}}')
+elif args==['agent','list']:print('{"result":{"type":"agent_list","agents":[]}}')
+elif args==['remote-api-bridge']:
+ r=json.loads(sys.stdin.readline());assert r['method']=='ping'
+ print(json.dumps({'id':r['id'],'result':{'type':'pong','version':'0.9.1','capabilities':{'workspace_create_command':True}}}))
+else:sys.exit(3)
+"#);
+        lab.plant_launchable("codex-sol", "codex", "gpt-6.1-sol");
+        lab.git(&["branch", "-M", "main"]);
+        let owner = lab.git(&["rev-parse", "HEAD"]);
+        lab.git(&["checkout", "-q", "-b", "contract-base"]);
+        fs::write(lab.repo.join("base-only.txt"), "predecessor deliverable\n").unwrap();
+        lab.git(&["add", "base-only.txt"]);
+        lab.git(&["commit", "-q", "-m", "predecessor"]);
+        let base = lab.git(&["rev-parse", "HEAD"]);
+        lab.git(&["checkout", "-q", "main"]);
+        let prompt = lab.home.join("prompt.txt");
+        fs::write(&prompt, "Write the deliverable.").unwrap();
+        let socket = lab.socket_inode_once("base.sock");
+        let mut args = vec!["launch", "demo", "run", "--task", "base-worker", "--profile", "codex-sol",
+            "--repository", lab.repo.to_str().unwrap(), "--base", "contract-base",
+            "--prompt-file", prompt.to_str().unwrap(), "--sign-with", lab.key.to_str().unwrap(),
+            "--herdr-socket", socket.to_str().unwrap()];
+        let file = lab.home.join("advanced-base.json");
+        if mode == "advanced" {
+            let mut template = lab.run_args("template", "codex-sol", "docs/result.md", prompt.to_str().unwrap());
+            template.extend(["--herdr-socket", socket.to_str().unwrap(), "--prepare-only"]);
+            lab.ok(&template);
+            let mut contract = lab.ok(&["task", "demo", "show", "template"])["contract"].clone();
+            contract["task_id"] = serde_json::json!("base-worker");
+            contract["base_oid"] = serde_json::json!(base);
+            fs::write(&file, serde_json::to_vec(&contract).unwrap()).unwrap();
+            let index = args.iter().position(|a| *a == "--base").unwrap();
+            args[index + 1] = "HEAD";
+            args.extend(["--contract-file", file.to_str().unwrap()]);
+        } else if mode == "planning" { args.extend(["--plan-output", "docs/result.md"]); }
+        else { args.extend(["--write", "docs/result.md", "--output", "docs/result.md"]); }
+        let report = lab.ok(&args);
+        let attempt = report["attempt"].as_str().unwrap();
+        let state = herdr_farm::runtime::snapshot(&lab.project).unwrap();
+        let record = state.attempt_inputs.iter().find(|r| r.attempt.as_str() == attempt).unwrap();
+        assert_eq!(record.inputs.repositories[0].commit, base);
+        let receipts = herdr_farm::worktree_preparation::prepare(&lab.project, &record.operation, 1,
+            std::time::Instant::now() + std::time::Duration::from_secs(45), Default::default()).unwrap();
+        let worktree = PathBuf::from(&receipts[0].plan.path);
+        let wt = |args: &[&str]| {
+            let out = Command::new("git").arg("-C").arg(&worktree).args(args)
+                .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null").output().unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8(out.stdout).unwrap().trim().to_owned()
+        };
+        assert_eq!(wt(&["rev-parse", "HEAD"]), base);
+        assert_eq!(fs::read_to_string(worktree.join("base-only.txt")).unwrap(), "predecessor deliverable\n");
+        assert_eq!(lab.git(&["symbolic-ref", "--short", "HEAD"]), "main");
+        assert_eq!(lab.git(&["rev-parse", "HEAD"]), owner);
+        fs::create_dir_all(worktree.join("docs")).unwrap();
+        fs::write(worktree.join("docs/result.md"), "Worker deliverable\n").unwrap();
+        let captured = lab.ok(&["result", "demo", "capture", attempt]);
+        assert_eq!(captured["base_oid"], base);
+        assert_eq!(wt(&["diff", "--name-only", &base, "HEAD"]), "docs/result.md");
+        lab.ok(&["result", "demo", "submit-captured", attempt]);
+        assert_eq!(lab.git(&["rev-parse", "HEAD"]), owner);
+        // Replacing the attempt branch with the owner's older history is refused,
+        // without creating a capture commit or rewriting it back to the base.
+        wt(&["reset", "--hard", &owner]);
+        let error = lab.fail(&["result", "demo", "capture", attempt]);
+        assert!(error.contains("history does not contain the contract base"), "{error}");
+        assert_eq!(wt(&["rev-parse", "HEAD"]), owner);
+    }
+}
+
+#[test]
+fn an_unresolvable_advanced_contract_base_is_refused_before_reservation() {
+    let lab = Lab::with_herdr(STATIC_HERDR);
+    lab.plant_launchable("codex-sol", "codex", "gpt-6.1-sol");
+    let prompt = lab.home.join("prompt.txt");
+    fs::write(&prompt, "Write the deliverable.").unwrap();
+    let socket = lab.socket_inode_once("missing-base.sock");
+    let mut args = lab.run_args("template", "codex-sol", "docs/result.md", prompt.to_str().unwrap());
+    args.extend(["--herdr-socket", socket.to_str().unwrap(), "--prepare-only"]);
+    lab.ok(&args);
+    let mut contract = lab.ok(&["task", "demo", "show", "template"])["contract"].clone();
+    contract["task_id"] = serde_json::json!("missing-base");
+    contract["base_oid"] = serde_json::json!("e".repeat(contract["base_oid"].as_str().unwrap().len()));
+    let file = lab.home.join("missing-base.json");
+    fs::write(&file, serde_json::to_vec(&contract).unwrap()).unwrap();
+    let error = lab.fail(&["launch", "demo", "run", "--task", "missing-base", "--profile", "codex-sol",
+        "--repository", lab.repo.to_str().unwrap(), "--contract-file", file.to_str().unwrap(),
+        "--prompt-file", prompt.to_str().unwrap(), "--sign-with", lab.key.to_str().unwrap(),
+        "--herdr-socket", socket.to_str().unwrap()]);
+    assert!(error.contains("base") || error.contains("commit"), "{error}");
+    assert!(herdr_farm::runtime::snapshot(&lab.project).unwrap().attempts.is_empty());
+}
