@@ -1,0 +1,44 @@
+# cargo-nextest configuration. Run: `cargo nextest run --features state-store`.
+# nextest runs every test of every binary in one parallel pool, one process
+# per test; plain `cargo test` runs the binaries one after another.
+
+[profile.default]
+# Many E2E tests spawn a ticker, Herdr stand-ins and sandboxed workers; more
+# parallelism than this makes their timing-bounded waits flaky.
+test-threads = 6
+fail-fast = false
+status-level = "fail"
+final-status-level = "slow"
+# Report a test as slow after 60 s; terminate it after 10 minutes.
+slow-timeout = { period = "60s", terminate-after = 10 }
+
+[test-groups]
+# Concurrency and scale tests measure contention themselves.
+heavy = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = "binary(telemetry_scale)"
+test-group = "heavy"
+
+# Quick inner loop: everything except the ticker-driven end-to-end groups.
+# The merge gate always runs the default profile (everything).
+[profile.fast]
+default-filter = "not (binary(cli) | binary(artifacts) | binary(canonical_worker) | binary(recovery) | binary(delivery) | binary(ticker_jobs) | binary(ticker) | binary(controller) | binary(pull_requests) | binary(adopt) | binary(remote) | binary(routines) | binary(operator_launch) | binary(telemetry_scale))"
+
+[[profile.fast.overrides]]
+filter = "binary(telemetry_scale)"
+test-group = "heavy"
+
+# GitHub Actions: JUnit output, partitioned across runners with
+# `--partition count:N/M`.
+[profile.ci]
+test-threads = 4
+fail-fast = false
+slow-timeout = { period = "60s", terminate-after = 10 }
+
+[profile.ci.junit]
+path = "junit.xml"
+
+[[profile.ci.overrides]]
+filter = "binary(telemetry_scale)"
+test-group = "heavy"
