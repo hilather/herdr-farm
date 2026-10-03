@@ -87,6 +87,18 @@ impl Lab {
             .output()
             .unwrap()
     }
+    /// Like `cli`, but retries the transient lock refusal a command can meet
+    /// while the accelerated test ticker holds the root for a pass, so the
+    /// outcome reflects the command's own decision.
+    fn settled(&self, args: &[&str]) -> Output {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let out = self.cli(args);
+            let busy = String::from_utf8_lossy(&out.stderr).contains("lock acquisition failed");
+            if !busy || std::time::Instant::now() >= until { return out; }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
     fn ok(&self, args: &[&str]) -> String {
         let o = self.cli(args);
         assert!(
@@ -237,13 +249,13 @@ fn socket_open_primes_owned_coordinator_retries_swallowed_prompt_and_recreates_c
     state["live"] = json!(false);
     // An agent without its pane is uncertainty, not proof of absence.
     fs::write(l.home.path().join("herdr-state.json"), serde_json::to_vec(&state).unwrap()).unwrap();
-    assert!(!l.cli(&["open", "demo", "--reprime"]).status.success());
+    assert!(!l.settled(&["open", "demo", "--reprime"]).status.success());
     assert_eq!(l.state()["creates"], 1);
     assert_eq!(runtime::snapshot(&l.project).unwrap().ownership, retained);
     state["agent"] = json!(false);
     state["fail_inventory"] = json!(true);
     fs::write(l.home.path().join("herdr-state.json"), serde_json::to_vec(&state).unwrap()).unwrap();
-    assert!(!l.cli(&["open", "demo", "--reprime"]).status.success());
+    assert!(!l.settled(&["open", "demo", "--reprime"]).status.success());
     assert_eq!(l.state()["creates"], 1);
     assert_eq!(runtime::snapshot(&l.project).unwrap().ownership, retained);
     state["fail_inventory"] = json!(false);
@@ -252,7 +264,8 @@ fn socket_open_primes_owned_coordinator_retries_swallowed_prompt_and_recreates_c
         serde_json::to_vec(&state).unwrap(),
     )
     .unwrap();
-    l.ok(&["open", "demo", "--reprime"]);
+    let reopened = l.settled(&["open", "demo", "--reprime"]);
+    assert!(reopened.status.success(), "{}", String::from_utf8_lossy(&reopened.stderr));
     l.stop();
     let state = l.state();
     assert_eq!(state["creates"], 2);
@@ -274,7 +287,7 @@ fn socket_open_primes_owned_coordinator_retries_swallowed_prompt_and_recreates_c
     )
     .unwrap();
     fs::write(l.home.path().join("lose-prompt-reply"), "").unwrap();
-    assert!(!l.cli(&["open", "demo", "--reprime"]).status.success());
+    assert!(!l.settled(&["open", "demo", "--reprime"]).status.success());
     let sent = l.state()["prompts"].as_array().unwrap().len();
     l.ok(&["open", "demo"]);
     l.stop();
