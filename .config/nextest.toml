@@ -33,6 +33,9 @@ test-group = "heavy"
 # `--partition count:N/M`.
 [profile.ci]
 test-threads = 4
+# Owner rule: a test that fails once and passes on retry counts as green and
+# is reported FLAKY; a test failing both tries blocks.
+retries = 1
 # The worker-sandbox tests (unshare + mounts) don't run on GitHub-hosted
 # runners yet (read-only mounts over the workspace); they stay in the local
 # merge gate (default profile) until CI-PORTABILITY-1 makes them portable, as
