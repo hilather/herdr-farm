@@ -35,7 +35,7 @@ impl Lab {
         fs::write(home.path().join("herdr"), FAKE_HERDR).unwrap();
         fs::set_permissions(home.path().join("herdr"), fs::Permissions::from_mode(0o700)).unwrap();
         let lab = Lab { home, _listener: None };
-        lab.ok(&["new", "demo"]);
+        lab.ok(&["new", "--legacy", "demo"]);
         lab
     }
     fn path(&self, rel: &str) -> PathBuf { self.home.path().join(rel) }

@@ -19,7 +19,7 @@ impl Lab {
         let lab = Lab { home: tempfile::tempdir().unwrap() };
         fs::write(lab.path("herdr"), FAKE_HERDR).unwrap();
         fs::set_permissions(lab.path("herdr"), fs::Permissions::from_mode(0o700)).unwrap();
-        assert!(lab.command().args(["new", "demo"]).output().unwrap().status.success());
+        assert!(lab.command().args(["new", "--legacy", "demo"]).output().unwrap().status.success());
         for (n, machine) in machines.iter().enumerate() {
             let id = format!("t-{:04}", n + 1);
             let record = json!({"id": id, "title": machine, "status": "open", "kind": "adopted", "created": jiff::Timestamp::now().to_string(),
@@ -156,7 +156,7 @@ impl Brief {
         fs::write(path("panes.json"), json!({"result":{"panes":[{"workspace_id":"w","tab_id":"tab","pane_id":"p","cwd":source}]}}).to_string()).unwrap();
         let listener = std::os::unix::net::UnixListener::bind(path("session.sock")).unwrap();
         let mut brief = Brief { home, ticker: None, _listener: listener };
-        assert!(brief.command().args(["new", "demo"]).status().unwrap().success());
+        assert!(brief.command().args(["new", "--legacy", "demo"]).status().unwrap().success());
         let project = brief.path("root/demo");
         fs::write(project.join(".state/coordinator.json"), json!({"socket": brief.path("session.sock")}).to_string()).unwrap();
         fs::write(project.join("threads/t-0001.toml"), toml::to_string(&json!({"id":"t-0001","status":"open","kind":"adopted","prompt_pending":true,"machine":machine,

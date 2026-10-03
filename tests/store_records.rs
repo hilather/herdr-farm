@@ -14,7 +14,8 @@ struct Project { home: tempfile::TempDir }
 impl Project {
     fn new() -> Self {
         let p = Project { home: tempfile::tempdir().unwrap() };
-        for command in ["new", "pause"] { assert!(p.cli(&[command, "demo"]).status.success()); }
+        assert!(p.cli(&["new", "--legacy", "demo"]).status.success());
+        assert!(p.cli(&["pause", "demo"]).status.success());
         let project = p.project();
         migration::apply(&project, &migration::inspect_with_config(&project, &p.home.path().join("owner.toml")).unwrap(), true).unwrap();
         p

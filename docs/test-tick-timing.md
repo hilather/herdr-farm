@@ -122,3 +122,9 @@ publication acquisition uses the normal job retry deadline (and the existing
 bounded exclusive acquisition window). No background canonical coordinator
 replay loop is involved. Socket-bound validation requires an unrestricted lab;
 this sandbox cannot bind Unix sockets.
+
+Legacy ticker labs must create projects with `new --legacy` (or the public
+`project::create` API). The default `new` creates a paused canonical project;
+legacy tickers cannot exercise their intended workflows on that project.
+Canonical labs originally written to migrate legacy state retain explicit
+legacy creation before pausing and applying their migration.

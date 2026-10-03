@@ -85,7 +85,7 @@ impl Lab {
     }
     /// A project whose idle coordinator is pane `p` of session `session`.
     fn project_in_session(&mut self, slug: &str, session: &str) -> PathBuf {
-        self.ok(&["new", slug]);
+        self.ok(&["new", "--legacy", slug]);
         let project = self.project(slug);
         if !self.socket(session).exists() { self.listeners.push(UnixListener::bind(self.socket(session)).unwrap()); }
         fs::write(project.join(".state/coordinator.json"), json!({"socket": self.socket(session), "workspace_id": "w", "tab_id": "w:t", "pane_id": "p",
@@ -323,7 +323,8 @@ fn adopt_refuses_a_pane_that_a_migrated_project_already_binds() {
     fs::create_dir(&work).unwrap();
     lab.session("a", &demo, &[agent("w5:p1", &work, "my-agent", "idle")]);
     lab.session("b", &other, &[agent("w5:p1", &work, "my-agent", "idle")]);
-    for command in ["new", "pause"] { lab.ok(&[command, "owned"]); }
+    lab.ok(&["new", "--legacy", "owned"]);
+    lab.ok(&["pause", "owned"]);
     let owned = lab.project("owned").canonicalize().unwrap();
     fs::write(owned.join("threads/t-0001.toml"), "id='t-0001'\nstatus='resolved'\n").unwrap();
     migration::apply(&owned, &migration::inspect(&owned).unwrap(), true).unwrap();

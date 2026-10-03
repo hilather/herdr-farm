@@ -25,7 +25,8 @@ impl Root {
         let root = Root { home, key, config };
         let mut text = format!("[authority]\nversion=1\nrevision=1\napproval_public_key={public:?}\n");
         for slug in slugs {
-            for command in ["new", "pause"] { assert!(root.command().args([command, slug]).status().unwrap().success()); }
+            assert!(root.command().args(["new", "--legacy", slug]).status().unwrap().success());
+            assert!(root.command().args(["pause", slug]).status().unwrap().success());
             text += &format!("[safety.{:?}]\nroutine_commands=true\n", root.project(slug).canonicalize().unwrap().display().to_string());
         }
         fs::write(&root.config, text).unwrap();

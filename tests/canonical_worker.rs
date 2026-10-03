@@ -99,7 +99,8 @@ impl Lab {
         let mut lab = Lab { project: home.path().join("root/demo"), key, repo: home.path().join("repo"), herdr: home.path().join("bin/herdr"),
             profile: VersionedReference { id: String::new(), revision: 1, digest: String::new() }, binding: String::new(), server: None, home, kind };
         fs::write(lab.path("lab/agent-kind"), kind).unwrap();
-        for command in ["new", "pause"] { lab.ok(&[command, "demo"]); }
+        lab.ok(&["new", "--legacy", "demo"]);
+        lab.ok(&["pause", "demo"]);
         migration::apply(&lab.project, &migration::inspect_with_config(&lab.project, &config).unwrap(), true).unwrap();
         lab.git(&["init", "-q", "--object-format=sha256"]);
         lab.git(&["commit", "-q", "--allow-empty", "-m", "base"]);
@@ -1716,7 +1717,7 @@ fn an_isolated_codex_worker_commits_through_codex_workspace_write_sandbox() {
 fn an_isolated_worker_cannot_read_owner_secrets_or_lift_the_hiding_but_still_commits_and_submits() {
     let mut lab = Lab::new("unknown_usage='allow_with_warning'\n[worker_isolation]\nhide=['~/owner']");
     let home = lab.home.path().canonicalize().unwrap();
-    lab.ok(&["new", "other"]);
+    lab.ok(&["new", "--legacy", "other"]);
     let secrets = [
         (home.join(".ssh/id_owner"), "SENTINEL-SSH-KEY"),
         (home.join(".gnupg/private-keys-v1.d/key"), "SENTINEL-GNUPG"),

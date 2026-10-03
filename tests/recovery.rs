@@ -79,7 +79,7 @@ impl Lab {
     }
     /// A new project whose idle coordinator lives in session `slug`, pane `p`.
     fn project_in_session(&mut self, slug: &str) -> PathBuf {
-        self.ok(&["new", slug]);
+        self.ok(&["new", "--legacy", slug]);
         let project = self.project(slug);
         let socket = self.path(&format!("{slug}.sock"));
         self.listeners.push(UnixListener::bind(&socket).unwrap());

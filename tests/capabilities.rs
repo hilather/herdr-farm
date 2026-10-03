@@ -25,7 +25,8 @@ impl Project {
         let repo = home.path().join("repo");
         fs::create_dir(&repo).unwrap();
         let mut p = Project { project: home.path().join("root/demo"), db: PathBuf::new(), key, repo, oid: String::new(), home };
-        for command in ["new", "pause"] { p.ok(&[command, "demo"]); }
+        p.ok(&["new", "--legacy", "demo"]);
+        p.ok(&["pause", "demo"]);
         migration::apply(&p.project, &migration::inspect_with_config(&p.project, &config).unwrap(), true).unwrap();
         let s = runtime::snapshot(&p.project).unwrap();
         runtime::set_state(&p.project, s.head, s.control.unwrap().revision, ProjectState::Active, &config).unwrap();

@@ -46,7 +46,8 @@ impl Lab {
         assert!(Command::new("/usr/bin/ssh-keygen").args(["-q", "-t", "ed25519", "-N", "", "-f"]).arg(&key).output().unwrap().status.success());
         let socket = std::os::unix::net::UnixListener::bind(home.path().join("session.sock")).unwrap();
         let lab = Lab { project: home.path().join("root/demo"), key, home, _socket: socket };
-        for command in ["new", "pause"] { lab.ok(&[command, "demo"]); }
+        lab.ok(&["new", "--legacy", "demo"]);
+        lab.ok(&["pause", "demo"]);
         let public = fs::read_to_string(lab.key.with_extension("pub")).unwrap().split_whitespace().take(2).collect::<Vec<_>>().join(" ");
         let path = lab.config();
         fs::create_dir_all(path.parent().unwrap()).unwrap();

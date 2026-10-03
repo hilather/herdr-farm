@@ -76,7 +76,7 @@ impl Lab {
     }
     /// A new project whose coordinator lives in session `slug`, pane `p`.
     fn project_in_session(&mut self, slug: &str, reachable: bool, extra: Value) -> PathBuf {
-        self.ok(&["new", slug]);
+        self.ok(&["new", "--legacy", slug]);
         let socket = self.path(&format!("{slug}.sock"));
         if reachable { self.listeners.push(UnixListener::bind(&socket).unwrap()); }
         let mut record = json!({"socket": socket, "workspace_id": "w", "tab_id": "w:t", "pane_id": "p", "agent_name": "coordinator",
@@ -267,7 +267,7 @@ fn ticker_commands_keep_one_current_ticker_per_root() {
     assert!(!stop_file.exists());
 
     // With a project, `start` runs one detached ticker, even past a stale stop file.
-    lab.ok(&["new", "demo"]);
+    lab.ok(&["new", "--legacy", "demo"]);
     fs::write(&stop_file, "").unwrap();
     lab.ok(&["ticker", "start"]);
     let running = || {

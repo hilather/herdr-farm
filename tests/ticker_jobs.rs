@@ -104,7 +104,7 @@ impl Lab {
     }
     /// A new project whose coordinator lives in session `slug`, pane `p`.
     fn project_in_session(&mut self, slug: &str, extra: Value) -> PathBuf {
-        self.ok(&["new", slug]);
+        self.ok(&["new", "--legacy", slug]);
         self.listeners.push(UnixListener::bind(self.socket(slug)).unwrap());
         let mut record = json!({"socket": self.socket(slug), "workspace_id": "w", "tab_id": "w:t", "pane_id": "p", "agent_name": "coordinator",
             "cwd": self.project(slug), "prime_pending": true, "prime_request": 1});

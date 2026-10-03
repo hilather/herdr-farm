@@ -23,7 +23,8 @@ impl Lab {
         fs::write(&config, format!("[authority]\nversion=1\nrevision=1\napproval_public_key='ssh-ed25519 {}'\n[profiles.worker]\nkind='claude'\n\
 permission_policy='interactive'\nextra_args={extra_args}\n{budget}", "A".repeat(48))).unwrap();
         let lab = Lab { project: home.path().join("root/demo"), config, home };
-        for command in ["new", "pause"] { lab.ok(&[command, "demo"]); }
+        lab.ok(&["new", "--legacy", "demo"]);
+        lab.ok(&["pause", "demo"]);
         migration::apply(&lab.project, &migration::inspect_with_config(&lab.project, &lab.config).unwrap(), true).unwrap();
         fs::create_dir(lab.path("agent-home")).unwrap();
         for (name, version) in [("herdr", "herdr 0.9.1"), ("claude", "2.1.0-preview.1 (Claude Code)")] {
@@ -164,7 +165,8 @@ impl Lab {
         fs::create_dir_all(config_path.parent().unwrap()).unwrap();
         fs::write(&config_path, config.replace("kind='claude'", &format!("kind='{kind}'"))).unwrap();
         let lab = Lab { project: home.path().join("root/demo"), config: config_path, home };
-        for command in ["new", "pause"] { lab.ok(&[command, "demo"]); }
+        lab.ok(&["new", "--legacy", "demo"]);
+        lab.ok(&["pause", "demo"]);
         migration::apply(&lab.project, &migration::inspect_with_config(&lab.project, &lab.config).unwrap(), true).unwrap();
         fs::create_dir(lab.path("agent-home")).unwrap();
         fs::write(lab.path("herdr"), "#!/bin/sh\n[ \"$1\" = --version ] && echo 'herdr 0.9.1' && exit 0\nexit 3\n").unwrap();

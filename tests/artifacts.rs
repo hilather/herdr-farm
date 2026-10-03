@@ -70,7 +70,7 @@ impl Lab {
     /// `t-0001`, an idle worker in pane `pw` (on `machine`, if not empty)
     /// working in `$HOME/<slug>-source`: `report.md` and `library/`.
     fn thread(&mut self, slug: &str, machine: &str, extra: Value) -> PathBuf {
-        self.ok(&["new", slug]);
+        self.ok(&["new", "--legacy", slug]);
         let project = self.project(slug);
         let socket = self.path(&format!("{slug}.sock"));
         self.listeners.push(UnixListener::bind(&socket).unwrap());

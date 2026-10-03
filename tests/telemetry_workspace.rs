@@ -444,7 +444,7 @@ fn the_digest_section_stays_bounded_with_many_projects_attempts_and_alerts() {
     fs::create_dir_all(&home).unwrap();
     let slugs: Vec<String> = (0..6).map(|i| format!("p{i}")).collect();
     for slug in &slugs {
-        ok(run(&home, &root, &["new", slug], &[], ""));
+        ok(run(&home, &root, &["new", "--legacy", slug], &[], ""));
         let project = root.join(slug);
         drop(SqliteStore::create(&project.join(".state/state.db")).unwrap());
         let db = rusqlite::Connection::open(project.join(".state/state.db")).unwrap();
@@ -591,7 +591,7 @@ impl Lab {
         let socket = home.path().join("session.sock");
         let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
         let lab = Lab { home, fake, _listener: listener };
-        ok(lab.cli(&["new", "demo"]));
+        ok(lab.cli(&["new", "--legacy", "demo"]));
         let project = lab.root().join("demo");
         let coordinator = json!({"socket": socket, "workspace_id": "w0", "tab_id": "w0:t1", "pane_id": "w0:p1", "agent_name": "coordinator", "cwd": project});
         fs::write(project.join(".state/coordinator.json"), coordinator.to_string()).unwrap();

@@ -42,7 +42,7 @@ impl Home {
     }
 }
 
-/// `new` derives the slug from the name, writes the whole skeleton with
+/// `new --legacy` derives the slug from the name, writes the whole skeleton with
 /// PROJECT.md settings, keeps `@` inside a path, and refuses a second project
 /// of the same slug and names that would escape the root.
 #[test]
@@ -50,7 +50,7 @@ fn new_writes_the_skeleton_and_refuses_duplicates_and_escapes() {
     let home = Home::new();
     // Nothing exists yet: an absent root lists no projects.
     assert_eq!(home.ok(&["list"]), "");
-    let out = home.ok(&["new", "My Demo  Project!", "--goal", "Ship \"it\"", "--repo", "/srv/app@box", "--repo", "/a@b/c", "--repo", "/no/such/repo"]);
+    let out = home.ok(&["new", "--legacy", "My Demo  Project!", "--goal", "Ship \"it\"", "--repo", "/srv/app@box", "--repo", "/a@b/c", "--repo", "/no/such/repo"]);
     let dir = home.root().join("my-demo-project");
     assert!(out.starts_with(&format!("created `my-demo-project` at {}\n", dir.display())), "{out}");
     for sub in ["memory", "scratch", "routines", "threads", "inbox/done", "library", ".state"] {
@@ -80,19 +80,28 @@ fn new_writes_the_skeleton_and_refuses_duplicates_and_escapes() {
 
     // Folding to the same slug is a duplicate; the original is untouched.
     let before = home.tree();
-    assert!(home.refused(&["new", "my-demo-project"]).contains("`my-demo-project` already exists"));
+    assert!(home.refused(&["new", "--legacy", "my-demo-project"]).contains("`my-demo-project` already exists"));
     assert_eq!(fs::read_to_string(dir.join("PROJECT.md")).unwrap(), md);
     for (name, error) in [("../x", "may not contain"), ("a/b", "may not contain"), ("a\\b", "may not contain"), ("..", "may not contain"),
                           ("!!!", "no letters or digits"), ("", "no letters or digits")] {
-        assert!(home.refused(&["new", name]).contains(error), "{name:?}");
+        assert!(home.refused(&["new", "--legacy", name]).contains(error), "{name:?}");
     }
     assert_eq!(home.tree(), before, "a refused name created something");
 
     // Non-ASCII letters drop out and long names are cut to 40 characters.
-    assert!(home.ok(&["new", "  Ünï 42 "]).starts_with("created `n-42`"));
-    let long = home.ok(&["new", &"x".repeat(60)]);
+    assert!(home.ok(&["new", "--legacy", "  Ünï 42 "]).starts_with("created `n-42`"));
+    let long = home.ok(&["new", "--legacy", &"x".repeat(60)]);
     assert!(long.starts_with(&format!("created `{}`", "x".repeat(40))), "{long}");
     assert_eq!(home.listing(), ["my-demo-project", "n-42", &"x".repeat(40)]);
+
+    // The default uses canonical storage; explicit legacy creation keeps the skeleton above.
+    home.ok(&["new", "canonical-demo"]);
+    assert!(home.root().join("canonical-demo/.state/state.db").is_file());
+    assert!(!dir.join(".state/state.db").exists());
+    assert!(home.ok(&["context", "canonical-demo"]).contains("Runtime owner: SQLite;"));
+    let runtime: serde_json::Value = serde_json::from_str(&home.ok(&["runtime", "canonical-demo", "inspect"])).unwrap();
+    assert_eq!(runtime["control"]["state"], "paused");
+
 }
 
 /// Only valid slugs are projects: `list` skips dot folders, folders without
@@ -100,7 +109,7 @@ fn new_writes_the_skeleton_and_refuses_duplicates_and_escapes() {
 #[test]
 fn list_and_commands_accept_only_folders_with_project_md_and_valid_slugs() {
     let home = Home::new();
-    home.ok(&["new", "b"]);
+    home.ok(&["new", "--legacy", "b"]);
     for name in ["a", "0x", "demo-2", ".trash", "Not_A_Slug", "empty", &"a".repeat(41)] {
         fs::create_dir_all(home.root().join(name)).unwrap();
         if name != "empty" { fs::write(home.root().join(name).join("PROJECT.md"), "").unwrap(); }
@@ -120,7 +129,7 @@ fn list_and_commands_accept_only_folders_with_project_md_and_valid_slugs() {
 #[test]
 fn context_reads_front_matter_and_reports_malformed_project_md() {
     let home = Home::new();
-    home.ok(&["new", "demo"]);
+    home.ok(&["new", "--legacy", "demo"]);
     let md = home.root().join("demo/PROJECT.md");
     fs::write(&md, "+++\nname = \"X\"\nnudge = true\n+++\n\nBody\n+++\nmore\n").unwrap();
     let context = home.ok(&["context", "demo"]);
@@ -145,8 +154,8 @@ fn context_reads_front_matter_and_reports_malformed_project_md() {
 #[test]
 fn safety_overrides_are_keyed_by_canonical_project_path() {
     let home = Home::new();
-    home.ok(&["new", "demo"]);
-    home.ok(&["new", "other"]);
+    home.ok(&["new", "--legacy", "demo"]);
+    home.ok(&["new", "--legacy", "other"]);
     let defaults = "  start_threads = \"propose\"\n  coordinator_agent_args = []\n  thread_agent_args = []\n  coordinator_agent_args_kind = None\n  thread_agent_args_kind = None\n  routine_commands = false\n  cleanup_resolved = \"auto\"\n  resolve_threads = \"propose\"\n";
     assert!(home.ok(&["safety", "show", "demo"]).contains(defaults));
     let shown = home.ok(&["safety", "show", "demo"]);
@@ -180,7 +189,7 @@ fn safety_overrides_are_keyed_by_canonical_project_path() {
 #[test]
 fn claude_command_prefixes_are_validated_and_visible_through_cli() {
     let home = Home::new();
-    home.ok(&["new", "demo"]);
+    home.ok(&["new", "--legacy", "demo"]);
     let project = home.root().join("demo").canonicalize().unwrap();
     let config = home.0.path().join(".config/herdr-farm/config.toml");
     fs::create_dir_all(config.parent().unwrap()).unwrap();
@@ -235,7 +244,7 @@ fn coordinator_permissions_follow_target_and_owner_policy() {
     git(&["add", "."]);
     git(&["commit", "-qm", "reviewed scripts"]);
     let blob = git(&["rev-parse", "main:tools/run-tests.sh"]);
-    home.ok(&["new", "demo", "--repo", repo.to_str().unwrap()]);
+    home.ok(&["new", "--legacy", "demo", "--repo", repo.to_str().unwrap()]);
     let project = home.root().join("demo");
     let grant = |prefix: &str| {
         home.ok(&[
