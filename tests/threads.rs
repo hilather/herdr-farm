@@ -28,18 +28,20 @@ case "$1 $2" in
 esac
 "#;
 
-struct Lab { home: tempfile::TempDir, fake: PathBuf, _listener: std::os::unix::net::UnixListener }
+struct Lab { home: tempfile::TempDir, fake: PathBuf, _listener: std::os::unix::net::UnixListener, scale: &'static str }
 
 impl Lab {
     /// A project whose coordinator session is reachable through the fake herdr.
-    fn new() -> Self {
+    fn new() -> Self { Self::with_scale(include_str!("support/time-scale.txt").trim()) }
+    fn unscaled() -> Self { Self::with_scale("") }
+    fn with_scale(scale: &'static str) -> Self {
         let home = tempfile::tempdir().unwrap();
         let fake = home.path().join("herdr");
         fs::write(&fake, FAKE_HERDR).unwrap();
         fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).unwrap();
         let socket = home.path().join("session.sock");
         let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
-        let lab = Lab { home, fake, _listener: listener };
+        let lab = Lab { home, fake, _listener: listener, scale };
         lab.ok(&["new", "demo"]);
         let coordinator = json!({"socket": socket, "workspace_id": "w0", "tab_id": "w0:t1", "pane_id": "w0:p1", "agent_name": "coordinator", "cwd": lab.project()});
         fs::write(lab.project().join(".state/coordinator.json"), coordinator.to_string()).unwrap();
@@ -50,7 +52,7 @@ impl Lab {
     fn project(&self) -> PathBuf { self.root().join("demo") }
     fn path(&self, name: &str) -> PathBuf { self.home.path().join(name) }
     fn cli(&self, args: &[&str]) -> Output {
-        Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", &self.fake)
+        Command::new(BIN).env_clear().envs((!self.scale.is_empty()).then_some(("HERDR_FARM_TEST_TIME_SCALE", self.scale))).env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", &self.fake)
             .args(["--root", self.root().to_str().unwrap()]).args(args).output().unwrap()
     }
     fn ok(&self, args: &[&str]) -> String {
@@ -83,7 +85,7 @@ impl Lab {
     /// whose first `try_lock` met the status probe's own lock exits quietly;
     /// it is started again.
     fn ticker(&self) -> Ticker {
-        let spawn = || Ticker(Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", &self.fake)
+        let spawn = || Ticker(Command::new(BIN).env_clear().envs((!self.scale.is_empty()).then_some(("HERDR_FARM_TEST_TIME_SCALE", self.scale))).env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", &self.fake)
             .args(["--root", self.root().to_str().unwrap(), "ticker", "run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
         let mut ticker = spawn();
         let deadline = Instant::now() + Duration::from_secs(20);
@@ -107,7 +109,7 @@ impl Lab {
     }
     fn calls(&self) -> String { fs::read_to_string(self.path("herdr-calls")).unwrap_or_default() }
     fn git(&self, dir: &Path, args: &[&str]) -> String {
-        let out = Command::new("/usr/bin/git").env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("PATH", "/usr/bin:/bin").env("HOME", self.home.path())
+        let out = Command::new("/usr/bin/git").env_clear().envs((!self.scale.is_empty()).then_some(("HERDR_FARM_TEST_TIME_SCALE", self.scale))).env("PATH", "/usr/bin:/bin").env("HOME", self.home.path())
             .env("GIT_AUTHOR_NAME", "fixture").env("GIT_AUTHOR_EMAIL", "fixture@example.com")
             .env("GIT_COMMITTER_NAME", "fixture").env("GIT_COMMITTER_EMAIL", "fixture@example.com")
             .arg("-C").arg(dir).args(args).output().unwrap();
@@ -126,7 +128,7 @@ fn sha(bytes: &[u8]) -> String { format!("{:x}", Sha256::digest(bytes)) }
 /// the same rules the ticker uses; the table is the observable contract.
 #[test]
 fn thread_list_groups_every_record_and_live_state() {
-    let lab = Lab::new();
+    let lab = Lab::unscaled();
     struct Case { title: &'static str, record: Value, agent: Option<Value>, pane: bool, group: &'static str, note: &'static str }
     let case = |title, record: Value, agent: Option<Value>, pane, group, note| Case { title, record, agent, pane, group, note };
     let agent = |status: &str| Some(json!({"agent_status": status}));
@@ -357,7 +359,7 @@ fn start_restart_and_adopt_write_briefs_branches_and_launch_line() {
 /// a shell pane, reopen the worktree or tab, or create the placement again.
 #[test]
 fn restart_follows_what_the_record_reached() {
-    let lab = Lab::new();
+    let lab = Lab::unscaled();
     let repo = lab.path("repo");
     fs::create_dir(&repo).unwrap();
     lab.git(&repo, &["init", "-q", "-b", "main"]);

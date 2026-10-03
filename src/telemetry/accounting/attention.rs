@@ -90,7 +90,7 @@ fn bindings_filtered(project: &Path, selected: Option<&BTreeSet<String>>, open_o
 /// The sampling interval the ticker uses; the gap threshold is twice it.
 fn interval_ms() -> i64 {
     let secs = crate::product_environment::product_var_os("HERDR_FARM_TELEMETRY_COLLECT_SECS").and_then(|v| v.into_string().ok()).and_then(|v| v.parse::<i64>().ok()).filter(|s| *s > 0).unwrap_or(DEFAULT_INTERVAL_SECS);
-    crate::timing::pass(Duration::from_secs(secs as u64)).as_millis() as i64
+    crate::timing::collection_interval(Duration::from_secs(secs as u64)).as_millis() as i64
 }
 
 /// The Herdr executable the ticker's client uses: `HERDR_BIN_PATH`, else `herdr` on `PATH`.

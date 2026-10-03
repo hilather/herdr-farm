@@ -53,8 +53,8 @@ impl Drop for Ticker {
 #[test]
 fn bounded_real_ticker_scales_passes_and_enforces_the_floor() {
     for (scale, minimum) in [
-        (SCALE.trim(), Duration::from_millis(550)),
-        ("0.000001", Duration::from_millis(90)),
+        (SCALE.trim(), Duration::from_millis(950)),
+        ("0.000001", Duration::from_millis(950)),
     ] {
         let lab = Lab::new();
         let start = Instant::now();
@@ -123,7 +123,7 @@ fn unset_and_invalid_scales_keep_the_production_cadence_and_doctor_output() {
         .unwrap();
     let text = String::from_utf8_lossy(&doctor.stdout);
     assert!(text.contains("test time scale active (0.02)"));
-    assert!(text.contains("ticker pass 300 ms"));
+    assert!(text.contains("ticker pass 500 ms"));
     let mut ticker = Ticker(
         lab.command(None)
             .args(["ticker", "run"])
@@ -165,7 +165,7 @@ fn durable_retry_deadlines_survive_process_restart() {
     for (scale, first, second) in [
         (None, 1000, 2000),
         (Some(SCALE.trim()), 20, 40),
-        (Some("0.000001"), 20, 20),
+        (Some("0.000001"), 20, 40),
     ] {
         let home = tempfile::tempdir().unwrap();
         for phase in ["write", "resume"] {

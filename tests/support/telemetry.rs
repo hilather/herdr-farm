@@ -15,7 +15,7 @@ pub const DIGEST_1: &str = "sha256:c56c0b798f22b872890b69470f332d6be530384c7f5d5
 pub const DIGEST_2: &str = "sha256:6c2dcf23c84488655ff53556237af61da2717e13172cdf50dad886d53e84be41";
 pub const DIGEST_2B: &str = "sha256:49f430f4555d26b959282f29656f343ad7e239dadf49714298b21d46e61e698f";
 
-pub struct Fixture { pub tmp: tempfile::TempDir, pub root: PathBuf, pub project: PathBuf, pub home: PathBuf, pub attempt: String, pub decided: i64, pub config: herdr_farm::migration::ConfigReference }
+pub struct Fixture { pub tmp: tempfile::TempDir, pub root: PathBuf, pub project: PathBuf, pub home: PathBuf, pub attempt: String, pub decided: i64, pub config: herdr_farm::migration::ConfigReference, pub scale: &'static str }
 
 impl Fixture {
     /// Project `demo` with one attempt reserved by automatic admission on a Codex
@@ -77,7 +77,7 @@ impl Fixture {
         let (attempt, decided) = rusqlite::Connection::open(&db_path).unwrap()
             .query_row("SELECT attempt_id,decided_unix_ms FROM dispatch_decisions", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
         plant_profile(&db_path, codex_profile(&config, "codex", "other", Some(&base.join("other-home"))));
-        Fixture { tmp, root, project, home, attempt, decided, config }
+        Fixture { tmp, root, project, home, attempt, decided, config, scale: include_str!("time-scale.txt").trim() }
     }
 
     pub fn worktree(&self) -> String { format!("{}/.state/worktrees/{}/repo-00", self.project.display(), self.attempt) }
@@ -96,7 +96,7 @@ impl Fixture {
     pub fn cli(&self, command: &str) -> (serde_json::Value, Vec<u8>) { self.cli_args(&[command]) }
 
     pub fn cli_args(&self, args: &[&str]) -> (serde_json::Value, Vec<u8>) {
-        let out = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
+        let out = Command::new(BIN).env_clear().envs((!self.scale.is_empty()).then_some(("HERDR_FARM_TEST_TIME_SCALE", self.scale))).env("HOME", self.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
             .args(["--root", self.root.to_str().unwrap(), "telemetry", "demo"]).args(args).output().unwrap();
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
         let mut bytes = out.stdout.clone();
@@ -106,7 +106,7 @@ impl Fixture {
 
     /// Run a telemetry command in its text form; returns its stdout.
     pub fn text(&self, args: &[&str]) -> String {
-        let out = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
+        let out = Command::new(BIN).env_clear().envs((!self.scale.is_empty()).then_some(("HERDR_FARM_TEST_TIME_SCALE", self.scale))).env("HOME", self.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
             .args(["--root", self.root.to_str().unwrap(), "telemetry", "demo"]).args(args).output().unwrap();
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
         String::from_utf8(out.stdout).unwrap()
@@ -114,7 +114,7 @@ impl Fixture {
 
     /// Run a telemetry command that must fail; returns its stderr.
     pub fn cli_fail(&self, args: &[&str]) -> String {
-        let out = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
+        let out = Command::new(BIN).env_clear().envs((!self.scale.is_empty()).then_some(("HERDR_FARM_TEST_TIME_SCALE", self.scale))).env("HOME", self.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
             .args(["--root", self.root.to_str().unwrap(), "telemetry", "demo"]).args(args).output().unwrap();
         assert!(!out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
         String::from_utf8(out.stderr).unwrap()

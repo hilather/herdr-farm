@@ -211,7 +211,7 @@ impl Memory {
         let now=self.monotonic_now();
         let entry=self.machines.entry(machine.clone()).or_default();
         if entry.next_poll.is_some_and(|deadline|now<deadline) {return false;}
-        entry.next_poll=Some(now+crate::timing::pass(REMOTE_INTERVAL));
+        entry.next_poll=Some(now+crate::timing::cadence(REMOTE_INTERVAL));
         true
     }
 
@@ -219,7 +219,7 @@ impl Memory {
         let now=self.monotonic_now();
         // Backoff begins when the failed command finishes, not when its tick began.
         if error.is_some() {
-            self.machines.entry(machine.clone()).or_default().next_poll=Some(now+crate::timing::retry(REMOTE_RETRY_DELAY));
+            self.machines.entry(machine.clone()).or_default().next_poll=Some(now+crate::timing::cadence(REMOTE_RETRY_DELAY));
         }
     }
 }

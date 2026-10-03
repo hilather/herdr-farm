@@ -467,3 +467,52 @@ listeners are also denied. No socket workaround was attempted. The steward must
 run the listed workflows outside this sandbox before claiming the whole-suite
 speedup. No owner agent data, owner project roots, running ticker/server, or real
 agent CLI was used. No push was performed.
+
+## TEST-TICK-1b regression follow-up
+
+Read the complete steward `out/tick-alone-failures.log`, including every panic
+and repeated cancellation/lock diagnostic. This follow-up preserves production
+values and external execution budgets. No schema, retention classification, or
+backup classification changed. Timer families now share factors/floors; see
+[test timing policies](test-tick-timing.md). New guarantees extend E2E CLI/public
+store workflows; no unit tests or source-text assertions were added.
+
+Each reported regression is accounted for below. Pattern 1 is synthetic nominal
+time; pattern 2 is relative deadline/cooldown ordering; pattern 3 is waiting for
+observable state rather than a fixed number of passes.
+
+| Suite / test | Pattern and correction |
+| --- | --- |
+| canonical_worker / canonical_attempt_sidebar_refreshes_and_clears_on_pause_and_termination | 2: restore the unscaled native-call quiet window before observation admission can preempt the advisory batch; retain full wall-clock wait deadline |
+| canonical_worker / canonical_attempt_sidebar_does_not_publish_to_a_replaced_terminal | 2: same advisory window; terminal identity assertions unchanged |
+| canonical_worker / canonical_attempt_sidebar_clears_after_termination_in_an_active_project | 2: same advisory window; lifecycle cleanup assertions unchanged |
+| canonical_worker / canonical_attempt_sidebar_uses_collected_usage_and_observed_waiting | 2: same advisory window; real sampler scheduling and stored attention interval share its floor to avoid artificial gaps, with full wait deadline |
+| canonical_worker / canonical_attempt_sidebar_restart_offers_no_historical_cleanup_or_native_request | 2: same advisory window; restart still asserts no historical cleanup/native request |
+| canonical_worker / editing_worker_requires_operator_completion_when_automation_is_off | 3: wait for Running before stopping the first ticker; retain the later quiet-pass assertions that automation did not complete it |
+| telemetry / attempts_show_attention_summary | 1: omit scale from every CLI in the lab, including shared Fixture commands; retain exact nominal minute summaries |
+| telemetry_accounting / attention_intervals_union_and_censor | 1: omit scale from the lab CLI; retain all exact intervals, censoring, gaps and unions |
+| controller / a_notification_retry_is_not_delivered_before_it_is_due | 2: scale the retry spacing expectation; additionally enqueue a valid future notification through the public store API, observe two real passes while it is pending, and assert its eventual show timestamp is at/after its persisted due time |
+| threads / thread_list_groups_every_record_and_live_state | 1: unscaled lab for nominal 10/120/500-second state fixtures |
+| threads / restart_follows_what_the_record_reached | 1: unscaled CLI and ticker in the entire nominal startup-history lab |
+| ticker_jobs / a_failed_coordinator_start_backs_off_while_another_project_works | 2: common pass/cooldown factor; scale the existing 40-second gap tolerance and retain other-project interleaving |
+| ticker_jobs / token_refreshes_cool_down_while_another_coordinator_starts_and_primes | 2: same pass/cooldown family and scaled gap tolerance; retain exactly-once start/prime and interleaving assertions |
+| ticker_jobs / remote_machines_poll_on_their_own_deadlines_and_only_long_outages_are_reported | 2: shared pass/poll/retry factor; assert every actual poll/retry gap against its deadline instead of assuming external probes finish before a fixed call count; outage/state assertions unchanged |
+
+The existing socket-free `ticker_timing` workflow now checks the 500 ms main
+cadence floor through metrics and bounded CLI passes. Its public-store restart
+workflow checks 20 ms then 40 ms persisted retry deadlines even at a tiny factor,
+and refuses claims before the deadline. This replaces the requested unit
+ordering test in accordance with AGENTS.md and the task's explicit no-unit rule.
+
+Validation commands all used `--locked --offline -j 3`:
+
+- `cargo test --features state-store --test ticker_timing`: 4 passed (16.03 s).
+- `cargo test --features state-store --test telemetry --test telemetry_accounting -- --skip attempts_show_attention_summary --skip attention_intervals_union_and_censor`: 19 + 32 passed (20.78 s + 39.04 s).
+- `cargo test --features state-store --test canonical_worker --test controller --test telemetry --test telemetry_accounting --test threads --test ticker_jobs --test ticker_timing --no-run`: all seven suites compile.
+- `cargo clippy --features state-store --all-targets`: completed; existing warnings, no diagnostics on changed lines.
+
+Socket-only failures in this follow-up: **none executed**. All 14 reported
+regressions above require Unix socket fixture binds and are compile-only here,
+as requested. Their outside-sandbox execution remains with the steward. The
+historical socket-only failure lists earlier in this document remain the prior
+sandbox evidence; this follow-up does not claim those workflows passed.

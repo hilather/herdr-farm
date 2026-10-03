@@ -1140,7 +1140,7 @@ fn attention_intervals_union_and_censor() {
         VALUES(?1,?1,?2,?3,?3,'sha1',?4,?4,'linux-unshare-user-pid-mount-v1',0,2000)", rusqlite::params![hex('4'), hex('1'), oid, hex('e')]).unwrap();
 
     let cli = |args: &[&str]| -> (serde_json::Value, String) {
-        let out = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", &home).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", &herdr)
+        let out = Command::new(BIN).env_clear().env("HOME", &home).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", &herdr)
             .env("HERDR_PROJECTS_TELEMETRY_COLLECT_SECS", "60").args(["--root", root.to_str().unwrap(), "telemetry", "demo"]).args(args).output().unwrap();
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
         let text = String::from_utf8(out.stdout).unwrap();

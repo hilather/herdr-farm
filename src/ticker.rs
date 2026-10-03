@@ -432,6 +432,12 @@ pub(crate) fn next_tick_delay(memory:&Memory)->Duration {
     if memory.copy_jobs.as_ref().is_some_and(|q|q.canonical_work_pending()){return crate::timing::canonical_pass();}
     #[cfg(not(feature="state-store"))]
     let _=memory;
+    #[cfg(feature="state-store")]
+    if !memory.attempt_token_tickets.is_empty() {
+        // The next observation batch preempts advisory work. Its native calls
+        // are unscaled: retain the production quiet window for that batch.
+        return crate::timing::advisory_pass();
+    }
     crate::timing::tick()
 }
 
@@ -732,7 +738,7 @@ fn telemetry_pass(ctx:&Ctx,log:&Log,session:&str) {
     // directly can miss every other 15-s tick when a later poll is faster.
     let slot=(TELEMETRY_START.get_or_init(Instant::now).elapsed().as_nanos()/crate::timing::tick().as_nanos()).min(u64::MAX as u128) as u64;
     let Ok(mut scan)=SCAN.lock() else {return};
-    if scan.is_some_and(|(at,old)|old==slot&&at.elapsed()<crate::timing::pass(Duration::from_secs(secs))) {return;}
+    if scan.is_some_and(|(at,old)|old==slot&&at.elapsed()<crate::timing::collection_interval(Duration::from_secs(secs))) {return;}
     *scan=Some((Instant::now(),slot));
     let Ok(mut last)=LAST.lock() else {return};
     let mut observations=Vec::new();
@@ -745,7 +751,7 @@ fn telemetry_pass(ctx:&Ctx,log:&Log,session:&str) {
         if existing && observed!=Some(slot) {
             observations.push((slug.clone(),project.clone()));
         }
-        if collected.is_none_or(|at|at.elapsed()>=crate::timing::pass(Duration::from_secs(secs))) {
+        if collected.is_none_or(|at|at.elapsed()>=crate::timing::collection_interval(Duration::from_secs(secs))) {
             let configured=existing || match codex::collection_configured(&project).and_then(|native| {
                 if native {Ok(true)} else {herdr_farm::telemetry::otlp::configured(&project,&ctx.config_dir)}
             }) {

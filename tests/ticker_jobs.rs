@@ -174,6 +174,11 @@ fn agent_at(id: &str, cwd: &Path, name: &str, status: &str) -> Value {
     agent["agent_status"] = json!(status);
     agent
 }
+// CLI processes use this scale; preserve the cadence family's whole-second quantum.
+fn cadence_seconds(nominal: f64) -> f64 {
+    let scale: f64 = include_str!("support/time-scale.txt").trim().parse().unwrap();
+    nominal * (scale * 30.0).ceil() / 30.0
+}
 fn gaps(times: &[f64]) -> Vec<f64> { times.windows(2).map(|w| w[1] - w[0]).collect() }
 
 /// Replaces `open_retains_launch_history_and_queues_a_new_request_without_starting`
@@ -252,10 +257,10 @@ fn cooldown_lab(slugs: [&str; 2]) -> Lab {
     }
     lab
 }
-/// Asserts every run of `own` is at least three passes after the previous,
+/// Asserts every run of `own` follows its cooldown (measured from completion),
 /// and that `other` work ran in between.
 fn assert_cooled_down(what: &str, own: &[f64], other: &[f64]) {
-    assert!(own.len() >= 2 && gaps(own).iter().all(|gap| *gap >= 40.0), "{what} ran again before its cooldown: {own:?}");
+    assert!(own.len() >= 2 && gaps(own).iter().all(|gap| *gap >= cadence_seconds(40.0)), "{what} ran again before its cooldown: {own:?}");
     assert!(other.iter().any(|t| own[0] < *t && *t < own[1]), "nothing else ran while {what} cooled down: {own:?} {other:?}");
 }
 
@@ -333,8 +338,9 @@ fn remote_machines_poll_on_their_own_deadlines_and_only_long_outages_are_reporte
     ticker.next_pass();
     ticker.stop();
     let b = polls("b");
-    assert!(gaps(&b).iter().all(|gap| *gap >= 59.0), "b was polled before its deadline: {b:?}");
-    assert_eq!(polls("a").len(), 1, "a was retried before its backoff");
+    assert!(gaps(&b).iter().all(|gap| *gap >= cadence_seconds(60.0) - 0.002), "b was polled before its deadline: {b:?}");
+    let a = polls("a");
+    assert!(gaps(&a).iter().all(|gap| *gap >= cadence_seconds(120.0) - 0.002), "a was retried before its backoff: {a:?}");
     assert_eq!(outages("a").len(), 1, "{:?}", outages("a"));
     assert!(outages("a")[0].contains("`box` has been unreachable"), "{:?}", outages("a"));
     assert!(outages("b").is_empty());
