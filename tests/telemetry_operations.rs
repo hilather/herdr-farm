@@ -136,6 +136,7 @@ fn retention_classes_are_declared_with_doc09_defaults() {
     assert_eq!(row("optin.external_export_files"), (json!(7), "prune".into(), "source_of_truth".into(), true));
     assert_eq!(row("optin.captured_evidence"), (json!(7), "not_built".into(), "source_of_truth".into(), true));
     assert_eq!(row("canonical.state"), (Value::Null, "external_lifecycle".into(), "canonical".into(), true));
+    assert_eq!(row("canonical.coordinator_journal"), (Value::Null, "external_lifecycle".into(), "canonical".into(), true));
     // A deployment override is explicit policy; tombstones are never shortened.
     write_private(&config(&f).join("telemetry-retention.toml"), "schema = \"telemetry-retention.v1\"\n[days]\n\"sidecar.attention_samples\" = 30\n");
     let classes = json_of(&f, &["maintenance", "classes", "--json"]);

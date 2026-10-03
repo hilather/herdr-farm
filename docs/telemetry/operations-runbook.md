@@ -66,6 +66,7 @@ column named in `age_from`).
 | `optin.external_export_files` | the enabled external export directory | 7 d (a project override may only shorten it) | source of truth | prune, destructive |
 | `optin.captured_evidence` | — | 7 d | — | not built (contracts §7: no capture store exists) |
 | `canonical.state` | `state.db` | canonical | canonical | external lifecycle |
+| `canonical.coordinator_journal` | `.state/canonical-coordinator.json` | canonical | canonical | external lifecycle; retain with project backups |
 | `native.codex_rollouts` | `<execution_home>/.codex/sessions` | owned by Codex | — | external; their availability is the replay horizon |
 | `secret.cursor_key` | `<config_dir>/telemetry-cursor.key` | — | secret | never backed up with telemetry; deleting it revokes every cursor |
 
@@ -135,6 +136,7 @@ artefact.backups prune 30d source_of_truth destructive
 optin.external_export_files prune 7d source_of_truth destructive
 optin.captured_evidence not_built 7d source_of_truth destructive
 canonical.state external_lifecycle - canonical destructive
+canonical.coordinator_journal external_lifecycle - canonical destructive
 canonical.verification_execution_slots external_lifecycle - derivable
 native.codex_rollouts external_lifecycle - source_of_truth destructive
 secret.cursor_key external_lifecycle - source_of_truth destructive

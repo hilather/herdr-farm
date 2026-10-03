@@ -745,5 +745,7 @@ identity, pending layout/start/prime intent and accepted priming receipts. The
 maintenance class `canonical.coordinator_journal` retains it indefinitely, never
 prunes it, and requires inclusion in project backups. Restored pending effects
 require live reconciliation before replay. Runtime ownership and observation
-remain in the existing canonical tables; no schema migration or new table is
+remain in the existing canonical tables. Replacement records fresh same-session
+pane/agent absence and audits ownership relinquishment before any creation effect;
+uncertainty retains the old claim. No schema migration or new table is
 introduced. See [operator recovery](../operator-runbook.md#canonical-coordinator-after-migration-w-coord-2).
