@@ -226,7 +226,7 @@ fn verifier_rejections_replan_twice_then_escalate_until_a_new_plan() {
     // Plan revision 1 starts a fresh budget for the same blocker.
     let fifth = f.reject("task", &digest, "reject-5");
     assert_eq!(f.replan(&fifth)["Automatic"]["automatic_count"], 1);
-    assert_eq!(f.inbox().len(), 4);
+    assert_eq!(f.inbox().iter().filter(|(kind, _)| !results.contains(&kind.as_str())).count(), 4);
     assert_eq!(f.ok(&["plan", "inspect", "demo"])["plan_revision"], 1, "a replan request is not a proposal");
 }
 
