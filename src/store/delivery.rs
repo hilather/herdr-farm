@@ -80,6 +80,22 @@ pub(super) fn update_outcome(tx:&Connection,old:&Delivery,outcome:&Outcome,now:i
     let revision=increment(old.revision)?;
     tx.execute("UPDATE operation_delivery SET revision=?2,state=?3,owner=NULL,lease_until_ms=NULL,next_due_ms=?4,last_outcome=?5 WHERE operation_id=?1",params![old.operation.as_str(),integer(revision)?,state,due,serde_json::to_string(&outcome).map_err(|e|StoreError::Invalid(e.to_string()))?])?;
     log(tx,&old.operation,revision,"operation.outcome",serde_json::json!({"actor":actor,"outcome":outcome,"epoch":old.epoch}))?;
+    if state == "permanent_failure" {
+        let op = super::read_operation(tx, &old.operation)?;
+        if matches!(op.kind.as_str(), "verification.run" | "integration.run") {
+            let submission = if op.kind == "verification.run" {
+                op.payload.get("submission_id").and_then(|v| v.as_str()).map(str::to_owned)
+            } else {
+                op.payload.get("result_id").and_then(|v| v.as_str()).map(|result| {
+                    tx.query_row("SELECT submission_id FROM verified_results WHERE result_id=?1", [result], |r| r.get::<_, String>(0))
+                }).transpose()?
+            };
+            if let Some(submission) = submission {
+                let (task, attempt): (String, String) = tx.query_row("SELECT task_id,attempt_id FROM result_submissions WHERE submission_id=?1", [&submission], |r| Ok((r.get(0)?,r.get(1)?)))?;
+                super::inbox::result_notice(tx, if op.kind == "verification.run" { "verification.errored" } else { "integration.failed" }, &format!("{}:{revision}", old.operation.as_str()), &task, &attempt, &submission, outcome.evidence())?;
+            }
+        }
+    }
     delivery(tx,&old.operation)
 }
 impl SqliteStore {

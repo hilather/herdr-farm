@@ -602,14 +602,21 @@ pub fn open_active(project:&Path)->Result<SqliteStore> {open_published(project,t
 /// Hot paths (effect jobs, targeted commands): publication checks only. The
 /// whole-store check runs after a schema change and in the ticker's periodic check.
 pub fn open_active_unchecked(project:&Path)->Result<SqliteStore> {open_published(project,true,false)}
+/// Validate published authority and open SQLite with read-only flags.
+pub fn open_active_read_only(project: &Path) -> Result<SqliteStore> {
+    open_published_with(project, true, SqliteStore::open_read_only)
+}
 fn open_published(project:&Path,enforce_control:bool,integrity:bool)->Result<SqliteStore> {
+    open_published_with(project, enforce_control, if integrity { SqliteStore::open } else { SqliteStore::open_scoped })
+}
+fn open_published_with(project: &Path, enforce_control: bool, open: fn(&Path) -> std::result::Result<SqliteStore, crate::store::StoreError>) -> Result<SqliteStore> {
     let project=checked_project(project)?;
     let journal=load(&project)?;
     ensure!(journal.phase==Phase::Active,"migration has not completed; recover before using the store");
     let marker:Format=serde_json::from_slice(&read(&project.join(".state/format.json"))?)?;
     ensure!(published_format_matches(&marker,&journal),"active ownership marker mismatch");
     let path=project.join(".state/state.db");
-    let db=if integrity {SqliteStore::open(&path)?} else {SqliteStore::open_scoped(&path)?};
+    let db=open(&path)?;
     ensure!(db.import_operation_count()?==journal.plan.operations.len() as u64,"store imported operation count mismatch");
     let receipt=db.import_receipt()?;
     ensure!(receipt==(journal.plan.digest,journal.plan.sources.iter().filter(|s|s.kind!="backup").count() as u64,journal.plan.tasks.len() as u64),"store import identity mismatch");

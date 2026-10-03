@@ -225,3 +225,37 @@ mod tests {
         }
     }
 }
+
+/// Poll without holding a project lock or marking anything seen.
+pub fn wait(ctx: &crate::paths::Ctx, slug: &str, timeout: u64) -> Result<()> {
+    let dir = ctx.root.join(slug);
+    let deadline = std::time::Instant::now() + crate::timing::retry(std::time::Duration::from_secs(timeout));
+    loop {
+        let ids: Vec<String>;
+        #[cfg(feature="state-store")]
+        if project::ensure_legacy(&dir).is_err() {
+            ids = herdr_farm::runtime::unseen_inbox(&dir)?.into_iter().map(|i| i.content.id).collect();
+        } else {
+            let project = Project::load(&ctx.root, slug)?;
+            let seen = seen(&project);
+            ids = unhandled(&project).into_iter().filter(|i| !seen.contains(&i.id)).map(|i| i.id).collect();
+        }
+        #[cfg(not(feature="state-store"))]
+        {
+            let _ = &dir;
+            let project = Project::load(&ctx.root, slug)?;
+            let seen = seen(&project);
+            ids = unhandled(&project).into_iter().filter(|i| !seen.contains(&i.id)).map(|i| i.id).collect();
+        }
+        if !ids.is_empty() {
+            println!("{}", serde_json::json!({"items": ids.len(), "ids": ids}));
+            return Ok(());
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            println!("{}", serde_json::json!({"items":0,"timed_out":true}));
+            return Ok(());
+        }
+        std::thread::sleep(crate::timing::retry(std::time::Duration::from_secs(2)).min(remaining));
+    }
+}

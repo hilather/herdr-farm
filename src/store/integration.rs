@@ -904,6 +904,10 @@ fn apply_finish(
                 },
             )?;
         }
+        let (task, attempt, submission): (String, String, String) = tx.query_row(
+            "SELECT s.task_id,s.attempt_id,s.submission_id FROM verified_results r JOIN result_submissions s ON s.submission_id=r.submission_id WHERE r.result_id=?1",
+            [&view.verified_result_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+        super::inbox::result_notice(tx, if state == "integrated" { "integration.succeeded" } else { "integration.failed" }, &format!("{operation_id}:{outcome_revision}"), &task, &attempt, &format!("{submission} / {}", view.verified_result_id), reason.unwrap_or(""))?;
         Ok(())
 }
 
