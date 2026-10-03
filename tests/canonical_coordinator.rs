@@ -264,7 +264,11 @@ fn socket_open_primes_owned_coordinator_retries_swallowed_prompt_and_recreates_c
         serde_json::to_vec(&state).unwrap(),
     )
     .unwrap();
+    l.ok(&["ticker", "start"]);
+    let reopening = std::time::Instant::now();
     let reopened = l.settled(&["open", "demo", "--reprime"]);
+    assert!(reopening.elapsed() < std::time::Duration::from_secs(5),
+        "foreground reprime starved while ticker was running: {:?}", reopening.elapsed());
     assert!(reopened.status.success(), "{}", String::from_utf8_lossy(&reopened.stderr));
     l.stop();
     let state = l.state();

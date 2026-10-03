@@ -158,7 +158,11 @@ fn fence(dir: &Path, ctx: &Ctx, j: &Journal) -> Result<()> {
 pub fn open(ctx: &Ctx, slug: &str, options: &OpenOptions) -> Result<()> {
     project::validate_slug(slug)?;
     let dir = ctx.root.join(slug).canonicalize()?;
-    let guard = herdr_farm::execution_guard::RootGuard::exclusive(&ctx.root)?;
+    // Retain operator intent across the short root publication section. The
+    // project guard excludes background effects during native I/O without
+    // excluding foreground commands in other projects.
+    let _intent = herdr_farm::execution_guard::CoordinatorOpenGuard::acquire(&dir)?;
+    let guard = herdr_farm::execution_guard::ProjectGuard::acquire(&dir)?;
     let snapshot = runtime::snapshot(&dir).context(
         "legacy runtime is disabled; canonical coordinator requires an active migrated store",
     )?;
@@ -294,7 +298,7 @@ pub fn open(ctx: &Ctx, slug: &str, options: &OpenOptions) -> Result<()> {
             "relinquish owned resources before rebinding; existing references are retained"
         );
         let head = runtime::record_observations_held(&dir, &batch)?;
-        runtime::relinquish(&dir, &b.id, owned.revision, head,
+        runtime::relinquish_held(&dir, &b.id, owned.revision, head, &guard,
             "open --reprime replaces freshly observed absent coordinator")?;
     }
     if journal.is_none() {
@@ -383,6 +387,21 @@ pub fn open(ctx: &Ctx, slug: &str, options: &OpenOptions) -> Result<()> {
     );
     fence(&dir, ctx, &j)?;
     let current = runtime::snapshot(&dir)?;
+    if current.runtime_bindings.iter().any(|b|
+        b.id == "coordinator" && RuntimeRoute::from_identity(&b.identity) != j.route)
+    {
+        let batch = crate::reconcile_live::collect(ctx, &dir)?;
+        runtime::record_observations_held(&dir, &batch)?;
+    }
+    // Never upgrade shared ownership. Only root-wide conflict validation and
+    // binding publication require exclusivity; no native calls or waits here.
+    drop(guard);
+    let root_guard = herdr_farm::execution_guard::RootGuard::exclusive_by(
+        &ctx.root,
+        Instant::now() + timing::job_retry(),
+        &crate::runner::Cancellation::default(),
+    )?;
+    let current = runtime::snapshot(&dir)?;
     crate::runtime_ownership::check_conflicts(
         ctx,
         &dir,
@@ -396,23 +415,15 @@ pub fn open(ctx: &Ctx, slug: &str, options: &OpenOptions) -> Result<()> {
             ..Default::default()
         },
     )?;
-    let old_route_changed = current
-        .runtime_bindings
-        .iter()
-        .any(|b| b.id == "coordinator" && RuntimeRoute::from_identity(&b.identity) != j.route);
-    let head = if old_route_changed {
-        let batch = crate::reconcile_live::collect(ctx, &dir)?;
-        runtime::record_observations_held(&dir, &batch)?
-    } else {
-        current.head
-    };
     runtime::bind_coordinator_held(
         &dir,
-        head,
+        current.head,
         &j.route,
         options.reprime || j.replace_missing,
-        &guard,
+        &root_guard,
     )?;
+    drop(root_guard);
+    let guard = herdr_farm::execution_guard::ProjectGuard::acquire(&dir)?;
     let agents = call(&h, "coordinator-start-inventory", "agent.list", json!({}))?;
     let matching = agents["agents"]
         .as_array()

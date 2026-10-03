@@ -184,6 +184,17 @@ impl ProjectGuard {
     }
 }
 
+/// Foreground coordinator intent survives release of project ownership for
+/// root-wide binding publication. Background project effects never own it.
+pub struct CoordinatorOpenGuard { _file: LockFile }
+impl CoordinatorOpenGuard {
+    pub fn acquire(project: &Path) -> Result<Self> {
+        let project = project.canonicalize()?;
+        ensure!(std::fs::symlink_metadata(project.join(".state"))?.is_dir(), "project state must be a real directory");
+        Ok(Self { _file: exclusive_file(&project.join(".state/coordinator-open.lock"))? })
+    }
+}
+
 /// An exclusive resource fence held beside project or root ownership.
 pub struct Fence {_file:LockFile}
 fn fence_file(root:&Path,resource:&Resource)->Result<LockFile> {
