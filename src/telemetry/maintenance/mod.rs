@@ -131,6 +131,8 @@ pub const CLASSES: &[Class] = &[
         basis: "source_of_truth", destructive: true, action: Action::Prune, age_from: "file modification time", requires: "external export enabled with a directory destination; a project override may only shorten it" },
     Class { id: "optin.captured_evidence", store: "-", scope: "opt-in content capture", default_days: Some(7), basis: "source_of_truth", destructive: true, action: Action::NotBuilt,
         age_from: "-", requires: "no capture store exists (contracts §7)" },
+    Class { id: "canonical.worker_permissions", store: "<project>/.state/worker-permissions.json", scope: "worker command grants, owner requests and decisions, restart obligations and provenance",
+        default_days: None, basis: "canonical", destructive: true, action: Action::External, age_from: "-", requires: "project lifecycle; whole-project backup; telemetry never writes or deletes it" },
     Class { id: "canonical.state", store: "<project>/.state/state.db", scope: "workflow history, dispatch decisions, accepted usage/budget and quality evidence including verification run load/test metadata, seeded-defect and replay registries",
         default_days: None, basis: "canonical", destructive: true, action: Action::External, age_from: "-", requires: "canonical lifecycle; telemetry never writes or deletes it" },
     Class { id: "canonical.coordinator_journal", store: "<project>/.state/canonical-coordinator.json", scope: "version 1 coordinator layout/start/prime effect intent and acceptance receipt",

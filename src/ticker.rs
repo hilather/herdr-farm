@@ -1040,7 +1040,7 @@ fn launch_pass(ctx: &Ctx, project: &Project, herdr: &Herdr, threads: &[thread::T
         }
         let launched = (|| -> Result<()> {
             let safety = project.safety(&ctx.config_dir)?;
-            let agent_args=crate::agents::worker_arguments(&safety,t,ctx.runner)?;
+            let agent_args=crate::agents::worker_arguments(project,&safety,t,ctx.runner)?;
             *may_start=false;
             thread::update(project, &t.id, |t| t.launch_attempts += 1)?;
             herdr.on_machine(&t.machine).agent_start(&t.agent_name, &t.agent, &t.pane_id, &agent_args)?;
@@ -1268,6 +1268,7 @@ fn tick_slow(ctx: &Ctx, project: &Project, seen: &Seen, memory: &mut Memory) -> 
     errors.extend(crate::legacy_routine_jobs::deliver(project,&mut state).err());
     if let Some(error) = &seen.notification_error { errors.push(anyhow::anyhow!("{error}")); }
     let herdr = Herdr::new(ctx.env.herdr_bin(), &seen.socket, ctx.runner);
+    errors.extend(crate::worker_permissions::restart_pass(ctx, project, &herdr).err());
     let now = jiff::Timestamp::now();
     let mut may_start = true;
     let mut transitions = seen.transitions.clone();

@@ -35,6 +35,7 @@ mod canonical_verification_jobs;
 mod canonical_integration_jobs;
 mod actions;
 mod agents;
+mod worker_permissions;
 mod artifacts;
 #[cfg(all(feature = "state-store", target_os = "linux"))]
 use herdr_farm::source_tree;

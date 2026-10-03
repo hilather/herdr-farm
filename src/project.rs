@@ -207,9 +207,13 @@ pub struct Safety {
     pub thread_agent_args: Vec<String>,
     pub thread_agent_args_kind: Option<String>,
     pub thread_allowed_commands: Vec<String>,
+    pub worker_permissions: String,
+    pub grantable_commands: Vec<String>,
     pub thread_network: bool,
     #[serde(skip)]
     pub thread_agent_args_explicit: bool,
+    #[serde(skip)]
+    pub active_worker_grants: Vec<String>,
     pub routine_commands: bool,
 }
 
@@ -229,7 +233,14 @@ impl Safety {
     pub fn worker_arguments(&self,kind:&str)->Result<&[String]> {crate::agents::arguments(kind,self.thread_agent_args_kind.as_deref(),&self.thread_agent_args,"thread_agent_args")}
     pub fn effective_worker_arguments(&self, kind: &str, cwd: &str, repository: &str) -> Result<Vec<String>> {
         let explicit = self.worker_arguments(kind)?;
-        if self.thread_agent_args_explicit || !explicit.is_empty() { return Ok(explicit.to_vec()); }
+        if self.thread_agent_args_explicit || !explicit.is_empty() {
+            let mut args = explicit.to_vec();
+            if kind == "claude" && !self.active_worker_grants.is_empty() {
+                args.push("--allowedTools".into());
+                args.extend(self.active_worker_grants.iter().map(|prefix| format!("Bash({prefix})")));
+            }
+            return Ok(args);
+        }
         let mut args = Vec::new();
         match kind {
             "codex" => {
@@ -254,7 +265,7 @@ impl Safety {
         }
         Ok(args)
     }
-    fn validate_thread_allowed_commands(&self) -> Result<()> {
+    pub(crate) fn validate_thread_allowed_commands(&self) -> Result<()> {
         anyhow::ensure!(self.thread_allowed_commands.len() <= 64, "thread_allowed_commands accepts at most 64 entries");
         for command in &self.thread_allowed_commands {
             let prefix = command.strip_suffix(":*").unwrap_or("");
@@ -301,8 +312,11 @@ impl Default for Safety {
             thread_agent_args: Vec::new(),
             thread_agent_args_kind: None,
             thread_allowed_commands: Vec::new(),
+            worker_permissions: "coordinator".into(),
+            grantable_commands: Vec::new(),
             thread_network: false,
             thread_agent_args_explicit: false,
+            active_worker_grants: Vec::new(),
             routine_commands: false,
         }
     }
@@ -484,7 +498,10 @@ pub fn parse_safety(text:&str,canonical_project_dir:&Path)->Result<Safety> {
     }
     anyhow::ensure!(matches!(safety.cleanup_resolved.as_str(), "auto" | "keep"), "cleanup_resolved must be auto or keep");
     anyhow::ensure!(matches!(safety.resolve_threads.as_str(), "propose" | "auto"), "resolve_threads must be propose or auto");
+    anyhow::ensure!(matches!(safety.worker_permissions.as_str(), "coordinator" | "owner"), "worker_permissions must be coordinator or owner");
     safety.validate_thread_allowed_commands()?;
+    let extras = Safety { thread_allowed_commands: safety.grantable_commands.clone(), ..Safety::default() };
+    extras.validate_thread_allowed_commands().context("invalid grantable_commands")?;
     Ok(safety)
 }
 

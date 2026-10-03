@@ -199,3 +199,242 @@ fn claude_command_prefixes_are_validated_and_visible_through_cli() {
         assert!(error.contains("thread_allowed_commands"), "{error}");
     }
 }
+
+/// Public permission workflow: committed target scripts, interpreter narrowing,
+/// owner policy, escalation inbox, attribution, rejection and revocation.
+#[test]
+fn coordinator_permissions_follow_target_and_owner_policy() {
+    use std::io::Write;
+    use std::process::Stdio;
+    let home = Home::new();
+    let repo = home.0.path().join("repo");
+    fs::create_dir(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", home.0.path())
+            .args(["-C", repo.to_str().unwrap()])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["config", "user.name", "Fixture"]);
+    git(&["config", "user.email", "fixture@example.invalid"]);
+    fs::create_dir(repo.join("tools")).unwrap();
+    fs::write(repo.join("tools/run-tests.sh"), "#!/bin/sh\nexit 0\n").unwrap();
+    fs::write(repo.join("tools/check.py"), "print('checked')\n").unwrap();
+    fs::write(repo.join("-c"), "print('fixture')\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "reviewed scripts"]);
+    let blob = git(&["rev-parse", "main:tools/run-tests.sh"]);
+    home.ok(&["new", "demo", "--repo", repo.to_str().unwrap()]);
+    let project = home.root().join("demo");
+    let grant = |prefix: &str| {
+        home.ok(&[
+            "safety",
+            "grant",
+            "demo",
+            "--allow",
+            prefix,
+            "--reason",
+            "worker blocked on test",
+        ])
+    };
+    assert!(grant("tools/run-tests.sh:*").starts_with("granted permission-1"));
+    assert!(grant("python3 tools/check.py:*").starts_with("granted permission-2"));
+    assert!(grant("python3:*").starts_with("requested permission-3"));
+    assert!(grant("curl:*").starts_with("requested permission-4"));
+    assert!(grant("cargo test:*").starts_with("granted permission-5"));
+    let shown = home.ok(&["safety", "show", "demo"]);
+    assert!(
+        shown.contains("worker_permissions = \"coordinator\"")
+            && shown.contains("source=coordinator")
+            && shown.contains("committed project script")
+            && shown.contains(blob.trim()),
+        "{shown}"
+    );
+    assert!(
+        home.ok(&["safety", "requests", "demo"])
+            .contains("permission-3\tpython3:*")
+    );
+    assert!(
+        home.ok(&["context", "demo"])
+            .contains("Owner permission requested: curl:*")
+    );
+    assert!(
+        home.refused(&["safety", "approve", "demo", "permission-3"])
+            .contains("owner at a terminal")
+    );
+    assert!(
+        home.refused(&["safety", "revoke", "demo", "tools/run-tests.sh:*"])
+            .contains("owner at a terminal")
+    );
+    // A real owner terminal exercises the same interactive entry point used in production.
+    let owner = |args: &[&str], confirmation: &str| {
+        let quote = |text: &str| format!("'{}'", text.replace('\'', "'\\''"));
+        let root = home.root();
+        let command = std::iter::once(BIN)
+            .chain(["--root", root.to_str().unwrap()])
+            .chain(args.iter().copied())
+            .map(quote)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut child = Command::new("script")
+            .env_clear()
+            .env("HOME", home.0.path())
+            .env("PATH", "/usr/bin:/bin")
+            .env(
+                "HERDR_FARM_TEST_TIME_SCALE",
+                include_str!("support/time-scale.txt").trim(),
+            )
+            .args(["-q", "-e", "-c", &command, "/dev/null"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        writeln!(child.stdin.take().unwrap(), "{confirmation}").unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "owner {args:?}: {} {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    owner(
+        &["safety", "approve", "demo", "permission-3"],
+        "permission-3",
+    );
+    let approved = home.ok(&["safety", "show", "demo"]);
+    assert!(approved.contains("granted python3:*") && approved.contains("decision=owner:terminal"));
+    owner(
+        &[
+            "safety",
+            "reject",
+            "demo",
+            "permission-4",
+            "--reason",
+            "network forbidden",
+        ],
+        "permission-4",
+    );
+    assert!(!home.ok(&["safety", "requests", "demo"]).contains("curl:*"));
+    fs::write(
+        repo.join("tools/run-tests.sh"),
+        "#!/bin/sh\n# merged update\nexit 0\n",
+    )
+    .unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "merged script change"]);
+    let effective = home.ok(&["safety", "show", "demo"]);
+    assert!(
+        effective
+            .lines()
+            .find(|l| l.contains("effective worker arguments:"))
+            .unwrap()
+            .contains("Bash(tools/run-tests.sh:*)")
+    );
+    fs::remove_file(repo.join("tools/run-tests.sh")).unwrap();
+    git(&["add", "-u"]);
+    git(&["commit", "-qm", "remove merged script"]);
+    let effective = home.ok(&["safety", "show", "demo"]);
+    assert!(
+        !effective
+            .lines()
+            .find(|l| l.contains("effective worker arguments:"))
+            .unwrap()
+            .contains("Bash(tools/run-tests.sh:*)")
+    );
+    owner(
+        &["safety", "revoke", "demo", "tools/run-tests.sh:*"],
+        "tools/run-tests.sh:*",
+    );
+    assert!(
+        home.ok(&["safety", "show", "demo"])
+            .contains("revoked tools/run-tests.sh:*")
+    );
+    assert!(grant("python3 -c:*").starts_with("requested"));
+    let md = fs::read_to_string(project.join("PROJECT.md")).unwrap();
+    fs::write(
+        project.join("PROJECT.md"),
+        md.replacen("+++\n", "+++\nintegration_target = 'main'\n", 1),
+    )
+    .unwrap();
+    git(&["checkout", "-qb", "worker"]);
+    fs::write(repo.join("tools/worker-only.sh"), "exit 0\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "worker only"]);
+    assert!(grant("tools/worker-only.sh:*").starts_with("requested"));
+    let config = home.0.path().join(".config/herdr-farm/config.toml");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    fs::write(
+        &config,
+        format!(
+            "[safety.{:?}]\nworker_permissions='owner'\n",
+            project.display().to_string()
+        ),
+    )
+    .unwrap();
+    assert!(grant("cargo check:*").starts_with("requested"));
+    assert!(grant("python3 tools/check.py:*").starts_with("granted")); // existing grants survive policy edits
+    let before = fs::read(&config).unwrap();
+    assert!(grant("tools/check.py:*").starts_with("requested"));
+    assert_eq!(
+        fs::read(&config).unwrap(),
+        before,
+        "grant rewrote owner policy"
+    );
+    fs::write(
+        &config,
+        format!(
+            "[safety.{:?}]\ngrantable_commands=['custom-check:*','curl:*','python3:*','git:*']\n",
+            project.display().to_string()
+        ),
+    )
+    .unwrap();
+    assert!(grant("custom-check:*").starts_with("granted"));
+    assert!(grant("curl:*").starts_with("requested"));
+    assert!(grant("bash:*").starts_with("requested"));
+    assert!(grant("git:*").starts_with("requested"));
+    assert!(grant("echo ok; curl evil:*").starts_with("requested"));
+    assert!(grant("/tmp/outside:*").starts_with("requested"));
+    fs::write(&config,format!("[safety.{:?}]\nthread_agent_args=['--vendor-option']\nthread_agent_args_kind='claude'\n",project.display().to_string())).unwrap();
+    let explicit = home.ok(&["safety", "show", "demo"]);
+    let arguments = explicit
+        .lines()
+        .find(|line| line.contains("effective worker arguments:"))
+        .unwrap();
+    assert!(arguments.contains("--vendor-option") && arguments.contains("Bash(custom-check:*)"));
+    fs::write(
+        &config,
+        format!(
+            "[safety.{:?}]\nworker_permissions='invalid'\n",
+            project.display().to_string()
+        ),
+    )
+    .unwrap();
+    assert!(
+        home.refused(&["safety", "show", "demo"])
+            .contains("worker_permissions")
+    );
+    let state: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(project.join(".state/worker-permissions.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        state["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["status"] == "rejected" && r["decision_reason"] == "network forbidden")
+    );
+}

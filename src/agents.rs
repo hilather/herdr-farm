@@ -17,7 +17,7 @@ pub fn arguments<'a>(kind:&str,bound_kind:Option<&str>,args:&'a [String],setting
 fn valid_kind(kind:&str)->Result<()> {ensure!(!kind.is_empty()&&kind.len()<=64&&kind.as_bytes()[0].is_ascii_alphabetic()&&kind.bytes().all(|c|c.is_ascii_alphanumeric()||b"_-".contains(&c)),"invalid agent kind identifier");Ok(())}
 
 /// Resolve the launch's main repository without consulting agent configuration.
-pub fn worker_arguments(safety: &crate::project::Safety, t: &crate::thread::Thread, runner: &dyn crate::runner::Runner) -> Result<Vec<String>> {
+pub fn worker_arguments(project: &crate::project::Project, safety: &crate::project::Safety, t: &crate::thread::Thread, runner: &dyn crate::runner::Runner) -> Result<Vec<String>> {
     let mut repository = t.repo.clone();
     if t.agent == "codex" && t.machine.is_empty() && !safety.thread_agent_args_explicit && safety.thread_agent_args.is_empty() {
         let out = runner.run(&crate::runner::Cmd::new("git", std::time::Duration::from_secs(10)).args(["-C", &t.cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"]))?;
@@ -30,6 +30,7 @@ pub fn worker_arguments(safety: &crate::project::Safety, t: &crate::thread::Thre
             }
         }
     }
+    let safety = crate::worker_permissions::effective(project, safety, &t.repo, &t.cwd, runner)?;
     safety.effective_worker_arguments(&t.agent, &t.cwd, &repository)
 }
 

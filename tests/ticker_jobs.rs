@@ -40,6 +40,9 @@ elif args==['--version']:print('herdr 0.9.1')
 elif args==['remote-api-bridge','--check']:print('unsupported' if mode=='unsupported' else 'herdr-api-bridge-v1')
 elif args==['agent','list']:print(json.dumps({'result':{'agents':read('agents')}}))
 elif args==['pane','list']:print(json.dumps({'result':{'panes':read('panes')}}))
+elif args[:2]==['agent','send-keys']:
+    (home/f'{name}.agents').write_text(json.dumps([a for a in read('agents') if a['pane_id']!=args[2]]))
+    print('{"result":{}}')
 elif request is not None and request['method'] in ('agent.list','pane.list'):
     kind=request['method'].split('.')[0]+'s';print(json.dumps({'id':request['id'],'result':{kind:read(kind)}}))
 elif request is not None and request['method']=='notification.show':print(json.dumps({'id':request['id'],'result':{'type':'notification_show','shown':True,'reason':'shown'}}))
@@ -54,6 +57,9 @@ elif request is not None:
         with open(home/'starts','a') as f:f.write(json.dumps(params)+'\n')
     if request['method']=='agent.prompt':agent=next(a for a in read('agents') if a['pane_id']==params['target'])
     else:agent=dict(next(p for p in read('panes') if p['pane_id']==params['pane_id']),name=params['name'],launch_pending=True,agent_status='unknown',agent=None if mode=='null' else params['kind'])
+    if request['method']=='agent.start' and (home/f'{name}.persist-start').exists():
+        agent['agent_status']='idle';agent['launch_pending']=False
+        (home/f'{name}.agents').write_text(json.dumps(read('agents')+[agent]))
     kind={'agent.prompt':'agent_prompted','agent.start':'agent_started'}[request['method']]
     print(json.dumps({'id':request['id'],'result':{'type':kind,'agent':agent,'argv':[params.get('kind', 'claude')]+params.get('args', [])}}))
 elif args[:2] in (['agent','prompt'],['agent','start']):print('{"error":{"code":"unsupported","message":"synchronous effect"}}');sys.exit(2)
@@ -596,4 +602,229 @@ fn a_due_legacy_routine_is_claimed_once_and_delivered_after_its_command_ends() {
     assert_eq!(items.len(), 1);
     assert!(items[0].contains("routine-result"), "{}", items[0]);
     assert_eq!(routine()["last_run"], running["last_run"]);
+}
+
+/// Grants and owner decisions restart a blocked worker through the public
+/// ticker, keeping dirty files and branch; revocation changes the next argv.
+#[test]
+fn worker_permission_grants_restart_preserving_work_and_revoke_next_start() {
+    use std::io::Write;
+    let mut lab = Lab::new();
+    let project = lab.project_in_session("demo", json!({"prime_pending":false}));
+    let repo = lab.path("repo");
+    let work = lab.path("work");
+    fs::create_dir(&repo).unwrap();
+    let git = |path: &Path, args: &[&str]| {
+        let out = Command::new("git")
+            .env_clear()
+            .env("HOME", lab.home.path())
+            .env("PATH", "/usr/bin:/bin")
+            .env("GIT_AUTHOR_NAME", "Fixture")
+            .env("GIT_AUTHOR_EMAIL", "fixture@example.invalid")
+            .env("GIT_COMMITTER_NAME", "Fixture")
+            .env("GIT_COMMITTER_EMAIL", "fixture@example.invalid")
+            .arg("-C")
+            .arg(path)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    };
+    git(&repo, &["init", "-qb", "main"]);
+    fs::create_dir(repo.join("tools")).unwrap();
+    fs::write(repo.join("tools/run-tests.sh"), "#!/bin/sh\nexit 0\n").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-qm", "reviewed test"]);
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-qb",
+            "worker",
+            work.to_str().unwrap(),
+            "main",
+        ],
+    );
+    fs::write(work.join("dirty.txt"), "uncommitted owner work\n").unwrap();
+    let md = fs::read_to_string(project.join("PROJECT.md")).unwrap();
+    let (front, body) = md
+        .strip_prefix("+++\n")
+        .unwrap()
+        .split_once("\n+++\n")
+        .unwrap();
+    let mut settings: toml::Value = toml::from_str(front).unwrap();
+    settings["repos"] = toml::Value::try_from(json!([{"path":repo}])).unwrap();
+    fs::write(
+        project.join("PROJECT.md"),
+        format!("+++\n{}+++\n{body}", toml::to_string(&settings).unwrap()),
+    )
+    .unwrap();
+    fs::write(project.join("threads/t-0001.toml"),toml::to_string(&json!({"id":"t-0001","title":"task","status":"open","kind":"worktree","created":jiff::Timestamp::now().to_string(),"agent":"claude","agent_name":"hp-demo-t-0001","workspace_id":"w","tab_id":"w:t","pane_id":"pw","cwd":work,"repo":repo,"branch":"worker","worktree_path":work,"thread_dir":work.join(".herdr-project/demo-t-0001"),"prompt_pending":false})).unwrap()).unwrap();
+    fs::write(project.join("threads/t-0001.task.md"), "Run the tests.").unwrap();
+    let session = |status: &str| {
+        lab.session(
+            "demo",
+            &[
+                agent_at("p", &project, "coordinator", "idle"),
+                agent_at("pw", &work, "hp-demo-t-0001", status),
+            ],
+            &[pane_at("p", &project), pane_at("pw", &work)],
+        )
+    };
+    session("blocked");
+    lab.set("demo.persist-start", Some("yes"));
+    assert!(
+        lab.ok(&[
+            "safety",
+            "grant",
+            "demo",
+            "--allow",
+            "tools/run-tests.sh:*",
+            "--reason",
+            "test blocked"
+        ])
+        .starts_with("granted")
+    );
+    let record = || -> toml::Value {
+        toml::from_str(&fs::read_to_string(project.join("threads/t-0001.toml")).unwrap()).unwrap()
+    };
+    let starts = || -> Vec<Value> {
+        fs::read_to_string(lab.path("starts"))
+            .unwrap_or_default()
+            .lines()
+            .map(|s| serde_json::from_str(s).unwrap())
+            .collect()
+    };
+    {
+        let mut ticker = lab.run_ticker(&[]);
+        ticker.wait_for("permission restart and brief", 120, || {
+            starts().len() == 1 && record()["prompt_pending"].as_bool() == Some(false)
+        });
+        ticker.next_pass();
+        ticker.next_pass();
+        ticker.stop();
+    }
+    assert!(
+        starts()[0]["args"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("Bash(tools/run-tests.sh:*)"))
+    );
+    assert_eq!(record()["lifecycle_generation"].as_integer(), Some(1));
+    assert_eq!(
+        fs::read_to_string(work.join("dirty.txt")).unwrap(),
+        "uncommitted owner work\n"
+    );
+    assert_eq!(git(&work, &["branch", "--show-current"]).trim(), "worker");
+    assert!(
+        lab.ok(&["context", "demo"])
+            .contains("Permission restart t-0001: restarted")
+    );
+    assert!(
+        lab.ok(&["thread", "list", "demo"])
+            .contains("restarted for permission-1")
+    );
+    let owner = |args: &[&str], confirmation: &str| {
+        let root = lab.root();
+        let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+        let command = std::iter::once(BIN)
+            .chain(["--root", root.to_str().unwrap()])
+            .chain(args.iter().copied())
+            .map(quote)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut child = Command::new("script")
+            .env_clear()
+            .env("HOME", lab.home.path())
+            .env("PATH", "/usr/bin:/bin")
+            .env("HERDR_BIN_PATH", &lab.fake)
+            .env(
+                "HERDR_FARM_TEST_TIME_SCALE",
+                include_str!("support/time-scale.txt").trim(),
+            )
+            .args(["-q", "-e", "-c", &command, "/dev/null"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        writeln!(child.stdin.take().unwrap(), "{confirmation}").unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    assert!(
+        lab.ok(&["safety", "grant", "demo", "--allow", "python3:*"])
+            .starts_with("requested permission-2")
+    );
+    owner(
+        &["safety", "approve", "demo", "permission-2"],
+        "permission-2",
+    );
+    // Working agents are not interrupted; two grants are one pending batch.
+    session("working");
+    assert!(
+        lab.ok(&["safety", "grant", "demo", "--allow", "cargo check:*"])
+            .starts_with("granted")
+    );
+    {
+        let mut ticker = lab.run_ticker(&[]);
+        ticker.next_pass();
+        ticker.next_pass();
+        ticker.stop();
+    }
+    assert_eq!(starts().len(), 1);
+    session("idle");
+    {
+        let mut ticker = lab.run_ticker(&[]);
+        ticker.wait_for("approved permission restart", 120, || {
+            starts().len() == 2 && record()["prompt_pending"].as_bool() == Some(false)
+        });
+        ticker.next_pass();
+        ticker.stop();
+    }
+    assert_eq!(record()["lifecycle_generation"].as_integer(), Some(2));
+    assert!(
+        starts()[1]["args"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("Bash(python3:*)"))
+    );
+    owner(
+        &["safety", "revoke", "demo", "tools/run-tests.sh:*"],
+        "tools/run-tests.sh:*",
+    );
+    // A later grant creates the next real start, whose argv excludes the revoked rule.
+    assert!(
+        lab.ok(&["safety", "grant", "demo", "--allow", "cargo build:*"])
+            .starts_with("granted")
+    );
+    {
+        let mut ticker = lab.run_ticker(&[]);
+        ticker.wait_for("start after revocation", 120, || {
+            starts().len() == 3 && record()["prompt_pending"].as_bool() == Some(false)
+        });
+        ticker.next_pass();
+        ticker.stop();
+    }
+    assert!(
+        !starts()[2]["args"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("Bash(tools/run-tests.sh:*)"))
+    );
+    assert_eq!(
+        fs::read_to_string(work.join("dirty.txt")).unwrap(),
+        "uncommitted owner work\n"
+    );
 }

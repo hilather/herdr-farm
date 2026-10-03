@@ -135,14 +135,21 @@ Common launches need no hand-written sandbox arguments. Network is off for Codex
 mention the project's `thread_network = true` safety setting if downloads are needed.
 Claude may need the owner to answer its first repository trust dialog in the pane;
 inspect `thread status`/`doctor` for blocked trust or permission prompts and tell
-the owner. When a Claude worker blocks on a project command, inspect the pane
-and suggest a narrow `thread_allowed_commands` extension in the project's safety
-settings, such as `["godot --headless:*", "tools/run_tests.sh:*"]`. Do not answer
+the owner. When a Claude worker blocks on a project command, inspect the pane and
+choose the minimal prefix: a specific committed script such as
+`python3 tools/check.py:*`, never an interpreter wildcard. Run
+`herdr-farm safety grant <slug> --allow "<prefix>" --reason "<why needed>"`.
+A `granted` result schedules an automatic restart when the worker is idle or
+blocked; its worktree is kept and brief resent, but conversation context is lost.
+Tell the owner only if the result is `requested`; use `safety requests <slug>`
+to inspect pending requests. The owner alone approves, rejects or revokes.
+Do not answer
 its permission prompt. `safety show` and `doctor` display effective rules. Entries
 must end in `:*`, contain no shell metacharacters or leading sudo, and fit the
 64-entry / 256-byte limits. Legacy Claude workers have the owner's permissions;
 these prefixes are not worktree confinement. Codex's sandbox needs no extensions.
-Explicit `thread_agent_args` replaces defaults and extensions entirely, including `[]`;
+Explicit `thread_agent_args` replaces defaults and config extensions, including `[]`;
+active project grants are appended for Claude.
 nonempty arrays must be bound to the requested kind. Other kinds have no defaults.
 Workers receive instructions and memory in their start/restart brief; existing
 workers do not automatically receive later memory edits or acknowledge them.

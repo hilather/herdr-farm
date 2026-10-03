@@ -693,6 +693,16 @@ enum RoutineCommand {
 enum SafetyCommand {
     /// Print the effective safety settings and the config.toml table to edit
     Show { slug: String },
+    /// Grant a narrow worker command or request owner approval
+    Grant { slug: String, #[arg(long)] allow: String, #[arg(long, default_value="")] reason: String },
+    /// List permission requests (read-only)
+    Requests { slug: String },
+    /// Approve a request (owner at a terminal)
+    Approve { slug: String, id: String },
+    /// Reject a request (owner at a terminal)
+    Reject { slug: String, id: String, #[arg(long)] reason: String },
+    /// Revoke a grant (owner at a terminal)
+    Revoke { slug: String, prefix: String },
 }
 
 #[derive(Subcommand)]
@@ -2008,6 +2018,17 @@ pub fn run() -> Result<()> {
         Command::Action { id } => actions::run_action(&ctx, &id),
         Command::Pane { id } => actions::run_pane(&ctx, &id),
         Command::Safety { command } => match command {
+            SafetyCommand::Grant { slug, allow, reason } => crate::worker_permissions::grant(&ctx, &slug, &allow, &reason),
+            SafetyCommand::Requests { slug } => {
+                let project = Project::load(&ctx.root, &slug)?;
+                for request in crate::worker_permissions::load(&project)?.records.iter().filter(|r|r.status=="requested") {
+                    println!("{}\t{}\t{}", request.id, request.prefix, request.reason);
+                }
+                Ok(())
+            },
+            SafetyCommand::Approve { slug, id } => crate::worker_permissions::decide(&ctx, &slug, &id, true, ""),
+            SafetyCommand::Reject { slug, id, reason } => crate::worker_permissions::decide(&ctx, &slug, &id, false, &reason),
+            SafetyCommand::Revoke { slug, prefix } => crate::worker_permissions::revoke(&ctx, &slug, &prefix),
             SafetyCommand::Show { slug } => {
                 let project = Project::load(&ctx.root, &slug)?;
                 let safety = project.safety(&ctx.config_dir)?;
@@ -2021,8 +2042,13 @@ pub fn run() -> Result<()> {
                 println!("  cleanup_resolved = {:?}", safety.cleanup_resolved);
                 println!("  resolve_threads = {:?}", safety.resolve_threads);
                 println!("  thread_allowed_commands = {:?}", safety.thread_allowed_commands);
+                println!("  worker_permissions = {:?}", safety.worker_permissions);
+                println!("  grantable_commands = {:?}", safety.grantable_commands);
+                println!("  config thread_allowed_commands: {:?}", safety.thread_allowed_commands);
+                crate::worker_permissions::show(&project)?;
                 println!("  thread_network = {}", safety.thread_network);
-                println!("  effective worker arguments: {}", safety.worker_summary());
+                println!("  built-in defaults: {}", crate::project::Safety::default().worker_summary());
+                println!("  effective worker arguments: {}", crate::worker_permissions::summary(&project, &safety, ctx.runner)?);
                 println!();
                 println!("To change one, edit {} by hand and add:", ctx.config_dir.join("config.toml").display());
                 println!();

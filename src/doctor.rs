@@ -390,7 +390,10 @@ fn report(
         };
         if let Err(error) = project.try_status() { check(&mut out, Some(false), &label, format!("lifecycle record: {error:#}")); }
         match project.safety(config_dir) {
-            Ok(safety) => check(&mut out, None, &label, format!("effective worker arguments: {}", safety.worker_summary())),
+            Ok(safety) => match crate::worker_permissions::summary(&project, &safety, runner) {
+                Ok(summary) => check(&mut out, None, &label, format!("effective worker arguments: {summary}")),
+                Err(error) => check(&mut out, Some(false), &label, format!("worker permissions: {error:#}")),
+            },
             Err(e) => check(&mut out, Some(false), &label, format!("safety: {e}")),
         }
         for t in crate::thread::list(&project) {
