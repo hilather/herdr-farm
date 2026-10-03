@@ -42,7 +42,7 @@ impl Planted {
         db
     }
     fn command_in(&self, slug: &str, args: &[&str]) -> std::process::Output {
-        Command::new(BIN).env_clear().env("HOME", self.home()).env("PATH", "/usr/bin:/bin")
+        Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.home()).env("PATH", "/usr/bin:/bin")
             .args(["--root", self.root.to_str().unwrap(), "telemetry", slug]).args(args).output().unwrap()
     }
     fn raw_in(&self, slug: &str, args: &[&str]) -> Vec<u8> {

@@ -20,7 +20,7 @@ const DAY: i64 = 86_400_000;
 
 fn command(f: &Fixture, args: &[&str], path: Option<&str>, cwd: Option<&Path>) -> std::process::Output {
     let mut command = Command::new(BIN);
-    command.env_clear().env("HOME", f.tmp.path().join("home")).env("PATH", path.unwrap_or("/usr/bin:/bin"))
+    command.env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", f.tmp.path().join("home")).env("PATH", path.unwrap_or("/usr/bin:/bin"))
         .args(["--root", f.root.to_str().unwrap(), "telemetry", "demo"]).args(args);
     if let Some(cwd) = cwd { command.current_dir(cwd); }
     command.output().unwrap()
@@ -583,7 +583,7 @@ fn a_spool_retired_before_ingestion_is_reported_not_lost() {
     fs::create_dir_all(&spool).unwrap();
     let document = f.tmp.path().join("result.json");
     fs::write(&document, format!("{{\"attempt_id\":\"{}\"}}", f.attempt)).unwrap();
-    let worker = Command::new(BIN).env_clear().env("HOME", f.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
+    let worker = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", f.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
         .env("HERDR_PROJECTS_SUBMISSION_SPOOL", &spool).args(["--root", f.root.to_str().unwrap(), "result", "demo", "submit", "--input-file", document.to_str().unwrap()])
         .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);

@@ -13,7 +13,7 @@ fn script(path: &Path, body: &str) {
 }
 
 fn doctor(home: &Path, root: &Path) -> (Output, String) {
-    let out = Command::new(BIN).env_clear().env("HOME", home).env("PATH", format!("{}:/usr/bin:/bin", home.join("bin").display()))
+    let out = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", home).env("PATH", format!("{}:/usr/bin:/bin", home.join("bin").display()))
         .env("HERDR_BIN_PATH", home.join("herdr")).arg("--root").arg(root).arg("doctor").output().unwrap();
     let text = String::from_utf8(out.stdout.clone()).unwrap();
     (out, text)
@@ -49,7 +49,7 @@ fn doctor_fails_only_on_required_checks_and_changes_nothing() {
     assert!(!root.exists(), "doctor must not create the root");
 
     // Metrics of a ticker that is not running are advisory, even unreadable ones.
-    let new = Command::new(BIN).env_clear().env("HOME", home).arg("--root").arg(&root).args(["new", "demo"]).output().unwrap();
+    let new = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", home).arg("--root").arg(&root).args(["new", "demo"]).output().unwrap();
     assert!(new.status.success(), "{}", String::from_utf8_lossy(&new.stderr));
     let metrics = root.join(".ticker-metrics.json");
     fs::write(&metrics, r#"{"control":{"queued":0,"running":1,"high_water":2,"completed":3},"transfer":{"queued":0,"running":0,"high_water":0,"completed":0},"max_queue_delay_ms":40,"uncertain":false}"#).unwrap();

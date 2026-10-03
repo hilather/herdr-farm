@@ -147,7 +147,7 @@ impl VerifierLane {
             Err(error)=>Err(error),
         };
         let (identity,_)=self.pending.take().unwrap();let now=Instant::now();self.cooldown.retain(|_,until|*until>now);
-        match result {Ok(())=>Vec::new(),Err(error)=>{self.cooldown.insert(identity.operation.clone(),now+Duration::from_secs(30));vec![format!("{} {}: verifier queue: {error:#}",identity.project,identity.operation)]}}
+        match result {Ok(())=>Vec::new(),Err(error)=>{self.cooldown.insert(identity.operation.clone(),now+crate::timing::job_retry());vec![format!("{} {}: verifier queue: {error:#}",identity.project,identity.operation)]}}
     }
 }
 impl Drop for VerifierLane {fn drop(&mut self){if let Some((_,ticket))=&self.pending{ticket.cancel();}}}

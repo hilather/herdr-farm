@@ -96,7 +96,7 @@ impl Fixture {
     pub fn cli(&self, command: &str) -> (serde_json::Value, Vec<u8>) { self.cli_args(&[command]) }
 
     pub fn cli_args(&self, args: &[&str]) -> (serde_json::Value, Vec<u8>) {
-        let out = Command::new(BIN).env_clear().env("HOME", self.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
+        let out = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
             .args(["--root", self.root.to_str().unwrap(), "telemetry", "demo"]).args(args).output().unwrap();
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
         let mut bytes = out.stdout.clone();
@@ -106,7 +106,7 @@ impl Fixture {
 
     /// Run a telemetry command in its text form; returns its stdout.
     pub fn text(&self, args: &[&str]) -> String {
-        let out = Command::new(BIN).env_clear().env("HOME", self.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
+        let out = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
             .args(["--root", self.root.to_str().unwrap(), "telemetry", "demo"]).args(args).output().unwrap();
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
         String::from_utf8(out.stdout).unwrap()
@@ -114,7 +114,7 @@ impl Fixture {
 
     /// Run a telemetry command that must fail; returns its stderr.
     pub fn cli_fail(&self, args: &[&str]) -> String {
-        let out = Command::new(BIN).env_clear().env("HOME", self.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
+        let out = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
             .args(["--root", self.root.to_str().unwrap(), "telemetry", "demo"]).args(args).output().unwrap();
         assert!(!out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
         String::from_utf8(out.stderr).unwrap()

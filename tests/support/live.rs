@@ -23,7 +23,7 @@ impl Lab {
     pub fn path(&self) -> &Path { self.temp.path() }
     pub fn command(&self, bin: impl AsRef<std::ffi::OsStr>) -> Command {
         let mut cmd = Command::new(bin);
-        cmd.env_clear().current_dir(self.path()).env("HOME", self.path().join("home"))
+        cmd.env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).current_dir(self.path()).env("HOME", self.path().join("home"))
             .env("PATH", format!("{}:/usr/local/bin:/usr/bin:/bin", self.herdr.parent().unwrap().display()))
             .env("SHELL", "/bin/sh").env("TERM", "xterm-256color").env("LANG", "C.UTF-8")
             .env("XDG_RUNTIME_DIR", self.path().join("runtime"))

@@ -914,7 +914,7 @@ fn a_failed_machine_call_changes_nothing_until_the_elapsed_retry_deadline() {
     memory.advance_clock(std::time::Duration::ZERO);
     for _ in 0..8 {
         let _ = ticker::tick_project_with(&ctx, &project, &mut memory);
-        memory.advance_clock(ticker::TICK);
+        memory.advance_clock(crate::timing::tick());
     }
     // No poll before the two-minute retry deadline, regardless of tick count.
     assert_eq!(machine_calls(&failing), 1);

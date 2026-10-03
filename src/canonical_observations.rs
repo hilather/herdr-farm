@@ -127,7 +127,7 @@ use std::collections::BTreeMap;
 use crate::{executor::{Executor,Request,Identity,Lane,Ticket},fair_admission::{Cursor,Key}};
 const OFFER_LIMIT:usize=128;
 const PENDING_LIMIT:usize=16;
-const SAMPLE_AGE:Duration=Duration::from_secs(60);
+fn sample_age()->Duration {crate::timing::observation_lease(BUDGET)}
 pub enum Poll {Pending,Ready(Sample),Failed(String)}
 struct Classification {fingerprint:String,head:u64,known_negative:bool,expires:Instant,touched:bool}
 struct Rotation {identity:(u64,u64),last:Option<String>}
@@ -201,7 +201,7 @@ impl Reads {
         // starve the existing root-exclusive effect adapters indefinitely.
         if !self.pending.is_empty(){return errors;}
         while self.pending.len()<PENDING_LIMIT {
-            let Some(key)=self.offers.keys().filter(|key|allowed(&key.0)).min_by(|a,b|cursor.compare(a,b)).cloned()else{break;};let candidate=self.offers.remove(&key).unwrap();let identity=candidate.request.identity.clone();let deadline=candidate.request.deadline+(SAMPLE_AGE-BUDGET);
+            let Some(key)=self.offers.keys().filter(|key|allowed(&key.0)).min_by(|a,b|cursor.compare(a,b)).cloned()else{break;};let candidate=self.offers.remove(&key).unwrap();let identity=candidate.request.identity.clone();let deadline=candidate.request.deadline+(sample_age()-BUDGET);
             match self.executor.submit(candidate.request) {
                 Ok(ticket)=>{cursor.accepted(&key);self.pending.insert(key,Pending{fingerprint:candidate.fingerprint,identity,ticket,deadline});},
                 Err(error)=>{self.unknown=true;errors.push(format!("{}: canonical observation admission: {error:#}",key.0));},

@@ -43,7 +43,7 @@ impl Reads {
     pub fn pending(&self,key:&MachineKey)->bool {self.entries.contains_key(key)}
     pub fn poll(&mut self,key:&MachineKey,bin:&str,config:&Path,threads:&[thread::Thread])->Result<Poll> {
         ensure!(threads.len()<=256,"remote observation exceeds 256 threads");
-        let now=Instant::now();let stale=self.entries.iter().filter(|(_,e)|now.duration_since(e.queued)>=Duration::from_secs(60)).map(|(k,_)|k.clone()).collect::<Vec<_>>();for key in stale {self.remove(&key);}
+        let now=Instant::now();let stale=self.entries.iter().filter(|(_,e)|now.duration_since(e.queued)>=crate::timing::observation_lease(Duration::from_secs(30))).map(|(k,_)|k.clone()).collect::<Vec<_>>();for key in stale {self.remove(&key);}
         let config=crate::paths::read_root_config(config)?;
         let bytes=config.as_deref().unwrap_or("").as_bytes();ensure!(bytes.len()<=1024*1024,"config exceeds remote observation limit");
         let probe=Probe{bin:bin.into(),socket:key.socket.clone(),machine:key.machine.clone(),fallback:remote::configured_target_bytes(bytes,&key.machine),directories:threads.iter().filter(|t|!t.thread_dir.is_empty()).map(|t|(t.id.clone(),t.thread_dir.clone())).collect()};

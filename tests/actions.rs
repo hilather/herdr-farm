@@ -24,7 +24,7 @@ impl Lab {
     /// Runs as herdr runs actions and popups: in session `a.sock`, with the
     /// plugin state directory and, for a popup, its handoff id.
     fn run(&self, args: &[&str], env: &[(&str, &str)], stdin: &str) -> Output {
-        let mut child = Command::new(BIN).env_clear().env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin")
+        let mut child = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin")
             .env("HERDR_BIN_PATH", self.path("herdr")).env("HERDR_SOCKET_PATH", self.path("a.sock")).env("HERDR_PLUGIN_STATE_DIR", self.path("state"))
             .envs(env.iter().copied()).arg("--root").arg(self.path("root")).args(args)
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();

@@ -280,7 +280,7 @@ fn golden_acceptance_and_amplification() {
     db.execute("INSERT INTO integrated_commits(integrated_id,candidate_id,operation_id,repository,ref_name,commit_oid,tree_oid,expected_old_oid,object_format,created_unix_ms)
         VALUES(?1,?1,'op-t2','/repo','refs/heads/main',?2,?2,?2,'sha1',4000)", rusqlite::params![hex('9'), oid]).unwrap();
     drop(db);
-    let out = Command::new(BIN).env_clear().env("HOME", tmp.path()).env("PATH", "/usr/bin:/bin")
+    let out = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", tmp.path()).env("PATH", "/usr/bin:/bin")
         .args(["--root", tmp.path().join("root").to_str().unwrap(), "telemetry", "demo", "report", "--json"]).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
@@ -293,7 +293,7 @@ fn golden_acceptance_and_amplification() {
     for id in ["M31", "M32", "M33"] {
         assert_eq!(metric(&report, id)["value"], unavailable("attention_not_collected"), "{id}");
     }
-    let text = Command::new(BIN).env_clear().env("HOME", tmp.path()).env("PATH", "/usr/bin:/bin")
+    let text = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", tmp.path()).env("PATH", "/usr/bin:/bin")
         .args(["--root", tmp.path().join("root").to_str().unwrap(), "telemetry", "demo", "report", "--text"]).output().unwrap();
     let text = String::from_utf8(text.stdout).unwrap();
     assert!(text.lines().any(|l| l.starts_with("M02 ") && l.contains("2/3")), "{text}");
@@ -329,7 +329,7 @@ fn no_source_is_unavailable_not_zero() {
     let project = tmp.path().join("root/demo");
     fs::create_dir_all(project.join(".state")).unwrap();
     drop(SqliteStore::create(&project.join(".state/state.db")).unwrap());
-    let out = Command::new(BIN).env_clear().env("HOME", tmp.path()).env("PATH", "/usr/bin:/bin")
+    let out = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", tmp.path()).env("PATH", "/usr/bin:/bin")
         .args(["--root", tmp.path().join("root").to_str().unwrap(), "telemetry", "demo", "report", "--json"]).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
@@ -386,7 +386,7 @@ fn quota_headroom_at_dispatch() {
     assert_eq!(m40, [format!("M40 quota_headroom_at_dispatch {} codex primary remaining 62.5% age_ms=60000 fresh", f.attempt),
         format!("M40 quota_headroom_at_dispatch {} codex secondary n/a (not_reported)", f.attempt)], "{text}");
     fs::write(f.project.join("PROJECT.md"), "# demo\n").unwrap();
-    let pane = Command::new(BIN).env_clear().env("HOME", f.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
+    let pane = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", f.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
         .args(["--root", f.root.to_str().unwrap(), "pane", "fleet"]).output().unwrap();
     assert!(pane.status.success(), "{}", String::from_utf8_lossy(&pane.stderr));
     let pane = String::from_utf8(pane.stdout).unwrap();
@@ -429,7 +429,7 @@ fn attempts_show_bound_usage_or_its_reason() {
     // 1000 + 500 input, 400 + 100 cached, 120 + 60 output, 80 + 20 reasoning, 1120 + 560 total.
     assert_eq!(outcome_usage(&f), serde_json::json!({"input_tokens": 1500, "cached_input_tokens": 500, "cache_write_input_tokens": 0,
         "output_tokens": 180, "reasoning_output_tokens": 100, "total_tokens": 1680, "records": 2}));
-    let text = Command::new(BIN).env_clear().env("HOME", f.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
+    let text = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", f.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
         .args(["--root", f.root.to_str().unwrap(), "telemetry", "demo", "attempts"]).output().unwrap();
     assert!(String::from_utf8(text.stdout).unwrap().trim_end().ends_with("usage=in=1500 out=180 total=1680"));
 
@@ -470,7 +470,7 @@ fn names(dir: &Path) -> Vec<PathBuf> { tree(dir).into_iter().map(|(path, ..)| pa
 /// `pane fleet` as the plugin popup runs it (stdin closed: the hold-open prompt returns).
 fn fleet_pane(f: &Fixture) -> String {
     fs::write(f.project.join("PROJECT.md"), "# demo\n").unwrap();
-    let out = Command::new(BIN).env_clear().env("HOME", f.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
+    let out = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", f.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
         .args(["--root", f.root.to_str().unwrap(), "pane", "fleet"]).stdin(std::process::Stdio::null()).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     String::from_utf8(out.stdout).unwrap()
@@ -712,7 +712,7 @@ fn attempts_show_attention_summary() {
     let _server = std::os::unix::net::UnixListener::bind(&socket).unwrap();
     let home = f.tmp.path().join("home");
     let cli = |args: &[&str]| -> String {
-        let out = Command::new(BIN).env_clear().env("HOME", &home).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", &herdr)
+        let out = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", &home).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", &herdr)
             .env("HERDR_PROJECTS_TELEMETRY_COLLECT_SECS", "60").args(["--root", f.root.to_str().unwrap(), "telemetry", "demo"]).args(args).output().unwrap();
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
         String::from_utf8(out.stdout).unwrap()

@@ -247,7 +247,7 @@ impl Drop for Server {
 }
 fn server(f: &Fixture) -> (Server, String, String) {
     let mut child = Command::new(BIN)
-        .env_clear()
+        .env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim())
         .env("HOME", f.tmp.path().join("home"))
         .env("PATH", "/usr/bin:/bin")
         .args([

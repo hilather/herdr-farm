@@ -19,9 +19,8 @@ impl Retry {
 
     pub fn reserve(&mut self, now: jiff::Timestamp, key: &str) {
         self.attempts = self.attempts.saturating_add(1);
-        let exponential = 15_i64 * (1_i64 << self.attempts.saturating_sub(1).min(5));
-        let jitter = thread::sha256_hex(format!("{key}:{}", self.attempts).as_bytes()).as_bytes()[0] as i64 % 5;
-        self.next_attempt = (now + jiff::SignedDuration::from_secs((exponential + jitter).min(300))).to_string();
+        let jitter = thread::sha256_hex(format!("{key}:{}", self.attempts).as_bytes()).as_bytes()[0] as u64 % 5;
+        self.next_attempt = (now + jiff::SignedDuration::from_millis(crate::timing::legacy_delivery_backoff(self.attempts, jitter).as_millis() as i64)).to_string();
     }
 
     pub fn failed(&mut self, error: &anyhow::Error) {

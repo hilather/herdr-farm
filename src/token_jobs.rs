@@ -90,7 +90,7 @@ fn execute_with(input:&Input,control:&Control,before_send:impl FnOnce()->Result<
     let(terminal,agents,panes)=observe(input,&target,control,&locks)?;
     before_send()?;input.route(control,&locks)?;let target=input.current(&p,&guard,control)?;
     let tokens:BTreeMap<String,String>=match &target {
-        Current::Thread(t)=>{let now=jiff::Timestamp::now();let mut live=thread::live_state(t,&agents,&panes,now);if t.is_remote()&&live.agent_state.as_deref()==Some("blocked"){live.state_secs=live.state_secs.max(thread::BLOCKED_DEBOUNCE_SECS);}crate::threads::thread_tokens(t,&p.slug,thread::group(t,&live,now)).into_iter().collect()},
+        Current::Thread(t)=>{let now=jiff::Timestamp::now();let mut live=thread::live_state(t,&agents,&panes,now);if t.is_remote()&&live.agent_state.as_deref()==Some("blocked"){live.state_secs=live.state_secs.max(crate::timing::seconds(thread::BLOCKED_DEBOUNCE_SECS));}crate::threads::thread_tokens(t,&p.slug,thread::group(t,&live,now)).into_iter().collect()},
         Current::Coordinator(..)=>[("project".into(),p.slug.clone()),("thread".into(),"coordinator".into()),("rank".into(),"0".into())].into_iter().collect(),
     };
     let result=input.call("pane.report_metadata",serde_json::json!({"pane_id":target.pane(),"source":crate::herdr::SOURCE,"ttl_ms":crate::coordinator::TOKEN_TTL.as_millis() as u64,"tokens":tokens}),control,&locks)?;

@@ -428,7 +428,7 @@ pub fn revisions(project: &Path, metric: Option<&str>) -> Result<Value> {
 
 /// Ticker: refresh tracked cells at most once per `TICK_INTERVAL_MS`, only once
 /// an operator has run `analytics refresh` (a tracked cell exists).
-pub const TICK_INTERVAL_MS: i64 = 60_000;
+pub const TICK_INTERVAL_MS: i64 = crate::timing::ANALYTICS_INTERVAL_MS;
 
 pub fn tick(project: &Path) -> Result<()> {
     let Some(db) = crate::telemetry::sidecar::read(project)? else { return Ok(()) };
@@ -436,7 +436,7 @@ pub fn tick(project: &Path) -> Result<()> {
     let last: Option<i64> = db.query_row("SELECT max(checked_unix_ms) FROM analytics_cells", [], |r| r.get(0))?;
     drop(db);
     match last {
-        Some(at) if jiff::Timestamp::now().as_millisecond() - at >= TICK_INTERVAL_MS => match refresh_with_wait(project, None, &mut crate::telemetry::writer::WriterWait::ticker(), true) {
+        Some(at) if jiff::Timestamp::now().as_millisecond() - at >= crate::timing::pass(std::time::Duration::from_millis(TICK_INTERVAL_MS as u64)).as_millis() as i64 => match refresh_with_wait(project, None, &mut crate::telemetry::writer::WriterWait::ticker(), true) {
             Err(error) if crate::telemetry::writer::busy(&error) => Ok(()),
             result => result.map(drop),
         },

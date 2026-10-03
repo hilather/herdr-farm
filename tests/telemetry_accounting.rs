@@ -543,7 +543,7 @@ fn repricing_uses_rate_effective_at_usage_time() {
         "coverage": {"entries": 6, "priced": 2, "unpriced": unpriced}, "unlinked_children": null}]));
 
     // Text rounds only at presentation: 6 decimal places.
-    let out = Command::new(BIN).env_clear().env("HOME", f.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
+    let out = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", f.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
         .args(["--root", f.root.to_str().unwrap(), "telemetry", "demo", "accounting", "cost"]).output().unwrap();
     assert!(out.status.success());
     let text = String::from_utf8(out.stdout).unwrap();
@@ -614,9 +614,9 @@ fn ticker_pass(f: &Fixture, done: &dyn Fn() -> bool) {
     // store format marker makes it a canonical (state-store) project.
     fs::write(f.project.join("PROJECT.md"), "ticker fixture").unwrap();
     fs::write(f.project.join(".state/format.json"), "{}").unwrap();
-    let mut child = Command::new(BIN).env_clear().env("HOME", f.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
+    let mut child = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", f.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
         .args(["--root", f.root.to_str().unwrap(), "ticker", "run"]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap();
-    let end = std::time::Instant::now() + Duration::from_secs(60);
+    let end = std::time::Instant::now() + Duration::from_secs(15);
     while !done() {
         let exited = child.try_wait().unwrap();
         assert!(std::time::Instant::now() < end && exited.is_none(), "{exited:?} {}", fs::read_to_string(f.root.join(".ticker.log")).unwrap_or_default());
@@ -1140,7 +1140,7 @@ fn attention_intervals_union_and_censor() {
         VALUES(?1,?1,?2,?3,?3,'sha1',?4,?4,'linux-unshare-user-pid-mount-v1',0,2000)", rusqlite::params![hex('4'), hex('1'), oid, hex('e')]).unwrap();
 
     let cli = |args: &[&str]| -> (serde_json::Value, String) {
-        let out = Command::new(BIN).env_clear().env("HOME", &home).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", &herdr)
+        let out = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", &home).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", &herdr)
             .env("HERDR_PROJECTS_TELEMETRY_COLLECT_SECS", "60").args(["--root", root.to_str().unwrap(), "telemetry", "demo"]).args(args).output().unwrap();
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
         let text = String::from_utf8(out.stdout).unwrap();
@@ -1742,7 +1742,7 @@ fn plant_fleet(project: &Path, class_of: &dyn Fn(&str, &str, &str) -> Option<Str
 /// Run `git` in `dir` with a fixed identity and reflog time `at` (ms).
 fn git_at(dir: &Path, home: &Path, at: i64, args: &[&str]) {
     let date = format!("@{} +0000", at / 1000);
-    let out = Command::new("git").current_dir(dir).env_clear().env("HOME", home).env("PATH", "/usr/bin:/bin").env("GIT_CONFIG_NOSYSTEM", "1")
+    let out = Command::new("git").current_dir(dir).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", home).env("PATH", "/usr/bin:/bin").env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_AUTHOR_NAME", "w").env("GIT_AUTHOR_EMAIL", "w@example.invalid").env("GIT_COMMITTER_NAME", "w").env("GIT_COMMITTER_EMAIL", "w@example.invalid")
         .env("GIT_AUTHOR_DATE", &date).env("GIT_COMMITTER_DATE", &date).args(args).output().unwrap();
     assert!(out.status.success() || args[0] == "merge", "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
@@ -1816,7 +1816,7 @@ fn fan_out_buckets_and_integration_conflicts() {
     let db = plant_fleet(&project, &|_, code, _| Some(code.to_owned()), &|_| "cfg".to_owned());
     worker_worktrees(&project, &home);
     let cli_in = |slug: &str, args: &[&str]| -> String {
-        let out = Command::new(BIN).env_clear().env("HOME", &home).env("PATH", "/usr/bin:/bin")
+        let out = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", &home).env("PATH", "/usr/bin:/bin")
             .args(["--root", root.to_str().unwrap(), "telemetry", slug]).args(args).output().unwrap();
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
         String::from_utf8(out.stdout).unwrap()
@@ -1891,7 +1891,7 @@ fn fan_out_buckets_and_integration_conflicts() {
     let m = &wide["metrics"]["M35"];
     assert_eq!((&m["value"], &m["marginal_per_added_agent_per_hour"], &m["label"]), (&json!("3/4"), &json!("1/4"), &json!("comparable")));
     for bad in ["7", "0", "2880"] {
-        let out = Command::new(BIN).env_clear().env("HOME", &home).env("PATH", "/usr/bin:/bin")
+        let out = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", &home).env("PATH", "/usr/bin:/bin")
             .args(["--root", root.to_str().unwrap(), "telemetry", "demo", "accounting", "fleet", "--window-minutes", bad]).output().unwrap();
         assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("--window-minutes must divide 1440"), "{bad}");
     }
@@ -2374,7 +2374,7 @@ fn coordinator_overhead_and_overlap_waste_from_accepted_reasons() {
     assert!(err.contains("only an ended attempt"), "{err}");
     drop(store);
     // On the CLI a worker execution context is refused before any write.
-    let out = Command::new(BIN).env_clear().env("HOME", &f.home).env("PATH", "/usr/bin:/bin")
+    let out = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", &f.home).env("PATH", "/usr/bin:/bin")
         .args(["--root", f.root.to_str().unwrap(), "telemetry", "demo", "accounting", "supersede", &f.attempt, "--outcome", "superseded",
             "--reason", "sibling_changed_same_area", "--sibling", "s1", "--evidence", "attempt:s1"]).output().unwrap();
     assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("HOME is a worker execution home"), "{}", String::from_utf8_lossy(&out.stderr));
@@ -2720,7 +2720,7 @@ fn killed_incremental_accounting_sync_resumes_atomically() {
     drop(file);
     f.cli("collect");
     let mark: i64 = f.sidecar().query_row("SELECT watermark FROM accounting_stream", [], |r| r.get(0)).unwrap();
-    let mut child = Command::new(BIN).env_clear().env("HOME", f.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
+    let mut child = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", f.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
         .args(["--root", f.root.to_str().unwrap(), "telemetry", "demo", "accounting", "sync"])
         .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).spawn().unwrap();
     let probe = f.sidecar();
@@ -2953,7 +2953,7 @@ fn racing_sync_and_refresh_wait_then_revalidate_their_inputs() {
     let old = f.cli_args(&["query", "--metric", "M08", "--as-of-seq", &pinned, "--json"]).0;
     let db = f.sidecar();
     db.execute_batch("BEGIN IMMEDIATE").unwrap();
-    let spawn = |args: &[&str]| Command::new(BIN).env_clear()
+    let spawn = |args: &[&str]| Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim())
         .env("HOME", f.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
         .env("HERDR_BIN_PATH", "/bin/false")
         .args(["--root", f.root.to_str().unwrap(), "telemetry", "demo"]).args(args)
@@ -3005,7 +3005,7 @@ fn foreground_collect_waits_and_commits_each_record_once() {
     f.rollout(&f.home, "collect-wait", &[RECORD], &f.worktree(), f.decided + 1000, "0.154.0");
     let db = f.sidecar();
     db.execute_batch("BEGIN IMMEDIATE").unwrap();
-    let mut child = Command::new(BIN).env_clear().env("HOME", f.tmp.path().join("home"))
+    let mut child = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", f.tmp.path().join("home"))
         .env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", "/bin/false")
         .args(["--root", f.root.to_str().unwrap(), "telemetry", "demo", "collect"])
         .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();

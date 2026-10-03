@@ -66,7 +66,7 @@ impl Lab {
     fn config(&self) -> PathBuf { self.path(".config/herdr-farm/config.toml") }
     fn store(&self) -> PathBuf { self.project.join(".state/state.db") }
     fn cli(&self, args: &[&str]) -> Output {
-        Command::new(BIN).env_clear().env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin")
+        Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin")
             .args(["--root", self.path("root").to_str().unwrap()]).args(args).output().unwrap()
     }
     fn ok(&self, args: &[&str]) -> Value {
@@ -109,11 +109,11 @@ impl Lab {
     fn shown(&self) -> usize { fs::read_to_string(self.path("requests")).unwrap_or_default().lines().filter(|l| *l == "notification.show").count() }
     fn log(&self) -> String { fs::read_to_string(self.path("root/.ticker.log")).unwrap_or_default() }
     fn spawn(&self) -> Ticker {
-        Ticker(Command::new(BIN).env_clear().env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", self.path("herdr"))
+        Ticker(Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", self.path("herdr"))
             .args(["--root", self.path("root").to_str().unwrap(), "ticker", "run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap())
     }
     fn wait(&self, ticker: &mut Ticker, predicate: &dyn Fn() -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + Duration::from_secs(15);
         while !predicate() {
             assert!(ticker.0.try_wait().unwrap().is_none(), "ticker exited");
             assert!(Instant::now() < deadline, "{}", self.log());
@@ -255,7 +255,7 @@ fn ticker_reserves_a_ready_dependent_once_only_with_factory_admission_on() {
     let repo = lab.path("repo");
     fs::create_dir(&repo).unwrap();
     let git = |args: &[&str]| -> String {
-        let out = Command::new("/usr/bin/git").env_clear().env("PATH", "/usr/bin:/bin").env("HOME", lab.home.path())
+        let out = Command::new("/usr/bin/git").env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("PATH", "/usr/bin:/bin").env("HOME", lab.home.path())
             .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_AUTHOR_NAME", "fixture").env("GIT_AUTHOR_EMAIL", "fixture@example.com")
             .env("GIT_COMMITTER_NAME", "fixture").env("GIT_COMMITTER_EMAIL", "fixture@example.com").current_dir(&repo).args(args).output().unwrap();
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
@@ -523,7 +523,7 @@ fn a_notification_is_claimed_before_it_is_shown_and_never_shown_twice() {
     assert_eq!(fs::read_to_string(lab.path("during")).unwrap(), "claimed\n");
     let delivery = lab.delivery(&op);
     assert_eq!((delivery.attempts, lab.shown()), (1, 1));
-    let out = Command::new(BIN).env_clear().env("HOME", lab.home.path()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", lab.path("herdr"))
+    let out = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", lab.home.path()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", lab.path("herdr"))
         .args(["--root", lab.path("root").to_str().unwrap(), "operations", "demo", "deliver-notification", op.as_str(), "--expected-revision", &delivery.revision.to_string()]).output().unwrap();
     assert!(!out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
     lab.run(2, &|| true);

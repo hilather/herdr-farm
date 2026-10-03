@@ -76,8 +76,7 @@ pub(super) fn update_outcome(tx:&Connection,old:&Delivery,outcome:&Outcome,now:i
     let mut state=match outcome { Outcome::Confirmed{..}=>"confirmed",Outcome::Retryable{..}=>"pending",Outcome::Ambiguous{..}=>"ambiguous",Outcome::PermanentFailure{..}=>"permanent_failure" };
     let mut outcome=outcome.clone();
     if state=="pending" && old.attempts>=32 { state="permanent_failure";outcome=Outcome::PermanentFailure{diagnostic:format!("retry budget exhausted after confirmed no effect: {}",outcome.evidence())}; }
-    let backoff=1_000_i64*(1_i64<<old.attempts.saturating_sub(1).min(8));
-    let due=now+backoff.min(300_000);
+    let due=now+crate::timing::delivery_backoff(old.attempts).as_millis() as i64;
     let revision=increment(old.revision)?;
     tx.execute("UPDATE operation_delivery SET revision=?2,state=?3,owner=NULL,lease_until_ms=NULL,next_due_ms=?4,last_outcome=?5 WHERE operation_id=?1",params![old.operation.as_str(),integer(revision)?,state,due,serde_json::to_string(&outcome).map_err(|e|StoreError::Invalid(e.to_string()))?])?;
     log(tx,&old.operation,revision,"operation.outcome",serde_json::json!({"actor":actor,"outcome":outcome,"epoch":old.epoch}))?;

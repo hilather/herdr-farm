@@ -1094,7 +1094,7 @@ impl IntegrationLab {
         use herdr_farm::{domain::ProjectState, migration, runtime};
         let home = tempfile::tempdir().unwrap();
         let root = home.path().join("root");
-        let lab = |args: &[&str]| std::process::Command::new(BIN).env_clear().env("HOME", home.path()).args(args).output().unwrap();
+        let lab = |args: &[&str]| std::process::Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", home.path()).args(args).output().unwrap();
         for action in ["new", "pause"] { assert!(lab(&["--root", root.to_str().unwrap(), action, "demo"]).status.success()); }
         let key = home.path().join("owner");
         assert!(std::process::Command::new("/usr/bin/ssh-keygen").args(["-q", "-t", "ed25519", "-N", "", "-f"]).arg(&key).output().unwrap().status.success());
@@ -1121,7 +1121,7 @@ impl IntegrationLab {
     fn hp(&self, args: &[&str]) -> std::process::Output {
         let mut all = vec!["--root", self.root.to_str().unwrap()];
         all.extend_from_slice(args);
-        std::process::Command::new(BIN).env_clear().env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").args(all).output().unwrap()
+        std::process::Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").args(all).output().unwrap()
     }
     fn ok(&self, args: &[&str]) -> serde_json::Value {
         let out = self.hp(args);
@@ -1135,7 +1135,7 @@ impl IntegrationLab {
     }
     fn db(&self) -> rusqlite::Connection { rusqlite::Connection::open(self.project.join(".state/state.db")).unwrap() }
     fn git(&self, args: &[&str]) -> String {
-        let out = std::process::Command::new("/usr/bin/git").env_clear().env("PATH", "/usr/bin:/bin").env("HOME", self.home.path()).env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null")
+        let out = std::process::Command::new("/usr/bin/git").env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("PATH", "/usr/bin:/bin").env("HOME", self.home.path()).env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_AUTHOR_NAME", "fixture").env("GIT_AUTHOR_EMAIL", "fixture@example.com").env("GIT_COMMITTER_NAME", "fixture").env("GIT_COMMITTER_EMAIL", "fixture@example.com")
             .current_dir(&self.repo).args(args).output().unwrap();
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
@@ -2033,7 +2033,7 @@ fn review_cli_refuses_worker_execution_context() {
     fs::create_dir_all(&worktree).unwrap();
     let owner_home = f.tmp.path().join("home");
     let run = |home: &std::path::Path, cwd: &std::path::Path, args: &[&str]| {
-        std::process::Command::new(BIN).env_clear().env("HOME", home).env("PATH", "/usr/bin:/bin").current_dir(cwd)
+        std::process::Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", home).env("PATH", "/usr/bin:/bin").current_dir(cwd)
             .args(["--root", f.root.to_str().unwrap(), "telemetry", "demo", "review"]).args(args).output().unwrap()
     };
     // A second, unreviewed submission the owner can still register.
@@ -2371,7 +2371,7 @@ fn revoked_or_expired_grant_cannot_accept_and_workers_cannot_mint() {
     let worker_home = w.lab.home.path().join("fast-home");
     fs::create_dir_all(&worker_home).unwrap();
     let (doc, sig, _) = w.sign(&w.lab.key, GRANT_NS, "g.json", &grant);
-    let in_worker = |args: &[&str]| std::process::Command::new(BIN).env_clear().env("HOME", &worker_home).env("PATH", "/usr/bin:/bin")
+    let in_worker = |args: &[&str]| std::process::Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", &worker_home).env("PATH", "/usr/bin:/bin")
         .args(["--root", w.lab.root.to_str().unwrap(), "telemetry", "demo", "review"]).args(args).output().unwrap();
     let out = in_worker(&["authority", "import", &doc, &sig]);
     assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("worker execution context"));

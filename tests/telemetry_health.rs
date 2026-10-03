@@ -41,7 +41,7 @@ impl Planted {
     fn sidecar(&self) -> rusqlite::Connection { rusqlite::Connection::open(self.project.join(".state/telemetry.db")).unwrap() }
     fn config_dir(&self) -> PathBuf { self.tmp.path().join("home/.config/herdr-farm") }
     fn command(&self, args: &[&str]) -> std::process::Output {
-        Command::new(BIN).env_clear().env("HOME", self.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
+        Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
             .args(["--root", self.root.to_str().unwrap(), "telemetry", "demo"]).args(args).output().unwrap()
     }
     fn raw(&self, args: &[&str]) -> Vec<u8> {
@@ -168,7 +168,7 @@ fn ticker_health_requires_operator_opt_in_obeys_interval_and_never_notifies() {
     let synced = || p.sidecar().query_row("SELECT synced_unix_ms FROM usage_ledger", [], |r| r.get::<_, i64>(0)).ok();
     let pass = || {
         let before = synced();
-        let mut child = Command::new(BIN).env_clear().env("HOME", p.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
+        let mut child = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", p.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
             .args(["--root", p.root.to_str().unwrap(), "ticker", "run"])
             .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -900,7 +900,7 @@ mod world {
             f
         }
         pub fn cli(&self, args: &[&str]) -> Output {
-            Command::new(BIN).env_clear().env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin")
+            Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin")
                 .args(["--root", self.home.path().join("root").to_str().unwrap()]).args(args).output().unwrap()
         }
         pub fn ok(&self, args: &[&str]) -> Value {
@@ -920,7 +920,7 @@ mod world {
         pub fn path(&self, name: &str) -> PathBuf { self.home.path().join(name) }
         pub fn attempts(&self) -> Vec<Attempt> { runtime::snapshot(&self.project).unwrap().attempts }
         pub fn git(&self, args: &[&str]) -> String {
-            let out = Command::new("/usr/bin/git").env_clear().env("PATH", "/usr/bin:/bin").env("HOME", self.home.path())
+            let out = Command::new("/usr/bin/git").env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("PATH", "/usr/bin:/bin").env("HOME", self.home.path())
                 .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null")
                 .env("GIT_AUTHOR_NAME", "fixture").env("GIT_AUTHOR_EMAIL", "fixture@example.com")
                 .env("GIT_COMMITTER_NAME", "fixture").env("GIT_COMMITTER_EMAIL", "fixture@example.com")

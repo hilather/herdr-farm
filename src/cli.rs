@@ -696,7 +696,11 @@ enum TickerCommand {
     /// Start the ticker if it is not running (does nothing when there are no projects)
     Start,
     /// Run the ticker loop in the foreground
-    Run,
+    Run {
+        /// Exit after this many completed passes (isolated test labs only)
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        passes: Option<u64>,
+    },
     /// Ask the running ticker to exit and wait for it
     Stop,
     /// Show the running ticker's version, root and tool resolution
@@ -2005,7 +2009,7 @@ pub fn run() -> Result<()> {
         }
         Command::Ticker { command } => match command {
             TickerCommand::Start => ticker::start(&ctx),
-            TickerCommand::Run => ticker::run(&ctx),
+            TickerCommand::Run { passes } => ticker::run_passes(&ctx, passes),
             TickerCommand::Stop => ticker::stop(&ctx.root),
             TickerCommand::Status => ticker::status(&ctx.root),
         },

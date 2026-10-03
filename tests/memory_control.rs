@@ -632,7 +632,7 @@ fn manual_import_cli_stages_previews_and_requires_signed_review() {
     import(&project);
     let cli = |args: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_herdr-farm"))
-            .env_clear()
+            .env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim())
             .env("HOME", tmp.path())
             .env("PATH", "/usr/bin:/bin")
             .args(["--root", tmp.path().to_str().unwrap(), "memory", "project"])
@@ -828,7 +828,7 @@ fn promotion_and_all_consumer_obligations_commit_or_roll_back_together() {
     assert!(rows.iter().any(|r| r["subscriber"] == "task:consumer-b"));
     let binding:String=raw.query_row("SELECT binding_id FROM consumer_binding_obligations ORDER BY binding_id LIMIT 1",[],|row|row.get(0)).unwrap();
     let pull=|flag:&str,id:&str|Command::new(env!("CARGO_BIN_EXE_herdr-farm"))
-        .env_clear().env("HOME",tmp.path()).env("PATH","/usr/bin:/bin")
+        .env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME",tmp.path()).env("PATH","/usr/bin:/bin")
         .args(["--root",tmp.path().to_str().unwrap(),"memory","project","package",flag,id])
         .output().unwrap();
     let first=pull("--binding",&binding);assert!(first.status.success(),"{}",String::from_utf8_lossy(&first.stderr));
@@ -870,7 +870,7 @@ fn worker_update_receipts_are_explicit_exact_and_survive_restart() {
     let (tmp, project, key) = fixture();
     let cli = |args: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_herdr-farm"))
-            .env_clear()
+            .env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim())
             .env("HOME", tmp.path())
             .env("PATH", "/usr/bin:/bin")
             .args(["--root", tmp.path().to_str().unwrap(), "memory", "project"])
@@ -1563,7 +1563,7 @@ fn optional_update_supersession_requires_exact_applied_replacement_and_preserves
     assert_eq!(read_snapshot_update_package(&project,&snapshot).unwrap().package,package);
     let path=tmp.path().join("supersession.json");
     fs::write(&path,serde_json::to_vec(&request).unwrap()).unwrap();
-    let cli=|args:&[&str]| Command::new(env!("CARGO_BIN_EXE_herdr-farm")).env_clear().env("HOME",tmp.path()).env("PATH","/usr/bin:/bin")
+    let cli=|args:&[&str]| Command::new(env!("CARGO_BIN_EXE_herdr-farm")).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME",tmp.path()).env("PATH","/usr/bin:/bin")
         .args(["--root",tmp.path().to_str().unwrap(),"memory","project"]).args(args).output().unwrap();
     let output=cli(&["supersede-update","--attempt","attempt-a","--input",path.to_str().unwrap()]);
     assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));

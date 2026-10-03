@@ -109,3 +109,6 @@ pub(crate) mod git_quarantine;
 pub mod replay;
 
 pub mod product_environment;
+
+/// Shared process-local ticker and retry timing.
+pub mod timing;

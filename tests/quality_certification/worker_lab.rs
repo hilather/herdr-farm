@@ -110,7 +110,7 @@ impl WorkerLab {
     pub fn path(&self, name: &str) -> PathBuf { self.home.path().join(name) }
     fn socket(&self) -> PathBuf { self.path("lab/native.sock") }
     pub fn cli(&self, args: &[&str]) -> Output {
-        Command::new(BIN).env_clear().env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").args(["--root", self.path("root").to_str().unwrap()]).args(args).output().unwrap()
+        Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").args(["--root", self.path("root").to_str().unwrap()]).args(args).output().unwrap()
     }
     pub fn ok(&self, args: &[&str]) -> Value {
         let out = self.cli(args);
@@ -124,7 +124,7 @@ impl WorkerLab {
     pub fn head(&self) -> u64 { self.state().head }
     pub fn events(&self, kind: &str) -> Vec<Event> { self.state().events.into_iter().filter(|e| e.kind == kind).collect() }
     pub fn git(&self, args: &[&str]) -> String {
-        let out = Command::new("/usr/bin/git").env_clear().env("PATH", "/usr/bin:/bin").env("HOME", self.home.path())
+        let out = Command::new("/usr/bin/git").env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("PATH", "/usr/bin:/bin").env("HOME", self.home.path())
             .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_AUTHOR_NAME", "fixture").env("GIT_AUTHOR_EMAIL", "fixture@example.com")
             .env("GIT_COMMITTER_NAME", "fixture").env("GIT_COMMITTER_EMAIL", "fixture@example.com").current_dir(&self.repo).args(args).output().unwrap();
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
@@ -142,7 +142,7 @@ sys.stdout.buffer.write(json.dumps({'result':json.loads(reply)['result']}).encod
     /// Compile `source` as the lab agent (`bin/claude`).
     pub fn write_agent(&self, source: &str) {
         let (agent, file) = (self.path("bin/claude"), self.path("bin/probe.rs"));
-        fs::write(&file, source).unwrap();
+        fs::write(&file, format!("const TEST_TIME_SCALE: &str = {:?};\n{source}", include_str!("../support/time-scale.txt").trim())).unwrap();
         let built = Command::new("rustc").args(["--edition", "2021", "-o"]).arg(&agent).arg(&file).output().unwrap();
         assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
         fs::set_permissions(&agent, fs::Permissions::from_mode(0o700)).unwrap();
@@ -246,11 +246,11 @@ sys.stdout.buffer.write(json.dumps({'result':json.loads(reply)['result']}).encod
         while !self.socket().exists() { assert!(Instant::now() < deadline); std::thread::sleep(Duration::from_millis(10)); }
     }
     pub fn spawn(&self) -> Ticker {
-        Ticker(Command::new(BIN).env_clear().env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", &self.herdr)
+        Ticker(Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", &self.herdr)
             .args(["--root", self.path("root").to_str().unwrap(), "ticker", "run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap())
     }
     pub fn wait(&self, ticker: &mut Ticker, seconds: u64, predicate: &dyn Fn() -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(seconds);
+        let deadline = Instant::now() + Duration::from_secs((seconds / 4).max(15));
         let mut pause = Duration::from_millis(20);
         while !predicate() {
             assert!(ticker.0.try_wait().unwrap().is_none(), "ticker exited");

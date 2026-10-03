@@ -44,7 +44,7 @@ impl Project {
         (p, snapshot.id.as_str().to_owned())
     }
     fn cli(&self, args: &[&str]) -> Output {
-        Command::new(BIN).env_clear().env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin")
+        Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin")
             .args(["--root", self.home.path().join("root").to_str().unwrap()]).args(args).output().unwrap()
     }
     fn ok(&self, args: &[&str]) -> Value {

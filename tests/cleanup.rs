@@ -54,7 +54,7 @@ impl Lab {
     fn project(&self, slug: &str) -> PathBuf { self.root().join(slug) }
     fn work(&self) -> PathBuf { self.path("worktree") }
     fn cli(&self, args: &[&str]) -> Output {
-        Command::new(BIN).env_clear().env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", self.path("herdr"))
+        Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", self.path("herdr"))
             .arg("--root").arg(self.root()).args(args).output().unwrap()
     }
     fn ok(&self, args: &[&str]) -> String {
@@ -68,7 +68,7 @@ impl Lab {
         }
     }
     fn git(&self, args: &[&str]) -> String {
-        let out = Command::new("/usr/bin/git").env_clear().env("PATH", "/usr/bin:/bin").env("HOME", self.home.path())
+        let out = Command::new("/usr/bin/git").env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("PATH", "/usr/bin:/bin").env("HOME", self.home.path())
             .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_AUTHOR_NAME", "fixture").env("GIT_AUTHOR_EMAIL", "fixture@example.com")
             .env("GIT_COMMITTER_NAME", "fixture").env("GIT_COMMITTER_EMAIL", "fixture@example.com")
@@ -97,7 +97,7 @@ impl Lab {
     /// A foreground `ticker run`, so a restart hands it the launch rather
     /// than spawning a detached one.
     fn ticker(&self) -> Ticker {
-        let spawn = || Command::new(BIN).env_clear().env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", self.path("herdr"))
+        let spawn = || Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", self.path("herdr"))
             .arg("--root").arg(self.root()).args(["ticker", "run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
         let mut ticker = Ticker(spawn());
         let deadline = Instant::now() + Duration::from_secs(20);

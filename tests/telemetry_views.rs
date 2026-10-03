@@ -22,7 +22,7 @@ const DOC: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/docs/telemetry/operator-
 
 /// Run the binary with a clean environment under `home`, on `root`.
 fn run(home: &Path, root: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
-    Command::new(BIN).env_clear().env("HOME", home).env("PATH", "/usr/bin:/bin").envs(env.iter().copied())
+    Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", home).env("PATH", "/usr/bin:/bin").envs(env.iter().copied())
         .args(["--root", root.to_str().unwrap()]).args(args).stdin(std::process::Stdio::null()).output().unwrap()
 }
 
@@ -496,9 +496,9 @@ fn views_and_pane_never_read_another_project() {
 fn ticker_pass(f: &Fixture, done: &dyn Fn() -> bool) {
     fs::write(f.project.join("PROJECT.md"), "ticker fixture").unwrap();
     fs::write(f.project.join(".state/format.json"), "{}").unwrap();
-    let mut child = Command::new(BIN).env_clear().env("HOME", home(f)).env("PATH", "/usr/bin:/bin")
+    let mut child = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", home(f)).env("PATH", "/usr/bin:/bin")
         .args(["--root", f.root.to_str().unwrap(), "ticker", "run"]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap();
-    let end = std::time::Instant::now() + Duration::from_secs(60);
+    let end = std::time::Instant::now() + Duration::from_secs(15);
     while !done() {
         let exited = child.try_wait().unwrap();
         assert!(std::time::Instant::now() < end && exited.is_none(), "{exited:?} {}", fs::read_to_string(f.root.join(".ticker.log")).unwrap_or_default());

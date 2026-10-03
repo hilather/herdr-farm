@@ -34,7 +34,7 @@ impl Home {
     /// `hp ARGS` with only HOME, a PATH holding the fake herdr, and `vars`.
     fn run(&self, vars: &[(&str, &str)], args: &[&str]) -> Output {
         let mut command = Command::new(BIN);
-        command.env_clear().env("HOME", self.dir.path()).env("PATH", &self.bin);
+        command.env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.dir.path()).env("PATH", &self.bin);
         for (k, v) in vars { command.env(k, v); }
         command.args(args).output().unwrap()
     }

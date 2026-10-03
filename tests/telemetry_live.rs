@@ -80,7 +80,7 @@ fn command(bin: &Path, home: &Path, cwd: &Path) -> Command {
     use std::os::unix::process::CommandExt;
     let mut cmd = Command::new(bin);
     cmd.process_group(0);
-    cmd.env_clear()
+    cmd.env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim())
         .env(
             "PATH",
             std::env::var("HERDR_LIVE_PATH")

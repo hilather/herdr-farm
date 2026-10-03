@@ -38,7 +38,7 @@ impl Factory {
         f
     }
     fn cli(&self, args: &[&str]) -> Output {
-        Command::new(BIN).env_clear().env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin")
+        Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin")
             .args(["--root", self.home.path().join("root").to_str().unwrap()]).args(args).output().unwrap()
     }
     fn ok(&self, args: &[&str]) -> Value {
@@ -57,7 +57,7 @@ impl Factory {
     fn head(&self) -> u64 { runtime::snapshot(&self.project).unwrap().head }
     fn path(&self, name: &str) -> PathBuf { self.home.path().join(name) }
     fn git(&self, args: &[&str]) -> String {
-        let out = Command::new("/usr/bin/git").env_clear().env("PATH", "/usr/bin:/bin").env("HOME", self.home.path())
+        let out = Command::new("/usr/bin/git").env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("PATH", "/usr/bin:/bin").env("HOME", self.home.path())
             .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_AUTHOR_NAME", "fixture").env("GIT_AUTHOR_EMAIL", "fixture@example.com")
             .env("GIT_COMMITTER_NAME", "fixture").env("GIT_COMMITTER_EMAIL", "fixture@example.com")
@@ -307,7 +307,7 @@ fn ticker_requests_replans_only_while_enabled_and_active() {
     // expired deadline wait is woken on the first pass, marking it done.
     let pass = |marker: &str| {
         let wait = f.wait(&["register", "--task", "task", "--condition", "user_decision", "--deadline", marker]);
-        let mut child = Command::new(BIN).env_clear().env("HOME", f.home.path()).env("PATH", "/usr/bin:/bin")
+        let mut child = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", f.home.path()).env("PATH", "/usr/bin:/bin")
             .args(["--root", root.to_str().unwrap(), "ticker", "run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
         let deadline = Instant::now() + Duration::from_secs(20);
         let woken = || f.count(&format!("SELECT wake_requested FROM wait_conditions WHERE wait_id='{}'", wait["wait_id"].as_str().unwrap())) == 1;

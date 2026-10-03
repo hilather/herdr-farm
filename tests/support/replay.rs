@@ -119,7 +119,7 @@ impl Lab {
     pub(crate) fn db(&self) -> rusqlite::Connection { rusqlite::Connection::open(self.project.join(".state/state.db")).unwrap() }
     pub(crate) fn store(&self) -> String { self.project.join(".state/state.db").canonicalize().unwrap().display().to_string() }
     pub(crate) fn cli(&self, args: &[&str]) -> Output {
-        Command::new(BIN).env_clear().env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin")
+        Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin")
             .args(["--root", self.root().to_str().unwrap()]).args(args).output().unwrap()
     }
     pub(crate) fn ok(&self, args: &[&str]) -> Value {
@@ -139,7 +139,7 @@ impl Lab {
     }
     pub(crate) fn head(&self) -> u64 { self.state().head }
     pub(crate) fn git_in(&self, dir: &Path, args: &[&str]) -> String {
-        let out = Command::new("/usr/bin/git").env_clear().env("PATH", "/usr/bin:/bin").env("HOME", self.home.path())
+        let out = Command::new("/usr/bin/git").env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("PATH", "/usr/bin:/bin").env("HOME", self.home.path())
             .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_AUTHOR_NAME", "fixture").env("GIT_AUTHOR_EMAIL", "fixture@example.com").env("GIT_COMMITTER_NAME", "fixture").env("GIT_COMMITTER_EMAIL", "fixture@example.com")
             .env("GIT_AUTHOR_DATE", "2026-01-01T00:00:00Z").env("GIT_COMMITTER_DATE", "2026-01-01T00:00:00Z")
@@ -239,11 +239,11 @@ sys.stdout.buffer.write(json.dumps({'result':json.loads(reply)['result']}).encod
         while !self.socket().exists() { assert!(Instant::now() < deadline); std::thread::sleep(Duration::from_millis(10)); }
     }
     pub(crate) fn spawn(&self) -> Ticker {
-        Ticker(Command::new(BIN).env_clear().env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", &self.herdr)
+        Ticker(Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", &self.herdr)
             .args(["--root", self.root().to_str().unwrap(), "ticker", "run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap())
     }
     pub(crate) fn wait(&self, ticker: &mut Ticker, seconds: u64, predicate: &dyn Fn() -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(seconds);
+        let deadline = Instant::now() + Duration::from_secs((seconds / 4).max(15));
         let mut pause = Duration::from_millis(20);
         while !predicate() {
             assert!(ticker.0.try_wait().unwrap().is_none(), "ticker exited");
@@ -310,10 +310,10 @@ sys.stdout.buffer.write(json.dumps({'result':json.loads(reply)['result']}).encod
             let target = repository.join(".git/objects").join(relative);
             if target.exists() { continue; }
             let kind = self.git_in(repository, &["cat-file", "-t", oid]);
-            let bytes = Command::new("/usr/bin/git").env_clear().env("PATH", "/usr/bin:/bin")
+            let bytes = Command::new("/usr/bin/git").env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("PATH", "/usr/bin:/bin")
                 .args(["-C", repository.to_str().unwrap(), "cat-file", &kind, oid]).output().unwrap();
             assert!(bytes.status.success());
-            let mut writer = Command::new("/usr/bin/git").env_clear().env("PATH", "/usr/bin:/bin")
+            let mut writer = Command::new("/usr/bin/git").env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("PATH", "/usr/bin:/bin")
                 .env("GIT_OBJECT_DIRECTORY", &loose).args(["-C", repository.to_str().unwrap(), "hash-object", "-w", "-t", &kind, "--stdin"])
                 .stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
             writer.stdin.take().unwrap().write_all(&bytes.stdout).unwrap();

@@ -6,15 +6,15 @@ type Key=(String,String);
 const LIMIT:usize=128;
 /// Local report reads share Transfer and keep 16 slots (`local_reports::PENDING_LIMIT`).
 const REPORT_RESERVE:usize=16;
-const RETENTION:Duration=Duration::from_secs(180);
+fn retention()->Duration {crate::timing::queue_retention()}
 fn failure_delay(identity:&Identity)->Duration {
     // Launch retries observe durable boundaries under the original 30s lease.
     // Generic backoff would consume that entire lease after one lost reply.
-    if identity.operation.starts_with("canonical-launch:") {Duration::from_secs(1)}
+    if identity.operation.starts_with("canonical-launch:") {crate::timing::launch_retry()}
     // A brief, preparation or termination that lost a lock race or hit a
     // transient failure is retried soon; the claim it serves is short-lived.
-    else if identity.operation.starts_with("canonical-worker:") {Duration::from_secs(2)}
-    else {Duration::from_secs(30)}
+    else if identity.operation.starts_with("canonical-worker:") {crate::timing::worker_retry()}
+    else {crate::timing::job_retry()}
 }
 struct Entry {work:Option<Request>,resources:Vec<Resource>,not_before:Instant,touched:Instant,last:u64,needed:bool}
 struct Pending {key:Key,identity:Identity,ticket:crate::executor::Ticket,resources:Vec<Resource>}
@@ -102,7 +102,7 @@ impl Queue {
         let declared:BTreeSet<_>=self.pending_sets.keys().cloned().collect();
         self.entries.retain(|key,e| {
             if e.work.as_ref().is_some_and(|r|r.deadline<=now){e.work=None;}
-            Some(key)==pending.as_ref()||declared.contains(key)||now<e.touched+RETENTION
+            Some(key)==pending.as_ref()||declared.contains(key)||now<e.touched+retention()
         });
     }
     pub fn offer(&mut self,ctx:&Ctx<'_>,project:&Project,t:&Thread,target:Option<&str>)->Result<()> {
@@ -198,7 +198,7 @@ impl Queue {
         // at idle cadence instead of competing with every launch stage.
         // Attempt-token workers own suffix cadence; a change can publish on
         // the next tick instead of waiting for thread-token cooldown.
-        if let Some(entry)=self.entries.get_mut(&pending.key) {entry.not_before=now+if result.is_err()||pending.identity.operation=="notification"||(pending.identity.operation.starts_with("tokens:")&&!pending.identity.operation.starts_with("tokens:attempt:")){failure_delay(&pending.identity)}else if pending.identity.operation.starts_with("canonical-worker:terminate-")||pending.identity.operation.starts_with("canonical-worker:recover:"){Duration::from_secs(15)}else{Duration::ZERO};entry.touched=now;entry.needed=result.is_err();}
+        if let Some(entry)=self.entries.get_mut(&pending.key) {entry.not_before=now+if result.is_err()||pending.identity.operation=="notification"||(pending.identity.operation.starts_with("tokens:")&&!pending.identity.operation.starts_with("tokens:attempt:")){failure_delay(&pending.identity)}else if pending.identity.operation.starts_with("canonical-worker:terminate-")||pending.identity.operation.starts_with("canonical-worker:recover:"){crate::timing::worker_recovery_retry()}else{Duration::ZERO};entry.touched=now;entry.needed=result.is_err();}
         result.err().map(|e|format!("{} {}: background queue: {e:#}",pending.key.0,pending.key.1)).into_iter().collect()
     }
     #[cfg(any(test,not(feature="state-store")))]
@@ -302,7 +302,7 @@ mod tests {
         let pool=Arc::new(crate::executor::Executor::new(crate::executor::Limits::default(),Arc::new(Immediate)).unwrap());let mut queue=Queue::new(pool.clone());
         for n in 0..LIMIT {queue.offer_request(work("project",&format!("{n:04}"))).unwrap();}
         queue.offer_request(work("overflow","1")).unwrap();assert_eq!(queue.entries.len(),LIMIT);queue.admit();let pending=queue.pending.as_ref().unwrap().key.clone();
-        for entry in queue.entries.values_mut(){entry.touched=Instant::now()-RETENTION;}
+        for entry in queue.entries.values_mut(){entry.touched=Instant::now()-retention();}
         queue.prune();assert_eq!(queue.entries.len(),1);assert!(queue.entries.contains_key(&pending));assert!(queue.pending());
         assert!(drain(&mut queue).is_empty());assert!(pool.stop(Duration::from_secs(1)));
     }

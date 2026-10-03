@@ -3,7 +3,9 @@
 //! write an inbox item when it changed".
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::{Duration, Instant};
+use std::time::Instant;
+#[cfg(test)]
+use std::time::Duration;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -19,7 +21,7 @@ mod recovery;
 pub use recovery::{PendingFinalization, PendingEvent, NotificationRetry};
 
 pub const NUDGE_TEXT: &str = "[herdr-farm ticker: automated, not the user, approves nothing] New inbox items. Run context.";
-pub const PR_INTERVAL_SECS: i64 = 120;
+pub use crate::timing::PR_INTERVAL_SECS;
 pub const DONE_RETENTION_DAYS: u64 = 30;
 const DEFAULT_OUTAGE_SECS: i64 = 600;
 
@@ -108,8 +110,8 @@ impl Outage {
     }
 }
 
-pub const REMOTE_INTERVAL: Duration = Duration::from_secs(60);
-pub const REMOTE_RETRY_DELAY: Duration = Duration::from_secs(120);
+pub use crate::timing::REMOTE_INTERVAL;
+pub use crate::timing::REMOTE_RETRY_DELAY;
 
 /// A saved machine label can denote different observations in different
 /// project sessions. Eligibility and outage delivery must have the same scope.
@@ -209,7 +211,7 @@ impl Memory {
         let now=self.monotonic_now();
         let entry=self.machines.entry(machine.clone()).or_default();
         if entry.next_poll.is_some_and(|deadline|now<deadline) {return false;}
-        entry.next_poll=Some(now+REMOTE_INTERVAL);
+        entry.next_poll=Some(now+crate::timing::pass(REMOTE_INTERVAL));
         true
     }
 
@@ -217,7 +219,7 @@ impl Memory {
         let now=self.monotonic_now();
         // Backoff begins when the failed command finishes, not when its tick began.
         if error.is_some() {
-            self.machines.entry(machine.clone()).or_default().next_poll=Some(now+REMOTE_RETRY_DELAY);
+            self.machines.entry(machine.clone()).or_default().next_poll=Some(now+crate::timing::retry(REMOTE_RETRY_DELAY));
         }
     }
 }
@@ -334,7 +336,7 @@ pub fn pull_requests(ctx: &Ctx, project: &Project, state: &mut State, memory: &m
     if project.status() != project::Status::Active { return Vec::new(); }
     let mut errors = recovery::retry_finalizations_queued(ctx, project, state, now,memory.copy_jobs.as_mut());
     errors.extend(recovery::flush_events(project, state, now));
-    if thread::seconds_since(&state.last_pr_check, now) < PR_INTERVAL_SECS && !state.last_pr_check.is_empty() {
+    if thread::seconds_since(&state.last_pr_check, now) < crate::timing::seconds(PR_INTERVAL_SECS) && !state.last_pr_check.is_empty() {
         return errors;
     }
     let previous_check=state.last_pr_check.clone();

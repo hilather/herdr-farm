@@ -7,7 +7,7 @@ use crate::{executor::{Executor,Request,Identity,Lane,Ticket},fair_admission::{C
 const PENDING_LIMIT:usize=16; // Leaves transfer admission room for guarded effects.
 const OFFER_LIMIT:usize=128;
 const QUEUE_BUDGET:Duration=Duration::from_secs(30);
-const SAMPLE_AGE:Duration=Duration::from_secs(60);
+fn sample_age()->Duration {crate::timing::observation_lease(QUEUE_BUDGET)}
 #[derive(Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Observation {pub hash:Option<String>}
@@ -83,7 +83,7 @@ impl Reads {
         let mut errors=Vec::new();let mut admission=self.cursor.clone();
         while self.pending.len()<PENDING_LIMIT {
             let Some(key)=self.offers.keys().min_by(|a,b|admission.compare(a,b)).cloned() else {break;};
-            let candidate=self.offers.remove(&key).unwrap();let identity=candidate.request.identity.clone();let deadline=candidate.request.deadline+(SAMPLE_AGE-QUEUE_BUDGET);
+            let candidate=self.offers.remove(&key).unwrap();let identity=candidate.request.identity.clone();let deadline=candidate.request.deadline+(sample_age()-QUEUE_BUDGET);
             match self.executor.submit(candidate.request.clone()) {
                 Ok(ticket)=>{admission.accepted(&key);self.pending.insert(key,Pending{fingerprint:candidate.fingerprint,identity,ticket,deadline});},
                 // A full transfer lane is backpressure, not a failed observation.

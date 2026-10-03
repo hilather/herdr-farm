@@ -137,7 +137,7 @@ impl Lab {
     /// What the lab agent prints for `--version`.
     fn version(&self) -> &'static str { if self.kind == "codex" { "codex-cli 0.154.0" } else { "2.1.0 (Claude Code)" } }
     fn cli(&self, args: &[&str]) -> Output {
-        Command::new(BIN).env_clear().env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin")
+        Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin")
             .args(["--root", self.path("root").to_str().unwrap()]).args(args).output().unwrap()
     }
     fn ok(&self, args: &[&str]) -> Value {
@@ -149,7 +149,7 @@ impl Lab {
     /// project turns can hold the lock, so the arguments are rebuilt from the
     /// current state and the command retried for a bounded time.
     fn ok_live(&self, args: &dyn Fn() -> Vec<String>) -> Value {
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let deadline = Instant::now() + Duration::from_secs(15);
         loop {
             let args = args();
             let args = args.iter().map(String::as_str).collect::<Vec<_>>();
@@ -183,7 +183,7 @@ impl Lab {
     fn head(&self) -> u64 { self.state().head }
     fn events(&self, kind: &str) -> Vec<Event> { self.state().events.into_iter().filter(|e| e.kind == kind).collect() }
     fn git(&self, args: &[&str]) -> String {
-        let out = Command::new("/usr/bin/git").env_clear().env("PATH", "/usr/bin:/bin").env("HOME", self.home.path())
+        let out = Command::new("/usr/bin/git").env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("PATH", "/usr/bin:/bin").env("HOME", self.home.path())
             .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_AUTHOR_NAME", "fixture").env("GIT_AUTHOR_EMAIL", "fixture@example.com")
             .env("GIT_COMMITTER_NAME", "fixture").env("GIT_COMMITTER_EMAIL", "fixture@example.com")
@@ -269,11 +269,11 @@ sys.stdout.buffer.write(json.dumps({'result':json.loads(reply)['result']}).encod
     fn count(&self, method: &str) -> usize { self.requests().iter().filter(|(m, _)| m == method).count() }
     fn attempt(&self, id: &AttemptId) -> Attempt { self.state().attempts.into_iter().find(|a| &a.id == id).unwrap() }
     fn spawn(&self) -> Ticker {
-        Ticker(Command::new(BIN).env_clear().env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", &self.herdr)
+        Ticker(Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", &self.herdr)
             .args(["--root", self.path("root").to_str().unwrap(), "ticker", "run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap())
     }
     fn wait(&self, ticker: &mut Ticker, seconds: u64, predicate: &dyn Fn() -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(seconds);
+        let deadline = Instant::now() + Duration::from_secs((seconds / 4).max(15));
         // Predicates read `runtime::snapshot` (whole-store integrity check plus
         // a full read); at a fixed 20 ms they competed with the ticker being
         // waited on. Back off to 250 ms; the deadline is unchanged.
@@ -288,7 +288,7 @@ sys.stdout.buffer.write(json.dumps({'result':json.loads(reply)['result']}).encod
     /// `wait` that names the stage and reports the jobs, the attempt and the
     /// ticker log when it times out.
     fn wait_for(&self, ticker: &mut Ticker, stage: &str, attempt: &AttemptId, seconds: u64, predicate: &dyn Fn() -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(seconds);
+        let deadline = Instant::now() + Duration::from_secs((seconds / 4).max(15));
         let mut pause = Duration::from_millis(20);
         while !predicate() {
             assert!(ticker.0.try_wait().unwrap().is_none(), "ticker exited while waiting for: {stage}");
@@ -340,19 +340,8 @@ sys.stdout.buffer.write(json.dumps({'result':json.loads(reply)['result']}).encod
         }
         self.stop(ticker);
     }
-    /// Run a fresh ticker until the server has seen `passes` more `method`
-    /// requests, then stop it.
-    /// Run a ticker for `seconds` (several passes) and stop it: for checks that
-    /// nothing further happens once no session is left to probe.
-    fn run_quiet(&self, seconds: u64) {
-        let mut ticker = self.spawn();
-        let until = Instant::now() + Duration::from_secs(seconds);
-        while Instant::now() < until {
-            assert!(ticker.0.try_wait().unwrap().is_none(), "ticker exited");
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        self.stop(ticker);
-    }
+    /// Assert quiet behaviour across several completed controller passes.
+    fn run_quiet(&self, passes: usize) { self.run_passes(passes); }
     fn run_for(&self, method: &str, passes: usize) {
         let seen = self.count(method);
         let mut ticker = self.spawn();
@@ -536,7 +525,7 @@ fn ticker_stops_the_dedicated_herdr_server_of_a_finished_task() {
     let running = lab.attempt(&attempt);
     lab.ok_live(&|| ["task", "demo", "cancel-attempt", attempt.as_str(), "--expected-revision", &running.revision.to_string(), "--expected-head", &lab.head().to_string(), "--reason", "finished"].map(String::from).to_vec());
     lab.wait(&mut ticker, 60, &|| lab.attempt(&attempt).termination_observed);
-    let until = Instant::now() + Duration::from_secs(30);
+    let until = Instant::now() + Duration::from_secs(15);
     while server.try_wait().unwrap().is_none() {
         assert!(Instant::now() < until, "the ticker never stopped the finished task's server: {}", fs::read_to_string(lab.path("root/.ticker.log")).unwrap_or_default());
         std::thread::sleep(Duration::from_millis(100));
@@ -1178,7 +1167,7 @@ impl Lab {
     }
     /// The CLI as the reviewing worker runs it: `HOME` is the profile's execution home.
     fn worker_cli(&self, args: &[&str]) -> Output {
-        Command::new(BIN).env_clear().env("HOME", self.path("agent-home")).env("PATH", "/usr/bin:/bin")
+        Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.path("agent-home")).env("PATH", "/usr/bin:/bin")
             .args(["--root", self.path("root").to_str().unwrap()]).args(args).output().unwrap()
     }
     fn review_show(&self, as_of: Option<i64>) -> Value {
@@ -1540,7 +1529,7 @@ const WORK_POLICY: &str = r#"{"version":1,"checks":["/usr/bin/git","diff","--qui
 impl Lab {
     /// Whether `git args` succeeds in the lab repository.
     fn git_ok(&self, args: &[&str]) -> bool {
-        Command::new("/usr/bin/git").env_clear().env("PATH", "/usr/bin:/bin").env("HOME", self.home.path())
+        Command::new("/usr/bin/git").env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("PATH", "/usr/bin:/bin").env("HOME", self.home.path())
             .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null").current_dir(&self.repo).args(args)
             .output().unwrap().status.success()
     }
@@ -1880,7 +1869,7 @@ fn main() {
     fs::write("probe-1.tmp", format!("head {head}\nblob {blob}\nobjects {objects}\n")).unwrap();
     fs::rename("probe-1.tmp", "probe-1.txt").unwrap();
     while !Path::new("submit.json").exists() { std::thread::sleep(Duration::from_millis(50)); }
-    let out = Command::new(BIN).args(["--root", ROOT, "result", "demo", "submit", "--input-file", "submit.json"]).output().unwrap();
+    let out = Command::new(BIN).env("HERDR_FARM_TEST_TIME_SCALE", TEST_TIME_SCALE).args(["--root", ROOT, "result", "demo", "submit", "--input-file", "submit.json"]).output().unwrap();
     fs::write("submit-1.tmp", format!("{}\n{}{}", out.status.success(), String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))).unwrap();
     fs::rename("submit-1.tmp", "submit-1.txt").unwrap();
     loop { std::thread::park() }
@@ -1961,7 +1950,7 @@ fn main() {
     for n in 1..=2 {
         let mut last = String::new();
         for _ in 0..60 {
-            let out = Command::new(BIN).args(["--root", ROOT, "result", "demo", "submit", "--input-file", "submit.json"]).output().unwrap();
+            let out = Command::new(BIN).env("HERDR_FARM_TEST_TIME_SCALE", TEST_TIME_SCALE).args(["--root", ROOT, "result", "demo", "submit", "--input-file", "submit.json"]).output().unwrap();
             last = format!("{}\n{}{}", out.status.success(), String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
             if out.status.success() { break }
             std::thread::sleep(Duration::from_millis(200));
@@ -1983,7 +1972,7 @@ fn field(json: &str, key: &str) -> String {
     json.find(&marker).map(|i| json[i + marker.len()..].split('"').next().unwrap().to_owned()).unwrap_or_default()
 }
 fn review(args: &[&str]) -> String {
-    let out = Command::new(BIN).args(["--root", ROOT, "telemetry", "demo", "review"]).args(args).output().unwrap();
+    let out = Command::new(BIN).env("HERDR_FARM_TEST_TIME_SCALE", TEST_TIME_SCALE).args(["--root", ROOT, "telemetry", "demo", "review"]).args(args).output().unwrap();
     format!("{}\n{}{}", out.status.success(), String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
 }
 fn main() {
@@ -2005,7 +1994,7 @@ fn main() {
 impl Lab {
     /// Compile `source` (a probe above) as the lab agent, with `consts` appended.
     fn write_agent(&self, source: &str, consts: &[(&str, String)]) {
-        let mut text = source.to_owned();
+        let mut text = format!("const TEST_TIME_SCALE: &str = {:?};\n{source}", include_str!("support/time-scale.txt").trim());
         for (name, value) in consts { text += &format!("const {name}: &str = {value:?};\n"); }
         let (agent, file) = (self.path("bin/claude"), self.path("bin/probe.rs"));
         fs::write(&file, text).unwrap();

@@ -233,7 +233,7 @@ impl Lab {
             "--agent-executable", agent.to_str().unwrap(), "--execution-home", home.to_str().unwrap()])
     }
     fn git(&self, args: &[&str]) -> String {
-        let out = Command::new("/usr/bin/git").env_clear().env("PATH", "/usr/bin:/bin").env("HOME", &self.home)
+        let out = Command::new("/usr/bin/git").env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("PATH", "/usr/bin:/bin").env("HOME", &self.home)
             .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_AUTHOR_NAME", "fixture").env("GIT_AUTHOR_EMAIL", "fixture@example.com")
             .env("GIT_COMMITTER_NAME", "fixture").env("GIT_COMMITTER_EMAIL", "fixture@example.com")
@@ -243,7 +243,7 @@ impl Lab {
     }
     fn cli(&self, args: &[&str]) -> Output {
         // Verification's disposable server socket lives under the temporary directory.
-        Command::new(BIN).env_clear().env("HOME", &self.home).env("HERDR_PROJECTS_OWNER_HOME", &self.home).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", self.home.join("bin/herdr"))
+        Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", &self.home).env("HERDR_PROJECTS_OWNER_HOME", &self.home).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", self.home.join("bin/herdr"))
             .env("TMPDIR", std::env::var_os("TMPDIR").unwrap_or("/tmp".into())).env("XDG_RUNTIME_DIR", self.runtime.path())
             .envs(self.extra_env.iter().map(|(k, v)| (k.as_str(), v.as_path())))
             .args(["--root", self.root.to_str().unwrap()]).args(args).output().unwrap()
@@ -319,7 +319,7 @@ impl Lab {
         fs::create_dir_all(&shim).unwrap();
         fs::write(shim.join("herdr-farm"), format!("#!/bin/sh\nunset HERDR_FARM_SUBMISSION_SPOOL\nexec {BIN} \"$@\"\n")).unwrap();
         fs::set_permissions(shim.join("herdr-farm"), fs::Permissions::from_mode(0o700)).unwrap();
-        Command::new("/bin/sh").arg("-c").arg(script).current_dir(&worktree).env_clear()
+        Command::new("/bin/sh").arg("-c").arg(script).current_dir(&worktree).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim())
             .env("HOME", &self.home).env("HERDR_PROJECTS_OWNER_HOME", &self.home).env("PATH", format!("{}:/usr/bin:/bin", shim.display()))
             .env("TMPDIR", std::env::var_os("TMPDIR").unwrap_or("/tmp".into())).env("XDG_RUNTIME_DIR", self.runtime.path())
             .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -345,7 +345,7 @@ fn launch_run_refuses_loudly_at_the_first_failing_step_and_changes_nothing() {
     assert_eq!(herdr_farm::runtime::snapshot(&lab.project).unwrap(), before, "a refused run must not write");
     assert!(!lab.root.join(".herdr-run").exists(), "no Herdr server directory before the first step passes");
     // HERDR_BIN_PATH must name the verified Herdr by absolute path.
-    let out = Command::new(BIN).env_clear().env("HOME", &lab.home).env("HERDR_PROJECTS_OWNER_HOME", &lab.home).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", "herdr")
+    let out = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", &lab.home).env("HERDR_PROJECTS_OWNER_HOME", &lab.home).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", "herdr")
         .args(["--root", lab.root.to_str().unwrap()]).args(lab.run_args("plan-codex", "codex-sol", "docs/plan-codex.md", prompt.to_str().unwrap())).output().unwrap();
     assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("HERDR_BIN_PATH"), "{}", String::from_utf8_lossy(&out.stderr));
 }
@@ -561,14 +561,14 @@ fn launch_run_retries_after_termination_but_refuses_an_unobserved_live_worker() 
     let args = lab.run_args("plan-retry", "codex-sol", "docs/retry.md", prompt.to_str().unwrap());
     let first = lab.ok(&args);
     let attempt = first["attempt"].as_str().unwrap();
-    let mut ticker = FixtureTicker(Command::new(BIN).env_clear().env("HOME", &lab.home)
+    let mut ticker = FixtureTicker(Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", &lab.home)
         .env("HERDR_PROJECTS_OWNER_HOME", &lab.home).env("PATH", "/usr/bin:/bin")
         .env("HERDR_BIN_PATH", lab.home.join("bin/herdr"))
         .env("XDG_RUNTIME_DIR", lab.runtime.path())
         .args(["--root", lab.root.to_str().unwrap(), "ticker", "run"])
         .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap());
     let wait = |stage: &str, done: &dyn Fn() -> bool| {
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(15);
         while !done() {
             assert!(std::time::Instant::now() < until,
                 "timed out waiting for {stage}\nattempt states: {:?}\nticker log:\n{}",
@@ -590,7 +590,7 @@ fn launch_run_retries_after_termination_but_refuses_an_unobserved_live_worker() 
     assert!(error.contains("step 2") && error.contains("fresh resource identity evidence required"), "{error}");
     // Return to the launch's authorized config so the controller can stop it.
     fs::write(&config, &original).unwrap();
-    let mut ticker = FixtureTicker(Command::new(BIN).env_clear().env("HOME", &lab.home)
+    let mut ticker = FixtureTicker(Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", &lab.home)
         .env("HERDR_PROJECTS_OWNER_HOME", &lab.home).env("PATH", "/usr/bin:/bin")
         .env("HERDR_BIN_PATH", lab.home.join("bin/herdr"))
         .env("XDG_RUNTIME_DIR", lab.runtime.path())

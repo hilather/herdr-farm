@@ -79,7 +79,7 @@ impl Lab {
     }
     fn path(&self, name: &str) -> PathBuf { self.home.path().join(name) }
     fn cli_in(&self, home: &Path, args: &[&str]) -> Output {
-        Command::new(BIN).env_clear().env("HOME", home).env("PATH", "/usr/bin:/bin")
+        Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", home).env("PATH", "/usr/bin:/bin")
             .args(["--root", self.path("root").to_str().unwrap()]).args(args).output().unwrap()
     }
     fn cli(&self, args: &[&str]) -> Output { self.cli_in(self.home.path(), args) }
@@ -108,7 +108,7 @@ impl Lab {
     fn db(&self) -> rusqlite::Connection { rusqlite::Connection::open(self.project.join(".state/state.db")).unwrap() }
     fn decisions(&self) -> i64 { self.db().query_row("SELECT count(*) FROM review_acceptances", [], |r| r.get(0)).unwrap() }
     fn git(&self, args: &[&str]) -> String {
-        let out = Command::new("/usr/bin/git").env_clear().env("PATH", "/usr/bin:/bin").env("HOME", self.home.path())
+        let out = Command::new("/usr/bin/git").env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("PATH", "/usr/bin:/bin").env("HOME", self.home.path())
             .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_AUTHOR_NAME", "fixture").env("GIT_AUTHOR_EMAIL", "fixture@example.com")
             .env("GIT_COMMITTER_NAME", "fixture").env("GIT_COMMITTER_EMAIL", "fixture@example.com")
@@ -483,7 +483,7 @@ fn isolated_worker_cannot_read_the_signer_key() {
         {bin:?} --root {root:?} telemetry demo review signer run --subject reviewer:carol --once; echo run-exit $?",
         policy = dir.join("policy.json"), audit = dir.join("audit.jsonl"));
     // Control: the owner's own process reads it.
-    let owner = Command::new("/bin/sh").args(["-c", &probe]).env_clear().env("HOME", lab.home.path()).env("PATH", "/usr/bin:/bin").output().unwrap();
+    let owner = Command::new("/bin/sh").args(["-c", &probe]).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", lab.home.path()).env("PATH", "/usr/bin:/bin").output().unwrap();
     let owner = String::from_utf8_lossy(&owner.stdout).into_owned();
     assert!(owner.contains(&format!("READ {}", key.display())) && owner.contains(&body), "{owner}");
     assert!(owner.contains(&format!("READ {}", sibling.display())) && owner.contains("BINLIST herdr-farm owner-secret"), "{owner}");
@@ -497,7 +497,7 @@ fn isolated_worker_cannot_read_the_signer_key() {
     let isolation = Isolation::for_agent(&lab.project, &home, &cwd, Path::new("/bin/sh"), &[cwd.as_path()], &[], Some(&config), Some(&lab.path("lab/native.sock")), &[])
         .unwrap().with_executable(&bin).unwrap();
     let argv = isolated_gated_command(Path::new("/bin/sh"), &["-c".into(), probe.clone()], 60, "release-signer-probe", &home, &isolation).unwrap();
-    let mut child = Command::new(&argv[0]).args(&argv[1..]).current_dir(&cwd).env_clear().env("HOME", lab.home.path()).env("PATH", "/usr/bin:/bin")
+    let mut child = Command::new(&argv[0]).args(&argv[1..]).current_dir(&cwd).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", lab.home.path()).env("PATH", "/usr/bin:/bin")
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
     child.stdin.take().unwrap().write_all(b"release-signer-probe\n").unwrap();
     let out = child.wait_with_output().unwrap();

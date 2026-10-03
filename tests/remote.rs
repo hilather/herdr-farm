@@ -31,7 +31,7 @@ impl Lab {
     fn path(&self, name: &str) -> PathBuf { self.home.path().join(name) }
     fn command(&self) -> Command {
         let mut command = Command::new(BIN);
-        command.env_clear().env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", self.path("herdr")).arg("--root").arg(self.path("root"));
+        command.env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", self.path("herdr")).arg("--root").arg(self.path("root"));
         command
     }
     fn listing(&self, machines: Option<Value>) {
@@ -169,7 +169,7 @@ impl Brief {
     fn path(&self, name: &str) -> PathBuf { self.home.path().join(name) }
     fn command(&self) -> Command {
         let mut command = Command::new(BIN);
-        command.env_clear().env("HOME", self.home.path()).env("PATH", format!("{}:/usr/bin:/bin", self.path("bin").display()))
+        command.env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.home.path()).env("PATH", format!("{}:/usr/bin:/bin", self.path("bin").display()))
             .env("HERDR_BIN_PATH", self.path("herdr")).arg("--root").arg(self.path("root"));
         command
     }
@@ -183,7 +183,7 @@ impl Brief {
         record.get("prompt_pending").and_then(|v| v.as_bool())
     }
     fn wait(&mut self, what: &str, done: impl Fn(&Self) -> bool) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         while !done(self) {
             assert!(self.ticker.as_mut().unwrap().try_wait().unwrap().is_none(), "ticker exited");
             assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}: {}", fs::read_to_string(self.path("root/.ticker.log")).unwrap_or_default());

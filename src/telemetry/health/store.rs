@@ -17,7 +17,7 @@ use std::path::Path;
 /// Evaluations kept in `health_evaluations`.
 pub const KEEP_EVALUATIONS: i64 = 1000;
 /// The ticker evaluates at most once per this interval, and only once an operator has run `health evaluate`.
-pub const TICK_INTERVAL_MS: i64 = 300_000;
+pub const TICK_INTERVAL_MS: i64 = crate::timing::HEALTH_INTERVAL_MS;
 
 fn unavailable(reason: &str) -> Value { json!({"status": "unavailable", "reason": reason}) }
 
@@ -137,7 +137,7 @@ pub fn tick(project: &Path) -> Result<()> {
     drop(db);
     let now = jiff::Timestamp::now().as_millisecond();
     match last {
-        Some(at) if now - at >= TICK_INTERVAL_MS => evaluate(project, "tick", now).map(drop),
+        Some(at) if now - at >= crate::timing::pass(std::time::Duration::from_millis(TICK_INTERVAL_MS as u64)).as_millis() as i64 => evaluate(project, "tick", now).map(drop),
         _ => Ok(()),
     }
 }
