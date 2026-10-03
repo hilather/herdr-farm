@@ -25,7 +25,7 @@ Inspect and plan are dry runs. They fingerprint sources and report blockers with
 creating a store. CLI inspect/plan produce version-2 plans binding the external
 config path and its absence or content fingerprint into the migration ID. Config
 values are not included. A plan must be written outside the source project. Apply requires
-an unchanged plan, a paused/archived project, explicit stopped-writer confirmation,
+unchanged sources, config fingerprint and task/operation mapping, a paused/archived project, explicit stopped-writer confirmation,
 and exclusive ticker, root execution and project locks. It does not stop processes
 on the operator's behalf or migrate any actual user project during implementation.
 
@@ -45,8 +45,21 @@ same-user process cwd, open descriptor or mapped content under the recorded cwd,
 worktree, output directory or project. The importer's own maintenance record lock
 is excluded from its descriptor check. Idle UI is insufficient. Missing or failed
 session observations, remote identities, open/starting threads and live agents
-block. Inspect, plan and exact-plan apply repeat these checks; the operator must
+block. Inspect and plan report live blockers; apply and recovery repeat live checks
+separately from source freshness, preserving specific safety errors. Advisory
+warnings and supported probe version changes do not invalidate a plan. An
+Linux `ENOENT`/`ESRCH` process-exit observations are accepted only after the
+process is confirmed gone or a sole zombie. An incomplete snapshot is retried up to eight
+times; discovered writers and persistent uncertainty still block. The operator must
 also confirm all known writers stopped. No processes are stopped by migration.
+
+Plan freshness previously compared the entire inspection result, including live
+writer blockers. Under parallel finalization tests, a disappearing unrelated
+process produced `ESRCH` while reading `/proc/<pid>/maps`; that uncertainty could
+change blockers without changing source bytes and be reported as stale mapping.
+Freshness now compares source inventory/digests, config reference, version and
+project identity, tasks, operations and source-derived blockers. Live checks
+remain mandatory at each pre-cutover verification and report their own causes.
 
 Final-copy artifact manifests are typed and checked against thread/generation,
 manifest digest and retained file digests. Retained generations may be earlier

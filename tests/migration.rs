@@ -529,3 +529,41 @@ fn stopped_thread_migrates_with_reason_and_dirty_work_preserved() {
     let active = p.set_state("active");
     assert!(active.status.success(), "{}", String::from_utf8_lossy(&active.stderr));
 }
+
+/// Advisory output and supported live probe versions can change without changing
+/// migration inputs. Real source changes and new live agents still refuse cutover.
+#[test]
+fn plan_freshness_separates_sources_from_live_observations() {
+    use std::os::unix::fs::PermissionsExt;
+    let p = Project::new("pause");
+    let herdr = p.home.path().join("herdr");
+    let fixture = |version: &str| {
+        fs::write(&herdr, format!("#!/bin/sh\ncase \"$*\" in\n--version) echo 'herdr {version}';;\n'pane list') echo '{{\"result\":{{\"panes\":[]}}}}';;\n'agent list') cat \"$HOME/agents.json\";;\n*) exit 9;;\nesac\n")).unwrap();
+        fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
+    };
+    fixture("0.9.1");
+    fs::write(p.home.path().join("agents.json"), r#"{"result":{"agents":[]}}"#).unwrap();
+    p.write(".state/coordinator.json", json!({"socket":p.home.path().join("session.sock"),"pane_id":"c1"}).to_string());
+    let plan = p.plan();
+    let original = p.read("PROJECT.md");
+    p.write("PROJECT.md", [original.as_slice(), b"\nChanged source\n"].concat());
+    let refused = p.apply(&plan);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("source or mapping changed since plan; regenerate plan before cutover"));
+    assert!(!p.project.join(".state/state.db").exists());
+    p.write("PROJECT.md", original);
+    fixture("0.9.2");
+    fs::write(p.home.path().join("agents.json"), r#"{"result":{"agents":[{"pane_id":"c1","tab_id":"ct","workspace_id":"cw","agent":"codex","agent_status":"running"}]}}"#).unwrap();
+    let refused = p.apply(&plan);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("live agent blocks migration"), "{refused:?}");
+    assert!(!p.project.join(".state/state.db").exists());
+    fs::write(p.home.path().join("agents.json"), r#"{"result":{"agents":[]}}"#).unwrap();
+    let mut advisory: Value = serde_json::from_slice(&fs::read(&plan).unwrap()).unwrap();
+    advisory["warnings"] = json!(["advisory observation changed"]);
+    fs::write(&plan, serde_json::to_vec(&advisory).unwrap()).unwrap();
+    let applied = p.apply(&plan);
+    assert!(applied.status.success(), "{applied:?}");
+    assert_eq!(p.ok(&["migration", "demo", "status"])["phase"], "active");
+    assert!(migration::open_active(&p.project).unwrap().imported_sources().unwrap().iter().any(|source| source.path == ".state/coordinator.json"));
+}

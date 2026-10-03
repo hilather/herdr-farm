@@ -120,7 +120,7 @@ fn front(text: &str) -> Result<toml::Value> {
     let (header,_)=rest.split_once("\n+++\n").or_else(||rest.strip_suffix("\n+++").map(|h|(h,""))).context("unclosed TOML front matter")?;
     Ok(toml::from_str(header)?)
 }
-fn analyze(project: &Path, source: &Source, tasks: &mut Vec<Task>, blockers: &mut Vec<String>, warnings: &mut Vec<String>, ids: &mut BTreeSet<String>) -> Result<()> {
+fn analyze(project: &Path, live: bool, source: &Source, tasks: &mut Vec<Task>, blockers: &mut Vec<String>, warnings: &mut Vec<String>, ids: &mut BTreeSet<String>) -> Result<()> {
     let bytes=read(&project.join(&source.path))?;
     ensure!(hash(&bytes)==source.digest,"source changed during inspect: {}",source.path);
     if evidence::retained(&source.path) || source.path==".state/memory-review.json" { return evidence::validate(project, source, &bytes); }
@@ -138,9 +138,9 @@ fn analyze(project: &Path, source: &Source, tasks: &mut Vec<Task>, blockers: &mu
             if value.get("machine").and_then(|v|v.as_str()).is_some_and(|s|!s.is_empty()) { blockers.push(format!("{}: remote identity requires live reconciliation",source.path)); }
             if value.get("pane_id").and_then(|v|v.as_str()).is_some_and(|s|!s.is_empty()) {
                 let record=serde_json::to_value(&value)?;
-                if !matches!(status,"resolved"|"stopped") || evidence::quiesced(project, &record).is_err() { blockers.push(format!("{}: pane_id identity requires live reconciliation; writer quiescence is unverified",source.path)); }
+                if !matches!(status,"resolved"|"stopped") || live && evidence::quiesced(project, &record).is_err() { blockers.push(format!("{}: pane_id identity requires live reconciliation; writer quiescence is unverified",source.path)); }
             }
-            if matches!(status,"resolved"|"stopped") && ["cwd","worktree_path","thread_dir"].iter().any(|field|value.get(*field).and_then(|v|v.as_str()).is_some_and(|s|!s.is_empty())) && value.get("pane_id").and_then(|v|v.as_str()).is_none_or(|s|s.is_empty()) && evidence::writer_paths(project,&serde_json::to_value(&value)?).is_err() { blockers.push(format!("{}: writer quiescence is unverified",source.path)); }
+            if live && matches!(status,"resolved"|"stopped") && ["cwd","worktree_path","thread_dir"].iter().any(|field|value.get(*field).and_then(|v|v.as_str()).is_some_and(|s|!s.is_empty())) && value.get("pane_id").and_then(|v|v.as_str()).is_none_or(|s|s.is_empty()) && evidence::writer_paths(project,&serde_json::to_value(&value)?).is_err() { blockers.push(format!("{}: writer quiescence is unverified",source.path)); }
             let title=value.get("title").and_then(|v|v.as_str()).unwrap_or(id);
             tasks.push(Task { id:TaskId::new(format!("legacy-{id}")).map_err(anyhow::Error::msg)?,revision:1,state:if status=="failed" {TaskState::Failed}else{TaskState::AwaitingReview},title:title.into(),active_attempt:None });
         },
@@ -148,7 +148,7 @@ fn analyze(project: &Path, source: &Source, tasks: &mut Vec<Task>, blockers: &mu
             let value:serde_json::Value=serde_json::from_str(text)?;
             validate_runtime(&source.path,&value)?;
             if source.path==".state/project.json" { ensure!(matches!(value.get("status").and_then(|v|v.as_str()),Some("paused"|"archived")),"pause/archive project before migration"); }
-            if source.path==".state/coordinator.json" && value.get("pane_id").and_then(|v|v.as_str()).is_some_and(|s|!s.is_empty()) && evidence::quiesced(project,&value).is_err() { blockers.push(".state/coordinator.json: coordinator identity requires live reconciliation; remove no evidence to bypass this check".into()); }
+            if source.path==".state/coordinator.json" && value.get("pane_id").and_then(|v|v.as_str()).is_some_and(|s|!s.is_empty()) && live && evidence::quiesced(project,&value).is_err() { blockers.push(".state/coordinator.json: coordinator identity requires live reconciliation; remove no evidence to bypass this check".into()); }
             warnings.push(format!("{}: preserved losslessly; pending obligations require reconciliation before dispatch",source.path));
         },
         "inbox" => { if source.path.ends_with(".md") {
@@ -174,6 +174,9 @@ fn analyze(project: &Path, source: &Source, tasks: &mut Vec<Task>, blockers: &mu
 /// Read-only inventory and deterministic plan. Diagnoses malformed records without
 /// returning their contents (which may contain credentials or untrusted prompts).
 pub fn inspect(project: &Path) -> Result<Plan> {
+    inspect_sources(project, true)
+}
+fn inspect_sources(project: &Path, live: bool) -> Result<Plan> {
     let project=checked_project(project)?;
     let mut sources=Vec::new(); inventory(&project,Path::new(""),&mut sources,&mut 0)?;
     sources.sort_by(|a,b|a.path.cmp(&b.path));
@@ -181,7 +184,7 @@ pub fn inspect(project: &Path) -> Result<Plan> {
     if !sources.iter().any(|s|s.path==".state/project.json") { blockers.push("legacy status is active by default; pause project first".into()); }
     match read(&project.join("PROJECT.md")).and_then(|b|front(std::str::from_utf8(&b)?)) { Ok(value)=>if validate_settings(&value).is_err(){blockers.push("PROJECT.md: invalid settings types".into());},Err(_)=>blockers.push("PROJECT.md: invalid settings/front matter".into()) }
     for source in &sources {
-        if source.kind!="backup" && analyze(&project,source,&mut tasks,&mut blockers,&mut warnings,&mut ids).is_err() { blockers.push(format!("{}: invalid or unsupported record; repair before migration",source.path)); }
+        if source.kind!="backup" && analyze(&project,live,source,&mut tasks,&mut blockers,&mut warnings,&mut ids).is_err() { blockers.push(format!("{}: invalid or unsupported record; repair before migration",source.path)); }
     }
     if tasks.len()>10_000 { blockers.push("more than 10,000 imported tasks".into()); }
     let operations=match obligations::convert(&project,&sources,&mut tasks) {
@@ -289,7 +292,37 @@ fn backup(project:&Path,plan:&Plan)->Result<()> {
     sync_dir(&dest)
 }
 fn verify_sources(project:&Path,plan:&Plan)->Result<()> {
-    let current=match &plan.config { Some(config)=>inspect_with_config(project,Path::new(&config.path))?,None=>inspect(project)? }; ensure!(current==*plan,"source or mapping changed since plan; regenerate plan before cutover"); Ok(())
+    // Freshness binds immutable inputs and their mapping, not live observations
+    // or advisory warnings. Repeat safety probes separately with their own errors.
+    let mut current = inspect_sources(project, false)?;
+    if let Some(config) = &plan.config {
+        current.version = 2;
+        current.config = Some(config_reference(Path::new(&config.path))?);
+        current.digest = references::plan_digest(&current)?;
+    }
+    ensure!(current.version == plan.version && current.project == plan.project
+        && current.config == plan.config && current.digest == plan.digest
+        && current.sources == plan.sources && current.tasks == plan.tasks
+        && current.operations == plan.operations && current.blockers == plan.blockers,
+        "source or mapping changed since plan; regenerate plan before cutover");
+    for source in &current.sources {
+        let record = if source.kind == "thread" {
+            let value: toml::Value = toml::from_str(std::str::from_utf8(&read(&project.join(&source.path))?)?)?;
+            Some(serde_json::to_value(value)?)
+        } else if source.path == ".state/coordinator.json" {
+            Some(serde_json::from_slice(&read(&project.join(&source.path))?)?)
+        } else { None };
+        if let Some(record) = record {
+            if record.get("pane_id").and_then(serde_json::Value::as_str).is_some_and(|s| !s.is_empty()) {
+                evidence::quiesced(project, &record)
+                    .with_context(|| format!("{}: live migration safety check failed", source.path))?;
+            } else if source.kind == "thread" && ["cwd", "worktree_path", "thread_dir"].iter().any(|field| record.get(*field).and_then(serde_json::Value::as_str).is_some_and(|s| !s.is_empty())) {
+                evidence::writer_paths(project, &record)
+                    .with_context(|| format!("{}: writer migration safety check failed", source.path))?;
+            }
+        }
+    }
+    Ok(())
 }
 fn expected_import(project:&Path,plan:&Plan)->Result<Vec<ImportedSource>> {
     plan.sources.iter().filter(|s|s.kind!="backup").map(|s| {
