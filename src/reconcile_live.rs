@@ -88,9 +88,10 @@ fn collect_limited(ctx:&Ctx,project:&Path,control:Option<&herdr_farm::store::con
             if worktree_before.is_some()&&worktree_before==after&&common.is_some()&&common_dirs.get(&identity.repo)==Some(&common)&&top.as_deref()==Some(identity.worktree_path.as_str()) {worktree_identity=after;}else{worktree=State::Unknown;}
         }
         let mut agent_identity=if agent_present {sessions.get(&(identity.socket.clone(),identity.machine.clone())).and_then(|s|s.as_ref().ok()).and_then(|(_,agents)|agents.iter().find(|a|a.pane_id==identity.pane_id)).map(|a|herdr_farm::domain::AgentIdentity{kind:a.agent.clone(),name:a.name.clone()})}else{None};
-        if let Some(owned)=item.ownership.as_ref().filter(|o|o.binding==binding.id&&o.binding_revision==binding.revision) {
-            if owned.session!=session_identity||owned.agent!=agent_identity {pane=State::Mismatch;agent_present=false;agent_identity=None;}
-        }
+        // Absence has no agent identity to compare; the socket must still match.
+        if let Some(owned)=item.ownership.as_ref().filter(|o|o.binding==binding.id&&o.binding_revision==binding.revision)
+            && (owned.session!=session_identity||(pane!=State::Absent&&owned.agent!=agent_identity))
+        {pane=State::Mismatch;agent_present=false;agent_identity=None;}
         observations.push(RuntimeObservation{binding:binding.id.clone(),binding_revision:binding.revision,task_revision:item.task_revision,observed_unix_ms:started,pane,worktree,agent_present,collector:"herdr-git-v2".into(),config_digest:config.digest.clone(),diagnostic:"Observation only: pane absence/idle is not termination, worktree identity is not preservation, and remote worktrees remain unverified. No ownership, capacity release or dispatch authorized.".into(),session_identity,worktree_identity,agent_identity});
     }
     ensure!(migration::config_reference(Path::new(&config.path))?==config,"config changed during observation; retry");

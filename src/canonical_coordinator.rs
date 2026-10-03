@@ -271,6 +271,32 @@ pub fn open(ctx: &Ctx, slug: &str, options: &OpenOptions) -> Result<()> {
         );
         journal = None;
     }
+    // Prove absence on the recorded route before any replacement effect can
+    // obscure that evidence (Herdr may reuse pane identifiers).
+    if (live.is_none() || binding.is_some_and(|b| previous.as_ref().is_some_and(|r|
+        *r != RuntimeRoute::from_identity(&b.identity))))
+        && (options.reprime || journal.as_ref().is_some_and(|j| j.replace_missing))
+        && let Some(b) = binding
+        && let Some(owned) = snapshot.ownership.iter().find(|o| o.binding == b.id)
+    {
+        let batch = crate::reconcile_live::collect(ctx, &dir)?;
+        let now = jiff::Timestamp::now().as_millisecond();
+        ensure!(
+            b.identity.machine.is_empty() && b.identity.worktree_path.is_empty()
+                && owned.attempt.is_none() && owned.binding_revision == b.revision
+                && batch.observations.iter().any(|o| o.binding == b.id
+                    && o.binding_revision == b.revision && o.task_revision.is_none()
+                    && o.collector == "herdr-git-v2"
+                    && o.pane == herdr_farm::reconcile::ResourceState::Absent
+                    && !o.agent_present && o.session_identity.is_some()
+                    && o.session_identity == owned.session
+                    && now >= o.observed_unix_ms && now - o.observed_unix_ms <= 30_000),
+            "relinquish owned resources before rebinding; existing references are retained"
+        );
+        let head = runtime::record_observations_held(&dir, &batch)?;
+        runtime::relinquish(&dir, &b.id, owned.revision, head,
+            "open --reprime replaces freshly observed absent coordinator")?;
+    }
     if journal.is_none() {
         let mut j = Journal {
             version: 1,

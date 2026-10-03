@@ -89,10 +89,21 @@ impl SqliteStore {
         let tx=self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;check_schema(&tx)?;
         let schema:u32=tx.query_row("PRAGMA user_version",[],|r|r.get(0))?;if schema<9{return Err(StoreError::UnsupportedSchema(schema));}
         if head(&tx)?!=expected_head{return Err(StoreError::Conflict);}
-        if super::control::read(&tx)?.state==ProjectState::Active {return Err(StoreError::Invalid("pause the project before relinquishing ownership".into()));}
         let owned=read_all(&tx)?.into_iter().find(|o|o.binding==id&&o.revision==expected_revision).ok_or(StoreError::Conflict)?;
         let binding=super::runtime::read_all(&tx)?.into_iter().find(|b|b.id==id&&b.revision==owned.binding_revision).ok_or(StoreError::Conflict)?;
         if owned.identity_digest!=identity_digest(&binding)? {return Err(StoreError::Conflict);}
+        if super::control::read(&tx)?.state==ProjectState::Active {
+            let observation=super::observations::read_binding(&tx,id,None)?;
+            let now=jiff::Timestamp::now().as_millisecond();
+            let absent=id=="coordinator" && binding.task.is_none() && owned.attempt.is_none()
+                && binding.identity.machine.is_empty() && binding.identity.worktree_path.is_empty()
+                && observation.as_ref().is_some_and(|o|o.collector=="herdr-git-v2"
+                    && o.binding_revision==binding.revision && o.task_revision.is_none()
+                    && o.pane==crate::reconcile::ResourceState::Absent && !o.agent_present
+                    && o.session_identity.is_some() && o.session_identity==owned.session
+                    && now>=o.observed_unix_ms && now-o.observed_unix_ms<=30_000);
+            if !absent {return Err(StoreError::Invalid("pause the project before relinquishing ownership".into()));}
+        }
         let attempts=read_attempts(&tx)?;
         if let Some(attempt)=&owned.attempt {
             let attempt=attempts.iter().find(|a|&a.id==attempt&&binding.task.as_ref()==Some(&a.task)).ok_or(StoreError::Conflict)?;

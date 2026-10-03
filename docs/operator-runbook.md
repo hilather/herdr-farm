@@ -209,7 +209,11 @@ is insufficient: the adapter waits for working/blocked status or visible working
 evidence, using the worker brief confirmation window. Startup screens that
 swallow a prompt cause up to three deliveries after fresh verified visible idle
 checks. Repeated `open` focuses the accepted coordinator without launching or
-priming again. If its pane was closed, run `herdr-farm open PROJECT --reprime` to
+priming again. Replacement requires fresh Herdr evidence that both the recorded
+pane and agent are absent on the same socket incarnation. Open audits withdrawal
+of the current ownership revision before creating or binding the replacement;
+unavailable or ambiguous observations retain ownership and refuse replacement.
+If its pane was closed, run `herdr-farm open PROJECT --reprime` to
 recreate and prime it. `--rebind` permits moving sessions only after the previous
 socket is gone. An interrupted start/prompt remains a durable pending effect;
 inspect the pane before explicitly requesting `--reprime`. An interrupted

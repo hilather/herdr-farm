@@ -36,7 +36,9 @@ elif a[:2]==['workspace','create']:
 elif a[:2]==['agent','start']:
  s['starts']+=1;s['agent']=True;s['args']=a;reply={'result':{'agent':agent()}}
 elif a==['pane','list']:reply={'result':{'panes':[pane()] if s['live'] else []}}
-elif a==['agent','list']:reply={'result':{'agents':[agent()] if s['live'] and s['agent'] else []}}
+elif a==['agent','list']:
+ if s.get('fail_inventory'):sys.exit(1)
+ reply={'result':{'agents':[agent()] if s['agent'] else []}}
 else:reply={'result':{'type':'ok'}}
 json.dump(s,open(path,'w'))
 if a==['remote-api-bridge'] and m=='agent.prompt' and os.path.exists(root+'/lose-prompt-reply'):
@@ -230,9 +232,21 @@ fn socket_open_primes_owned_coordinator_retries_swallowed_prompt_and_recreates_c
     l.stop();
     assert_eq!(l.state()["starts"], 1);
     assert_eq!(l.state()["prompts"].as_array().unwrap().len(), 2);
+    let retained = runtime::snapshot(&l.project).unwrap().ownership;
     let mut state = l.state();
     state["live"] = json!(false);
+    // An agent without its pane is uncertainty, not proof of absence.
+    fs::write(l.home.path().join("herdr-state.json"), serde_json::to_vec(&state).unwrap()).unwrap();
+    assert!(!l.cli(&["open", "demo", "--reprime"]).status.success());
+    assert_eq!(l.state()["creates"], 1);
+    assert_eq!(runtime::snapshot(&l.project).unwrap().ownership, retained);
     state["agent"] = json!(false);
+    state["fail_inventory"] = json!(true);
+    fs::write(l.home.path().join("herdr-state.json"), serde_json::to_vec(&state).unwrap()).unwrap();
+    assert!(!l.cli(&["open", "demo", "--reprime"]).status.success());
+    assert_eq!(l.state()["creates"], 1);
+    assert_eq!(runtime::snapshot(&l.project).unwrap().ownership, retained);
+    state["fail_inventory"] = json!(false);
     fs::write(
         l.home.path().join("herdr-state.json"),
         serde_json::to_vec(&state).unwrap(),
