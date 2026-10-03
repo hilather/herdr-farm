@@ -99,6 +99,12 @@ impl Lab {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
     }
+    /// `ok` for a command that can meet the accelerated ticker's pass lock.
+    fn settled_ok(&self, args: &[&str]) -> String {
+        let o = self.settled(args);
+        assert!(o.status.success(), "{args:?}: {}", String::from_utf8_lossy(&o.stderr));
+        String::from_utf8(o.stdout).unwrap()
+    }
     fn ok(&self, args: &[&str]) -> String {
         let o = self.cli(args);
         assert!(
@@ -199,7 +205,7 @@ fn socket_open_primes_owned_coordinator_retries_swallowed_prompt_and_recreates_c
     let alias = l.home.path().join("git/herdr-projects");
     fs::create_dir_all(alias.parent().unwrap()).unwrap();
     std::os::unix::fs::symlink(BIN, &alias).unwrap();
-    l.ok(&["open", "demo"]);
+    l.settled_ok(&["open", "demo"]);
     l.stop();
     let state = l.state();
     assert_eq!(state["creates"], 1);
@@ -247,14 +253,14 @@ fn socket_open_primes_owned_coordinator_retries_swallowed_prompt_and_recreates_c
     let mut changed = fs::read_to_string(&config).unwrap();
     changed.push_str("# owner configuration changed\n");
     fs::write(&config, changed).unwrap();
-    l.ok(&["open", "demo"]);
+    l.settled_ok(&["open", "demo"]);
     l.stop();
     assert_eq!(serde_json::from_str::<Value>(&l.ok(&["runtime", "demo", "inspect"])).unwrap()["control"]["state"], "active");
     let adopted = runtime::snapshot(&l.project).unwrap();
     assert!(adopted.ownership.iter().any(|o| o.binding == "coordinator" && o.config_digest == migration::config_reference(&config).unwrap().digest));
     let control = adopted.control.unwrap();
     l.ok(&["runtime", "demo", "state", "paused", "--expected-revision", &control.revision.to_string(), "--expected-head", &adopted.head.to_string()]);
-    l.ok(&["open", "demo"]);
+    l.settled_ok(&["open", "demo"]);
     l.stop();
     assert_eq!(serde_json::from_str::<Value>(&l.ok(&["runtime", "demo", "inspect"])).unwrap()["control"]["state"], "paused");
     // Restore active for the replacement workflow below.
@@ -285,7 +291,7 @@ fn socket_open_primes_owned_coordinator_retries_swallowed_prompt_and_recreates_c
             .unwrap()
             .contains("context demo")
     );
-    l.ok(&["open", "demo"]);
+    l.settled_ok(&["open", "demo"]);
     l.stop();
     assert_eq!(l.state()["starts"], 1);
     assert_eq!(l.state()["prompts"].as_array().unwrap().len(), 2);
@@ -296,7 +302,7 @@ fn socket_open_primes_owned_coordinator_retries_swallowed_prompt_and_recreates_c
     old["version"] = json!(1);
     old.as_object_mut().unwrap().remove("permission_file");
     fs::write(&journal_path, serde_json::to_vec(&old).unwrap()).unwrap();
-    l.ok(&["open", "demo"]);
+    l.settled_ok(&["open", "demo"]);
     l.stop();
     let upgraded: Value = serde_json::from_slice(&fs::read(&journal_path).unwrap()).unwrap();
     assert_eq!(upgraded["version"], 2);
