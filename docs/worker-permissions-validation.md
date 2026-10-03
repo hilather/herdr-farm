@@ -174,9 +174,8 @@ restricting Git writes to objects, the thread's own refs/reflogs and its
 linked-worktree admin directory. Private homes, token-fd login and rewritten
 Claude settings prevent a granted test runner or committed script from
 modifying owner configuration or planting restart hooks. Legacy Claude launches
-remain unsandboxed in this card. PERM-1 grants are contained once card 1b connects
-the launch path to this sandbox; command-prefix grants alone provide no such
-boundary.
+remain unsandboxed in this card. Card 1b connects the launch path to this
+sandbox; command-prefix grants alone provide no such boundary.
 
 Validation in the hard sandbox (2026-10-03): the requested nextest invocation
 ran 17 tests. Both `thread_sandbox` tests and `worker_login_share` passed,
@@ -206,3 +205,21 @@ no-default-features build also passed, verifying that the owner isolation/token
 parser is available without state-store. The five existing worker-supervision
 tests also passed, including the canonical baseline environment assertion.
 No schema or table changes were made.
+
+## Sandboxed Claude command policy (card 1a-c)
+
+PERM-1 grants and `thread_allowed_commands` affect only unsandboxed Claude launches (`thread_sandbox = false` owner opt-out or remote threads). Sandboxed Claude threads run commands without human prompts; the sandbox is the boundary. Their arguments contain only validated explicit `thread_agent_args` plus `--setting-sources user`, with no generated `--permission-mode` or `--allowedTools` list. The thread settings allow Bash, Read, Edit, Write, Glob and Grep and set `sandbox.autoAllowBashIfSandboxed = true`. Settings are rewritten from scratch on every launch, discarding planted hooks and extra allow rules.
+
+The legacy launcher remains unconnected in this card. No schema or crate changes.
+
+Validation: the requested `cargo nextest run --locked --offline -j 3 --features
+state-store --test thread_sandbox --test threads` ran 16 tests: both
+`thread_sandbox` tests passed; all 14 `threads` tests failed only at
+`UnixListener::bind` (tests/threads.rs:64) with `Operation not permitted`.
+The socket-only failures are exactly the 14 names listed in the card 1a section
+above. No workaround was attempted; the steward must run them outside.
+
+`cargo clippy --locked --offline -j 3 --features state-store --all-targets`
+completed successfully; existing warnings remain, none on changed lines.
+`git diff --check` passed. No owner data, running server/ticker, or agent CLI
+was accessed. No push was performed.

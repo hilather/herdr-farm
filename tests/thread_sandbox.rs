@@ -96,11 +96,17 @@ fn shared_git_thread_and_tab_are_contained_and_restarts_discard_worker_settings(
     assert!(isolated_gated_command(&agent, &["--settings".into(), "planted.json".into()], 30, "release", &home, &isolation).unwrap_err().to_string().contains("--settings"));
     let writable = [&wt, &common.join("objects"), &common.join("refs/heads/hp/demo/t-0001"), &common.join("logs/refs/heads/hp/demo/t-0001"), &admin, &home].map(|p| p.to_string_lossy().into_owned());
     agent_home::prepare_claude_thread(&home, &wt, &writable, false).unwrap();
-    fs::write(home.join(".claude/settings.json"), r#"{"permissions":{"allow":["Bash"]},"hooks":{"PreToolUse":[]}}"#).unwrap();
+    fs::write(home.join(".claude/settings.json"), r#"{"permissions":{"allow":["Bash", "WebFetch", "Read(/planted/**)"]},"hooks":{"PreToolUse":[]}}"#).unwrap();
     agent_home::prepare_claude_thread(&home, &wt, &writable, false).unwrap();
     let settings: serde_json::Value = serde_json::from_str(&fs::read_to_string(home.join(".claude/settings.json")).unwrap()).unwrap();
     assert!(settings.get("hooks").is_none());
-    assert!(!settings["permissions"]["allow"].as_array().unwrap().iter().any(|v| v == "Bash"));
+    assert_eq!(settings["permissions"]["allow"], serde_json::json!(["Bash", "Read", "Edit", "Write", "Glob", "Grep"]));
+    assert_eq!(settings["sandbox"]["autoAllowBashIfSandboxed"], true);
+    assert_eq!(settings["sandbox"]["enabled"], true);
+    assert_eq!(settings["sandbox"]["failIfUnavailable"], true);
+    assert_eq!(settings["sandbox"]["allowUnsandboxedCommands"], false);
+    assert_eq!(settings["sandbox"]["filesystem"]["allowWrite"], serde_json::json!(writable));
+    assert_eq!(settings["permissions"]["deny"], serde_json::json!(["WebFetch", "WebSearch"]));
     assert_eq!(settings["sandbox"]["network"]["allowedDomains"], serde_json::json!([]));
     let trust: serde_json::Value = serde_json::from_str(&fs::read_to_string(home.join(".claude.json")).unwrap()).unwrap();
     assert_eq!(trust["projects"][wt.to_str().unwrap()]["hasTrustDialogAccepted"], true);
@@ -170,6 +176,15 @@ fn owner_safety_settings_are_reported_and_validated_through_cli() {
     assert!(output.contains("Claude threads are unsandboxed"), "{output}");
     assert!(output.contains("thread_wall_hours = 12"), "{output}");
     assert!(output.contains("RUST_BACKTRACE=1"), "{output}");
+    let sandboxed = format!("[safety.\"{}\"]\nthread_sandbox = true\nthread_allowed_commands = [\"tool test:*\"]\nthread_agent_args_kind = \"claude\"\nthread_agent_args = [\"--model\", \"sonnet\"]\n", root.join("demo").display());
+    fs::write(config_dir.join("config.toml"), &sandboxed).unwrap();
+    let out = cli(&["safety", "show", "demo"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let output = String::from_utf8(out.stdout).unwrap();
+    let arguments = output.lines().find(|line| line.contains("sandboxed Claude worker arguments:")).unwrap();
+    assert_eq!(arguments.trim(), r#"sandboxed Claude worker arguments: ["--model", "sonnet", "--setting-sources", "user"]"#);
+    fs::write(config_dir.join("config.toml"), sandboxed.replace("sonnet", "--settings")).unwrap();
+    assert!(!cli(&["safety", "show", "demo"]).status.success());
     for invalid in ["thread_wall_hours = 0", "thread_wall_hours = 169", "thread_env = [\"GIT_AUTHOR_NAME=bad\"]", "thread_env = [\"LD_PRELOAD=bad\"]"] {
         fs::write(config_dir.join("config.toml"), format!("[safety.\"{}\"]\n{invalid}\n", root.join("demo").display())).unwrap();
         assert!(!cli(&["safety", "show", "demo"]).status.success());

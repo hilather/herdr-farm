@@ -220,7 +220,9 @@ pub struct Safety {
     pub routine_commands: bool,
 }
 
-// Claude Code Bash prefix permission rules; never allow a bare `git` or shell.
+// Unsandboxed Claude launches only (owner opt-out or remote threads): PERM-1
+// grants and thread_allowed_commands extend these Bash prefix permission rules.
+// Sandboxed threads allow commands without prompts inside the sandbox boundary.
 const CLAUDE_WORKER_COMMANDS: &[&str] = &[
     "git status", "git log", "git diff", "git show", "git branch",
     "git checkout", "git switch", "git add", "git commit", "git merge",
@@ -229,8 +231,7 @@ const CLAUDE_WORKER_COMMANDS: &[&str] = &[
     "grep",
     // Not `find` (-exec, -delete), `sed` (GNU `e` executes commands) or `rg`
     // (--pre runs a preprocessor): each can run an arbitrary command under an
-    // allowed prefix. Legacy Claude launches remain unsandboxed until the thread launcher
-    // uses the thread sandbox; grants are contained then.
+    // allowed prefix.
 ];
 
 impl Safety {
@@ -271,14 +272,10 @@ impl Safety {
     }
     /// Arguments for the sandboxed Claude launch path.
     #[allow(dead_code)] // Launch integration connects the legacy launcher to this prepared API.
-    pub fn sandboxed_claude_arguments(&self, cwd: &str, repository: &str) -> Result<Vec<String>> {
+    pub fn sandboxed_claude_arguments(&self, _cwd: &str, _repository: &str) -> Result<Vec<String>> {
         let explicit = self.worker_arguments("claude")?;
         crate::agents::validate_sandboxed_claude_arguments(explicit)?;
-        let mut defaults = self.clone();
-        defaults.thread_agent_args.clear();
-        defaults.thread_agent_args_explicit = false;
-        let mut args = defaults.effective_worker_arguments("claude", cwd, repository)?;
-        args.extend_from_slice(explicit);
+        let mut args = explicit.to_vec();
         args.extend(["--setting-sources".into(), "user".into()]);
         Ok(args)
     }

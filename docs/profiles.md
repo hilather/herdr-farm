@@ -583,6 +583,10 @@ for every new grant. Optional `grantable_commands = ["tool test:*"]` defines
 additional exact prefixes the coordinator can grant, with the same syntax and
 limits as `thread_allowed_commands`. The automatic exclusions still apply.
 
+PERM-1 grants and `thread_allowed_commands` affect only unsandboxed Claude
+launches (`thread_sandbox = false` or remote threads). Sandboxed Claude threads
+run commands without human prompts inside the sandbox boundary.
+
 `safety grant PROJECT --allow "tools/run-tests.sh:*" --reason "test blocked"`
 grants a committed project script verified against `integration_target` in
 PROJECT.md, or the repository default branch. Verification uses `git ls-tree`;

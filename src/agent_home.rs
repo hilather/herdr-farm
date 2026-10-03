@@ -262,11 +262,11 @@ pub fn prepare_claude_thread(home: &Path, cwd: &Path, writable: &[String], netwo
     ensure!(cwd.is_absolute() && writable.iter().all(|p| Path::new(p).is_absolute()), "thread sandbox paths must be absolute");
     let mut sandbox = json!({
         "enabled": true, "failIfUnavailable": true,
-        "allowUnsandboxedCommands": false, "autoAllowBashIfSandboxed": false,
+        "allowUnsandboxedCommands": false, "autoAllowBashIfSandboxed": true,
         "filesystem": {"allowWrite": writable}
     });
     if !network { sandbox["network"] = json!({"allowedDomains": []}); }
-    let mut permissions = json!({"defaultMode": "acceptEdits", "allow": ["Read", "Edit", "Write", "Glob", "Grep"]});
+    let mut permissions = json!({"defaultMode": "acceptEdits", "allow": CLAUDE_ALLOW});
     if !network { permissions["deny"] = json!(["WebFetch", "WebSearch"]); }
     let settings = json!({"permissions": permissions, "sandbox": sandbox, "env": {"DISABLE_AUTOUPDATER": "1"}});
     write_config(&home.join(".claude/settings.json"), (serde_json::to_string_pretty(&settings)? + "\n").as_bytes())?;
