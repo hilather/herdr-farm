@@ -433,10 +433,11 @@ fn launch_run_reserves_a_planning_task_for_each_kind_and_reruns_safely() {
         args.drain(key..key+2);
         args
     };
-    // A new binding pauses the project until no attempt is unfinished, so both
-    // tasks are prepared (bound, reconciled, active) before either is reserved.
+    // Prepare-only remains available for the first task; the second is added
+    // directly while the first retains its reservation.
     for job in jobs {
         lab.plant_launchable(job.1, job.2, job.3);
+        if job.0 != jobs[0].0 { continue; }
         let mut args = arguments(&lab, job, prompt.to_str().unwrap());
         args.push("--prepare-only".into());
         let report = lab.ok(&args.iter().map(String::as_str).collect::<Vec<_>>());
@@ -447,7 +448,19 @@ fn launch_run_reserves_a_planning_task_for_each_kind_and_reruns_safely() {
         let args = arguments(&lab, job, prompt.to_str().unwrap());
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         let output = format!("docs/{task}.md");
+        let before = herdr_farm::runtime::snapshot(&lab.project).unwrap();
         let report = lab.ok(&args);
+        let after = herdr_farm::runtime::snapshot(&lab.project).unwrap();
+        assert_eq!(after.control, before.control, "adding a resource-free binding keeps the epoch and active control");
+        let binding = after.runtime_bindings.iter().find(|b| b.task.as_ref().is_some_and(|id| id.as_str() == task)).unwrap();
+        assert!(after.observations.iter().any(|o| o.binding == binding.id && o.binding_revision == binding.revision
+            && o.task_revision == after.tasks.iter().find(|t| t.id.as_str() == task).map(|t| t.revision - 1)
+            && o.pane == herdr_farm::reconcile::ResourceState::Unrecorded
+            && o.worktree == herdr_farm::reconcile::ResourceState::Unrecorded && !o.agent_present));
+        for previous in &before.attempts {
+            assert_eq!(after.attempts.iter().find(|a| a.id == previous.id), Some(previous));
+        }
+        assert!(!after.events.iter().filter(|e| e.sequence > before.head).any(|e| e.kind == "project.reconciliation_invalidated"));
         assert_eq!(report["kind"], kind, "{report}");
         let attempt = report["attempt"].as_str().unwrap().to_owned();
         assert!(report["worktree"].as_str().unwrap().contains(".state/worktrees"), "{report}");
@@ -488,17 +501,16 @@ fn launch_run_reserves_a_planning_task_for_each_kind_and_reruns_safely() {
     assert_ne!(attempts[0], attempts[1]);
     let queue = lab.ok(&["scheduler", "demo", "inspect"]);
     assert_eq!(queue["policy"]["max_active_workers"], 2, "{queue}");
-    // A task needing a new binding is refused before anything changes while
-    // attempts are unfinished (the binding would pause the project).
+    // An explicit owner pause blocks another task even with workers retained.
     let before = herdr_farm::runtime::snapshot(&lab.project).unwrap();
-    let mut third = lab.run_args("plan-third", "codex-sol", "docs/plan-third.md", prompt.to_str().unwrap()).into_iter().map(str::to_owned).collect::<Vec<_>>();
-    let socket = lab.socket_inode_once("plan-third.sock");
-    third.extend(["--herdr-socket".into(), socket.display().to_string()]);
-    let error = lab.fail(&third.iter().map(String::as_str).collect::<Vec<_>>());
-    assert!(error.contains("--prepare-only") && error.contains("pauses the project"), "{error}");
+    lab.ok(&["runtime", "demo", "state", "paused", "--expected-head", &before.head.to_string(),
+        "--expected-revision", &before.control.unwrap().revision.to_string()]);
+    let args = lab.run_args("plan-third", "codex-sol", "docs/plan-third.md", prompt.to_str().unwrap());
+    let error = lab.fail(&args);
+    assert!(error.contains("explicitly paused"), "{error}");
     let after = herdr_farm::runtime::snapshot(&lab.project).unwrap();
-    assert_eq!(after.control.as_ref().unwrap().state, ProjectState::Active, "the project must stay active");
-    assert_eq!(after.runtime_bindings.len(), before.runtime_bindings.len(), "no binding was created");
+    assert_eq!(after.control.as_ref().unwrap().state, ProjectState::Paused);
+    assert_eq!(after.runtime_bindings.len(), before.runtime_bindings.len());
 }
 
 /// A Claude profile whose pinned owner configuration names no setup-token file

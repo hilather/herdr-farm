@@ -62,18 +62,15 @@ starts. Rerun the same command after interruption; finished steps are skipped.
 
 ## 2. Run a planning task per worker
 
-A new runtime binding pauses the project until no attempt is unfinished, and
-parallel workers need disjoint write scopes (each planning task writes only its own
-`docs/...md`). So prepare every task first, then reserve them. Write the task text
-(`prompt.md`), then:
+New tasks can be added while other workers are reserved or running. Parallel
+workers need disjoint write scopes (each planning task writes only its own
+`docs/...md`) and available capacity. An explicit owner pause must be resumed
+after reconciliation before launching. Write the task text (`prompt.md`), then:
 
 ```sh
 common="--repository /path/to/repo --prompt-file prompt.md --integration-ref refs/heads/integration \
   --max-active-workers 2"
-# 1. prepare both: contract, queue, capacity, Herdr server, binding, reconcile, activate
-herdr-farm launch PROJECT run --task plan-codex  --profile codex-sol      --plan-output docs/plan-codex.md  $common --prepare-only
-herdr-farm launch PROJECT run --task plan-claude --profile claude-sonnet  --plan-output docs/plan-claude.md $common --prepare-only
-# 2. reserve both: knowledge snapshot, draft, signed approval, import, reserve
+# Reserve each task; --prepare-only optionally stops before drafting and reservation.
 herdr-farm launch PROJECT run --task plan-codex  --profile codex-sol      --plan-output docs/plan-codex.md  $common
 herdr-farm launch PROJECT run --task plan-claude --profile claude-sonnet  --plan-output docs/plan-claude.md $common
 ```
@@ -96,9 +93,9 @@ every step as `done`, `already_done`, or `refreshed`, the attempt id and its wor
 
 It is idempotent: rerun the same command after fixing a failure and finished steps are
 skipped; once a task has its attempt a rerun only reports it. A failure names the step
-(`launch run stopped at step N (...)`) and what completed before it. A task that needs a
-new binding while another attempt is unfinished is refused before anything changes (the
-project would be paused under a live worker). Signing is automatic within the
+(`launch run stopped at step N (...)`) and what completed before it. Adding a new
+local task binding without a pane or worktree preserves active control and existing
+attempts; routes with resource references still require reconciliation. Signing is automatic within the
 owner policy. A task with your own
 contract uses `--contract-file` instead of `--plan-output`.
 

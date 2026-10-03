@@ -246,7 +246,10 @@ fn activate(run: &mut Run, name: &'static str, force: bool) -> Result<()> {
     let project = run.project.clone();
     let config = std::path::absolute(run.ctx.config_dir.join("config.toml"))?;
     let current = migration::config_reference(&config)?.digest;
-    let control = runtime::snapshot(&project)?.control.context("project has no control state")?;
+    let snapshot = runtime::snapshot(&project)?;
+    let control = snapshot.control.as_ref().context("project has no control state")?;
+    ensure!(control.state != ProjectState::Paused || runtime::automatically_paused(&snapshot),
+        "project is explicitly paused by the owner; resume it with `runtime state active` after reconciliation");
     if !force && control.state == ProjectState::Active && !control.reconciliation_required && control.config_digest == current {
         run.skipped(name, json!({"state":"active"}));
         return Ok(());
@@ -266,8 +269,15 @@ pub(crate) fn activate_project(ctx: &Ctx, project: &Path, held: Option<&herdr_fa
     else { runtime::record_observations(project, &batch)?; }
     let snapshot = runtime::snapshot(project)?;
     // Open retains a project guard; re-check owner intent after native I/O.
-    // Launch run is an explicit operator activation and may resume owner pauses.
+    if snapshot.control.as_ref().is_some_and(|c| c.state == ProjectState::Active
+        && !c.reconciliation_required && c.config_digest == migration::config_reference(&config).ok().and_then(|r| r.digest)) {
+        return Ok(());
+    }
     if held.is_some() && !runtime::automatically_paused(&snapshot) { return Ok(()); }
+    if !runtime::automatically_paused(&snapshot)
+        && snapshot.control.as_ref().is_some_and(|c| c.state == ProjectState::Paused) {
+        bail!("project is explicitly paused by the owner; resume it with `runtime state active` after reconciliation");
+    }
     let control = snapshot.control.context("project has no control state")?;
     match held {
         // `open` holds the project guard; a second execution lock would refuse.
@@ -515,6 +525,9 @@ pub fn run(ctx: &Ctx, slug: &str, mut args: Args) -> Result<Value> {
     if config.get("profiles").and_then(|v|v.get(&args.profile)).is_none() { problems.push("owner profiles: profile is absent from current owner configuration".into()); }
     if let Err(error)=code_paths(&args) {problems.push(format!("task inputs: {error:#}"));}
     let snapshot = runtime::snapshot(&project)?;
+    if snapshot.control.as_ref().is_some_and(|c| c.state == ProjectState::Paused) && !runtime::automatically_paused(&snapshot) {
+        problems.push("project is explicitly paused by the owner; resume it with `runtime state active` after reconciliation".into());
+    }
     let held = snapshot.attempts.iter().filter(|a| a.retains_capacity()).count();
     let existing = snapshot.tasks.iter().any(|t|t.id.as_str()==args.task && t.active_attempt.is_some());
     if held + usize::from(!existing) > cap as usize { problems.push(format!("owner cap: unfinished attempts plus this launch exceed launch.max_workers ({cap})")); }
@@ -572,9 +585,6 @@ pub fn run(ctx: &Ctx, slug: &str, mut args: Args) -> Result<Value> {
             let live_identity=snapshot.runtime_bindings.iter().any(|b|blocker.starts_with(&format!("{}:",b.id)) && (!b.identity.pane_id.is_empty() || !b.identity.worktree_path.is_empty()));
             if !blocker.contains("fresh") || live_identity {problems.push(format!("admission: {blocker}"));}
         }
-    }
-    if !snapshot.runtime_bindings.iter().any(|b|b.task.as_ref().is_some_and(|t|t.as_str()==args.task)) && snapshot.tasks.iter().any(|t|t.active_attempt.is_some()) {
-        problems.push("admission: a new runtime binding pauses the project until every reserved or running attempt is finished; prepare every task first with --prepare-only".into());
     }
     eprintln!("launch run: profile_evidence");
     let plan=profile_plan(ctx, &project, &args, problems.is_empty());
@@ -740,18 +750,9 @@ fn steps(run: &mut Run, args: &Args, plan: ProfilePlan) -> Result<Value> {
             (binding.id.clone(), false)
         }
         None => {
-            // A new runtime binding pauses the project, and it resumes only when
-            // no attempt is unfinished. Refuse before the binding exists rather
-            // than leave a project with a live worker paused.
-            if let Some(busy) = snapshot.tasks.iter().find(|t| t.active_attempt.is_some()) {
-                bail!("task {} already has a reserved or running attempt, and a new runtime binding pauses the project until every attempt is finished; prepare every task first with --prepare-only, then reserve them", busy.id.as_str());
-            }
             let route = RuntimeRoute { socket: socket.display().to_string(), cwd: repository.display().to_string(), ..Default::default() };
             let change = retry(|| {
                 let fresh = runtime::snapshot(&project)?;
-                if let Some(busy) = fresh.tasks.iter().find(|t| t.active_attempt.is_some()) {
-                    bail!("task {} already has a reserved or running attempt; prepare every task first with --prepare-only", busy.id.as_str());
-                }
                 let revision = fresh.tasks.iter().find(|t| t.id == task_id).context("task missing")?.revision;
                 runtime::create_binding(&project, Some(&task_id), Some(revision), fresh.head, &route)
             })?;
