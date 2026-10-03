@@ -750,7 +750,7 @@ pub fn open(ctx: &Ctx, slug: &str, options: &OpenOptions) -> Result<()> {
         )?;
     }
     if runtime::automatically_paused(&runtime::snapshot(&dir)?)
-        && let Err(error) = crate::launch_run::activate_project(ctx, &dir, true)
+        && let Err(error) = crate::launch_run::activate_project(ctx, &dir, Some(&guard))
     {
         match runtime::admission(&dir, &ctx.config_dir.join("config.toml")) {
             Ok(report) if !report.blockers.is_empty() => {

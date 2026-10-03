@@ -253,23 +253,27 @@ fn activate(run: &mut Run, name: &'static str, force: bool) -> Result<()> {
     }
     let reacknowledged = control.state == ProjectState::Active && control.config_digest != current;
     // Shared with `open`; retried because the ticker can move the head between collection and activation.
-    retry(|| activate_project(run.ctx, &project, false))?;
+    retry(|| activate_project(run.ctx, &project, None))?;
     run.done(name, json!({"state":"active","owner_configuration_reacknowledged":reacknowledged}));
     Ok(())
 }
 
 /// Shared activation path: collect fresh evidence, then use store admission checks.
-pub(crate) fn activate_project(ctx: &Ctx, project: &Path, held: bool) -> Result<()> {
+pub(crate) fn activate_project(ctx: &Ctx, project: &Path, held: Option<&herdr_farm::execution_guard::ProjectGuard>) -> Result<()> {
     let config = std::path::absolute(ctx.config_dir.join("config.toml"))?;
     let batch = crate::reconcile_live::collect(ctx, project)?;
-    if held { runtime::record_observations_held(project, &batch)?; }
+    if held.is_some() { runtime::record_observations_held(project, &batch)?; }
     else { runtime::record_observations(project, &batch)?; }
     let snapshot = runtime::snapshot(project)?;
     // Open retains a project guard; re-check owner intent after native I/O.
     // Launch run is an explicit operator activation and may resume owner pauses.
-    if held && !runtime::automatically_paused(&snapshot) { return Ok(()); }
+    if held.is_some() && !runtime::automatically_paused(&snapshot) { return Ok(()); }
     let control = snapshot.control.context("project has no control state")?;
-    runtime::set_state(project, snapshot.head, control.revision, ProjectState::Active, &config)?;
+    match held {
+        // `open` holds the project guard; a second execution lock would refuse.
+        Some(guard) => runtime::set_state_held(project, snapshot.head, control.revision, ProjectState::Active, &config, guard)?,
+        None => runtime::set_state(project, snapshot.head, control.revision, ProjectState::Active, &config)?,
+    };
     Ok(())
 }
 
