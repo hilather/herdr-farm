@@ -58,19 +58,29 @@ Codex workers start with launch-only trust for their worktree and repository roo
 a workspace-write sandbox and on-request approval. Network is off; set
 `thread_network = true` in the project's safety settings when workers need
 downloads. Claude workers use `--permission-mode acceptEdits` and a built-in
-`--allowedTools` list for local Git workflows and shell reads. To pre-approve a
-project command, add `thread_allowed_commands = ["godot --headless:*",
-"tools/run_tests.sh:*"]` under `[safety."<canonical project path>"]` in the
-config file printed by `safety show`. These validated prefixes extend Claude's
-defaults; Codex workers use their sandbox instead. Legacy Claude workers run
-with your permissions: prefix approvals do not enforce worktree confinement.
-`safety show` and `doctor` display the effective rules. A blocked command may
-be outside the allow-list; inspect its pane before approving or adding a prefix.
+`--allowedTools` list for local Git workflows and shell reads. When a worker blocks on a project command, the coordinator can run
+`safety grant PROJECT --allow "tools/run-tests.sh:*" --reason "test blocked"`.
+The default `worker_permissions = "coordinator"` allows committed target-branch
+scripts and a fixed set of test/build tool prefixes. It escalates other commands
+to your inbox, with an exact prefix and reason. Set `worker_permissions = "owner"`
+under `[safety."<canonical project path>"]` to require your approval for every
+new grant. Use `safety requests`, then `safety approve PROJECT ID` or
+`safety reject PROJECT ID --reason "reason"` at your terminal.
+
+The ticker restarts idle or blocked workers after a grant and waits for working
+workers to become idle. It keeps their branch, worktree and uncommitted files,
+and resends the brief; the agent's conversation context is lost. `thread list`
+and `context` report this. `safety revoke PROJECT "prefix:*"` removes a grant
+from the next start. `safety show` displays defaults, config and grant provenance.
+You can still set `thread_allowed_commands` directly in owner config.
+See [worker permission policy](profiles.md#worker-command-grants) for exact rules.
+Legacy Claude workers run with your permissions; prefixes do not enforce
+worktree confinement. Codex workers use their sandbox instead.
 The first thread in a new repository may still need you to answer Claude's folder-trust
 dialog in its pane. `thread list` preserves the `blocked` state and shows a
 separate hint column; `doctor` flags possible trust or permission prompts.
-An explicit `thread_agent_args` replaces the defaults,
-including an empty array. See [Operations](operations.md#safety-settings).
+An explicit `thread_agent_args`, including an empty array, replaces the defaults
+and config extensions; active project grants are still appended for Claude. See [Operations](operations.md#safety-settings).
 
 When a thread finishes it writes a report. The report is copied to `threads/<id>.md` in the project folder and the thread moves to Ready for review. Tell the coordinator you've looked (it runs `thread ack`), or resolve the thread:
 

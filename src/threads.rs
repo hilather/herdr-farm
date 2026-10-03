@@ -446,6 +446,11 @@ fn lists_for(view: &SessionView, record: &Thread) -> Result<(Vec<Agent>, Vec<Pan
 
 pub fn restart(ctx: &Ctx, slug: &str, id: &str) -> Result<Thread> {
     let _lease = crate::cleanup::lease(&ctx.root)?;
+    restart_owned(ctx, slug, id)
+}
+
+/// Caller must hold the root execution lease.
+pub(crate) fn restart_owned(ctx: &Ctx, slug: &str, id: &str) -> Result<Thread> {
     let project = Project::load(&ctx.root, slug)?;
     if project.status() != project::Status::Active {
         bail!("`{slug}` is {}; restart is refused until the project is active again", project.status());
@@ -832,7 +837,9 @@ fn row(project: &Project, t: &Thread, view: Option<&SessionView>, now: jiff::Tim
 pub fn print_list(ctx: &Ctx, slug: &str) -> Result<()> {
     let project = Project::load(&ctx.root, slug)?;
     for row in rows(ctx, &project) {
-        let hint = if row.note == "blocked" { format!("{}; inspect the pane", crate::agents::blocked_hint(&row.thread.agent)) } else { String::new() };
+        let mut hint = if row.note == "blocked" { format!("{}; inspect the pane", crate::agents::blocked_hint(&row.thread.agent)) } else { String::new() };
+        let restart = crate::worker_permissions::restart_note(&project, &row.thread.id)?;
+        if !restart.is_empty() {if !hint.is_empty() {hint.push_str("; ");}hint.push_str(&restart);}
         println!("{}\t{}\t{}\t{}\t{}", row.thread.id, row.group.label(), row.note, row.thread.title, hint);
     }
     Ok(())

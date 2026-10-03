@@ -3,7 +3,7 @@ use super::*;
 fn arguments_from(input:&Input,project:&Project,t:&Thread,text:Option<&str>)->Result<Vec<String>> {
     ensure!(text.map(|s|thread::sha256_hex(s.as_bytes()))==input.config_digest,"launch argument configuration changed");
     let safety=project::parse_safety(text.unwrap_or(""),&project.canonical_dir()).map_err(|_|anyhow::anyhow!("invalid launch safety configuration (contents withheld)"))?;
-    let args=crate::agents::worker_arguments(&safety,t,&crate::runner::RealRunner)?;ensure!(args.len()<=128&&args.iter().map(String::len).sum::<usize>()<=32768,"launch arguments exceed bounds");Ok(args)
+    let args=crate::agents::worker_arguments(project,&safety,t,&crate::runner::RealRunner)?;ensure!(args.len()<=128&&args.iter().map(String::len).sum::<usize>()<=32768,"launch arguments exceed bounds");Ok(args)
 }
 pub(super) fn execute(input:&Input,control:&Control)->Result<()> {execute_with(input,control,||Ok(()))}
 fn execute_with(input:&Input,control:&Control,after_claim:impl FnOnce()->Result<()>)->Result<()> {

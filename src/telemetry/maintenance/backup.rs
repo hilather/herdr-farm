@@ -197,7 +197,7 @@ pub fn create(project: &Path, out: &Path, recipient: Option<&str>) -> Result<Val
     let mut manifest = json!({"schema": SCHEMA, "project": super::super::health::store::slug(project), "created_unix_ms": created, "streams": streams,
         "watermark_unix_ms": mark, "rows": rows, "files": files,
         "encryption": recipient.map(|r| json!({"tool": "age", "recipient": r})),
-        "excluded": {"state.db": "canonical store: its own backup procedure (runbook \"Canonical store\")", "telemetry-cursor.key": "secret: stored separately, never in a telemetry backup",
+        "excluded": {"worker-permissions.json": "permission authority: lifetime retention and whole-project backup, never restored by telemetry", "state.db": "canonical store: its own backup procedure (runbook \"Canonical store\")", "telemetry-cursor.key": "secret: stored separately, never in a telemetry backup",
             "codex rollouts": "native sources owned by Codex", "spool, git quarantine, replay repositories": "canonical workflow artefacts, not telemetry"}});
     let id = store::sha256(manifest.to_string().as_bytes());
     manifest["backup_id"] = json!(id);

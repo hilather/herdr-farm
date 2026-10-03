@@ -300,7 +300,19 @@ pub fn digest(ctx: &Ctx, project: &Project, prefix: &str) -> Result<(String, Vec
                 "Safety: start_threads={} routine_commands={} thread_agent_args={:?} coordinator_agent_args={:?} cleanup_resolved={} resolve_threads={}",
                 safety.start_threads, safety.routine_commands, safety.thread_agent_args, safety.coordinator_agent_args, safety.cleanup_resolved, safety.resolve_threads
             );
-            let _ = writeln!(out, "Effective worker arguments: {}", safety.worker_summary());
+            let _ = writeln!(out, "Worker permission policy: {}", safety.worker_permissions);
+            match crate::worker_permissions::load(project) {
+                Ok(state) => {
+                    for r in state.records.iter().filter(|r|matches!(r.status.as_str(), "granted" | "requested")) {let _ = writeln!(out, "Permission {}: {} {} ({}, {})",r.id,r.status,r.prefix,r.principal,r.rule);}
+                    for (id, note) in &state.restart_history {let _ = writeln!(out, "Permission restart {id}: {note}");}
+                    for (id, batches) in &state.pending_restarts {let _ = writeln!(out, "Permission restart pending {id}: {}",batches.join(","));}
+                },
+                Err(error) => {let _ = writeln!(out, "permission-state-error: {error:#}");}
+            }
+            match crate::worker_permissions::summary(project, &safety, ctx.runner) {
+                Ok(summary) => {let _ = writeln!(out, "Effective worker arguments: {summary}");},
+                Err(error) => {let _ = writeln!(out, "permission-state-error: {error:#}");}
+            }
         }
         Err(error) => {
             let _ = writeln!(out, "config-error: {error:#}");

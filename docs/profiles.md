@@ -573,3 +573,40 @@ and approved attempt for the `char-count-worker-brief-v2` contract; old snapshot
 are not silently given new output instructions.
 
 Compatibility: legacy environment variables and existing data/config locations remain supported; see [renaming](renaming.md).
+
+## Worker command grants
+
+Per-project `[safety."<canonical project path>"]` controls worker permission
+changes. `worker_permissions = "coordinator"` is the default, including projects
+created before this setting existed. Set `"owner"` to require an owner decision
+for every new grant. Optional `grantable_commands = ["tool test:*"]` defines
+additional exact prefixes the coordinator can grant, with the same syntax and
+limits as `thread_allowed_commands`. The automatic exclusions still apply.
+
+`safety grant PROJECT --allow "tools/run-tests.sh:*" --reason "test blocked"`
+grants a committed project script verified against `integration_target` in
+PROJECT.md, or the repository default branch. Verification uses `git ls-tree`;
+worker-only files, symlinks and paths outside the repository do not qualify.
+A script grant records the target blob and checks the path again at launch.
+Merged changes remain eligible; a deleted target script suspends its grant.
+A shared path in several repositories grants only the recorded repository.
+
+Automatic build/test prefixes are `godot --headless`, `cargo test`, `cargo build`,
+`cargo check`, `cargo nextest run`, `npm test`, `npm run test`, `pnpm test`,
+`yarn test`, `pytest`, `go test`, `make test`, and `make check` (each ending in `:*`).
+A general interpreter needs one committed script argument, for example
+`python3 tools/check.py:*`. Interpreter wildcards, network commands, shell
+metacharacters, sudo and paths outside the repository cannot be auto-granted.
+Owner extras cannot override these exclusions.
+
+Grants and requests live in `.state/worker-permissions.json`, a versioned local
+stream with migrations in `migrations/worker-permissions/` and its own MIGRATIONS
+list. It works with legacy projects without creating or migrating state.db.
+This is permission authority and audit history: retain it for the project's
+lifetime and include it in the project backup, alongside thread records.
+Telemetry backups exclude it; telemetry retention never deletes it.
+`safety show` distinguishes built-in defaults, configured prefixes and stored
+grants, including rule, principal, timestamp and script blob. Explicit
+`thread_agent_args` replaces built-in defaults and config extensions; managed
+active grants are still appended for Claude. Omit it to use the built-in worker
+permission defaults. Codex uses its sandbox.

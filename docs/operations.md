@@ -48,6 +48,7 @@ Every thread works from `<its working directory>/.herdr-project/<project>-<id>/`
 | `thread stop`, `thread restart`, `thread prompt`, `thread adopt`, `thread list`, `thread show`, `thread ack`, `thread resolve` | See `--help` on each. |
 | `overview [<project>] [--wait]`, `focus [<project>]`, `unfocus` | Threads grouped by what needs you, as text and in the sidebar. |
 | `routine list`, `routine approve`, `safety show` | Routines and safety settings. |
+| `safety grant`, `safety requests`, `safety approve`, `safety reject`, `safety revoke` | Worker permission policy; decisions and revocation require the owner at a terminal. |
 | `pause`, `resume`, `archive`, `unarchive`, `delete [--force]` | Project lifecycle. `delete` moves the folder to `.trash/`. |
 | `ticker start \| run \| stop \| status`, `doctor`, `skill` | Housekeeping. |
 
@@ -81,6 +82,8 @@ coordinator_agent_args_kind = "claude" # required when the array is nonempty
 # thread_agent_args = []           # replaces defaults, even when empty
 # thread_agent_args_kind = "claude" # required when the array is nonempty
 thread_allowed_commands = ["godot --headless:*", "tools/run_tests.sh:*"] # Claude extensions
+worker_permissions = "coordinator" # default; "owner" escalates all new grants
+# grantable_commands = ["tool test:*"] # optional owner-selected exact prefixes
 thread_network = false            # optional: enable Codex worker downloads
 routine_commands = false           # true lets approved routines run shell commands
 ```
@@ -113,7 +116,8 @@ with no surrounding whitespace, shell metacharacters or leading `sudo`
 (including an executable path ending in `/sudo`). Limits are 64 entries and
 256 bytes per entry. Invalid entries refuse safety configuration and launch.
 Codex workers use their sandbox and do not need or receive these extensions.
-Explicit `thread_agent_args` replaces the defaults and extensions together.
+Explicit `thread_agent_args` replaces the defaults and config extensions together;
+active project grants are still appended for Claude.
 
 These are command-prefix approvals, not a sandbox or argument policy. Legacy
 Claude workers run with the owner's permissions; prefixes do not restrict paths,
@@ -155,6 +159,8 @@ The coordinator runs the binary every turn, so allow-list it in your agent **by 
   "Bash(<binary> --root <root> list:*)",
   "Bash(<binary> --root <root> overview:*)",
   "Bash(<binary> --root <root> safety show:*)",
+  "Bash(<binary> --root <root> safety grant:*)",
+  "Bash(<binary> --root <root> safety requests:*)",
   "Bash(<binary> --root <root> routine list:*)",
   "Bash(<binary> --root <root> thread list:*)",
   "Bash(<binary> --root <root> thread show:*)",
@@ -867,3 +873,29 @@ resolved threads, including verifying that recorded panes are gone. An unfinishe
 stop must be recovered first. These are legacy TOML lifecycle fields, retained
 losslessly by conversion; no canonical or telemetry database schema changes. Quiesced stopped runtime
 bindings import as `historical-stopped` and do not block canonical activation.
+
+## Worker permission requests and restarts
+
+The coordinator uses `safety grant PROJECT --allow "tools/run-tests.sh:*"
+--reason "worker blocked on tests"`. Under the default `worker_permissions =
+"coordinator"`, committed target-branch scripts and the build/test prefixes
+listed in [profiles.md](profiles.md#worker-command-grants) are immediately
+granted. Other commands return `requested` and create an owner inbox item with
+the exact prefix and reason. `safety requests PROJECT` is read-only.
+
+The owner runs `safety approve PROJECT ID`, `safety reject PROJECT ID --reason
+"reason"`, or `safety revoke PROJECT "prefix:*"` at a terminal and confirms the
+exact ID or prefix. Decisions record `owner:terminal`, time and rejection reason.
+Never allow-list approve, reject or revoke for the coordinator. Permissions are
+stored in project state; these commands do not rewrite config.toml.
+
+A grant or approval schedules one restart per existing unresolved worker.
+Committed-script auto-grants currently require an owner-configured local
+repository; requests involving remote-only scripts are escalated.
+The ticker batches pending grants and waits for working agents to become idle.
+Idle, done and blocked agents are gracefully finished, then restarted with the
+existing branch and worktree. Uncommitted files are preserved. The brief is
+resent and conversation context is lost. Pending launches and copy deliveries
+drain first; adopted, resolved and stopped threads are excluded (a deliberately stopped worker is never revived by a grant). `thread list`
+and `context` show pending and completed permission restarts. Revocation affects
+the next start; it does not interrupt an already running agent.
