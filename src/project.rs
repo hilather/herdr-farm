@@ -210,6 +210,9 @@ pub struct Safety {
     pub worker_permissions: String,
     pub grantable_commands: Vec<String>,
     pub thread_network: bool,
+    pub thread_sandbox: bool,
+    pub thread_wall_hours: u64,
+    pub thread_env: Vec<String>,
     #[serde(skip)]
     pub thread_agent_args_explicit: bool,
     #[serde(skip)]
@@ -226,7 +229,8 @@ const CLAUDE_WORKER_COMMANDS: &[&str] = &[
     "grep",
     // Not `find` (-exec, -delete), `sed` (GNU `e` executes commands) or `rg`
     // (--pre runs a preprocessor): each can run an arbitrary command under an
-    // allowed prefix, and legacy Claude threads are not sandboxed.
+    // allowed prefix. Legacy Claude launches remain unsandboxed until card 1b
+    // wires the thread sandbox into the launcher; grants are contained then.
 ];
 
 impl Safety {
@@ -263,6 +267,19 @@ impl Safety {
             }
             _ => {}
         }
+        Ok(args)
+    }
+    /// Arguments for the sandboxed Claude launch path (card 1b).
+    #[allow(dead_code)] // Card 1b connects the legacy launcher to this prepared API.
+    pub fn sandboxed_claude_arguments(&self, cwd: &str, repository: &str) -> Result<Vec<String>> {
+        let explicit = self.worker_arguments("claude")?;
+        crate::agents::validate_sandboxed_claude_arguments(explicit)?;
+        let mut defaults = self.clone();
+        defaults.thread_agent_args.clear();
+        defaults.thread_agent_args_explicit = false;
+        let mut args = defaults.effective_worker_arguments("claude", cwd, repository)?;
+        args.extend_from_slice(explicit);
+        args.extend(["--setting-sources".into(), "user".into()]);
         Ok(args)
     }
     pub(crate) fn validate_thread_allowed_commands(&self) -> Result<()> {
@@ -315,6 +332,9 @@ impl Default for Safety {
             worker_permissions: "coordinator".into(),
             grantable_commands: Vec::new(),
             thread_network: false,
+            thread_sandbox: true,
+            thread_wall_hours: 168,
+            thread_env: Vec::new(),
             thread_agent_args_explicit: false,
             active_worker_grants: Vec::new(),
             routine_commands: false,
@@ -499,6 +519,8 @@ pub fn parse_safety(text:&str,canonical_project_dir:&Path)->Result<Safety> {
     anyhow::ensure!(matches!(safety.cleanup_resolved.as_str(), "auto" | "keep"), "cleanup_resolved must be auto or keep");
     anyhow::ensure!(matches!(safety.resolve_threads.as_str(), "propose" | "auto"), "resolve_threads must be propose or auto");
     anyhow::ensure!(matches!(safety.worker_permissions.as_str(), "coordinator" | "owner"), "worker_permissions must be coordinator or owner");
+    anyhow::ensure!(safety.thread_wall_hours >= 1, "thread_wall_hours must be at least 1");
+    herdr_farm::worker_supervision::validate_thread_env(&safety.thread_env)?;
     safety.validate_thread_allowed_commands()?;
     let extras = Safety { thread_allowed_commands: safety.grantable_commands.clone(), ..Safety::default() };
     extras.validate_thread_allowed_commands().context("invalid grantable_commands")?;

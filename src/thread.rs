@@ -265,9 +265,9 @@ pub fn allocate(project: &Project, fill: impl FnOnce(&mut Thread)) -> Result<Thr
 pub fn branch_name(slug: &str, id: &str, title: &str) -> String {
     let title = slugify(title);
     if title.is_empty() {
-        format!("hp/{slug}/{id}")
+        format!("hp/{slug}/{id}/work")
     } else {
-        format!("hp/{slug}/{id}-{title}")
+        format!("hp/{slug}/{id}/{title}")
     }
 }
 
