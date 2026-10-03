@@ -2353,7 +2353,7 @@ fn canonical_attempt_sidebar_restart_offers_no_historical_cleanup_or_native_requ
 }
 
 #[test]
-fn dedicated_worker_refuses_remote_manifest_before_launch_or_brief() {
+fn dedicated_worker_refuses_remote_manifest_before_its_brief() {
     let mut lab = Lab::new("unknown_usage='allow_with_warning'");
     let (_, attempt) = lab.reserve("Retained instructions");
     fs::write(lab.path("lab/manifest-source"), "remote:/fixture/herdr/agent-detection/remote/claude.toml").unwrap();
@@ -2362,7 +2362,10 @@ fn dedicated_worker_refuses_remote_manifest_before_launch_or_brief() {
     lab.wait(&mut ticker, 120, &|| lab.count("agent.explain") >= 1);
     lab.stop(ticker);
     assert_eq!(lab.count("agent.prompt"), 0);
-    assert!(!lab.events("runtime.launch_started").iter().any(|e| e.payload["attempt"] == attempt.as_str()));
+    // Readiness is judged on the launched agent's pane, so launch has started;
+    // the refusal must stop the brief: no prompt, not running, no delivery.
     assert_ne!(lab.attempt(&attempt).state, AttemptState::Running);
-    assert!(!lab.state().deliveries.iter().any(|d| d.state == DeliveryState::Confirmed));
+    let state = lab.state();
+    assert!(!state.deliveries.iter().any(|d| d.state == DeliveryState::Confirmed
+        && state.operations.iter().any(|o| o.id == d.operation && o.kind == "runtime.worker_brief")), "no brief delivery is confirmed");
 }
