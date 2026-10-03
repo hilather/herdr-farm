@@ -2,9 +2,9 @@
 
 For a project already migrated to the canonical store with control active, this
 runs a task on a Codex or a Claude Code worker from the CLI alone: no SQL, no
-hand-edited agent configuration. Everything signed is signed by the owner with
-`ssh-keygen -Y sign`; the application never reads a private key except through
-that command and only for a path you pass explicitly.
+hand-edited agent configuration. Herdr Farm signs launches automatically within
+the owner policy through gated
+`ssh-keygen -Y sign`. The application never opens private key files.
 
 ## 0. Once per machine
 
@@ -38,32 +38,27 @@ max_wall_seconds = 3600
 unknown_usage = "allow_with_warning"
 ```
 
-  Changing this file changes its digest: acknowledge it (`runtime PROJECT state
-  active ...`) as usual after editing.
-* A dedicated, owner-controlled execution home per profile, outside the project
-  and outside the owner's real agent directories (for example
-  `~/.herdr-farm-homes/codex-sol`).
+  Changing this file changes its digest. `launch run` refreshes profile evidence
+  and re-acknowledges owner edits automatically; coordinators never edit it.
 * An existing branch of the repository, not checked out, for results to integrate
   into (for example `git branch integration`).
 
-## 1. Verify each profile (once, and after any agent or Herdr upgrade)
+## 1. Profile evidence is automatic
 
-```sh
-HERDR=/absolute/path/to/herdr          # the exact binary you will run the ticker with
-herdr-farm profile verify-interaction PROJECT codex-sol \
-  --herdr-executable "$HERDR" --agent-executable /absolute/path/to/codex \
-  --execution-home ~/.herdr-farm-homes/codex-sol --retain
-herdr-farm profile verify-interaction PROJECT claude-sonnet \
-  --herdr-executable "$HERDR" --agent-executable /absolute/path/to/claude \
-  --execution-home ~/.herdr-farm-homes/claude-sonnet --retain
-```
+`launch run` revalidates retained evidence and refreshes it when missing or stale
+(config digest, agent or Herdr binary, or model pins changed). It uses the same
+probe as `profile verify-interaction --retain` and reports `profile_evidence:
+refreshed` with the reason. Herdr is selected from `HERDR_BIN_PATH`, then the
+latest profile evidence, then an absolute real file resolved from PATH. The
+agent uses the recorded executable if present, otherwise its kind from PATH
+following symlinks; script shims require `mise which <kind>` or explicit
+`profile verify-interaction`. The execution home uses the recorded home or
+`~/.herdr-farm-homes/<profile>` created with mode 0700. Explicit verification
+remains available for unusual installations.
 
-Each starts the real agent in a disposable Herdr server inside the execution
-home's `.hp-verify-work` directory (trusted for you), checks readiness and the
-pinned model, sends one fixed diagnostic prompt and stops it. The output's
-`preparation.launchable` must be `true` and `evidence.interaction.pinned` must
-show your model and effort. It uses a little account usage. Use the actual
-executable, not a version-manager shim.
+Run launch in the background or with a timeout of at least five minutes: profile
+refresh alone can take 120 seconds. Progress appears on stderr as each step
+starts. Rerun the same command after interruption; finished steps are skipped.
 
 ## 2. Run a planning task per worker
 
@@ -73,9 +68,8 @@ parallel workers need disjoint write scopes (each planning task writes only its 
 (`prompt.md`), then:
 
 ```sh
-export HERDR_BIN_PATH="$HERDR"
 common="--repository /path/to/repo --prompt-file prompt.md --integration-ref refs/heads/integration \
-  --sign-with ~/.ssh/owner_key --max-active-workers 2"
+  --max-active-workers 2"
 # 1. prepare both: contract, queue, capacity, Herdr server, binding, reconcile, activate
 herdr-farm launch PROJECT run --task plan-codex  --profile codex-sol      --plan-output docs/plan-codex.md  $common --prepare-only
 herdr-farm launch PROJECT run --task plan-claude --profile claude-sonnet  --plan-output docs/plan-claude.md $common --prepare-only
@@ -84,7 +78,8 @@ herdr-farm launch PROJECT run --task plan-codex  --profile codex-sol      --plan
 herdr-farm launch PROJECT run --task plan-claude --profile claude-sonnet  --plan-output docs/plan-claude.md $common
 ```
 
-Per run it: finds the retained launchable evidence for the profile; makes the project
+Per run it: revalidates and, when needed, refreshes the profile evidence; makes
+the project
 active (an owner configuration acknowledged by an active project is what lets a signed
 contract be installed); adds the task; builds and signs (namespace
 `contract@herdr-projects`) the planning contract (the single deliverable `docs/...md`,
@@ -97,19 +92,18 @@ binds the task to it, reconciles and activates. Without `--prepare-only` it then
 retains the knowledge snapshot (PROJECT.md followed by your prompt and the
 deliverable instruction), drafts the launch, signs the approval
 (`approval@herdr-projects`), imports it and reserves the attempt. The JSON report lists
-every step as `done` or `already_done`, the attempt id and its worktree.
+every step as `done`, `already_done`, or `refreshed`, the attempt id and its worktree.
 
 It is idempotent: rerun the same command after fixing a failure and finished steps are
 skipped; once a task has its attempt a rerun only reports it. A failure names the step
 (`launch run stopped at step N (...)`) and what completed before it. A task that needs a
 new binding while another attempt is unfinished is refused before anything changes (the
-project would be paused under a live worker). Without `--sign-with` it stops at the first
-document needing a signature and tells you how to sign it by hand. A task with your own
+project would be paused under a live worker). Signing is automatic within the
+owner policy. A task with your own
 contract uses `--contract-file` instead of `--plan-output`.
 
-`HERDR_BIN_PATH` must be the absolute path of the Herdr the profiles were verified with,
-both for this command and for the running ticker (start the ticker with it set; the
-controller launches the reserved attempts).
+`HERDR_BIN_PATH` is optional. When unset, launch uses the profile’s recorded Herdr,
+or resolves `herdr` from PATH when no evidence is retained.
 
 ## 3. Watch and collect
 
@@ -140,7 +134,8 @@ herdr-farm telemetry PROJECT attempts
 The worker writes `docs/plan-*.md` in its worktree and finishes by running the
 script at the end of its brief, which commits the deliverable and submits it through
 its spool; verification then runs the signed acceptance policy and integration lands it
-on the integration branch (both automatic with `--integration-ref`). Once every signed
+on the integration branch (verification is always automatic; integration is
+automatic with `--integration-ref`). Once every signed
 acceptance policy accepts a submission, the ticker completes its started attempt;
 `verify_then_integrate` also requires successful integration with merged-output checks.
 The controller stops the worker, proves termination, releases capacity, and records
@@ -300,16 +295,22 @@ review through `result PROJECT show`, `result PROJECT jobs` and the verification
 and integration commands printed by context. See `skill/COORDINATOR.md` for the
 complete command forms and approval semantics.
 
-Signing can be configured once in the owner's `config.toml`:
+Signer resolution is `--sign-with`, then `[coordinator] signing_key`, then a
+matching owner key in the directory of the configuration pinned at migration
+and `ctx.config_dir` if different. No configuration edit or key handling is
+needed. Discovery reads only public `.pub` siblings: the private path must be a
+regular non-symlink file owned by the current user with no group or other mode
+bits, and its public half must match `[authority] approval_public_key` by type
+and base64. Zero or multiple matches refuse. A fixed probe is signed and verified
+before any project state change. Passphrase keys must be loaded into ssh-agent.
 
-```toml
-[coordinator]
-signing_key = "/absolute/path/to/owner-key"
-```
-
-`launch run --sign-with KEY` overrides this setting. Signing still uses gated
-`ssh-keygen -Y sign`; Herdr Farm does not read private key contents. A configured
-key grants no additional user authorization. The coordinator obeys
+Every signer source has the same policy: an execution home for the product
+sandbox, a canonical local repository listed in PROJECT.md, a frozen profile
+name in the current owner configuration, and unfinished reserved, launching, or
+running attempts plus this launch within `[launch] max_workers` (default 4,
+range 1..64). `--max-active-workers` defaults to this cap and cannot exceed it.
+The coordinator never passes `--sign-with`, reads or searches for keys, or edits
+config.toml. It reports the exact refused rule to the owner. The coordinator obeys
 `start_threads=propose/auto`, `resolve_threads=propose/auto` and
 `cleanup_resolved=keep/auto`; signed approvals, verified results, explicit
 integration targets and proven termination remain canonical enforcement.
@@ -330,7 +331,7 @@ The maintenance inventory classifies it as canonical and never prunes it.
 ### One-command code tasks
 
 ```sh
-herdr-farm launch PROJECT run --task CODE --title 'Implement the change' --profile codex-sol --repository /absolute/repo --sign-with /absolute/owner-key --write src/ --write tests/ --output src/lib.rs --prompt-file /absolute/brief.md
+herdr-farm launch PROJECT run --task CODE --title 'Implement the change' --profile codex-sol --repository /absolute/repo --write src/ --write tests/ --output src/lib.rs --prompt-file /absolute/brief.md
 ```
 
 Repeat `--write` for 1–64 repository-relative files or directory prefixes ending

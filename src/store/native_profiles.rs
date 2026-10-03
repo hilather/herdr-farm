@@ -52,6 +52,15 @@ impl SqliteStore {
     /// selects a candidate: drafting and reserving revalidate it against the
     /// current installation and authority before any use.
     pub fn latest_launchable_native_profile(&mut self, name: &str) -> Result<Option<(VersionedReference, String)>> {
+        self.latest_native_profile_matching(name, true)
+    }
+
+    /// Latest retained installation paths, including evidence not yet launchable.
+    pub fn latest_native_profile(&mut self, name: &str) -> Result<Option<(VersionedReference, String)>> {
+        self.latest_native_profile_matching(name, false)
+    }
+
+    fn latest_native_profile_matching(&mut self, name: &str, launchable: bool) -> Result<Option<(VersionedReference, String)>> {
         let tx = self.connection.transaction()?;
         schema(&tx)?;
         let mut statement = tx.prepare("SELECT profile_digest,report FROM native_profiles WHERE length(report)<=1048576 ORDER BY sequence DESC LIMIT 256")?;
@@ -60,7 +69,7 @@ impl SqliteStore {
             let (digest, report) = row?;
             let Ok(value) = serde_json::from_str::<serde_json::Value>(&report) else { continue };
             let preparation = &value["preparation"];
-            if preparation["profile"]["name"] == name && preparation["launchable"] == true {
+            if preparation["profile"]["name"] == name && (!launchable || preparation["launchable"] == true) {
                 let kind = preparation["profile"]["kind"].as_str().unwrap_or_default().to_owned();
                 return Ok(Some((VersionedReference { id: format!("profile-{digest}"), revision: 1, digest }, kind)));
             }

@@ -182,7 +182,8 @@ impl Lab {
             fs::write(home.join(login), "shared-login").unwrap();
             fs::set_permissions(home.join(login), fs::Permissions::from_mode(0o600)).unwrap();
         }
-        let key = home.join("owner");
+        let key = home.join(".config/herdr-farm/owner");
+        fs::create_dir_all(key.parent().unwrap()).unwrap();
         assert!(Command::new("/usr/bin/ssh-keygen").args(["-q", "-t", "ed25519", "-N", "", "-f"]).arg(&key).output().unwrap().status.success());
         let public = fs::read_to_string(key.with_extension("pub")).unwrap().split_whitespace().take(2).collect::<Vec<_>>().join(" ");
         let config = home.join(".config/herdr-farm/config.toml");
@@ -216,7 +217,7 @@ impl Lab {
         }
         lab.git(&["commit", "-q", "--allow-empty", "-m", "start"]);
         lab.git(&["branch", "integration"]);
-        fs::write(lab.project.join("PROJECT.md"), "Shadow trial project. Follow the task.\n").unwrap();
+        fs::write(lab.project.join("PROJECT.md"), format!("+++\n[[repos]]\npath={:?}\n+++\nShadow trial project. Follow the task.\n", lab.repo.to_str().unwrap())).unwrap();
         lab
     }
     /// Replace the stand-in agent `name` with one built from `source`.
@@ -341,7 +342,7 @@ fn launch_run_refuses_loudly_at_the_first_failing_step_and_changes_nothing() {
     let prompt = lab.home.join("prompt.txt");
     fs::write(&prompt, "Plan the next milestone.").unwrap();
     let error = lab.fail(&lab.run_args("plan-codex", "codex-sol", "docs/plan-codex.md", prompt.to_str().unwrap()));
-    assert!(error.contains("stopped at step 1") && error.contains("no launchable evidence retained for profile codex-sol") && error.contains("verify-interaction"), "{error}");
+    assert!(error.contains("verify-interaction"), "{error}");
     assert_eq!(herdr_farm::runtime::snapshot(&lab.project).unwrap(), before, "a refused run must not write");
     assert!(!lab.root.join(".herdr-run").exists(), "no Herdr server directory before the first step passes");
     // HERDR_BIN_PATH must name the verified Herdr by absolute path.
@@ -501,7 +502,7 @@ fn a_claude_profile_without_a_setup_token_file_is_refused_by_verification_and_la
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let before = herdr_farm::runtime::snapshot(&lab.project).unwrap();
     let error = lab.fail(&args);
-    assert!(error.contains("stopped at step 1") && error.contains("claude_token_file") && error.contains("claude setup-token"), "{error}");
+    assert!(error.contains("preflight") && error.contains("claude_token_file") && error.contains("claude setup-token"), "{error}");
     assert_eq!(herdr_farm::runtime::snapshot(&lab.project).unwrap(), before, "a refused run must not write");
     // Verification refuses the same profile before it starts any server.
     let (herdr, agent, home) = (lab.home.join("bin/herdr"), lab.home.join("bin/claude"), lab.home.join("agent-home-claude"));
@@ -607,7 +608,7 @@ fn launch_run_retries_after_termination_but_refuses_an_unobserved_live_worker() 
     fs::write(&config, format!("{original}\n# owner edit\n")).unwrap();
     lab.plant_launchable("codex-sol", "codex", "gpt-6.1-sol");
     let error = lab.fail(&args);
-    assert!(error.contains("step 2") && error.contains("fresh resource identity evidence required"), "{error}");
+    assert!(error.contains("preflight") && error.contains("fresh resource identity evidence required"), "{error}");
     // Return to the launch's authorized config so the controller can stop it.
     fs::write(&config, &original).unwrap();
     let mut ticker = FixtureTicker(Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", &lab.home)
@@ -914,4 +915,76 @@ fn advanced_launch_fills_product_fields_and_refuses_identity_mismatches() {
     assert_ne!(replaced["project_store"], contract["project_store"]);
     assert_ne!(replaced["expected_head"], contract["expected_head"]);
     assert_ne!(replaced["authority"], contract["authority"]);
+}
+
+/// Discovery and policy refusals use the CLI and leave canonical state intact.
+#[test]
+fn automatic_signer_refusals_and_policy_limits_change_nothing() {
+    for case in ["mismatch", "duplicate", "permissions", "repository", "cap", "passphrase"] {
+        let lab = Lab::new();
+        let config = lab.home.join(".config/herdr-farm/config.toml");
+        if case == "cap" {
+            let mut text=fs::read_to_string(&config).unwrap();
+            text.push_str("\n[launch]\nmax_workers=1\n");
+            fs::write(&config,text).unwrap();
+        }
+        if case == "passphrase" {
+            fs::remove_file(&lab.key).unwrap();
+            fs::remove_file(lab.key.with_extension("pub")).unwrap();
+            assert!(Command::new("ssh-keygen").args(["-q","-t","ed25519","-N","secret","-f"]).arg(&lab.key).output().unwrap().status.success());
+            let public=fs::read_to_string(lab.key.with_extension("pub")).unwrap().split_whitespace().take(2).collect::<Vec<_>>().join(" ");
+            let text=fs::read_to_string(&config).unwrap();
+            let old=text.lines().find(|line|line.starts_with("approval_public_key=")).unwrap();
+            fs::write(&config,text.replace(old,&format!("approval_public_key={public:?}"))).unwrap();
+        }
+        lab.plant_launchable("codex-sol","codex","gpt-6.1-sol");
+        let socket=lab.socket_inode_once("automatic.socket");
+        let args=["launch","demo","run","--task","auto","--profile","codex-sol","--repository",lab.repo.to_str().unwrap(),"--plan-output","docs/auto.md","--herdr-socket",socket.to_str().unwrap()];
+        let expected=match case {
+            "mismatch" => {fs::write(lab.key.with_extension("pub"),"ssh-ed25519 WRONG\n").unwrap(); "no signing key matching"},
+            "duplicate" => {let second=lab.key.with_file_name("second");fs::copy(&lab.key,&second).unwrap();fs::copy(lab.key.with_extension("pub"),second.with_extension("pub")).unwrap(); "more than one signing key"},
+            "permissions" => {fs::set_permissions(&lab.key,fs::Permissions::from_mode(0o640)).unwrap(); "no signing key matching"},
+            "repository" => {fs::write(lab.project.join("PROJECT.md"),"+++\nrepos=[]\n+++\nTrial\n").unwrap(); "project repositories"},
+            "cap" => {let report=lab.ok(&args); assert!(report["attempt"].is_string()); "owner cap"},
+            "passphrase" => "the signing key needs a passphrase; load it into ssh-agent",
+            _ => unreachable!(),
+        };
+        let before=herdr_farm::runtime::snapshot(&lab.project).unwrap();
+        let started=std::time::Instant::now();
+        let error=if case=="cap" {let mut second=args; second[4]="second";lab.fail(&second)} else {lab.fail(&args)};
+        assert!(error.contains(expected),"{case}: {error}");
+        if case=="passphrase" {assert!(started.elapsed()<std::time::Duration::from_secs(10),"passphrase probe must fail promptly");}
+        assert_eq!(herdr_farm::runtime::snapshot(&lab.project).unwrap(),before,"{case}: refusal mutated state");
+    }
+}
+
+#[test]
+fn automatic_signer_reserves_and_defaults_to_owner_capacity() {
+    let mut lab=Lab::new();
+    lab.extra_env.push(("HERDR_BIN_PATH".into(), PathBuf::new()));
+    lab.plant_launchable("codex-sol","codex","gpt-6.1-sol");
+    let socket=lab.socket_inode_once("auto.socket");
+    let args=["launch","demo","run","--task","auto","--profile","codex-sol","--repository",lab.repo.to_str().unwrap(),"--plan-output","docs/auto.md","--herdr-socket",socket.to_str().unwrap()];
+    let report=lab.ok(&args);
+    assert!(report["attempt"].is_string(),"{report}");
+    assert_eq!(herdr_farm::runtime::snapshot(&lab.project).unwrap().scheduler.unwrap().policy.max_active_workers,4);
+    let again=lab.ok(&args);
+    assert_eq!(again["attempt"],report["attempt"]);
+    assert!(again["steps"].as_array().unwrap().iter().any(|s|s["step"]=="profile_evidence" && s["outcome"]=="already_done"),"{again}");
+    let automation=herdr_farm::migration::open_active(&lab.project).unwrap().result_automation().unwrap();
+    assert!(automation.verify);
+    assert!(!automation.integrate);
+}
+
+/// socket: a configuration digest change is repaired without a separate command.
+#[test]
+fn stale_profile_evidence_is_refreshed_by_launch_run() {
+    let lab=Lab::new();
+    lab.verify("codex-sol","codex");
+    let config=lab.home.join(".config/herdr-farm/config.toml");
+    let mut text=fs::read_to_string(&config).unwrap();text.push_str("\n# owner comment\n");fs::write(config,text).unwrap();
+    let socket=lab.socket_inode_once("refresh.socket");
+    let report=lab.ok(&["launch","demo","run","--task","refresh","--profile","codex-sol","--repository",lab.repo.to_str().unwrap(),"--plan-output","docs/refresh.md","--herdr-socket",socket.to_str().unwrap()]);
+    assert!(report["attempt"].is_string(),"{report}");
+    assert!(report["steps"].as_array().unwrap().iter().any(|s|s["step"]=="profile_evidence" && s["outcome"]=="refreshed"),"{report}");
 }

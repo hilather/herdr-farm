@@ -2,8 +2,8 @@
 //! project from nothing to a reserved canonical attempt, using only the
 //! existing library steps. Every step checks the current state first, so a
 //! rerun skips what is already done, and the first failing step stops the run
-//! with its name. The owner signs through `ssh-keygen -Y sign` with a key path
-//! the operator passes; this program never reads a private key itself.
+//! with its name. Automatic signing obeys the pinned owner policy and passes
+//! the key path to `ssh-keygen`; this program never reads a private key itself.
 use crate::paths::Ctx;
 use anyhow::{Context, Result, bail, ensure};
 use herdr_farm::{
@@ -13,7 +13,7 @@ use herdr_farm::{
 use serde_json::{Value, json};
 use std::{
     fs,
-    os::unix::{fs::DirBuilderExt, process::CommandExt},
+    os::unix::{fs::{DirBuilderExt, MetadataExt}, process::CommandExt},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     time::{Duration, Instant},
@@ -41,7 +41,7 @@ pub struct Args {
     /// Existing, not-checked-out branch that verified results integrate into.
     pub integration_ref: Option<String>,
     pub base: String,
-    pub max_active_workers: u32,
+    pub max_active_workers: Option<u32>,
     /// A Herdr server the operator already runs for this task (its control
     /// socket); by default a dedicated server is started.
     pub herdr_socket: Option<PathBuf>,
@@ -90,10 +90,10 @@ fn git(repository: &Path, args: &[&str]) -> Result<String> {
 fn sign(key: &Path, namespace: &str, file: &Path) -> Result<PathBuf> {
     let signature = PathBuf::from(format!("{}.sig", file.display()));
     let _ = fs::remove_file(&signature);
-    // Inherited terminal: a passphrase-protected key prompts the operator.
-    let status = Command::new("ssh-keygen").args(["-Y", "sign", "-n", namespace, "-f"]).arg(key).arg(file).stdout(Stdio::null()).status_gated()
+    // No controlling terminal: encrypted keys must already be in ssh-agent.
+    let status = Command::new("/usr/bin/setsid").arg("/usr/bin/ssh-keygen").env("SSH_ASKPASS_REQUIRE", "never").stdin(Stdio::null()).args(["-Y", "sign", "-n", namespace, "-f"]).arg(key).arg(file).stdout(Stdio::null()).status_gated()
         .context("ssh-keygen could not be started")?;
-    ensure!(status.success() && signature.is_file(), "ssh-keygen did not sign {}", file.display());
+    ensure!(status.success() && signature.is_file(), "the signing key needs a passphrase; load it into ssh-agent (ssh-keygen did not sign {})", file.display());
     Ok(signature)
 }
 
@@ -329,19 +329,176 @@ fn herdr_server(run: &mut Run, herdr: &Path, task: &str, existing: Option<&Path>
     Ok(socket)
 }
 
-pub fn run(ctx: &Ctx, slug: &str, mut args: Args) -> Result<Value> {
-    let project = ctx.root.join(slug).canonicalize().with_context(|| format!("project {slug} not found"))?;
-    if args.sign_with.is_none()
-        && let Some(text)=crate::paths::read_control_text(&ctx.config_dir.join("config.toml"),1024*1024)? {
-        let config:toml::Value=toml::from_str(&text).context("invalid coordinator signing configuration")?;
-        if let Some(value)=config.get("coordinator").and_then(|c|c.get("signing_key")) {
-            let key=value.as_str().context("coordinator.signing_key must be an absolute path")?;
-            ensure!(Path::new(key).is_absolute(),"coordinator.signing_key must be an absolute path");
-            args.sign_with=Some(key.into());
+struct ProbeDirectory(PathBuf);
+impl Drop for ProbeDirectory {
+    fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); }
+}
+
+fn resolve_signer(explicit: Option<PathBuf>, dirs: &[PathBuf], public: &str) -> Result<PathBuf> {
+    let matches = |key: &Path| -> bool {
+        let private = if key.extension().is_some_and(|e|e=="pub") { key.with_extension("") } else { key.to_owned() };
+        let pub_path = PathBuf::from(format!("{}.pub", private.display()));
+        fs::symlink_metadata(&private).is_ok_and(|m|m.is_file() && m.uid()==unsafe {libc::geteuid()} && m.mode() & 0o077==0)
+            && fs::read_to_string(pub_path).is_ok_and(|v|v.split_whitespace().take(2).collect::<Vec<_>>().join(" ")==public)
+    };
+    if let Some(key) = explicit {
+        let agent_public = key.extension().is_some_and(|e|e=="pub") && std::env::var_os("SSH_AUTH_SOCK").is_some()
+            && fs::symlink_metadata(&key).is_ok_and(|m|m.is_file() && m.uid()==unsafe {libc::geteuid()} && m.mode() & 0o022==0)
+            && fs::read_to_string(&key).is_ok_and(|v|v.split_whitespace().take(2).collect::<Vec<_>>().join(" ")==public);
+        ensure!(matches(&key) || agent_public, "signing key does not match the owner approval key or fails file ownership/permissions policy: {}", key.display());
+        return Ok(key);
+    }
+    let mut keys = Vec::new();
+    for dir in dirs {
+        if let Ok(entries)=fs::read_dir(dir) {
+            for entry in entries { let key=entry?.path(); if key.extension().is_some_and(|e|e=="pub") {continue;}
+                if matches(&key) {keys.push(key);} }
         }
     }
+    keys.sort(); keys.dedup();
+    ensure!(!keys.is_empty(), "no signing key matching the owner approval key was found in {}", dirs.iter().map(|d|d.display().to_string()).collect::<Vec<_>>().join(", "));
+    ensure!(keys.len()==1, "more than one signing key matches the owner approval key: {}", keys.iter().map(|d|d.display().to_string()).collect::<Vec<_>>().join(", "));
+    Ok(keys.remove(0))
+}
+
+fn on_path(ctx: &Ctx, name: &str) -> Result<PathBuf> {
+    for directory in std::env::split_paths(ctx.env.var("PATH").unwrap_or("/usr/bin:/bin")) {
+        let path=directory.join(name);
+        if path.is_file() { return Ok(path.canonicalize()?); }
+    }
+    bail!("{name} unavailable on PATH; run profile verify-interaction with explicit executables")
+}
+
+struct ProfilePlan {
+    candidate: Option<(VersionedReference, String)>,
+    reason: Option<String>,
+    herdr: PathBuf,
+    refresh: Option<(PathBuf, PathBuf)>,
+}
+
+fn profile_plan(ctx: &Ctx, project: &Path, args: &Args, observe: bool) -> Result<ProfilePlan> {
+    ensure!(!args.profile.is_empty() && args.profile.len()<=64 && args.profile.as_bytes()[0].is_ascii_alphabetic() && args.profile.bytes().all(|c|c.is_ascii_alphanumeric() || b"_-".contains(&c)), "invalid profile name");
+    let mut store=herdr_farm::store::SqliteStore::open(&project.join(".state/state.db"))?;
+    let candidate = store.latest_native_profile(&args.profile)?;
+    let retained = candidate.as_ref().map(|(r,_)|store.native_profile_report(r)).transpose()?.flatten();
+    let frozen = retained.as_ref().map(|v|serde_json::from_value::<herdr_farm::domain::FrozenProfile>(v["preparation"]["profile"].clone())).transpose()?;
+    if let Some(f)=&frozen {
+        let mut current=f.clone(); current.config=migration::config_reference(Path::new(&f.config.path))?;
+        herdr_farm::profile_config::check_worker_login(&current, project)?;
+    }
+    drop(store);
+    let herdr = if let Some(path)=ctx.env.var("HERDR_BIN_PATH") { PathBuf::from(path) }
+        else if let Some(f)=&frozen { PathBuf::from(&f.herdr.path) } else { on_path(ctx, "herdr")? };
+    ensure!(herdr.is_absolute() && herdr.is_file(), "HERDR_BIN_PATH or profile Herdr must be an absolute real file");
+    let reason = match &candidate {
+        Some(_) if retained.as_ref().is_some_and(|v|v["preparation"]["launchable"] != true) => Some("latest profile evidence is not launchable".into()),
+        Some(_) if frozen.as_ref().is_some_and(|f|Path::new(&f.herdr.path).canonicalize().ok()!=herdr.canonicalize().ok()) => Some("selected Herdr executable changed".into()),
+        Some((reference,_)) if observe => herdr_farm::profile_preparation::revalidate(project, reference, Instant::now()+herdr_farm::profile_preparation::BUDGET, Default::default()).err().map(|e|format!("{e:#}")),
+        Some(_) => None,
+        None => Some(format!("no launchable evidence retained for profile {}", args.profile)),
+    };
+    let refresh = if reason.is_some() {
+        let pinned=migration::status(project)?.plan.config.context("pinned config missing")?;
+        let config:toml::Value=toml::from_str(&String::from_utf8(migration::read_plan_file(Path::new(&pinned.path))?)?)?;
+        let kind=config.get("profiles").and_then(|p|p.get(&args.profile)).and_then(|p|p.get("kind")).and_then(|v|v.as_str()).context("profile kind missing; run profile verify-interaction")?;
+        let agent=if let Some(f)=&frozen && Path::new(&f.agent.path).is_file() {PathBuf::from(&f.agent.path)} else {
+            let path=on_path(ctx,kind)?;
+            use std::io::Read;
+            let mut prefix=[0;2]; fs::File::open(&path)?.read_exact(&mut prefix)?;
+            if prefix==*b"#!" {
+                let mise=on_path(ctx,"mise").context("script agent requires profile verify-interaction")?;
+                let result=Command::new(mise).args(["which",kind]).output_gated()?;
+                ensure!(result.status.success(), "run profile verify-interaction to select the agent executable");
+                PathBuf::from(String::from_utf8(result.stdout)?.trim()).canonicalize()?
+            } else {path}
+        };
+        let home=frozen.as_ref().and_then(|f|f.execution_home.as_ref()).map(PathBuf::from).unwrap_or_else(||ctx.env.home.join(".herdr-farm-homes").join(&args.profile));
+        Some((agent,home))
+    } else {None};
+    Ok(ProfilePlan{candidate, reason, herdr, refresh})
+}
+
+pub fn run(ctx: &Ctx, slug: &str, mut args: Args) -> Result<Value> {
+    let project = ctx.root.join(slug).canonicalize().with_context(|| format!("project {slug} not found"))?;
+    eprintln!("launch run: preflight");
+    let pinned = migration::status(&project)?.plan.config.context("migration has no pinned config")?;
+    let config: toml::Value = toml::from_str(&String::from_utf8(migration::read_plan_file(Path::new(&pinned.path))?)?)?;
+    let cap = config.get("launch").and_then(|v| v.get("max_workers")).map(|v| v.as_integer().context("launch.max_workers must be an integer")).transpose()?.unwrap_or(4);
+    ensure!((1..=64).contains(&cap), "launch.max_workers must be in 1..64");
+    args.max_active_workers = Some(args.max_active_workers.unwrap_or(cap as u32));
+    let mut problems = Vec::new();
+    if args.max_active_workers.unwrap() == 0 || args.max_active_workers.unwrap() > cap as u32 { problems.push("owner cap: --max-active-workers must be at least one and cannot exceed launch.max_workers".into()); }
+    if config.get("profiles").and_then(|v|v.get(&args.profile)).is_none() { problems.push("owner profiles: profile is absent from current owner configuration".into()); }
+    if let Err(error)=code_paths(&args) {problems.push(format!("task inputs: {error:#}"));}
+    let snapshot = runtime::snapshot(&project)?;
+    let held = snapshot.attempts.iter().filter(|a| a.retains_capacity()).count();
+    let existing = snapshot.tasks.iter().any(|t|t.id.as_str()==args.task && t.active_attempt.is_some());
+    if held + usize::from(!existing) > cap as usize { problems.push(format!("owner cap: unfinished attempts plus this launch exceed launch.max_workers ({cap})")); }
+    let repository = args.repository.canonicalize()?;
+    match crate::project::parse_project_md(&String::from_utf8(migration::read_plan_file(&project.join("PROJECT.md"))?)?) {
+        Ok((settings, _)) if settings.repos.iter().any(|r|r.machine.is_none() && Path::new(&r.path).canonicalize().is_ok_and(|p|p==repository)) => {},
+        _ => problems.push("project repositories: canonical repository is not a local repository listed in PROJECT.md".into()),
+    }
+    if let Some(path)=&args.contract_file {
+        let document:Value=serde_json::from_slice(&migration::read_plan_file(path)?)?;
+        if document["task_id"] != args.task {problems.push(format!("task inputs: contract task_id must equal --task {}", args.task));}
+        if let Some(kind)=config.get("profiles").and_then(|p|p.get(&args.profile)).and_then(|p|p.get("kind")).and_then(|v|v.as_str())
+            && document["profile_kind"] != kind {problems.push(format!("task inputs: contract profile_kind must equal the profile's kind {kind}"));}
+        if !document["repository"].as_str().is_some_and(|p|Path::new(p).canonicalize().is_ok_and(|p|p==repository)) {
+            problems.push("project repositories: contract repository must equal the selected project repository".into());
+        }
+    }
+    let mut dirs = vec![Path::new(&pinned.path).parent().context("config directory missing")?.to_owned()];
+    if !dirs.contains(&ctx.config_dir) { dirs.push(ctx.config_dir.clone()); }
+    let public = config["authority"]["approval_public_key"].as_str().context("owner approval key missing")?;
+    let signer = (|| {
+        let explicit = if let Some(key)=&args.sign_with {Some(key.clone())}
+            else if let Some(value)=config.get("coordinator").and_then(|v|v.get("signing_key")) {
+                let key=value.as_str().context("coordinator.signing_key must be an absolute path")?;
+                ensure!(Path::new(key).is_absolute(), "coordinator.signing_key must be an absolute path");
+                Some(PathBuf::from(key))
+            } else {None};
+        resolve_signer(explicit, &dirs, public)
+    })();
+    match signer {
+        Ok(key) => {
+            let probe = ProbeDirectory(herdr_farm::short_socket::fresh()?);
+            let file = probe.0.join("probe");
+            let payload = b"herdr-farm automatic launch signing preflight v1\n";
+            fs::write(&file, payload)?;
+            match sign(&key, "preflight@herdr-projects", &file).and_then(|sig|authority::verify_signing_probe(&project, payload, &fs::read(sig)?)) {
+                Ok(()) => args.sign_with = Some(key),
+                Err(error) => problems.push(format!("signer: {error:#}")),
+            }
+        },
+        Err(error) => problems.push(format!("signer: {error:#}")),
+    }
+    let mut store = herdr_farm::store::SqliteStore::open(&project.join(".state/state.db"))?;
+    if let Some((reference, _)) = store.latest_native_profile(&args.profile)? {
+        let report = store.native_profile_report(&reference)?.context("retained profile missing")?;
+        let mut frozen:herdr_farm::domain::FrozenProfile=serde_json::from_value(report["preparation"]["profile"].clone())?;
+        frozen.config=migration::config_reference(Path::new(&pinned.path))?;
+        if let Err(error)=herdr_farm::profile_config::check_worker_login(&frozen, &project) {problems.push(format!("profile evidence: {error:#}"));}
+        if report["preparation"]["profile"]["execution_home"].as_str().is_none() { problems.push("sandboxed workers: profile has no execution home".into()); }
+    }
+    let needs_activation=snapshot.control.as_ref().is_none_or(|c|c.state!=ProjectState::Active || c.reconciliation_required || c.config_digest.as_deref()!=migration::config_reference(Path::new(&pinned.path)).ok().and_then(|r|r.digest).as_deref());
+    if needs_activation {
+        for blocker in runtime::admission(&project, Path::new(&pinned.path))?.blockers {
+            // Reconciliation supplies fresh observations, but cannot drain work.
+            let live_identity=snapshot.runtime_bindings.iter().any(|b|blocker.starts_with(&format!("{}:",b.id)) && (!b.identity.pane_id.is_empty() || !b.identity.worktree_path.is_empty()));
+            if !blocker.contains("fresh") || live_identity {problems.push(format!("admission: {blocker}"));}
+        }
+    }
+    if !snapshot.runtime_bindings.iter().any(|b|b.task.as_ref().is_some_and(|t|t.as_str()==args.task)) && snapshot.tasks.iter().any(|t|t.active_attempt.is_some()) {
+        problems.push("admission: a new runtime binding pauses the project until every reserved or running attempt is finished; prepare every task first with --prepare-only".into());
+    }
+    eprintln!("launch run: profile_evidence");
+    let plan=profile_plan(ctx, &project, &args, problems.is_empty());
+    if let Err(error)=&plan {problems.push(format!("profile evidence: {error:#}"));}
+    problems.dedup();
+    ensure!(problems.is_empty(), "launch run preflight refused:\n{}", problems.join("\n"));
     let mut run = Run { ctx, project: project.clone(), slug: slug.to_owned(), steps: Vec::new() };
-    match steps(&mut run, &args) {
+    match steps(&mut run, &args, plan.context("profile evidence preflight failed")?) {
         Ok(report) => Ok(report),
         Err(error) => {
             let failed = run.steps.len() + 1;
@@ -351,29 +508,34 @@ pub fn run(ctx: &Ctx, slug: &str, mut args: Args) -> Result<Value> {
     }
 }
 
-fn steps(run: &mut Run, args: &Args) -> Result<Value> {
+fn steps(run: &mut Run, args: &Args, plan: ProfilePlan) -> Result<Value> {
     let ctx = run.ctx;
     let project = run.project.clone();
     let task_id = TaskId::new(args.task.clone()).map_err(anyhow::Error::msg)?;
-    let herdr = PathBuf::from(ctx.env.herdr_bin());
-    ensure!(herdr.is_absolute(), "set HERDR_BIN_PATH to the absolute path of the Herdr executable the profile was verified with");
+
     let repository = args.repository.canonicalize().context("--repository must exist")?;
     code_paths(args)?;
     ensure!((usize::from(args.plan_output.is_some()) + usize::from(args.contract_file.is_some()) + usize::from(!args.write.is_empty())) == 1
         || runtime::task_contract(&project, &task_id)?.is_some(),
         "give --plan-output, --write with --output, or --contract-file");
 
-    // 1. The retained, launchable profile evidence.
-    let mut store = herdr_farm::store::SqliteStore::open(&project.join(".state/state.db"))?;
-    let (profile, kind) = store
-        .latest_launchable_native_profile(&args.profile)?
-        .with_context(|| format!("no launchable evidence retained for profile {}: run `profile verify-interaction {} {} --retain ...` first", args.profile, run.slug, args.profile))?;
-    // A worker that cannot log in would only 401 after launch: refuse now.
-    let retained = store.native_profile_report(&profile)?.context("retained native profile not found")?;
-    let frozen: herdr_farm::domain::FrozenProfile = serde_json::from_value(retained["preparation"]["profile"].clone()).context("retained native profile is unreadable")?;
-    herdr_farm::profile_config::check_worker_login(&frozen, &project)?;
-    drop(store);
-    run.done("profile_evidence", json!({"profile":profile,"kind":kind}));
+    // 1. Refresh is a separately retained, resumable step.
+    let ProfilePlan{candidate,reason,herdr,refresh}=plan;
+    let (profile, kind) = if let Some((agent,home))=refresh {
+        fs::DirBuilder::new().recursive(true).mode(0o700).create(&home)?;
+        let verified=herdr_farm::profile_preparation::verify_interaction(&project,&args.profile,&herdr,&agent,&home,Instant::now()+Duration::from_secs(120),Default::default())?;
+        let report=serde_json::to_value(&verified)?;
+        ensure!(report["preparation"]["launchable"]==true, "profile verify-interaction did not produce launchable evidence");
+        let value:(VersionedReference,String)=(serde_json::from_value(report["preparation"]["reference"].clone())?,
+            report["preparation"]["profile"]["kind"].as_str().context("verified profile kind missing")?.to_owned());
+        verified.retain(&project)?;
+        eprintln!("launch run: profile_evidence: refreshed ({})", reason.as_deref().unwrap_or("missing evidence"));
+        run.steps.push(Step{name:"profile_evidence",outcome:"refreshed",detail:json!({"profile":value.0,"kind":value.1,"reason":reason})});
+        value
+    } else {
+        let value=candidate.context("profile evidence missing")?;
+        run.skipped("profile_evidence",json!({"profile":value.0,"kind":value.1})); value
+    };
 
     if let Some(path) = &args.contract_file {
         let value: Value = serde_json::from_slice(&migration::read_plan_file(path)?)?;
@@ -383,9 +545,11 @@ fn steps(run: &mut Run, args: &Args) -> Result<Value> {
 
     // 2. The owner configuration must be acknowledged by an active project
     // before a signed contract can be installed.
+    eprintln!("launch run: project_control");
     activate(run, "project_control", false)?;
 
     // 3. The task and its signed contract.
+    eprintln!("launch run: task");
     let snapshot = runtime::snapshot(&project)?;
     if snapshot.tasks.iter().any(|t| t.id == task_id) {
         run.skipped("task", json!({"task":args.task}));
@@ -393,6 +557,7 @@ fn steps(run: &mut Run, args: &Args) -> Result<Value> {
         let head = retry(|| runtime::add_task(&project, task_id.clone(), args.title.clone().unwrap_or_else(|| args.task.clone()), run.head()?))?;
         run.done("task", json!({"task":args.task,"head":head}));
     }
+    eprintln!("launch run: contract");
     if let Some(installed) = runtime::task_contract(&project, &task_id)? {
         run.skipped("contract", json!({"installed":installed}));
     } else {
@@ -411,6 +576,7 @@ fn steps(run: &mut Run, args: &Args) -> Result<Value> {
 
     // 4. Capacity, queue and the integration target.
     let snapshot = runtime::snapshot(&project)?;
+    eprintln!("launch run: queue");
     let scheduler = snapshot.scheduler.as_ref().context("project has no scheduler state: migrate it first")?;
     if snapshot.scheduler.as_ref().is_some_and(|s| s.queue.iter().any(|q| q.task == task_id) && snapshot.tasks.iter().any(|t| t.id == task_id && (t.state == herdr_farm::domain::TaskState::Queued || t.active_attempt.is_some()))) {
         run.skipped("queue", json!({"task":args.task}));
@@ -423,17 +589,20 @@ fn steps(run: &mut Run, args: &Args) -> Result<Value> {
         })?;
         run.done("queue", json!({"head":head}));
     }
+    eprintln!("launch run: scheduler_capacity");
     let scheduler_policy = &scheduler.policy;
-    if scheduler_policy.max_active_workers >= args.max_active_workers {
+    if scheduler_policy.max_active_workers == args.max_active_workers.unwrap() {
         run.skipped("scheduler_capacity", json!({"max_active_workers":scheduler_policy.max_active_workers}));
     } else {
         let head = retry(|| {
             let fresh = runtime::snapshot(&project)?;
             let policy = fresh.scheduler.context("scheduler missing")?.policy;
-            runtime::scheduler_policy(&project, fresh.head, policy.revision, policy.max_active_workers.max(args.max_active_workers), policy.max_attempts_per_task.max(1))
+            runtime::scheduler_policy(&project, fresh.head, policy.revision, args.max_active_workers.unwrap(), policy.max_attempts_per_task.max(1))
         })?;
         run.done("scheduler_capacity", json!({"max_active_workers":args.max_active_workers,"head":head}));
     }
+    retry(|| herdr_farm::store::set_project_result_automation(&project, run.head()?, Some(true), None))?;
+    eprintln!("launch run: integration_target");
     if let Some(reference) = &args.integration_ref {
         retry(|| herdr_farm::integration::configure_project(&project, &repository, reference))?;
         retry(|| herdr_farm::store::set_project_result_automation(&project, run.head()?, Some(true), Some(true)))?;
@@ -441,7 +610,9 @@ fn steps(run: &mut Run, args: &Args) -> Result<Value> {
     }
 
     // 5. Herdr server, binding, reconciliation and activation.
+    eprintln!("launch run: herdr_server");
     let socket = herdr_server(run, &herdr, &args.task, args.herdr_socket.as_deref())?;
+    eprintln!("launch run: binding");
     let snapshot = runtime::snapshot(&project)?;
     if let Some(old) = snapshot.runtime_bindings.iter().find(|b| b.task.as_ref() == Some(&task_id)) {
         let history: Vec<_> = snapshot.attempts.iter().filter(|a| a.task == task_id).collect();
@@ -495,6 +666,7 @@ fn steps(run: &mut Run, args: &Args) -> Result<Value> {
             (change.binding.id, true)
         }
     };
+    eprintln!("launch run: reconcile_and_activate");
     activate(run, "reconcile_and_activate", created)?;
 
     if args.prepare_only {
@@ -522,6 +694,7 @@ fn steps(run: &mut Run, args: &Args) -> Result<Value> {
     let contract = migration::open_active(&project)?.task_contract_document(task_id.as_str())?.context("the task has no installed contract document")?;
     let reference = runtime::task_contract(&project, &task_id)?.context("the task has no installed contract")?;
     instructions.push_str(&finish_instructions(&ctx.root, run.slug.as_str(), &contract, &reference)?);
+    eprintln!("launch run: knowledge_snapshot");
     let knowledge = retry(|| {
         let _guard = herdr_farm::memory::mutation_guard(&project)?;
         let resolved = crate::agents::resolve::resolve(&args.profile, &ctx.config_dir.join("config.toml"), None)?;
@@ -542,17 +715,20 @@ fn steps(run: &mut Run, args: &Args) -> Result<Value> {
     };
     run.done("knowledge_snapshot", json!({"snapshot":selection.knowledge}));
     let deadline = Instant::now() + herdr_farm::profile_preparation::BUDGET;
+    eprintln!("launch run: draft");
     let drafted = retry(|| launch_preparation::draft(&project, &selection, run.head()?, Duration::from_secs(args.validity_seconds), deadline, Default::default()))?;
     let approval = dir.join("approval.json");
     fs::write(&approval, serde_json::to_vec_pretty(&drafted.approval)?)?;
     run.done("draft", json!({"approval_document":approval,"brief_chars":drafted.brief.prompt_chars}));
     let key = args.sign_with.as_deref().with_context(|| format!("the launch approval needs the owner's signature: pass --sign-with KEY, or sign {} with `ssh-keygen -Y sign -n {} -f KEY`, then `approval import` and `launch reserve`", approval.display(), authority::SIGNATURE_NAMESPACE))?;
+    eprintln!("launch run: approval_import");
     let imported = retry(|| {
         let signature = sign(key, authority::SIGNATURE_NAMESPACE, &approval)?;
         authority::import_signed(&project, &approval, &signature, run.head()?)
     })?;
     run.done("approval_import", json!({"approval":imported}));
     let approval_reference = VersionedReference { id: format!("approval-{}", imported.digest), revision: 1, digest: imported.digest.clone() };
+    eprintln!("launch run: reserve");
     let reservation = retry(|| launch_preparation::reserve(&project, &selection, &approval_reference, run.head()?, deadline, Default::default()))?;
     anyhow::ensure!(reservation.record.inputs == drafted.inputs, "the reservation does not carry the drafted inputs");
     let attempt = reservation.record.attempt.clone();
@@ -573,7 +749,7 @@ fn report(run: &Run, task: &str, profile: &VersionedReference, kind: &str, herdr
         "herdr_socket":socket,
         "steps":run.steps.iter().map(|s| json!({"step":s.name,"outcome":s.outcome,"detail":s.detail})).collect::<Vec<_>>(),
         "next":[
-            format!("The ticker launches the worker; run it with HERDR_BIN_PATH={} so it uses the verified Herdr.", herdr.display()),
+            format!("The ticker launches the worker using the verified profile Herdr {}.", herdr.display()),
             format!("Watch it with `scheduler {} inspect` and `operations {} inspect`. The worker's brief ends with the submission it must make; if it finishes without submitting, `result {} submit-captured <attempt>` captures its worktree and records the submission, and automatic verification and integration take it from there.", run.slug, run.slug, run.slug),
             format!("When the task is finished the ticker stops its dedicated Herdr server; `launch {} stop --task {task}` does it explicitly.", run.slug)
         ]

@@ -308,6 +308,11 @@ fn policy_at(project:&Path,original:&migration::ConfigReference)->Result<(Policy
     Ok((policy,reference))
 }
 
+/// Verify the automatic signer's fixed preflight probe against the pinned owner.
+pub fn verify_signing_probe(project: &Path, payload: &[u8], signature: &[u8]) -> Result<()> {
+    verify_signature(&policy(project)?.0, payload, signature, "preflight@herdr-projects", &RealRunner)
+}
+
 /// Report the pinned owner policy identity for signing; never grants approval.
 pub fn policy_reference(project:&Path)->Result<VersionedReference> {policy(project)?.0.reference()}
 pub(crate) fn routine_policy(project:&Path)->Result<(VersionedReference,migration::ConfigReference)> {
