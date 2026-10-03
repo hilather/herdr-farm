@@ -259,13 +259,13 @@ fn socket_open_primes_owned_coordinator_retries_swallowed_prompt_and_recreates_c
     let adopted = runtime::snapshot(&l.project).unwrap();
     assert!(adopted.ownership.iter().any(|o| o.binding == "coordinator" && o.config_digest == migration::config_reference(&config).unwrap().digest));
     let control = adopted.control.unwrap();
-    l.ok(&["runtime", "demo", "state", "paused", "--expected-revision", &control.revision.to_string(), "--expected-head", &adopted.head.to_string()]);
+    l.settled_ok(&["runtime", "demo", "state", "paused", "--expected-revision", &control.revision.to_string(), "--expected-head", &adopted.head.to_string()]);
     l.settled_ok(&["open", "demo"]);
     l.stop();
     assert_eq!(serde_json::from_str::<Value>(&l.ok(&["runtime", "demo", "inspect"])).unwrap()["control"]["state"], "paused");
     // Restore active for the replacement workflow below.
     let paused = runtime::snapshot(&l.project).unwrap();
-    l.ok(&["runtime", "demo", "state", "active", "--expected-revision", &paused.control.unwrap().revision.to_string(), "--expected-head", &paused.head.to_string()]);
+    l.settled_ok(&["runtime", "demo", "state", "active", "--expected-revision", &paused.control.unwrap().revision.to_string(), "--expected-head", &paused.head.to_string()]);
     assert_eq!(fs::read(owner_settings).unwrap(), owner_bytes);
     let alias_prefix = format!("{} --root {}", alias.display(), l.root.display());
     assert!(permissions["permissions"]["allow"].as_array().unwrap().contains(&json!(format!("Bash({alias_prefix} task demo add:*)"))));
@@ -358,7 +358,7 @@ fn socket_open_primes_owned_coordinator_retries_swallowed_prompt_and_recreates_c
     fs::write(l.home.path().join("lose-prompt-reply"), "").unwrap();
     assert!(!l.settled(&["open", "demo", "--reprime"]).status.success());
     let sent = l.state()["prompts"].as_array().unwrap().len();
-    l.ok(&["open", "demo"]);
+    l.settled_ok(&["open", "demo"]);
     l.stop();
     assert_eq!(l.state()["prompts"].as_array().unwrap().len(), sent);
 }
