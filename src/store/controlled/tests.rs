@@ -32,9 +32,9 @@ fn repeated_active_reads_share_the_original_input_budget() {
     let (_root,path)=fixture();
     padded_active_binding(&path,8*1024*1024);
     let mut db=ControlledStore::open_scoped(&path,ReadControl::new(Instant::now()+Duration::from_secs(30),Cancellation::default())).unwrap();
-    // Leave the old 50 MiB allowance to exercise exhaustion without ten times
-    // as many expensive repeated decodes after the production budget increase.
-    db.work_budget.bytes(462*1024*1024).unwrap();
+    // Leave at most 50 MiB to exercise shared-budget exhaustion without
+    // depending on the store-size allowance selected at open.
+    db.work_budget.bytes(db.work_budget.remaining_units().saturating_sub(50*1024*1024)).unwrap();
     let mut completed=0;
     for _ in 0..10 {
         match db.reconcile_active_work(None) {

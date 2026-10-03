@@ -371,7 +371,7 @@ impl ControlledStore {
         let c=control.clone();let reason=interrupted.clone();
         connection.commit_hook(Some(move||{let n=c.reason();if n!=0{reason.store(n,Ordering::SeqCst);}n!=0}));
         connection.busy_timeout(Duration::from_millis(10).min(control.deadline.saturating_duration_since(Instant::now())))?;
-        let work_budget=read_budget::ReadBudget::new(control.clone());
+        let work_budget=read_budget::ReadBudget::for_store(control.clone(), &connection);
         let store=Self{store:SqliteStore{connection},control,interrupted,work_budget,sql_work};
         if let Some(work)=&store.sql_work {
             // The field retains the callback context until Drop unregisters it.
@@ -433,13 +433,13 @@ impl ControlledStore {
     }
     pub fn read_snapshot(&mut self,at:Option<u64>)->Result<Snapshot> {
         self.control.check()?;
-        let budget=read_budget::ReadBudget::new(self.control.clone());
+        let budget=read_budget::ReadBudget::for_store(self.control.clone(), &self.store.connection);
         let value=self.store.read_snapshot_with_budget(at,Some(&budget)).map_err(|e|self.error(e))?;
         self.control.check()?;Ok(value)
     }
     pub(crate) fn launch_rows(&mut self,at:u64,task:&TaskId,binding:&str,approval:Option<&VersionedReference>)->Result<super::effect_rows::LaunchRows> {
         self.control.check()?;
-        let budget=read_budget::ReadBudget::new(self.control.clone());
+        let budget=read_budget::ReadBudget::for_store(self.control.clone(), &self.store.connection);
         let value=self.store.launch_rows(at,task,binding,approval,Some(&budget)).map_err(|e|self.error(e))?;
         self.control.check()?;Ok(value)
     }

@@ -822,7 +822,11 @@ remains cooperative. Aggregate decoded allocations and other effect workers stil
 need separate limits and controlled API integration.
 
 Controlled snapshot core readers (tasks, attempts, operations and events) now share
-50 MiB of input/structure accounting per snapshot, with 100000 returned rows,
+max(50 MiB, four times the main DB plus WAL size), capped at 512 MiB, of
+input/structure accounting per read. Size is measured once when the budget is
+created. The row limit scales proportionally from 100000, capped at 1000000;
+fourfold headroom covers repeated projections and JSON structure weights while
+small stores retain the original refusal limits. Readers retain
 16 MiB per field and 64 columns. Accounting occurs on SQLite-owned values before
 application copies and JSON decoding. JSON structure uses conservative lexical
 weights, not an exact heap estimate. A limit rejects the whole snapshot. Other
@@ -1024,3 +1028,8 @@ the budget.
 Stopping a dedicated server with `launch PROJECT stop --task T`, or the ticker
 sweep after worker termination, closes only its recorded viewer tab if its ID
 and label still match. A closed viewer or unreachable owner session is harmless.
+
+`launch run` pauses observed terminal-worker relaunches with the automatic
+`project.launch_run_paused` control event before relinquishing and rebinding.
+The same run reconciles and activates this pause; explicit owner pauses retain
+`project.control_changed` and still require an owner resume.

@@ -766,3 +766,10 @@ configuration (0600, parent 0700), classified as
 `canonical.coordinator_permissions`: retained with project backups for session
 provenance, never telemetry-pruned, regenerated at agent start. No SQLite schema
 change or new table is introduced. See [operator recovery](../operator-runbook.md#canonical-coordinator-after-migration-w-coord-2).
+
+Canonical read limits use DB-plus-WAL size measured once per budget: units are
+max(50 MiB, four times that size), capped at 512 MiB; rows scale proportionally
+from 100000 to at most 1000000. Field limits remain 16 MiB. This changes no schema
+or retention/backup classification. Automatic relaunch control is audited as
+`project.launch_run_paused`; explicit owner control remains
+`project.control_changed`.
