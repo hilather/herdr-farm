@@ -118,17 +118,13 @@ fn finish_poll(ctx:&Ctx,path:&Path,turn:u64,reachable:bool,observation_error:Opt
             Err(error)=>{errors.push(format!("result completion service: {error:#}"));true},
         }
     };
-    // Before observations stopped writing an event every pass, the moving head
-    // kept liveness unknown and the ticker awake. Queued effects must keep it
-    // awake explicitly, or a pending delivery is stranded by the idle exit.
-    let delivery_work=match herdr_farm::store::project_has_undelivered_operations(path) {Ok(pending)=>pending,Err(error)=>{errors.push(format!("delivery inventory: {error:#}"));true}};
     let routine_work=match scheduled {Ok(report)=>{if let Some(error)=report.diagnostic {errors.push(format!("routine scheduling: {error}"));}report.active},Err(error)=>{errors.push(format!("routine scheduling: {error:#}"));false}};
     // An admission failure is diagnostic only. Already-prepared dispatch still runs.
     let (progress,unknown_effects)=match result {
         Ok((progress,admission))=>{if let Some(error)=admission {errors.push(format!("admission: {error}"));}(progress,false)}
         Err(error)=>{errors.push(format!("{error:#}"));(false,queued)}
     };
-    Ok(PollResult{reachable:reachable||progress,scheduled_work:routine_work||wait_work||stop_work||replan_work||verification_work||integration_work||completion_work||delivery_work,unknown_effects,operation_error:(!errors.is_empty()).then(||errors.join("; ")),admission_log})
+    Ok(PollResult{reachable:reachable||progress,scheduled_work:routine_work||wait_work||stop_work||replan_work||verification_work||integration_work||completion_work,unknown_effects,operation_error:(!errors.is_empty()).then(||errors.join("; ")),admission_log})
 }
 fn process_next(ctx:&Ctx,path:&Path,turn:u64,effects:Option<&mut crate::copy_jobs::Queue>)->Result<bool> {
     Ok(process_next_with_launches(ctx,path,turn,effects,launch_dispatch_enabled()).1?.0)
