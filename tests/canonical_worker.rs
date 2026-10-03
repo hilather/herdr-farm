@@ -330,12 +330,15 @@ sys.stdout.buffer.write(json.dumps({'result':json.loads(reply)['result']}).encod
         let metrics = self.path("root/.ticker-metrics.json");
         let inode = || fs::metadata(&metrics).map(|m| m.ino()).ok();
         let (mut last, mut seen) = (inode(), 0);
+        // Accelerated passes are short, but native launch steps keep their
+        // unscaled windows: the pass budget only expires after a real-time floor.
+        let started = Instant::now();
         let mut ticker = self.spawn();
         while !done() {
             self.wait(&mut ticker, 60, &|| done() || inode() != last);
             if inode() != last && !done() {
                 (last, seen) = (inode(), seen + 1);
-                assert!(seen < passes, "not done within {passes} passes: {}", fs::read_to_string(self.path("root/.ticker.log")).unwrap_or_default());
+                assert!(seen < passes || started.elapsed() < Duration::from_secs(90), "not done within {passes} passes: {}", fs::read_to_string(self.path("root/.ticker.log")).unwrap_or_default());
             }
         }
         self.stop(ticker);
