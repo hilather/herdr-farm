@@ -2051,7 +2051,7 @@ pub fn run() -> Result<()> {
                 println!("  thread_wall_hours = {}", safety.thread_wall_hours);
                 println!("  thread_env = {:?}", safety.thread_env);
                 if !safety.thread_sandbox { println!("  Claude threads are unsandboxed (owner opt-out)"); }
-                println!("  Legacy Claude launch path remains unsandboxed until card 1b.");
+                println!("  Claude thread sandbox: prepared; the thread launcher does not use it yet");
 
                 println!("  built-in defaults: {}", crate::project::Safety::default().worker_summary());
                 println!("  effective worker arguments: {}", crate::worker_permissions::summary(&project, &safety, ctx.runner)?);

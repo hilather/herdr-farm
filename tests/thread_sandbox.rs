@@ -31,6 +31,8 @@ fn shared_git_thread_and_tab_are_contained_and_restarts_discard_worker_settings(
     }
     // One test owns this process's fixture environment; no real owner data is accessed.
     unsafe { std::env::set_var("HERDR_PROJECTS_OWNER_HOME", &owner); }
+    fs::write(owner.join(".gitconfig"), "[user]\nname = Sandbox Owner\nemail = sandbox-owner@example.invalid\n").unwrap();
+    for dir in [".cargo", ".rustup"] { fs::create_dir(owner.join(dir)).unwrap(); }
     let project = top.join("root/demo");
     fs::create_dir_all(project.join("threads")).unwrap();
     fs::create_dir_all(project.join("homes/other")).unwrap();
@@ -49,6 +51,10 @@ fn shared_git_thread_and_tab_are_contained_and_restarts_discard_worker_settings(
     fs::write(repo.join("initial"), "initial").unwrap();
     git(&repo, &["add", "."]);
     git(&repo, &["commit", "-m", "initial"]);
+    git(&repo, &["config", "--unset", "user.name"]);
+    git(&repo, &["config", "--unset", "user.email"]);
+    git(&repo, &["gc"]);
+    assert!(fs::read_dir(repo.join(".git/objects/pack")).unwrap().next().is_some());
     let wt = top.join("worktree");
     git(&repo, &["worktree", "add", "-b", "hp/demo/t-0001/work", wt.to_str().unwrap()]);
     let common = repo.join(".git");
@@ -104,7 +110,9 @@ fn shared_git_thread_and_tab_are_contained_and_restarts_discard_worker_settings(
     assert!(settings["permissions"].get("deny").is_none());
     agent_home::prepare_claude_thread(&home, &wt, &writable, false).unwrap();
     let mut script = String::from("#!/bin/sh\nset -eu\n[ \"$RUST_BACKTRACE\" = 1 ]\n[ \"$CLAUDE_CODE_OAUTH_TOKEN\" = fixture-secret-token ]\n[ ! -e /proc/self/fd/9 ]\nprintf changed > edit\ngit add edit\ngit commit -m sandbox-commit\n");
+    script.push_str(&format!("[ \"$CARGO_HOME\" = '{}' ]\n[ \"$RUSTUP_HOME\" = '{}' ]\n[ \"$XDG_CACHE_HOME\" = \"$HOME/.cache\" ]\n", owner.join(".cargo").display(), owner.join(".rustup").display()));
     for path in [
+        common.join("objects/pack/attack"),
         common.join("config"), common.join("hooks/pre-commit"), common.join("info/exclude"),
         common.join("packed-refs"), common.join("refs/heads/main"),
         common.join("refs/heads/hp/demo/other/work"), wt.join(".git"),
@@ -123,6 +131,10 @@ fn shared_git_thread_and_tab_are_contained_and_restarts_discard_worker_settings(
     assert_eq!(fs::read_to_string(wt.join("edit")).unwrap(), "changed");
     assert_eq!(git(&repo, &["show", "hp/demo/t-0001/work:edit"]), "changed");
     assert_eq!(fs::read_to_string(home.join("report")).unwrap(), "success");
+    assert_eq!(git(&wt, &["log", "-1", "--format=%an <%ae>"]), "Sandbox Owner <sandbox-owner@example.invalid>");
+    let overrides = isolation.clone().with_thread_env(&["CARGO_HOME=/tmp/cargo-override".into(), "RUSTUP_HOME=/tmp/rustup-override".into(), "XDG_CACHE_HOME=/tmp/cache-override".into()]).unwrap();
+    fs::write(&agent, "#!/bin/sh\nset -eu\n[ \"$CARGO_HOME\" = /tmp/cargo-override ]\n[ \"$RUSTUP_HOME\" = /tmp/rustup-override ]\n[ \"$XDG_CACHE_HOME\" = /tmp/cache-override ]\n").unwrap();
+    run(&agent, &wt, &home, &overrides);
     assert!(!fs::read_dir(&home).unwrap().any(|e| e.unwrap().file_name() == "token"));
     let tab = project.join("threads/t-0002");
     fs::create_dir(&tab).unwrap();
@@ -158,7 +170,7 @@ fn owner_safety_settings_are_reported_and_validated_through_cli() {
     assert!(output.contains("Claude threads are unsandboxed"), "{output}");
     assert!(output.contains("thread_wall_hours = 12"), "{output}");
     assert!(output.contains("RUST_BACKTRACE=1"), "{output}");
-    for invalid in ["thread_wall_hours = 0", "thread_env = [\"LD_PRELOAD=bad\"]"] {
+    for invalid in ["thread_wall_hours = 0", "thread_wall_hours = 169", "thread_env = [\"GIT_AUTHOR_NAME=bad\"]", "thread_env = [\"LD_PRELOAD=bad\"]"] {
         fs::write(config_dir.join("config.toml"), format!("[safety.\"{}\"]\n{invalid}\n", root.join("demo").display())).unwrap();
         assert!(!cli(&["safety", "show", "demo"]).status.success());
     }

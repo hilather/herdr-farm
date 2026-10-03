@@ -903,17 +903,17 @@ the next start; it does not interrupt an already running agent.
 
 ### Legacy Claude thread sandbox (card 1a)
 
-Card 1a provides and tests the sandbox API. The legacy `agent start --kind
-claude` launch path still runs with owner permissions; card 1b will connect it.
+The sandbox API is prepared and tested. The legacy `agent start --kind
+claude` launch path still runs with owner permissions; launch integration will connect it.
 PERM-1 grants will be contained once that launch integration lands.
 
 The thread sandbox makes the project and owner home read-only and hides owner
 agent directories, SSH secrets, owner config and other projects. Each execution
 home is private under `<project>/homes/<id>` (0700); other thread homes are
 hidden. Tab threads can write only their cwd and home. Worktree threads can
-also write their worktree, linked-worktree admin directory, shared Git objects,
+also write their worktree, linked-worktree admin directory, shared loose Git objects,
 and their own `hp/<slug>/<id>/` refs and reflogs. Commits reach the shared
-repository immediately. Shared Git config, hooks, info, packed refs, other
+repository immediately. Shared Git config, hooks, info, object packs, packed refs, other
 branches, `.git` pointers and admin linkage files stay read-only. New branches
 are `hp/<slug>/<id>/<title-slug>` (or `/work`); old recorded branches are retained,
 but the sandbox refuses them with guidance to restart from a new thread.
@@ -934,11 +934,19 @@ it is never copied into the home or included in argv.
 
 Owner-only `[safety."<canonical project path>"]` settings include
 `thread_sandbox = true` (default; false opts out), `thread_wall_hours = 168`
-(default seven-day supervisor cap; minimum 1), and `thread_env = ["NAME=VALUE"]`.
-These settings are reported by `safety show`; card 1b will apply the sandbox
+(between 1 and the seven-day supervisor cap of 168), and `thread_env = ["NAME=VALUE"]`.
+These settings are reported by `safety show`; launch integration will apply the sandbox
 switch and wall deadline to launches. Environment names must be uppercase
 identifiers, at most 32 entries; loader, HOME/PATH, Claude/Git and shell-startup
 overrides are refused. PATH starts with the product directory, followed by
 existing absolute owner PATH entries outside hidden paths, projects and the
-execution home, then `/usr/bin:/bin`. Toolchain caches default to the execution
-home; owner toolchain directories are never shared writable.
+execution home, then `/usr/bin:/bin`.
+
+Thread environments default to the first declared or real owner home's existing
+`.cargo` and `.rustup` directories, exposed read-only, while `XDG_CACHE_HOME`
+stays in the private thread home. Owner `thread_env` entries override these
+defaults. The owner-side planner captures the worktree's effective Git name and
+email (at most 256 bytes, without control characters), falling back to
+`worker <worker@invalid>`, and supplies author and committer identity.
+Restart uses recorded branch names; without one, it refuses creation when either
+the legacy or current branch name already exists.

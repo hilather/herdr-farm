@@ -217,6 +217,7 @@ pub struct Isolation {
     product: Option<String>,
     thread_path: Option<String>,
     thread_env: Vec<String>,
+    thread_defaults: Vec<String>,
 }
 
 /// Names the agent's submission spool directory in its baseline environment.
@@ -766,6 +767,7 @@ impl Isolation {
                     (common.clone(), false),
                     (format!("{common}/objects"), true),
                     (format!("{common}/objects/info"), false),
+                    (format!("{common}/objects/pack"), false),
                     (format!("{common}/refs/heads/{refs}"), true),
                     (format!("{common}/logs/refs/heads/{refs}"), true),
                     (directory.clone(), true),
@@ -828,7 +830,7 @@ impl Isolation {
             ensure!(keep.len() <= 7, "too many agent paths directly under {dir}");
             private.push(((*dir).to_owned(), keep));
         }
-        let mut isolation = Self { root, expose, private, git: quarantines, plan, hide, login: Vec::new(), token: None, project, spool: None, product: None, thread_path: None, thread_env: Vec::new() };
+        let mut isolation = Self { root, expose, private, git: quarantines, plan, hide, login: Vec::new(), token: None, project, spool: None, product: None, thread_path: None, thread_env: Vec::new(), thread_defaults: Vec::new() };
         // Every executable the worker runs: the agent, and the product binary
         // it invokes for `result submit` and the review worker channel (the
         // controller deriving this sandbox is that binary).
@@ -949,6 +951,32 @@ impl Isolation {
         }
         path.extend(["/usr/bin".into(), "/bin".into()]);
         isolation.thread_path = Some(path.join(":"));
+        if let Some(owner) = login_homes()?.first() {
+            for (name, relative) in [("CARGO_HOME", ".cargo"), ("RUSTUP_HOME", ".rustup")] {
+                let directory = Path::new(owner).join(relative);
+                if directory.is_dir() {
+                    isolation.thread_defaults.push(format!("{name}={}", directory.display()));
+                }
+            }
+        }
+        isolation.thread_defaults.push(format!("XDG_CACHE_HOME={}/.cache", home.display()));
+        for (key, fallback, names) in [
+            ("user.name", "worker", ["GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME"]),
+            ("user.email", "worker@invalid", ["GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL"]),
+        ] {
+            let mut command = std::process::Command::new("git");
+            command.arg("-C").arg(cwd).args(["config", "--get", key]);
+            if let Some(owner) = login_homes()?.first() { command.env("HOME", owner); }
+            let result = command.output_gated()?;
+            let value = if result.status.success() {
+                {
+                    let output = String::from_utf8(result.stdout)?;
+                    output.strip_suffix('\n').unwrap_or(&output).to_owned()
+                }
+            } else { fallback.to_owned() };
+            ensure!(!value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control), "invalid thread Git identity {key}");
+            isolation.thread_defaults.extend(names.map(|name| format!("{name}={value}")));
+        }
         if let Some((_, admin, common)) = git {
             for relative in [format!("refs/heads/{refs}"), format!("logs/refs/heads/{refs}")] {
                 std::fs::create_dir_all(common.join(relative))?;
@@ -958,7 +986,7 @@ impl Isolation {
                 if !path.exists() { std::fs::write(&path, "")?; }
                 ensure!(std::fs::symlink_metadata(&path)?.is_file(), "config.worktree must be a regular file");
                 isolation.plan.push((normal(&path)?, false));
-                isolation.plan.sort_by(|a, b| a.0.cmp(&b.0));
+                isolation.plan.sort_by(|a, b| Path::new(&a.0).cmp(Path::new(&b.0)).then(a.1.cmp(&b.1)));
             }
         }
         std::fs::create_dir_all(home)?;
@@ -1174,9 +1202,7 @@ pub fn isolated_gated_command(
     );
     command(executable, arguments, wall)?;
     if isolation.thread_path.is_some() {
-        if isolation.token.is_none() {
-            crate::profile_config::claude_token_file(&crate::profile_config::IsolationConfig::default())?;
-        }
+        ensure!(isolation.token.is_some(), "no Claude worker login is configured: create a long-lived token with `claude setup-token`, save it in a 0600 file outside the project and the agent directories, set `claude_token_file = \"/abs/path\"` under [worker_isolation.login] in the owner configuration, then prepare and verify the profile again");
         let explicit = arguments.strip_suffix(&["--setting-sources".into(), "user".into()]).unwrap_or(arguments);
         validate_thread_arguments(explicit)?;
     }
@@ -1210,7 +1236,10 @@ pub fn isolated_gated_command(
         "GIT_CONFIG_VALUE_2=false".into(),
     ]);
     if isolation.thread_path.is_some() {
-        args.extend([format!("CARGO_HOME={home}/.cargo"), format!("RUSTUP_HOME={home}/.rustup"), format!("XDG_CACHE_HOME={home}/.cache")]);
+        args.extend(isolation.thread_defaults.iter().filter(|entry| {
+            let name = entry.split_once('=').unwrap().0;
+            !isolation.thread_env.iter().any(|value| value.split_once('=').is_some_and(|(override_name, _)| override_name == name))
+        }).cloned());
     }
     args.extend_from_slice(&isolation.thread_env);
     if let Some(spool) = &isolation.spool {

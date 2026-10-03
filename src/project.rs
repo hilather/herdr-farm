@@ -229,8 +229,8 @@ const CLAUDE_WORKER_COMMANDS: &[&str] = &[
     "grep",
     // Not `find` (-exec, -delete), `sed` (GNU `e` executes commands) or `rg`
     // (--pre runs a preprocessor): each can run an arbitrary command under an
-    // allowed prefix. Legacy Claude launches remain unsandboxed until card 1b
-    // wires the thread sandbox into the launcher; grants are contained then.
+    // allowed prefix. Legacy Claude launches remain unsandboxed until the thread launcher
+    // uses the thread sandbox; grants are contained then.
 ];
 
 impl Safety {
@@ -269,8 +269,8 @@ impl Safety {
         }
         Ok(args)
     }
-    /// Arguments for the sandboxed Claude launch path (card 1b).
-    #[allow(dead_code)] // Card 1b connects the legacy launcher to this prepared API.
+    /// Arguments for the sandboxed Claude launch path.
+    #[allow(dead_code)] // Launch integration connects the legacy launcher to this prepared API.
     pub fn sandboxed_claude_arguments(&self, cwd: &str, repository: &str) -> Result<Vec<String>> {
         let explicit = self.worker_arguments("claude")?;
         crate::agents::validate_sandboxed_claude_arguments(explicit)?;
@@ -519,7 +519,7 @@ pub fn parse_safety(text:&str,canonical_project_dir:&Path)->Result<Safety> {
     anyhow::ensure!(matches!(safety.cleanup_resolved.as_str(), "auto" | "keep"), "cleanup_resolved must be auto or keep");
     anyhow::ensure!(matches!(safety.resolve_threads.as_str(), "propose" | "auto"), "resolve_threads must be propose or auto");
     anyhow::ensure!(matches!(safety.worker_permissions.as_str(), "coordinator" | "owner"), "worker_permissions must be coordinator or owner");
-    anyhow::ensure!(safety.thread_wall_hours >= 1, "thread_wall_hours must be at least 1");
+    anyhow::ensure!((1..=168).contains(&safety.thread_wall_hours), "thread_wall_hours must be between 1 and 168");
     herdr_farm::worker_supervision::validate_thread_env(&safety.thread_env)?;
     safety.validate_thread_allowed_commands()?;
     let extras = Safety { thread_allowed_commands: safety.grantable_commands.clone(), ..Safety::default() };

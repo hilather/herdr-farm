@@ -388,6 +388,8 @@ fn restart_follows_what_the_record_reached() {
     lab.git(&repo, &["init", "-q", "-b", "main"]);
     lab.git(&repo, &["commit", "-q", "--allow-empty", "-m", "base"]);
     lab.git(&repo, &["branch", "hp/demo/t-0006-half-made"]);
+    lab.git(&repo, &["branch", "hp/demo/t-0012/half-made"]);
+    lab.git(&repo, &["branch", "recorded-branch"]);
     let (mut agents, mut panes) = (Vec::new(), Vec::new());
     let mut thread = |n: usize, fields: Value, pane: bool, agent: Option<&str>| {
         let (id, ws) = (format!("t-{n:04}"), format!("w{n}"));
@@ -413,6 +415,8 @@ fn restart_follows_what_the_record_reached() {
         (4, "t-0004 is resolved; `thread resolve --reopen` first"),
         (5, "t-0005 is still starting"),
         (6, "t-0006: no worktree was recorded but its branch already exists"),
+        (12, "t-0012: no worktree was recorded but its branch already exists"),
+        (13, "t-0013: no worktree was recorded but its branch already exists"),
     ];
     thread(1, json!({}), true, Some("working"));
     thread(2, json!({"prompt_pending": true, "launch_attempts": 1}), true, None);
@@ -428,6 +432,8 @@ fn restart_follows_what_the_record_reached() {
     thread(10, json!({"kind": "tab", "worktree_path": ""}), false, None);
     // A start that stalled before creating anything is created again.
     thread(11, json!({"status": "starting", "worktree_path": ""}), false, None);
+    thread(12, json!({"status": "failed", "worktree_path": ""}), false, None);
+    thread(13, json!({"status": "failed", "worktree_path": "", "branch": "recorded-branch"}), false, None);
     lab.session(&agents, &panes);
 
     let records = || fs::read_dir(lab.project().join("threads")).unwrap().map(|e| fs::read(e.unwrap().path()).unwrap()).collect::<Vec<_>>();
@@ -464,8 +470,8 @@ fn restart_follows_what_the_record_reached() {
 
     let out = restart(11);
     assert!(out.starts_with("t-0011 is back in pane w") && !out.contains("w11:p1"), "{out}");
-    assert!(lab.git(&repo, &["branch", "--list", "hp/demo/t-0011-half-made"]).contains("hp/demo/t-0011-half-made"));
-    assert_eq!(lab.record("t-0011")["branch"].as_str(), Some("hp/demo/t-0011-half-made"));
+    assert!(lab.git(&repo, &["branch", "--list", "hp/demo/t-0011/half-made"]).contains("hp/demo/t-0011/half-made"));
+    assert_eq!(lab.record("t-0011")["branch"].as_str(), Some("hp/demo/t-0011/half-made"));
 }
 
 /// `thread prompt` sends only to a detected agent that is not waiting on the
