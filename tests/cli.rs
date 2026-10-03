@@ -84,7 +84,10 @@ print(json.dumps({{'result':r}}))
     let before=runtime::snapshot(&project).unwrap();fs::remove_file(home.path().join("entered")).unwrap();fs::write(home.path().join("mode"),"blocked").unwrap();
     let mut child=spawn();wait(&mut child,&||home.path().join("entered").exists());
     assert!(herdr_farm::execution_guard::ProjectGuard::acquire(&project).is_err());stop(&mut child);assert_eq!(runtime::snapshot(&project).unwrap(),before);
-    fs::write(home.path().join("mode"),"ok").unwrap();let mut child=spawn();wait(&mut child,&||runtime::snapshot(&project).unwrap().head>before.head);stop(&mut child);
+    fs::write(home.path().join("mode"),"ok").unwrap();
+    // An unchanged observation refreshes its stored time without an event, so progress is the observation time, not the head.
+    let seen=before.observations.iter().map(|o|o.observed_unix_ms).max().unwrap_or(0);
+    let mut child=spawn();wait(&mut child,&||runtime::snapshot(&project).unwrap().observations.iter().any(|o|o.observed_unix_ms>seen));stop(&mut child);
     assert!(herdr_farm::execution_guard::ProjectGuard::acquire(&project).is_ok());
     let raw=rusqlite::Connection::open(project.join(".state/state.db")).unwrap();
     let observed=||raw.query_row("SELECT coalesce(max(observed_unix_ms),0) FROM runtime_observations",[],|row|row.get::<_,i64>(0)).unwrap();
