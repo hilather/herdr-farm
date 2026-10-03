@@ -132,6 +132,7 @@ enum DelegationCommand {
 
 #[cfg(all(feature="state-store", target_os="linux"))]
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)] // Parsed once per CLI invocation; keep clap arguments direct.
 enum LaunchCommand {
     /// Produce an unsigned approval and exact brief from current retained inputs
     Draft {
@@ -161,10 +162,15 @@ enum LaunchCommand {
         #[arg(long, default_value_t=900)] validity_seconds: u64,
         #[arg(long)] title: Option<String>,
         /// Planning task: the one deliverable, a Markdown file under docs/
-        #[arg(long, conflicts_with="contract_file")] plan_output: Option<String>,
+        #[arg(long, conflicts_with_all=["contract_file", "write", "output"])] plan_output: Option<String>,
         /// Task instructions, appended to PROJECT.md in the retained brief
         #[arg(long)] prompt_file: Option<PathBuf>,
-        /// Your own complete unsigned contract document
+        /// Repo-relative files or directory prefixes the code task may change
+        #[arg(long, conflicts_with="contract_file")] write: Vec<String>,
+        /// Exact files the result must contain
+        #[arg(long, conflicts_with="contract_file")] output: Vec<String>,
+        #[arg(long)] deliverable: Option<String>,
+        /// Advanced unsigned contract decisions (product fills store fences)
         #[arg(long)] contract_file: Option<PathBuf>,
         /// Existing, not-checked-out branch (e.g. refs/heads/integration); turns verify+integrate automation on
         #[arg(long)] integration_ref: Option<String>,
@@ -1295,8 +1301,8 @@ pub fn run() -> Result<()> {
             let value=match command {
                 LaunchCommand::Draft { selection, expected_head, validity_seconds } =>
                     serde_json::to_value(herdr_farm::launch_preparation::draft(&project,&load(&selection)?,expected_head,std::time::Duration::from_secs(validity_seconds),deadline,Default::default())?)?,
-                LaunchCommand::Run { task, profile, repository, sign_with, validity_seconds, title, plan_output, prompt_file, contract_file, integration_ref, base, max_active_workers, herdr_socket, prepare_only } =>
-                    crate::launch_run::run(&ctx, &slug, crate::launch_run::Args { task, profile, repository, sign_with, validity_seconds, title, plan_output, prompt_file, contract_file, integration_ref, base, max_active_workers, herdr_socket, prepare_only })?,
+                LaunchCommand::Run { task, profile, repository, sign_with, validity_seconds, title, plan_output, write, output, deliverable, prompt_file, contract_file, integration_ref, base, max_active_workers, herdr_socket, prepare_only } =>
+                    crate::launch_run::run(&ctx, &slug, crate::launch_run::Args { task, profile, repository, sign_with, validity_seconds, title, plan_output, write, output, deliverable, prompt_file, contract_file, integration_ref, base, max_active_workers, herdr_socket, prepare_only })?,
                 LaunchCommand::Stop { task, force } => crate::launch_run::stop(&ctx, &slug, &task, force)?,
                 LaunchCommand::Reserve { selection, approval_digest, expected_head } => {
                     let approval=herdr_farm::domain::VersionedReference{id:format!("approval-{approval_digest}"),revision:1,digest:approval_digest};
@@ -1530,7 +1536,9 @@ pub fn run() -> Result<()> {
                 TaskCommand::Show{id}=>{
                     let id=TaskId::new(id).map_err(anyhow::Error::msg)?;
                     let task=runtime::snapshot(&dir)?.tasks.into_iter().find(|t|t.id==id).context("task not found")?;
-                    println!("{}",serde_json::to_string_pretty(&task)?);
+                    let mut shown = serde_json::to_value(&task)?;
+                    shown["contract"] = herdr_farm::migration::open_active(&dir)?.task_contract_document(id.as_str())?.unwrap_or(serde_json::Value::Null);
+                    println!("{}",serde_json::to_string_pretty(&shown)?);
                 },
                 TaskCommand::Add{id,title,expected_head}=>println!("Committed task at event head {}. Use migration export to generate the new view.",runtime::add_task(&dir,TaskId::new(id).map_err(anyhow::Error::msg)?,title,expected_head)?),
                 TaskCommand::Rename{id,title,expected_revision,expected_head}=>println!("Committed task at event head {}. Use migration export to generate the new view.",runtime::rename_task(&dir,&TaskId::new(id).map_err(anyhow::Error::msg)?,title,expected_revision,expected_head)?),

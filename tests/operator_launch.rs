@@ -766,3 +766,152 @@ fn prepare_refuses_a_swapped_or_repermissioned_execution_home() {
     let out = lab.prepare("codex-sol", "codex");
     assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("execution home changed"), "{}", String::from_utf8_lossy(&out.stderr));
 }
+
+#[test]
+fn code_launch_validates_scopes_and_outputs_before_writing() {
+    let lab = Lab::with_herdr(STATIC_HERDR);
+    let base = ["launch", "demo", "run", "--task", "code", "--profile", "codex-sol", "--repository", lab.repo.to_str().unwrap()];
+    let cases = [
+        (vec!["--output", "src/lib.rs"], "--output requires --write"),
+        (vec!["--write", "src/"], "name at least one file the result must contain"),
+        (vec!["--write", "src/", "--output", "tests/test.rs"], "outside every --write path"),
+        (vec!["--write", "src/*", "--output", "src/lib.rs"], "must not contain globs"),
+        (vec!["--write", "../src/", "--output", "src/lib.rs"], "repo-relative"),
+        (vec!["--write", "src/", "--output", "src/"], "exact file"),
+        (vec!["--write", "src/", "--output", "src/1", "--output", "src/2", "--output", "src/3", "--output", "src/4", "--output", "src/5", "--output", "src/6", "--output", "src/7", "--output", "src/8", "--output", "src/9"], "at most 8 --output"),
+    ];
+    let before = herdr_farm::runtime::snapshot(&lab.project).unwrap();
+    for (extra, message) in cases {
+        let mut args = base.to_vec();
+        args.extend(extra);
+        let error = lab.fail(&args);
+        assert!(error.contains(message), "{error}");
+        assert_eq!(herdr_farm::runtime::snapshot(&lab.project).unwrap(), before);
+    }
+}
+
+#[test]
+fn code_launch_reserves_under_concurrent_writes_and_submits_all_scoped_changes() {
+    let lab = Lab::with_herdr(STATIC_HERDR);
+    lab.plant_launchable("codex-sol", "codex", "gpt-6.1-sol");
+    let prompt = lab.home.join("code.txt");
+    fs::write(&prompt, "Implement the code and its tests.").unwrap();
+    let socket = lab.socket_inode_once("code.sock");
+    let args = ["launch", "demo", "run", "--task", "code", "--profile", "codex-sol", "--repository", lab.repo.to_str().unwrap(),
+        "--write", "./src//", "--write", "tests/", "--output", "src/lib.rs", "--prompt-file", prompt.to_str().unwrap(),
+        "--sign-with", lab.key.to_str().unwrap(), "--herdr-socket", socket.to_str().unwrap()];
+    let report = std::thread::scope(|scope| {
+        let writer = scope.spawn(|| {
+            for n in 0..20 {
+                if let Ok(snapshot) = herdr_farm::runtime::snapshot(&lab.project) {
+                    let head = snapshot.head.to_string();
+                    let _ = lab.cli(&["task", "demo", "add", &format!("other-{n}"), "--title", "Concurrent task", "--expected-head", &head]);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        });
+        let report = lab.ok(&args);
+        writer.join().unwrap();
+        report
+    });
+    assert!(herdr_farm::runtime::snapshot(&lab.project).unwrap().tasks.iter().any(|t| t.id.as_str().starts_with("other-")));
+    let attempt = report["attempt"].as_str().unwrap();
+    assert_eq!(report["write_paths"], serde_json::json!(["src/", "tests/"]));
+    assert_eq!(report["outputs"], serde_json::json!(["src/lib.rs"]));
+    let shown = lab.ok(&["task", "demo", "show", "code"]);
+    let contract = &shown["contract"];
+    assert_eq!(contract["scope"]["paths"], serde_json::json!([{"path":"src/","access":"write"},{"path":"tests/","access":"write"}]));
+    assert_eq!(contract["outputs"], serde_json::json!([{"path":"src/lib.rs","kind":"git_file"}]));
+    assert_eq!(contract["acceptance_policies"].as_array().unwrap().len(), 1);
+    assert_eq!(contract["acceptance_policies"][0]["id"], "output-1");
+    let brief = lab.ok(&["memory", "demo", "attempt-brief", "--attempt", attempt]);
+    let script = brief["text"].as_str().unwrap().split("```sh\n").nth(1).unwrap().split("```").next().unwrap();
+    let worktree = lab.home.join("code-worktree");
+    lab.git(&["worktree", "add", "-q", "-b", "code-result", worktree.to_str().unwrap()]);
+    for path in ["src/lib.rs", "tests/code.rs", "outside.txt"] {
+        fs::create_dir_all(worktree.join(path).parent().unwrap()).unwrap();
+        fs::write(worktree.join(path), "Content\n").unwrap();
+    }
+    let worker_git = |args: &[&str]| {
+        let output = Command::new("git").arg("-C").arg(&worktree).args(args)
+            .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null").output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    };
+    worker_git(&["add", "--", "outside.txt"]);
+    worker_git(&["-c", "user.name=worker", "-c", "user.email=worker@invalid", "commit", "-q", "-m", "outside scope"]);
+    let shim = lab.home.join("code-shim");
+    fs::create_dir_all(&shim).unwrap();
+    fs::write(shim.join("herdr-farm"), format!("#!/bin/sh\nunset HERDR_FARM_SUBMISSION_SPOOL\nexec {BIN} \"$@\"\n")).unwrap();
+    fs::set_permissions(shim.join("herdr-farm"), fs::Permissions::from_mode(0o700)).unwrap();
+    let submit = || Command::new("/bin/sh").args(["-c", script]).current_dir(&worktree).env_clear()
+        .env("HERDR_FARM_TEST_TIME_SCALE", include_str!("support/time-scale.txt").trim())
+        .env("HOME", &lab.home).env("HERDR_PROJECTS_OWNER_HOME", &lab.home)
+        .env("PATH", format!("{}:/usr/bin:/bin", shim.display())).env("XDG_RUNTIME_DIR", lab.runtime.path())
+        .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("HERDR_FARM_SUBMISSION_SPOOL", lab.project.join(".state/spool").join(attempt)).output().unwrap();
+    let refused = submit();
+    assert!(!refused.status.success());
+    let error = String::from_utf8_lossy(&refused.stderr);
+    assert!(error.contains("outside.txt") && error.contains("Restore"), "{error}");
+    fs::remove_file(worktree.join("outside.txt")).unwrap();
+    worker_git(&["add", "-A", "--", "outside.txt"]);
+    worker_git(&["-c", "user.name=worker", "-c", "user.email=worker@invalid", "commit", "-q", "-m", "restore outside scope"]);
+    fs::remove_file(worktree.join("src/lib.rs")).unwrap();
+    let missing = submit();
+    assert!(!missing.status.success() && String::from_utf8_lossy(&missing.stderr).contains("declared output missing: src/lib.rs"));
+    fs::write(worktree.join("src/lib.rs"), "Content\n").unwrap();
+    let submitted = submit();
+    assert!(submitted.status.success(), "{}", String::from_utf8_lossy(&submitted.stderr));
+    assert!(String::from_utf8_lossy(&submitted.stdout).contains("submission_id"));
+    let changed = Command::new("git").arg("-C").arg(&worktree).args(["diff", "--name-only", contract["base_oid"].as_str().unwrap(), "HEAD"]).output().unwrap();
+    assert_eq!(String::from_utf8(changed.stdout).unwrap(), "src/lib.rs\ntests/code.rs\n");
+}
+
+#[test]
+fn advanced_launch_fills_product_fields_and_refuses_identity_mismatches() {
+    let lab = Lab::with_herdr(STATIC_HERDR);
+    lab.plant_launchable("codex-sol", "codex", "gpt-6.1-sol");
+    let prompt = lab.home.join("prompt.txt");
+    fs::write(&prompt, "Plan.").unwrap();
+    let socket = lab.socket_inode_once("advanced.sock");
+    let mut planning = lab.run_args("template", "codex-sol", "docs/plan.md", prompt.to_str().unwrap());
+    planning.extend(["--herdr-socket", socket.to_str().unwrap(), "--prepare-only"]);
+    lab.ok(&planning);
+    let mut contract = lab.ok(&["task", "demo", "show", "template"])["contract"].clone();
+    for key in ["project_store", "expected_head", "contract_revision", "authority"] {
+        contract.as_object_mut().unwrap().remove(key);
+    }
+    let file = lab.home.join("advanced.json");
+    let args = ["launch", "demo", "run", "--task", "advanced", "--profile", "codex-sol", "--repository", lab.repo.to_str().unwrap(),
+        "--contract-file", file.to_str().unwrap(), "--sign-with", lab.key.to_str().unwrap(), "--herdr-socket", socket.to_str().unwrap(), "--prepare-only"];
+    fs::write(&file, serde_json::to_vec(&contract).unwrap()).unwrap();
+    let wrong = lab.fail(&args);
+    assert!(wrong.contains("task_id must equal --task"), "{wrong}");
+    contract["task_id"] = serde_json::json!("advanced");
+    contract["profile_kind"] = serde_json::json!("claude");
+    fs::write(&file, serde_json::to_vec(&contract).unwrap()).unwrap();
+    assert!(lab.fail(&args).contains("profile_kind must equal"));
+    contract["profile_kind"] = serde_json::json!("codex");
+    fs::write(&file, serde_json::to_vec(&contract).unwrap()).unwrap();
+    lab.ok(&args);
+    let installed = lab.ok(&["task", "demo", "show", "advanced"])["contract"].clone();
+    for (key, value) in contract.as_object().unwrap() {
+        assert_eq!(&installed[key], value, "decision {key} changed");
+    }
+    assert_eq!(installed["contract_revision"], 1);
+    assert!(installed["project_store"].is_string() && installed["authority"].is_object() && installed["expected_head"].is_number());
+    contract["task_id"] = serde_json::json!("replacement");
+    contract["project_store"] = serde_json::json!("/invalid/old-store");
+    contract["expected_head"] = serde_json::json!(0);
+    contract["contract_revision"] = serde_json::json!(99);
+    contract["authority"] = serde_json::json!({"id":"stale","revision":99,"digest":"stale"});
+    fs::write(&file, serde_json::to_vec(&contract).unwrap()).unwrap();
+    let mut replacement = args;
+    replacement[4] = "replacement";
+    lab.ok(&replacement);
+    let replaced = lab.ok(&["task", "demo", "show", "replacement"])["contract"].clone();
+    assert_eq!(replaced["contract_revision"], 1);
+    assert_ne!(replaced["project_store"], contract["project_store"]);
+    assert_ne!(replaced["expected_head"], contract["expected_head"]);
+    assert_ne!(replaced["authority"], contract["authority"]);
+}

@@ -365,7 +365,7 @@ fn named_resource(value: &str) -> Result<NamedResource, String> {
 
 /// Collapse `.` and duplicate slashes. `..` is not a repo-relative path.
 /// A glob or trailing slash is uncertain overlap data, not a sandbox.
-fn normalize_scope_path(raw: &str) -> Result<(String, ScopeCertainty), String> {
+pub fn normalize_scope_path(raw: &str) -> Result<(String, ScopeCertainty), String> {
     if raw.is_empty()
         || raw.len() > 512
         || raw.starts_with('/')

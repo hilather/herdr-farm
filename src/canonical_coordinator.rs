@@ -682,6 +682,7 @@ pub fn commands(root: &Path, slug: &str) -> Result<String> {
 {p} task {slug} show TASK\n\
 {p} task {slug} add TASK --title TITLE --expected-head HEAD\n\
 {p} launch {slug} run --task TASK --profile PROFILE --repository REPO --sign-with OWNER_KEY --plan-output docs/PLAN.md\n\
+{p} launch {slug} run --task TASK --profile PROFILE --repository REPO --sign-with OWNER_KEY --write src/ --write tests/ --output src/lib.rs --prompt-file BRIEF\n\
 {p} result {slug} show\n\
 {p} result {slug} jobs\n\
 {p} result {slug} verify SUBMISSION --policy-id POLICY --policy-file FILE --idempotency-key KEY --work-dir SCRATCH\n\
