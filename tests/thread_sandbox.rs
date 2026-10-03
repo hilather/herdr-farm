@@ -165,7 +165,7 @@ fn owner_safety_settings_are_reported_and_validated_through_cli() {
         .env_clear().env("HOME", lab.path()).env("PATH", "/usr/bin:/bin")
         .env("HERDR_FARM_TEST_TIME_SCALE", include_str!("support/time-scale.txt").trim())
         .arg("--root").arg(&root).args(args).output().unwrap();
-    let out = cli(&["new", "demo"]);
+    let out = cli(&["new", "--legacy", "demo"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let text = format!("[safety.\"{}\"]\nthread_sandbox = false\nthread_wall_hours = 12\nthread_env = [\"RUST_BACKTRACE=1\"]\n", root.join("demo").display());
     fs::write(config_dir.join("config.toml"), &text).unwrap();
