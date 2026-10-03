@@ -99,7 +99,7 @@ Network is off by default; `thread_network = true` adds
 `-c sandbox_workspace_write.network_access=true` to built-in Codex arguments.
 It has no effect on explicit argument arrays or other agents.
 
-Claude workers default to `--permission-mode acceptEdits` plus `--allowedTools`
+Unsandboxed Claude workers default to `--permission-mode acceptEdits` plus `--allowedTools`
 with Bash prefix rules such as `Bash(git status:*)`. The defaults allow `git`
 status, log, diff, show, branch, checkout/switch, add, commit, merge, rebase
 (for normal non-interactive use), cherry-pick, restore, rev-parse, ls-files and
@@ -121,7 +121,7 @@ active project grants are still appended for Claude.
 
 These are command-prefix approvals, not a sandbox or argument policy. Legacy
 Claude workers still run with the owner's permissions in card 1a; card 1b will
-connect the thread sandbox so PERM-1 grants are contained. Prefixes do not restrict paths,
+connect the thread sandbox. Sandboxed launches do not use these prefix grants. Prefixes do not restrict paths,
 Git hooks or options (including interactive rebase). Don't add prefixes for commands that can run other commands (`find`, `sed`, `rg --pre`, `xargs`, `env`, shells, interpreters).
 Use ordinary local worktree commands; review project extensions carefully before
 adding them. Commands outside these prefixes still need approval unless allowed
@@ -877,6 +877,10 @@ bindings import as `historical-stopped` and do not block canonical activation.
 
 ## Worker permission requests and restarts
 
+PERM-1 grants and `thread_allowed_commands` apply only to unsandboxed Claude
+launches (owner opt-out `thread_sandbox = false` or remote threads). Sandboxed
+Claude threads run commands without human prompts inside the sandbox boundary.
+
 The coordinator uses `safety grant PROJECT --allow "tools/run-tests.sh:*"
 --reason "worker blocked on tests"`. Under the default `worker_permissions =
 "coordinator"`, committed target-branch scripts and the build/test prefixes
@@ -905,7 +909,7 @@ the next start; it does not interrupt an already running agent.
 
 The sandbox API is prepared and tested. The legacy `agent start --kind
 claude` launch path still runs with owner permissions; launch integration will connect it.
-PERM-1 grants will be contained once that launch integration lands.
+PERM-1 grants and `thread_allowed_commands` affect only unsandboxed Claude launches (`thread_sandbox = false` owner opt-out or remote threads). Sandboxed Claude threads run commands without human prompts; the sandbox is the boundary. Their arguments contain only validated explicit `thread_agent_args` plus `--setting-sources user`, with no generated `--permission-mode` or `--allowedTools` list. The thread settings allow Bash, Read, Edit, Write, Glob and Grep and set `sandbox.autoAllowBashIfSandboxed = true`. Settings are rewritten from scratch on every launch, discarding planted hooks and extra allow rules.
 
 The thread sandbox makes the project and owner home read-only and hides owner
 agent directories, SSH secrets, owner config and other projects. Each execution

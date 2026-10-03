@@ -135,7 +135,10 @@ Common launches need no hand-written sandbox arguments. Network is off for Codex
 mention the project's `thread_network = true` safety setting if downloads are needed.
 Claude may need the owner to answer its first repository trust dialog in the pane;
 inspect `thread status`/`doctor` for blocked trust or permission prompts and tell
-the owner. When a Claude worker blocks on a project command, inspect the pane and
+the owner. PERM-1 grants and `thread_allowed_commands` affect only unsandboxed
+Claude launches (`thread_sandbox = false` or remote threads). Sandboxed Claude
+threads run commands without human prompts inside the sandbox boundary.
+When an unsandboxed Claude worker blocks on a project command, inspect the pane and
 choose the minimal prefix: a specific committed script such as
 `python3 tools/check.py:*`, never an interpreter wildcard. Run
 `herdr-farm safety grant <slug> --allow "<prefix>" --reason "<why needed>"`.

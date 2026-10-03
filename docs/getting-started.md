@@ -57,8 +57,14 @@ Each code thread opens as its own workspace on a branch named `hp/<project>/<id>
 Codex workers start with launch-only trust for their worktree and repository root,
 a workspace-write sandbox and on-request approval. Network is off; set
 `thread_network = true` in the project's safety settings when workers need
-downloads. Claude workers use `--permission-mode acceptEdits` and a built-in
-`--allowedTools` list for local Git workflows and shell reads. When a worker blocks on a project command, the coordinator can run
+downloads. Unsandboxed Claude workers use `--permission-mode acceptEdits` and a built-in
+`--allowedTools` list for local Git workflows and shell reads.
+
+PERM-1 grants and `thread_allowed_commands` affect only unsandboxed Claude
+launches (`thread_sandbox = false` or remote threads). Sandboxed Claude threads
+run commands without human prompts inside the sandbox boundary.
+
+When an unsandboxed worker blocks on a project command, the coordinator can run
 `safety grant PROJECT --allow "tools/run-tests.sh:*" --reason "test blocked"`.
 The default `worker_permissions = "coordinator"` allows committed target-branch
 scripts and a fixed set of test/build tool prefixes. It escalates other commands
