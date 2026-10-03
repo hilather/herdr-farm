@@ -48,7 +48,7 @@ impl Lab {
     fn ok(&self, args: &[&str]) -> String { self.ok_env(&[], args) }
     /// A new project whose coordinator runs in workspace `w1` of `socket`.
     fn project(&self, slug: &str, socket: &Path) {
-        self.ok(&["new", slug]);
+        self.ok(&["new", "--legacy", slug]);
         let coordinator = json!({"socket": socket, "workspace_id": "w1", "tab_id": "w1:t1", "pane_id": "w1:p1", "agent_name": "coordinator", "cwd": self.root().join(slug)});
         fs::write(self.root().join(slug).join(".state/coordinator.json"), coordinator.to_string()).unwrap();
     }
@@ -155,7 +155,7 @@ fn overview_without_a_slug_resolves_the_workspace_only_within_its_own_socket() {
 #[test]
 fn overview_and_focus_refuse_a_path_like_slug() {
     let lab = Lab::new();
-    lab.ok(&["new", "demo"]);
+    lab.ok(&["new", "--legacy", "demo"]);
     let before = fs::read_dir(lab.home.path()).unwrap().count();
     for command in ["overview", "focus"] {
         let out = lab.cli_env(&[], &[command, "../x"]);

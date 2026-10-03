@@ -28,7 +28,8 @@ impl Factory {
         let repo = home.path().join("repo");
         fs::create_dir(&repo).unwrap();
         let mut f = Factory { project: home.path().join("root/demo"), key, repo: repo.canonicalize().unwrap(), store: String::new(), base: String::new(), candidate: String::new(), format, home };
-        for command in ["new", "pause"] { f.ok(&[command, "demo"]); }
+        f.ok(&["new", "--legacy", "demo"]);
+        f.ok(&["pause", "demo"]);
         migration::apply(&f.project, &migration::inspect_with_config(&f.project, &config).unwrap(), true).unwrap();
         let s = runtime::snapshot(&f.project).unwrap();
         runtime::set_state(&f.project, s.head, s.control.unwrap().revision, ProjectState::Active, &config).unwrap();

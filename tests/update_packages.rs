@@ -25,7 +25,8 @@ impl Project {
         let owner = home.path().join("owner.toml");
         fs::write(&owner, format!("[authority]\nversion=1\nrevision=1\napproval_public_key={public:?}\n")).unwrap();
         let mut p = Project { project: home.path().join("root/demo"), key, store: String::new(), home };
-        for command in ["new", "pause"] { p.ok(&[command, "demo"]); }
+        p.ok(&["new", "--legacy", "demo"]);
+        p.ok(&["pause", "demo"]);
         migration::apply(&p.project, &migration::inspect_with_config(&p.project, &owner).unwrap(), true).unwrap();
         let s = runtime::snapshot(&p.project).unwrap();
         runtime::set_state(&p.project, s.head, s.control.unwrap().revision, ProjectState::Active, &owner).unwrap();

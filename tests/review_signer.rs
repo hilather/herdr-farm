@@ -51,7 +51,8 @@ impl Lab {
         for dir in ["repo", "bin", "agent-home", "lab"] { fs::create_dir(home.path().join(dir)).unwrap(); }
         let mut lab = Lab { project: home.path().join("root/demo"), key, repo: home.path().join("repo"),
             profile: VersionedReference { id: String::new(), revision: 1, digest: String::new() }, binding: String::new(), home };
-        for command in ["new", "pause"] { lab.ok(&[command, "demo"]); }
+        lab.ok(&["new", "--legacy", "demo"]);
+        lab.ok(&["pause", "demo"]);
         migration::apply(&lab.project, &migration::inspect_with_config(&lab.project, &config).unwrap(), true).unwrap();
         lab.git(&["init", "-q", "--object-format=sha256"]);
         lab.git(&["commit", "-q", "--allow-empty", "-m", "base"]);

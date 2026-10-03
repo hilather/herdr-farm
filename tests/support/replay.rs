@@ -92,7 +92,8 @@ impl Lab {
         for dir in ["repo", "bin", "agent-home", "lab"] { fs::create_dir(home.path().join(dir)).unwrap(); }
         let lab = Lab { project: home.path().join("root/demo"), key, repo: home.path().join("repo"), herdr: home.path().join("bin/herdr"),
             profile: VersionedReference { id: String::new(), revision: 1, digest: String::new() }, server: None, history: History::default(), home };
-        for command in ["new", "pause"] { lab.ok(&[command, "demo"]); }
+        lab.ok(&["new", "--legacy", "demo"]);
+        lab.ok(&["pause", "demo"]);
         migration::apply(&lab.project, &migration::inspect_with_config(&lab.project, &config).unwrap(), true).unwrap();
         lab.git(&["init", "-q", "--object-format=sha256", "-b", "master"]);
         // `commit` can detach automatic maintenance, whose `repack -d` removes

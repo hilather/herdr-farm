@@ -116,7 +116,8 @@ fn install(concurrent: u32, writes: serde_json::Value) -> Installed {
     let home = tempfile::tempdir().unwrap();
     let (owner, public) = key(home.path(), "owner");
     let (subject, subject_public) = key(home.path(), "subject");
-    for command in ["new", "pause"] { assert!(cli(home.path(), &[command, "demo"]).status.success()); }
+    assert!(cli(home.path(), &["new", "--legacy", "demo"]).status.success());
+    assert!(cli(home.path(), &["pause", "demo"]).status.success());
     let project = home.path().join("root/demo");
     let config = home.path().join("owner.toml");
     fs::write(&config, format!("[authority]\nversion=1\nrevision=1\napproval_public_key={public:?}\n")).unwrap();

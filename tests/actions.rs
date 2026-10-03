@@ -52,7 +52,7 @@ impl Lab {
 #[test]
 fn popups_opened_together_each_consume_their_own_context_once() {
     let lab = Lab::new();
-    assert!(lab.run(&["new", "demo"], &[], "").status.success());
+    assert!(lab.run(&["new", "--legacy", "demo"], &[], "").status.success());
     let work = lab.path("work");
     fs::create_dir(&work).unwrap();
     let agent = json!({"workspace_id": "w5", "tab_id": "w5:t1", "pane_id": "w5:p1", "terminal_id": "term", "cwd": work, "name": "mine", "agent": "claude", "agent_status": "idle"});

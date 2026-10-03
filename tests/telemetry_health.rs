@@ -867,7 +867,8 @@ mod world {
             let socket = std::os::unix::net::UnixListener::bind(home.path().join("native.sock")).unwrap();
             let mut f = World { project: home.path().join("root/demo"), key, repo, store: String::new(), base: String::new(),
                 profile: VersionedReference { id: String::new(), revision: 1, digest: String::new() }, bindings: BTreeMap::new(), _socket: socket, home };
-            for command in ["new", "pause"] { f.ok(&[command, "demo"]); }
+            f.ok(&["new", "--legacy", "demo"]);
+            f.ok(&["pause", "demo"]);
             migration::apply(&f.project, &migration::inspect_with_config(&f.project, &config).unwrap(), true).unwrap();
             f.store = f.project.join(".state/state.db").canonicalize().unwrap().display().to_string();
             f.git(&["init", "-q", "--object-format=sha256"]);

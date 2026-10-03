@@ -25,7 +25,8 @@ impl Project {
         fs::create_dir_all(config.parent().unwrap()).unwrap();
         fs::write(&config, format!("[authority]\nversion=1\nrevision=1\napproval_public_key={public:?}\n")).unwrap();
         let p = Project { project: home.path().join("root/demo"), key, store: String::new(), home };
-        for command in ["new", "pause"] { p.ok(&[command, "demo"]); }
+        p.ok(&["new", "--legacy", "demo"]);
+        p.ok(&["pause", "demo"]);
         fs::write(p.project.join("MEMORY.md"), "Ship only reviewed API changes.\n").unwrap();
         migration::apply(&p.project, &migration::inspect_with_config(&p.project, &config).unwrap(), true).unwrap();
         let store = p.project.join(".state/state.db").canonicalize().unwrap().display().to_string();

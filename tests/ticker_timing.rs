@@ -15,7 +15,7 @@ impl Lab {
         let lab = Self(tempfile::tempdir().unwrap());
         assert!(
             lab.command(Some(SCALE.trim()))
-                .args(["new", "demo"])
+                .args(["new", "--legacy", "demo"])
                 .output()
                 .unwrap()
                 .status

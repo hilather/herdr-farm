@@ -18,7 +18,7 @@ fn run(home: &Path, vars: &[(&str, &Path)], args: &[&str]) -> Output {
     cmd.args(args).output().unwrap()
 }
 fn create(home: &Path, vars: &[(&str, &Path)], slug: &str) {
-    let out = run(home, vars, &["new", slug]);
+    let out = run(home, vars, &["new", "--legacy", slug]);
     assert!(
         out.status.success(),
         "{}",

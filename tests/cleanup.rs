@@ -31,7 +31,7 @@ impl Lab {
         let lab = Lab { home, _listener: listener };
         fs::write(lab.path("herdr"), FAKE_HERDR).unwrap();
         fs::set_permissions(lab.path("herdr"), fs::Permissions::from_mode(0o700)).unwrap();
-        lab.ok(&["new", "demo"]);
+        lab.ok(&["new", "--legacy", "demo"]);
         fs::write(lab.project("demo").join(".state/coordinator.json"), json!({"socket": lab.path("session.sock"), "workspace_id": "w0", "tab_id": "w0:t1",
             "pane_id": "w0:p1", "agent_name": "coordinator", "cwd": lab.project("demo")}).to_string()).unwrap();
         fs::write(lab.path("panes.json"), json!({"result": {"panes": [{"workspace_id": "w0", "tab_id": "w0:t1", "pane_id": "w0:p1", "cwd": lab.project("demo")}]}}).to_string()).unwrap();
@@ -162,7 +162,7 @@ fn reopen_restores_the_removed_worktree_unless_its_branch_path_or_owner_changed(
 /// a runtime binding's working directory.
 #[cfg(feature = "state-store")]
 fn canonical_neighbour(lab: &Lab, reference: &std::path::Path, corrupt: bool) {
-    lab.ok(&["new", "canonical"]);
+    lab.ok(&["new", "--legacy", "canonical"]);
     lab.ok(&["pause", "canonical"]);
     let plan = lab.path("plan.json");
     lab.ok(&["migration", "canonical", "plan", "--output", plan.to_str().unwrap()]);

@@ -40,7 +40,7 @@ impl Home {
     }
     /// `new SLUG`: the project directory it reports creating.
     fn new_project(&self, vars: &[(&str, &str)], flags: &[&str], slug: &str) -> PathBuf {
-        let out = self.run(vars, &[flags, &["new", slug]].concat());
+        let out = self.run(vars, &[flags, &["new", "--legacy", slug]].concat());
         assert!(out.status.success(), "new {slug}: {}", String::from_utf8_lossy(&out.stderr));
         let text = String::from_utf8(out.stdout).unwrap();
         let dir = text.lines().next().and_then(|l| l.split_once(" at ")).map(|(_, d)| PathBuf::from(d)).unwrap();
@@ -100,14 +100,14 @@ fn projects_root_comes_from_flag_then_variable_then_config_then_home() {
 fn malformed_root_config_is_refused_unless_the_root_is_given() {
     let home = Home::new();
     home.config("root = [ \"secret-value\"");
-    for args in [&["new", "x"][..], &["list"]] {
+    for args in [&["new", "--legacy", "x"][..], &["list"]] {
         let out = home.run(&[], args);
         assert!(!out.status.success(), "{args:?}");
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(stderr.contains("config.toml does not parse (contents withheld)"), "{stderr}");
         assert!(!stderr.contains("secret-value"), "{stderr}");
     }
-    let out = home.run(&[("HERDR_PROJECTS_ROOT", "")], &["new", "x"]);
+    let out = home.run(&[("HERDR_PROJECTS_ROOT", "")], &["new", "--legacy", "x"]);
     assert!(!out.status.success());
     assert!(!home.path(".herdr-farm").exists());
     assert_eq!(home.new_project(&[("HERDR_PROJECTS_ROOT", "~/env")], &[], "y"), under(&home.path("env"), "y"));

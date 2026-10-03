@@ -26,7 +26,7 @@ fn live_herdr_workspace_and_worktree_contract() {
     assert!(result["result"]["root_pane"]["pane_id"].is_string());
     let reopened = lab.herdr(&["worktree", "open", "--cwd", root.to_str().unwrap(), "--path", work.to_str().unwrap(), "--no-focus"]);
     assert_eq!(reopened["result"]["worktree"]["path"], work.to_str().unwrap());
-    lab.hp(&["new", "demo"]);
+    lab.hp(&["new", "--legacy", "demo"]);
     let project = lab.path().join("projects/demo");
     let status = lab.herdr(&["status", "server", "--json"]);
     let socket = status["socket"].as_str().unwrap();
@@ -159,8 +159,8 @@ fn live_popup_handoff_routes_input_to_the_requested_action() {
     link.args(["plugin", "link"]).arg(&plugin);
     let (ok, _, error) = lab.run(link); assert!(ok, "plugin link: {error}");
     lab.start();
-    lab.hp(&["new", "demo"]);
-    lab.hp(&["new", "z-other"]);
+    lab.hp(&["new", "--legacy", "demo"]);
+    lab.hp(&["new", "--legacy", "z-other"]);
     let other_state = lab.path().join("projects/z-other/.state/project.json");
     let other_before = fs::read(&other_state).unwrap();
     lab.herdr(&["workspace", "create", "--cwd", lab.path().to_str().unwrap(), "--label", "Popup fixture", "--no-focus"]);

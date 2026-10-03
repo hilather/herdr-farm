@@ -26,7 +26,8 @@ impl Project {
         fs::create_dir_all(&config).unwrap();
         fs::write(config.join("config.toml"), "[profiles.planner]\nkind='claude'\npermission_policy='interactive'\n").unwrap();
         let mut p = Project { project: home.path().join("root/demo"), key, store: String::new(), home };
-        for command in ["new", "pause"] { p.ok(&[command, "demo"]); }
+        p.ok(&["new", "--legacy", "demo"]);
+        p.ok(&["pause", "demo"]);
         migration::apply(&p.project, &migration::inspect_with_config(&p.project, &owner).unwrap(), true).unwrap();
         let s = runtime::snapshot(&p.project).unwrap();
         runtime::set_state(&p.project, s.head, s.control.unwrap().revision, ProjectState::Active, &owner).unwrap();

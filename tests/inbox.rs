@@ -28,7 +28,7 @@ impl Lab {
         let socket = home.path().join("session.sock");
         let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
         let lab = Lab { home, fake, _listener: listener };
-        lab.ok(&["new", "demo"]);
+        lab.ok(&["new", "--legacy", "demo"]);
         let coordinator = json!({"socket": socket, "workspace_id": "w0", "tab_id": "w0:t1", "pane_id": "w0:p1", "agent_name": "coordinator", "cwd": lab.project()});
         fs::write(lab.project().join(".state/coordinator.json"), coordinator.to_string()).unwrap();
         lab

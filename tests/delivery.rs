@@ -46,7 +46,7 @@ impl Lab {
         let lab = Lab { _listener: UnixListener::bind(&socket).unwrap(), home };
         fs::write(lab.path("herdr"), FAKE_HERDR).unwrap();
         fs::set_permissions(lab.path("herdr"), fs::Permissions::from_mode(0o700)).unwrap();
-        let out = lab.command().args(["new", "demo"]).output().unwrap();
+        let out = lab.command().args(["new", "--legacy", "demo"]).output().unwrap();
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
         fs::write(lab.project().join(".state/coordinator.json"), json!({"socket": socket}).to_string()).unwrap();
         lab

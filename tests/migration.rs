@@ -20,7 +20,8 @@ impl Project {
     fn new(lifecycle: &str) -> Self {
         let home = tempfile::tempdir().unwrap();
         let p = Project { project: home.path().join("root/demo"), home };
-        for command in ["new", lifecycle] { p.ok(&[command, "demo"]); }
+        p.ok(&["new", "--legacy", "demo"]);
+        p.ok(&[lifecycle, "demo"]);
         p
     }
     fn cli(&self, args: &[&str]) -> Output {

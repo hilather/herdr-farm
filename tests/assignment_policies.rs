@@ -81,7 +81,8 @@ impl World {
         let home = tempfile::tempdir().unwrap();
         let root = home.path().join("root");
         let world_cmd = |args: &[&str]| Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", home.path()).args(args).output().unwrap();
-        for action in ["new", "pause"] { assert!(world_cmd(&["--root", root.to_str().unwrap(), action, "demo"]).status.success()); }
+        assert!(world_cmd(&["--root", root.to_str().unwrap(), "new", "--legacy", "demo"]).status.success());
+        assert!(world_cmd(&["--root", root.to_str().unwrap(), "pause", "demo"]).status.success());
         let key = home.path().join("owner");
         assert!(Command::new("/usr/bin/ssh-keygen").args(["-q", "-t", "ed25519", "-N", "", "-f"]).arg(&key).output().unwrap().status.success());
         let public = fs::read_to_string(key.with_extension("pub")).unwrap().split_whitespace().take(2).collect::<Vec<_>>().join(" ");

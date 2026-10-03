@@ -43,7 +43,7 @@ impl Lab {
         fs::create_dir_all(lab.path("gh")).unwrap();
         lab.script("bin/gh", &format!("#!/usr/bin/python3\nimport sys\nurl=sys.argv[-1]\nopen({:?},'a').write(url+'\\n')\nprint(open({:?}+'/'+url.rsplit('/',1)[1]+'.json').read())\n",
             lab.path("gh-calls").to_str().unwrap(), lab.path("gh").to_str().unwrap()));
-        assert!(lab.command().args(["new", "demo"]).output().unwrap().status.success());
+        assert!(lab.command().args(["new", "--legacy", "demo"]).output().unwrap().status.success());
         fs::write(lab.project().join(".state/coordinator.json"), json!({"socket": lab.path("session.sock"), "workspace_id": "w", "tab_id": "w:t", "pane_id": "p",
             "agent_name": "coordinator", "cwd": lab.project()}).to_string()).unwrap();
         lab
