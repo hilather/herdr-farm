@@ -31,6 +31,8 @@ pub enum Status {
     Starting,
     Open,
     Failed,
+    Stopping,
+    Stopped,
     Resolved,
 }
 
@@ -98,6 +100,10 @@ pub struct Thread {
     pub pr_state: String,
     pub pr_review: String,
     pub resolved_reason: String,
+    pub stop_journal: Option<crate::threads::stop::Journal>,
+    pub stopped_reason: String,
+    pub stopped_at: String,
+    pub stopped_by: String,
     /// Changes when a user restarts/resolves/reopens this execution.
     pub lifecycle_generation: u64,
     /// A manual reopen/restart must not immediately re-resolve the old PR.
@@ -398,6 +404,7 @@ pub enum Group {
     Working,
     Landing,
     Idle,
+    Stopped,
     Resolved,
 }
 
@@ -411,7 +418,8 @@ impl Group {
             Group::Working => 3,
             Group::Landing => 4,
             Group::Idle => 5,
-            Group::Resolved => 6,
+            Group::Stopped => 6,
+            Group::Resolved => 7,
         }
     }
 
@@ -422,6 +430,7 @@ impl Group {
             Group::Working => "Working",
             Group::Landing => "Landing",
             Group::Idle => "Idle",
+            Group::Stopped => "Stopped",
             Group::Resolved => "Resolved",
         }
     }
@@ -434,6 +443,7 @@ impl Group {
             Group::Working => "working",
             Group::Landing => "landing",
             Group::Idle => "idle",
+            Group::Stopped => "stopped",
             Group::Resolved => "resolved",
         }
     }
@@ -445,18 +455,20 @@ impl Group {
             Group::Working,
             Group::Landing,
             Group::Idle,
+            Group::Stopped,
             Group::Resolved,
         ]
         .into_iter()
         .find(|g| g.token() == token)
     }
 
-    pub const DISPLAY_ORDER: [Group; 6] = [
+    pub const DISPLAY_ORDER: [Group; 7] = [
         Group::ReadyForReview,
         Group::WaitingOnYou,
         Group::Working,
         Group::Landing,
         Group::Idle,
+        Group::Stopped,
         Group::Resolved,
     ];
 }
@@ -481,6 +493,8 @@ pub fn seconds_since(timestamp: &str, now: jiff::Timestamp) -> i64 {
 /// The group of a thread. First matching row wins. One function, so the CLI
 /// and the ticker always agree.
 pub fn group(thread: &Thread, live: &Live, now: jiff::Timestamp) -> Group {
+    if thread.status == Status::Stopped { return Group::Stopped; }
+    if thread.status == Status::Stopping { return Group::WaitingOnYou; }
     let state = live.agent_state.as_deref();
     let has_report = !thread.report_hash.is_empty();
     // 1

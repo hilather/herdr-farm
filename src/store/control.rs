@@ -44,7 +44,7 @@ fn blockers(db:&Connection,now:i64,config:Option<&str>)->Result<Vec<String>> {
         // First imported revision is retained terminal history, never a live route.
         // A rebind advances the revision and requires normal reconciliation.
         if binding.revision==1 && binding.source_path.is_some() && binding.identity.pane_id.is_empty()
-            && matches!(binding.identity.legacy_status.as_str(),"historical-resolved"|"historical") {continue;}
+            && matches!(binding.identity.legacy_status.as_str(),"historical-resolved"|"historical-stopped"|"historical") {continue;}
         let task=binding.task.as_ref().and_then(|id|tasks.iter().find(|t|&t.id==id));
         let task_revision=task.map(|t|t.revision);
         // Proven terminal task history is evidence of worker quiescence even

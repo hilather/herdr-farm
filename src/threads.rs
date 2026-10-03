@@ -13,6 +13,8 @@ use crate::runner::{Cmd, Runner};
 use crate::thread::{self, CopyOutcome, Group, Kind, Live, Status, Thread};
 use crate::{coordinator, remote, ticker};
 
+pub mod stop;
+
 const GIT_TIMEOUT: Duration = Duration::from_secs(5);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -178,7 +180,7 @@ pub fn start(ctx: &Ctx, slug: &str, args: StartArgs) -> Result<Thread> {
         eprintln!("warning: {repo} on {machine} is not listed in `repos` in PROJECT.md");
     }
 
-    let open_count = thread::list(&project).iter().filter(|t| t.status == Status::Open || t.status == Status::Starting).count();
+    let open_count = thread::list(&project).iter().filter(|t| matches!(t.status, Status::Open | Status::Starting | Status::Stopping)).count();
     if open_count as u32 >= settings.max_parallel_threads {
         eprintln!(
             "warning: {open_count} threads are already open; max_parallel_threads is {}",
@@ -449,6 +451,7 @@ pub fn restart(ctx: &Ctx, slug: &str, id: &str) -> Result<Thread> {
         bail!("`{slug}` is {}; restart is refused until the project is active again", project.status());
     }
     let record = thread::load(&project, id)?;
+    anyhow::ensure!(record.stop_journal.is_none(), "stop is unfinished; retry `thread stop` first");
     project.safety(&ctx.config_dir)?.worker_arguments(&record.agent)?;
     let view = require_session(ctx, &project)?;
     let (agents, panes) = lists_for(&view, &record)?;
@@ -525,8 +528,9 @@ pub fn prompt(ctx: &Ctx, slug: &str, id: &str, text: &str) -> Result<String> {
     if text.trim().is_empty() {
         bail!("the text is empty");
     }
-    if record.status == Status::Resolved {
-        bail!("{id} is resolved");
+    if record.status == Status::Resolved { bail!("{id} is resolved"); }
+    if matches!(record.status, Status::Stopped | Status::Stopping) {
+        bail!("{id} is stopped or stopping; restart before prompting");
     }
     if record.prompt_pending {
         bail!("{id} has not received its brief yet; try again once it has started");
@@ -582,6 +586,7 @@ pub fn resolve(ctx: &Ctx, slug: &str, id: &str, args: &ResolveArgs) -> Result<()
 fn resolve_leased(ctx: &Ctx, slug: &str, id: &str, args: &ResolveArgs, integrated: bool) -> Result<()> {
     let project = Project::load(&ctx.root, slug)?;
     let record = thread::load(&project, id)?;
+    anyhow::ensure!(record.stop_journal.is_none(), "stop is unfinished; retry `thread stop` first");
     anyhow::ensure!((record.pending_live_copy.is_none()&&record.pending_final_copy.is_none()),"recover the pending live projection before resolving");
     if args.reopen {
         if record.status != Status::Resolved {
@@ -790,6 +795,12 @@ pub fn rows(ctx: &Ctx, project: &Project) -> Vec<Row> {
 fn row(project: &Project, t: &Thread, view: Option<&SessionView>, now: jiff::Timestamp) -> Row {
     // Before the first poll a thread that is waiting for its launch is Working.
     let recorded = Group::from_token(&t.last_group).unwrap_or(if t.prompt_pending { Group::Working } else { Group::Idle });
+    if t.status == Status::Stopped {
+        return Row { thread: t.clone(), group: Group::Stopped, note: t.stopped_reason.clone() };
+    }
+    if t.status == Status::Stopping {
+        return Row { thread: t.clone(), group: Group::WaitingOnYou, note: "stop unfinished; retry thread stop".into() };
+    }
     if t.status == Status::Resolved {
         return Row { thread: t.clone(), group: Group::Resolved, note: format!("{}{}", t.resolved_reason, crate::resolved_cleanup::note(project, t)) };
     }

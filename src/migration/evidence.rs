@@ -194,6 +194,7 @@ pub(super) fn quiesced(project: &Path, record: &Value) -> Result<()> {
         !agents.iter().any(|a| a.pane_id == pane),
         "live agent blocks migration"
     );
+    ensure!(record.get("status").and_then(Value::as_str) != Some("stopped") || !panes.iter().any(|p| p.pane_id == pane), "stopped thread pane must be gone before migration");
     if let Some(found) = panes.iter().find(|p| p.pane_id == pane) {
         for (wanted, actual) in [
             ("workspace_id", found.workspace_id.as_str()),
