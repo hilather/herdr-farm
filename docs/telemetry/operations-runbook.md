@@ -65,6 +65,7 @@ column named in `age_from`).
 | `artefact.backups` | backup directories in the inventory | 30 d | source of truth | prune, destructive |
 | `optin.external_export_files` | the enabled external export directory | 7 d (a project override may only shorten it) | source of truth | prune, destructive |
 | `optin.captured_evidence` | — | 7 d | — | not built (contracts §7: no capture store exists) |
+| `canonical.worker_permissions` | `.state/worker-permissions.json` | canonical | canonical | external lifecycle; retain for project lifetime and include in whole-project backups |
 | `canonical.state` | `state.db` | canonical | canonical | external lifecycle |
 | `canonical.coordinator_journal` | `.state/canonical-coordinator.json` | canonical | canonical | external lifecycle; retain with project backups |
 | `native.codex_rollouts` | `<execution_home>/.codex/sessions` | owned by Codex | — | external; their availability is the replay horizon |
@@ -135,6 +136,7 @@ artefact.replay_repos prune 30d source_of_truth destructive
 artefact.backups prune 30d source_of_truth destructive
 optin.external_export_files prune 7d source_of_truth destructive
 optin.captured_evidence not_built 7d source_of_truth destructive
+canonical.worker_permissions external_lifecycle - canonical destructive
 canonical.state external_lifecycle - canonical destructive
 canonical.coordinator_journal external_lifecycle - canonical destructive
 canonical.verification_execution_slots external_lifecycle - derivable
