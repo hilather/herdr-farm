@@ -21,6 +21,29 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      # herdr-farm requires SQLite 3.53.4+ (Ubuntu 24.04 ships 3.45.1).
+      # Built from the release source, pinned by SHA-256, cached per version.
+      - name: Cache SQLite
+        id: sqlite-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/sqlite
+          key: sqlite-3530400-ubuntu-24.04
+      - name: Build SQLite 3.53.4
+        if: steps.sqlite-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -sSfL -o sqlite.tgz https://sqlite.org/2026/sqlite-autoconf-3530400.tar.gz
+          echo "0e9483900e92cd5de8fd48d16bf9200145a61f7fd5be542a5ac81d8a9516eb9c  sqlite.tgz" | sha256sum -c -
+          tar -xzf sqlite.tgz
+          cd sqlite-autoconf-3530400
+          ./configure --prefix="$HOME/sqlite" --disable-static
+          make -j"$(nproc)"
+          make install
+      - name: Use SQLite 3.53.4
+        run: |
+          echo "PKG_CONFIG_PATH=$HOME/sqlite/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$HOME/sqlite/lib" >> "$GITHUB_ENV"
+          echo "$HOME/sqlite/bin" >> "$GITHUB_PATH"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
@@ -43,6 +66,29 @@ jobs:
         partition: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
+      # herdr-farm requires SQLite 3.53.4+ (Ubuntu 24.04 ships 3.45.1).
+      # Built from the release source, pinned by SHA-256, cached per version.
+      - name: Cache SQLite
+        id: sqlite-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/sqlite
+          key: sqlite-3530400-ubuntu-24.04
+      - name: Build SQLite 3.53.4
+        if: steps.sqlite-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -sSfL -o sqlite.tgz https://sqlite.org/2026/sqlite-autoconf-3530400.tar.gz
+          echo "0e9483900e92cd5de8fd48d16bf9200145a61f7fd5be542a5ac81d8a9516eb9c  sqlite.tgz" | sha256sum -c -
+          tar -xzf sqlite.tgz
+          cd sqlite-autoconf-3530400
+          ./configure --prefix="$HOME/sqlite" --disable-static
+          make -j"$(nproc)"
+          make install
+      - name: Use SQLite 3.53.4
+        run: |
+          echo "PKG_CONFIG_PATH=$HOME/sqlite/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$HOME/sqlite/lib" >> "$GITHUB_ENV"
+          echo "$HOME/sqlite/bin" >> "$GITHUB_PATH"
       # Some tests compile stand-in agents with rustc at runtime.
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@v2
@@ -58,20 +104,20 @@ jobs:
           git config --global user.name ci
           git config --global user.email ci@invalid
           df -h / /dev/shm
-          mkdir -p nextest-extract
       - uses: actions/download-artifact@v4
         with:
           name: nextest-archive
       - name: Run tests (partition ${{ matrix.partition }}/4)
-        # The runner's /dev/shm is too small for the unpacked archive; use
-        # its disk temp directory for test scratch and unpack in the workspace.
+        # Tests find the CLI through the compile-time CARGO_BIN_EXE path, so
+        # unpack target/ into the workspace at the path it was built at.
         env:
           TMPDIR: ${{ runner.temp }}
         run: >
           cargo nextest run --profile ci
           --archive-file nextest-archive.tar.zst
           --workspace-remap .
-          --extract-to nextest-extract
+          --extract-to ${{ github.workspace }}
+          --extract-overwrite
           --partition count:${{ matrix.partition }}/4
       - uses: actions/upload-artifact@v4
         if: always()
