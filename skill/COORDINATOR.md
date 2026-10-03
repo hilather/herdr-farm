@@ -38,33 +38,69 @@ migration/format error requires recovery; it is not permission to assume legacy
 mode. In either mode, reports and memory narratives do not establish verified
 completion, and technical capability does not grant new user approval.
 
-## Canonical launch ingress
+## Canonical coordinator workflow
 
-`herdr-farm scheduler <slug> inspect` is not a launch. It reports `prepared_dispatch`
-separately from `launch_enabled`. Prepared dispatch starts only an attempt that
-was already reserved. Automatic admission is off, so `launch_enabled` stays
-false. Inspect does not reserve or launch.
+This section replaces the legacy thread workflows below for SQLite projects.
+On a SQLite project, `herdr-farm open <slug>` opens and primes a canonical
+coordinator. Run `herdr-farm context <slug>` every turn; it needs no named profile
+for the full state view. It prints task states, attempt states, inbox, recent
+submissions and verification/integration receipts, effective safety settings and
+commands with the exact prefix. A configured `profiles.planner` or optional `--profile NAME` selects checkpointed
+context; keep its session token and acknowledge its checkpoint as instructed.
 
-When the user asks for a canonical launch on a SQLite project, the path is
-draft, then sign, then `launch reserve`, then the controller. Tell the user
-that path. Do not run it:
+The commands use the project BEFORE the action, except `context` and `inbox`:
 
-1. `herdr-farm launch <slug> draft` returns an unsigned approval and writes no reservation.
-2. The user signs that approval and imports the grant.
-3. `herdr-farm launch <slug> reserve` commits the sealed preparation only after that grant is installed.
-4. The controller may start that reserved attempt. It does not prepare an arbitrary queued task.
+```sh
+herdr-farm task <slug> list
+herdr-farm task <slug> show TASK
+herdr-farm task <slug> add TASK --title 'Work title' --expected-head HEAD
+herdr-farm launch <slug> run --task TASK --profile PROFILE --repository /absolute/repo --plan-output docs/plan.md
+herdr-farm result <slug> show
+herdr-farm result <slug> jobs
+herdr-farm result <slug> verify SUBMISSION --policy-id POLICY --policy-file /absolute/policy.json --idempotency-key KEY --work-dir /absolute/new-scratch
+herdr-farm result <slug> integrate RESULT --repository /absolute/repo --idempotency-key KEY --work-dir /absolute/new-scratch
+herdr-farm operations <slug> inspect
+herdr-farm inbox list <slug>
+herdr-farm inbox done <slug> ITEM
+```
 
-Do not tell a worker to write canonical memory, promote memory, or edit the
-store. A worker report is not dependency evidence. Narrative success does not
-clear an edge. A stored verified result satisfies only a `verified_result`
-edge, and an integrated commit satisfies only `integrated_commit`. With
-`factory_admission` off, a satisfied edge still reports `admission_disabled`
-and does not launch. Do not satisfy an edge by describing the predecessor as
-done.
+Use the event head printed by context for `--expected-head`; refresh after a
+conflict. Launch requires retained launchable profile evidence. Use
+`--contract-file /absolute/contract.json` instead of `--plan-output` for a code
+contract, and `--prompt-file /absolute/brief.md` for the task instructions.
+`launch run` drafts and signs the task contract and launch approval, imports
+them, and reserves the attempt; the ticker launches it. Signing uses the owner's
+configured absolute `[coordinator].signing_key`, or explicit `--sign-with KEY`.
+If neither exists, propose the unsigned documents for owner signing and use
+`task <slug> contract put`, `approval <slug> import`, and `launch <slug> reserve`
+with the exact options printed by their help. Never fabricate signatures or
+change signing configuration to grant yourself authority.
+
+Respect the effective safety settings printed by context. `start_threads=propose`
+requires user approval before signing or dispatch; `auto` permits dispatch within
+the user's standing scope, still with owner-signed contracts and approvals.
+`resolve_threads=propose` requires user approval before integration or completion;
+`auto` still requires accepted verification and the configured integration target.
+Inspect `result <slug> jobs`: when explicitly enabled by the owner, verification
+and integration jobs run through the ticker. A narrative report or untrusted
+submission is never accepted verification or integration evidence.
+`cleanup_resolved=keep` means retain resources. Canonical cleanup uses
+`operations <slug> finalize BINDING --reason REASON --expected-head HEAD`, retained
+artifacts and proven worker termination; never directly delete panes or worktrees.
+Even `auto` does not grant destructive authority over adopted resources.
+
+All `thread` commands refuse on canonical projects. `thread start` becomes task
+creation plus signed `launch run`; `thread prompt` requires a new signed contract
+and attempt rather than mutation of an executing brief. Use `task list/show` and
+`result show` for `thread list/show`; use accepted verification/integration and
+canonical finalization instead of `thread resolve`. Do not edit `TASKS.md`, old
+thread records or the SQLite files. Worker reports and memory narratives do not
+satisfy dependency edges. Dispatch remains subject to canonical control,
+capacity and signed authority.
 
 ## Every turn
 
-1. Run `herdr-farm context <slug>` first. It prints the settings, the goal, current project instructions with a revision hash, the memory index, the task list (`TASKS.md`), the open threads with their live state, and the unhandled inbox items. Refresh your standing project instructions when that revision changes. Work from what it prints, not from what you remember. Migrated projects require `profiles.planner` or `herdr-farm context <slug> --profile NAME`. If context prints a checkpoint id and session token, acknowledge it with `herdr-farm context <slug> --session TOKEN --ack CHECKPOINT` before relying on a later delta. Continue that known conversation with `--session TOKEN`; omit the token after restart or compaction uncertainty to request full context.
+1. Run `herdr-farm context <slug>` first. It prints the settings, the goal, current project instructions with a revision hash, the memory index, the task list (`TASKS.md`), the open threads with their live state, and the unhandled inbox items. Refresh your standing project instructions when that revision changes. Work from what it prints, not from what you remember. Migrated projects print the full canonical state by default; `--profile NAME` selects checkpointed context. If context prints a checkpoint id and session token, acknowledge it with `herdr-farm context <slug> --session TOKEN --ack CHECKPOINT` before relying on a later delta. Continue that known conversation with `--session TOKEN`; omit the token after restart or compaction uncertainty to request full context.
 2. Handle the inbox items. Then run `herdr-farm inbox done <slug> <item-id>...` for the ones you handled.
 3. Answer the user.
 

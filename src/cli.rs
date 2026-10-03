@@ -1789,6 +1789,15 @@ pub fn run() -> Result<()> {
                         return Ok(());
                     }
                     let config=ctx.config_dir.join("config.toml");
+                    let planner_config=paths::read_control_text(&config,1024*1024)?.map(|text|toml::from_str::<toml::Value>(&text)).transpose()?;
+                    let has_planner=planner_config.as_ref().and_then(|v|v.get("profiles")).and_then(|v|v.get("planner")).is_some();
+                    if profile.is_none() && session.is_none() && !has_planner {
+                        let (text, head, unseen)=herdr_farm::runtime::context_snapshot(&dir)?;
+                        print!("{text}");
+                        println!("{}", crate::canonical_coordinator::surface(&ctx, &slug)?);
+                        if !peek && !unseen.is_empty() { herdr_farm::runtime::update_inbox(&dir,head,&unseen,false)?; }
+                        return Ok(());
+                    }
                     let resolved=match profile.as_deref() {
                         Some(name)=>crate::agents::resolve::resolve(name,&config,None)
                             .with_context(||format!("context --profile {name} is not a named profile"))?,
@@ -1807,6 +1816,7 @@ pub fn run() -> Result<()> {
                     let result=herdr_farm::runtime::coordinator_context(&dir,&herdr_session,&profile,&instructions)
                         .context("legacy runtime is disabled; migrated context could not be read")?;
                     println!("{}",result.text);
+                    println!("{}",crate::canonical_coordinator::surface(&ctx,&slug)?);
                     // TM4.8 (doc 15 §5): the bounded, advisory fleet section after the checkpointed context.
                     if let Some(section)=herdr_farm::telemetry::workspace::context_section(&dir,&slug,&ctx.config_dir) {print!("\n{section}");}
                     if !peek&&!result.unseen.is_empty(){herdr_farm::runtime::update_inbox(&dir,result.head,&result.unseen,false)?;}
@@ -1922,7 +1932,21 @@ pub fn run() -> Result<()> {
                 }
             }
         }
-        Command::Thread { command } => match command {
+        Command::Thread { command } => {
+            #[cfg(feature="state-store")]
+            {
+                let slug=match &command {
+                    ThreadCommand::Start{slug,..}|ThreadCommand::Restart{slug,..}|ThreadCommand::Prompt{slug,..}|
+                    ThreadCommand::Adopt{slug,..}|ThreadCommand::List{slug,..}|ThreadCommand::Show{slug,..}|
+                    ThreadCommand::Ack{slug,..}|ThreadCommand::ResolveIntegrated{slug,..}|ThreadCommand::Resolve{slug,..} => slug,
+                };
+                project::validate_slug(slug)?;
+                if project::ensure_legacy(&ctx.root.join(slug)).is_err() {
+                    herdr_farm::migration::open_active(&ctx.root.join(slug))?;
+                    bail!("thread commands are legacy-only on canonical projects; use `task {slug} list/show/add`, `launch {slug} run`, `result {slug} show/verify/integrate` and `operations {slug} inspect/finalize`; prompt changes require a new signed contract and attempt");
+                }
+            }
+            match command {
             ThreadCommand::Start { slug, title, repo, machine, agent, base, task_file, reason, note } => {
                 let task = read_text(&task_file)?;
                 let thread = threads::start(&ctx, &slug, StartArgs { title, repo, machine, agent, base, task, reason, note })?;
@@ -1953,6 +1977,7 @@ pub fn run() -> Result<()> {
             ThreadCommand::ResolveIntegrated { slug, id } => threads::resolve_integrated(&ctx, &slug, &id),
             ThreadCommand::Resolve { slug, id, reopen, remove_worktree, writers_stopped, skip_copy, discard_uncopied } => {
                 threads::resolve(&ctx, &slug, &id, &ResolveArgs { reopen, remove_worktree, writers_stopped, skip_copy, discard_uncopied })
+            }
             }
         },
         Command::Routine { command } => match command {

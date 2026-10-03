@@ -315,7 +315,7 @@ impl Native<'_> {
     }
 }
 
-pub(crate) fn validate_native_agent(
+pub fn validate_native_agent(
     value: &Value,
     route: &RuntimeRoute,
     terminal: &str,
@@ -354,7 +354,7 @@ pub(crate) fn validate_native_agent(
     Ok(())
 }
 
-pub(crate) fn validate_visible_readiness(kind: &str, explain: &Value) -> Result<()> {
+pub fn validate_visible_readiness(kind: &str, explain: &Value) -> Result<()> {
     ensure!(
         explain["agent"].as_str() == Some(kind)
             && explain["state"].as_str() == Some("idle")

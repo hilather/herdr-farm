@@ -236,8 +236,17 @@ fn herdr_server(run: &mut Run, herdr: &Path, task: &str, existing: Option<&Path>
     Ok(socket)
 }
 
-pub fn run(ctx: &Ctx, slug: &str, args: Args) -> Result<Value> {
+pub fn run(ctx: &Ctx, slug: &str, mut args: Args) -> Result<Value> {
     let project = ctx.root.join(slug).canonicalize().with_context(|| format!("project {slug} not found"))?;
+    if args.sign_with.is_none()
+        && let Some(text)=crate::paths::read_control_text(&ctx.config_dir.join("config.toml"),1024*1024)? {
+        let config:toml::Value=toml::from_str(&text).context("invalid coordinator signing configuration")?;
+        if let Some(value)=config.get("coordinator").and_then(|c|c.get("signing_key")) {
+            let key=value.as_str().context("coordinator.signing_key must be an absolute path")?;
+            ensure!(Path::new(key).is_absolute(),"coordinator.signing_key must be an absolute path");
+            args.sign_with=Some(key.into());
+        }
+    }
     let mut run = Run { ctx, project: project.clone(), slug: slug.to_owned(), steps: Vec::new() };
     match steps(&mut run, &args) {
         Ok(report) => Ok(report),

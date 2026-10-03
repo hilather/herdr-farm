@@ -118,6 +118,14 @@ impl SqliteStore {
     /// Rebinding is an explicit operator mutation. It clears observations and
     /// invalidates task-bound intents but never terminates or adopts a resource.
     pub fn rebind_runtime(&mut self,id:&str,expected_revision:u64,expected_head:u64,route:&RuntimeRoute)->Result<RouteChange> {
+        self.rebind_runtime_inner(id,expected_revision,expected_head,route,false)
+    }
+    /// The coordinator adapter may replace its explicitly requested, freshly
+    /// observed absent pane. Withdrawal and route change share one transaction.
+    pub(crate) fn replace_missing_coordinator(&mut self,expected_revision:u64,expected_head:u64,route:&RuntimeRoute)->Result<RouteChange> {
+        self.rebind_runtime_inner("coordinator",expected_revision,expected_head,route,true)
+    }
+    fn rebind_runtime_inner(&mut self,id:&str,expected_revision:u64,expected_head:u64,route:&RuntimeRoute,replace_missing:bool)->Result<RouteChange> {
         route.validate().map_err(StoreError::Invalid)?;
         let tx=self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;check_schema(&tx)?;
         let schema:u32=tx.query_row("PRAGMA user_version",[],|r|r.get(0))?;
@@ -136,7 +144,21 @@ impl SqliteStore {
             && (binding.identity.worktree_path.is_empty()||!route.pane_id.is_empty()) {
             return Ok(RouteChange{head:expected_head,binding,task_revision:task.map(|t|t.revision)});
         }
-        if schema>=9&&tx.query_row("SELECT EXISTS(SELECT 1 FROM runtime_ownership WHERE binding_id=?1)",[id],|r|r.get::<_,bool>(0))? {return Err(StoreError::Invalid("relinquish owned resources before rebinding; existing references are retained".into()));}
+        if schema>=9 && let Some(owned)=super::ownership::read_binding(&tx,id,None)? {
+            let observation=super::observations::read_binding(&tx,id,None)?;
+            let now=jiff::Timestamp::now().as_millisecond();
+            let absent=replace_missing && id=="coordinator" && binding.task.is_none() && owned.attempt.is_none()
+                && binding.identity.machine.is_empty() && binding.identity.worktree_path.is_empty()
+                && owned.binding_revision==binding.revision && owned.identity_digest==super::ownership::identity_digest(&binding)?
+                && observation.as_ref().is_some_and(|o|o.collector=="herdr-git-v2" && o.binding_revision==binding.revision
+                    && o.task_revision.is_none() && o.pane==crate::reconcile::ResourceState::Absent && !o.agent_present
+                    && o.session_identity.is_some() && o.session_identity==owned.session
+                    && now>=o.observed_unix_ms && now-o.observed_unix_ms<=30_000);
+            if !absent {return Err(StoreError::Invalid("relinquish owned resources before rebinding; existing references are retained".into()));}
+            tx.execute("DELETE FROM runtime_ownership WHERE binding_id=?1",[id])?;
+            tx.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES('runtime.relinquished',?1,?2,1,?3)",
+                params![id,integer(owned.revision)?,serde_json::json!({"ownership":owned,"reason":"open --reprime replaces freshly observed absent coordinator","resources_removed":false}).to_string()])?;
+        }
         if !route.pane_id.is_empty() && bindings.iter().any(|other|other.id!=id && other.identity.socket==route.socket && other.identity.machine==route.machine && other.identity.pane_id==route.pane_id) {
             return Err(StoreError::Invalid("pane already referenced by another binding in this project".into()));
         }

@@ -736,3 +736,14 @@ evidence permits another request. This uses the existing event ledger and its
 backup/retention classification, with no schema change.
 
 Compatibility: legacy environment variables and existing data/config locations remain supported; see [renaming](../renaming.md).
+
+### Canonical coordinator effect journal (W-COORD-2)
+
+`.state/canonical-coordinator.json` is a version 1 JSON effect journal, outside
+telemetry streams and SQLite schemas. It retains frozen session/terminal/config
+identity, pending layout/start/prime intent and accepted priming receipts. The
+maintenance class `canonical.coordinator_journal` retains it indefinitely, never
+prunes it, and requires inclusion in project backups. Restored pending effects
+require live reconciliation before replay. Runtime ownership and observation
+remain in the existing canonical tables; no schema migration or new table is
+introduced. See [operator recovery](../operator-runbook.md#canonical-coordinator-after-migration-w-coord-2).

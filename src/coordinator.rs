@@ -11,6 +11,8 @@ use crate::paths::{self, Ctx, SessionFlags};
 use crate::project::{Coordinator, Project, Status};
 use crate::remote::quote;
 use crate::{inbox, ticker};
+#[cfg(feature="state-store")]
+use crate::project;
 
 pub const TOKEN_TTL: Duration = Duration::from_secs(300);
 pub const MAX_LAUNCH_ATTEMPTS: u32 = 3;
@@ -75,6 +77,13 @@ pub struct OpenOptions {
 }
 
 pub fn open(ctx: &Ctx, slug: &str, options: &OpenOptions) -> Result<()> {
+    #[cfg(feature="state-store")]
+    {
+        project::validate_slug(slug)?;
+        if project::ensure_legacy(&ctx.root.join(slug)).is_err() {
+            return crate::canonical_coordinator::open(ctx, slug, options);
+        }
+    }
     let _lease = crate::cleanup::lease(&ctx.root)?;
     let project = Project::load(&ctx.root, slug)?;
     if project.status() != Status::Active {
