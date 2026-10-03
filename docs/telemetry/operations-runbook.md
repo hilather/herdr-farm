@@ -139,6 +139,7 @@ optin.captured_evidence not_built 7d source_of_truth destructive
 canonical.worker_permissions external_lifecycle - canonical destructive
 canonical.state external_lifecycle - canonical destructive
 canonical.coordinator_journal external_lifecycle - canonical destructive
+canonical.coordinator_permissions external_lifecycle - derivable
 canonical.verification_execution_slots external_lifecycle - derivable
 native.codex_rollouts external_lifecycle - source_of_truth destructive
 secret.cursor_key external_lifecycle - source_of_truth destructive
