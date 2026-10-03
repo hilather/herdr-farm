@@ -212,6 +212,17 @@ pub fn set_state(project:&Path,expected_head:u64,expected_revision:u64,state:cra
     Ok(change)
 }
 
+/// [`set_state`] for a caller that already holds project ownership (`open`):
+/// the same control transaction, without taking a second execution lock.
+pub fn set_state_held(project:&Path,expected_head:u64,expected_revision:u64,state:crate::domain::ProjectState,config:&Path,guard:&crate::execution_guard::ProjectGuard)->Result<crate::domain::ControlChange> {
+    guard.check_project(project)?;
+    let config=if state==crate::domain::ProjectState::Active {migration::config_reference(config)?.digest}else{None};
+    let mut db=migration::open_active(project)?;
+    let change=db.set_project_state(expected_head,expected_revision,state,jiff::Timestamp::now().as_millisecond(),config.as_deref())?;
+    migration::publish_control_marker(project,&db)?;
+    Ok(change)
+}
+
 pub fn retire_operation(project:&Path,id:&crate::domain::OperationId,revision:u64,head:u64,reason:&str)->Result<crate::operations::Delivery> {
     let _maintenance=migration::runtime_mutation(project)?;
     Ok(migration::open_active(project)?.retire_operation(id,revision,head,reason,jiff::Timestamp::now().as_millisecond())?)
