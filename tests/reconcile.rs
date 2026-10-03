@@ -55,6 +55,9 @@ impl Lab {
     fn path(&self, name: &str) -> PathBuf { self.home.path().join(name) }
     fn project(&self) -> PathBuf { self.path("root/demo") }
     fn cli(&self, args: &[&str]) -> Output {
+        let mut legacy_args = args.to_vec();
+        if args.first() == Some(&"new") { legacy_args.insert(1, "--legacy"); }
+        let args = legacy_args.as_slice();
         Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.home.path()).env("PATH", format!("{}:/usr/bin:/bin", self.path("bin").display()))
             .env("HERDR_BIN_PATH", self.path("herdr")).arg("--root").arg(self.path("root")).args(args).output().unwrap()
     }

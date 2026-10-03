@@ -18,7 +18,7 @@ and CLI output against hand-computed literals, never values recomputed by
 production code. Extend `tests/factory_harness.rs` (`vertical_slice`,
 `plant_profile`, `install_fixture_contract`) where it covers the path; new:
 `tests/telemetry.rs`, `tests/fixtures/telemetry/`. Run
-`cargo test --features state-store --test <file> <name>`.
+`cargo test --test <file> <name>`.
 
 **Stop (all cards)** and report, do not work around, if a change would: alter
 `LaunchInputs`, attempt/operation ID derivation or approval matching; write
@@ -214,3 +214,5 @@ Stop if the panel would write, launch, or read content outside contracts §7.
   `detail: rollout_unavailable` (contracts §5 "Re-evaluation");
   `records_collected_before_certification_are_reread`,
   `uncertified_records_without_their_rollout_stay_unavailable`.
+
+The `state-store` feature is enabled by default; build recipes above use that default.

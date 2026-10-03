@@ -1,8 +1,8 @@
 # TEST-TICK-1 sandbox validation
 
 Commands used `--locked --offline -j 3`. The complete state-store run used
-`cargo test --features state-store --no-fail-fast`; clippy used
-`cargo clippy --features state-store --all-targets`. The default-feature
+`cargo test --no-fail-fast`; clippy used
+`cargo clippy --all-targets`. The default-feature
 all-targets check also passed. No new unit tests were added: timing acceptance
 uses real CLI processes and public store APIs.
 
@@ -506,13 +506,15 @@ ordering test in accordance with AGENTS.md and the task's explicit no-unit rule.
 
 Validation commands all used `--locked --offline -j 3`:
 
-- `cargo test --features state-store --test ticker_timing`: 4 passed (16.03 s).
-- `cargo test --features state-store --test telemetry --test telemetry_accounting -- --skip attempts_show_attention_summary --skip attention_intervals_union_and_censor`: 19 + 32 passed (20.78 s + 39.04 s).
-- `cargo test --features state-store --test canonical_worker --test controller --test telemetry --test telemetry_accounting --test threads --test ticker_jobs --test ticker_timing --no-run`: all seven suites compile.
-- `cargo clippy --features state-store --all-targets`: completed; existing warnings, no diagnostics on changed lines.
+- `cargo test --test ticker_timing`: 4 passed (16.03 s).
+- `cargo test --test telemetry --test telemetry_accounting -- --skip attempts_show_attention_summary --skip attention_intervals_union_and_censor`: 19 + 32 passed (20.78 s + 39.04 s).
+- `cargo test --test canonical_worker --test controller --test telemetry --test telemetry_accounting --test threads --test ticker_jobs --test ticker_timing --no-run`: all seven suites compile.
+- `cargo clippy --all-targets`: completed; existing warnings, no diagnostics on changed lines.
 
 Socket-only failures in this follow-up: **none executed**. All 14 reported
 regressions above require Unix socket fixture binds and are compile-only here,
 as requested. Their outside-sandbox execution remains with the steward. The
 historical socket-only failure lists earlier in this document remain the prior
 sandbox evidence; this follow-up does not claim those workflows passed.
+
+The `state-store` feature is enabled by default; build recipes above use that default.

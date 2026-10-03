@@ -37,7 +37,7 @@ second turn in the same session wherever supported. Resume-last must refer to
 this fresh home; do not supply an owner session identifier. Run only one test:
 
 ```sh
-TMPDIR="$PWD/target/tmp" cargo test --locked --offline -j 3 --features state-store \
+TMPDIR="$PWD/target/tmp" cargo test --locked --offline -j 3 \
   --test telemetry_live claude_live -- --ignored --exact --test-threads=1
 ```
 
@@ -148,3 +148,5 @@ cacheCreation, and are compared against the ledger built from `api_request`
 (`otlp-devin-exclusive-v1`). The run fails if the ledger is empty or any counter
 differs. Recording a live report and
 adding it to the certification registry remains a separate reviewed change.
+
+The `state-store` feature is enabled by default; build recipes above use that default.

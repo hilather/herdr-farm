@@ -173,7 +173,7 @@ network client; `manifest.external.destination` records which was used.
 ## 7. Contract samples
 
 Generated from the test fixtures (the contracts §6 worked example) by
-`HERDR_EXPORT_SAMPLES=<dir> cargo test --features state-store --test
+`HERDR_EXPORT_SAMPLES=<dir> cargo test --test
 telemetry_export`; long cursors are shortened with `…`.
 
 `export --metric M02,M49` manifest:
@@ -429,3 +429,5 @@ Markdown bytes. The digest is SHA-256, prefixed `sha256:`. ISO-week filenames
 are versioned on every rerun; reports and manifests never replace an existing
 file. The report is all-time evidence generated weekly, with each metric’s
 cohort/time basis, coverage and denominator, and typed unknown reasons.
+
+The `state-store` feature is enabled by default; build recipes above use that default.

@@ -534,7 +534,7 @@ pub fn list_slugs(root: &Path) -> Vec<String> {
         .flatten()
         .filter_map(|entry| entry.file_name().into_string().ok())
         .filter(|name| !name.starts_with('.') && validate_slug(name).is_ok())
-        .filter(|name| root.join(name).join("PROJECT.md").is_file())
+        .filter(|name| !is_creating(&root.join(name)) && root.join(name).join("PROJECT.md").is_file())
         .collect();
     slugs.sort();
     slugs
@@ -579,12 +579,44 @@ notification instead.
 /// Creates the folder and skeleton files. The only code path that creates a
 /// project's directories. Fails if the slug exists.
 pub fn create(root: &Path, name: &str, goal: &str, repos: Vec<Repo>) -> Result<Project> {
+    create_skeleton(root, name, goal, repos, false)
+}
+
+/// Canonical creation shared by the CLI and the plugin's new-project action.
+pub fn create_canonical(root: &Path, config_dir: &Path, name: &str, goal: &str, repos: Vec<Repo>) -> Result<Project> {
+    #[cfg(not(feature="state-store"))]
+    { let _ = (root, config_dir, name, goal, repos); bail!("canonical creation requires the default state-store build; use new --legacy"); }
+    #[cfg(feature="state-store")]
+    {
+        herdr_farm::owner_setup::prepare(config_dir)?;
+        let project = create_skeleton(root, name, goal, repos, true)?;
+        herdr_farm::migration::initialize_new(&project.dir(), &std::path::absolute(config_dir.join("config.toml"))?)?;
+        Ok(project)
+    }
+}
+
+pub fn is_creating(dir: &Path) -> bool {
+    !matches!(std::fs::symlink_metadata(dir.join(".creating")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+}
+
+pub fn creating_slugs(root: &Path) -> Vec<String> {
+    let mut names: Vec<_> = std::fs::read_dir(root).into_iter().flatten().flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| validate_slug(n).is_ok() && is_creating(&root.join(n))).collect();
+    names.sort(); names
+}
+
+pub(crate) fn create_skeleton(root: &Path, name: &str, goal: &str, repos: Vec<Repo>, canonical: bool) -> Result<Project> {
     let slug = slug_from_name(name)?;
     let project = Project {
         root: root.to_path_buf(),
         slug: slug.clone(),
     };
     let dir = project.dir();
+    if is_creating(&dir) {
+        bail!("`{slug}` is creating; creation was interrupted or is still running. After confirming no new command is running, remove {} and run new again", dir.display());
+    }
     if dir.exists() {
         bail!("`{slug}` already exists in {}", root.display());
     }
@@ -612,6 +644,7 @@ pub fn create(root: &Path, name: &str, goal: &str, repos: Vec<Repo>) -> Result<P
 
     std::fs::create_dir_all(root)?;
     std::fs::create_dir(&dir).with_context(|| format!("could not create {}", dir.display()))?;
+    if canonical { write_atomic(&dir.join(".creating"), b"canonical creation in progress\n")?; }
     for sub in ["memory", "scratch", "routines", "threads", "inbox", "inbox/done", "library", ".state"] {
         std::fs::create_dir_all(dir.join(sub))?;
     }
@@ -620,7 +653,7 @@ pub fn create(root: &Path, name: &str, goal: &str, repos: Vec<Repo>) -> Result<P
         b"# Memory\n\nOne line per memory file: `- [title](memory/file.md): what it holds`.\n",
     )?;
     write_atomic(&dir.join("TASKS.md"), TASKS_TEMPLATE.as_bytes())?;
-    write_json(&project.state_dir().join("project.json"), &ProjectState::default())?;
+    write_json(&project.state_dir().join("project.json"), &ProjectState { status: if canonical { Status::Paused } else { Status::Active } })?;
     // PROJECT.md last: a folder without it is not a project, so a half-made
     // skeleton is never picked up by `list` or the ticker.
     write_atomic(
@@ -652,6 +685,7 @@ mod tests {
 /// Always compiled, including legacy-only binaries. Never treat an unreadable,
 /// newer, or interrupted ownership marker as permission to use legacy records.
 pub fn ensure_legacy(dir: &Path) -> Result<()> {
+    if is_creating(dir) { bail!("project is creating; wait for new to finish or rerun new for recovery instructions"); }
     for relative in [".state/format.json", ".state/migration/journal.json", ".state/migration/memory-journal.json"] {
         match std::fs::symlink_metadata(dir.join(relative)) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},

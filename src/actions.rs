@@ -164,7 +164,7 @@ pub fn run_pane(ctx: &Ctx, id: &str) -> Result<()> {
                 bail!("no name given");
             }
             let goal = ask("Goal (one line, optional)", "")?;
-            let project = project::create(&ctx.root, &name, &goal, Vec::new())?;
+            let project = project::create_canonical(&ctx.root, &ctx.config_dir, &name, &goal, Vec::new())?;
             println!("created `{}` at {}", project.slug, project.dir().display());
             run_on_slug(ctx, "open", &project.slug)
         })(),

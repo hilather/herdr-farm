@@ -2044,7 +2044,7 @@ Ran the state-store documentation tests omitted by the earlier all-target audit:
 all five compile-fail tests passed. They check that external callers cannot
 construct protected memory/prepared-launch, native-preparation, revalidation and
 started-receipt authority through the prohibited APIs. Command:
-`CARGO_HOME=/tmp/herdr-projects-cargo cargo test --locked --offline --features state-store --doc`.
+`CARGO_HOME=/tmp/herdr-projects-cargo cargo test --locked --offline --doc`.
 Log: `/tmp/herdr-launch-doc-tests.log`.
 
 Rechecked the current profile verifier and retained-report derivation against
@@ -2162,7 +2162,7 @@ Validation after enablement:
 - Both controller/ticker fixtures passed through production-default selection
   (12.05 seconds); no credentials or vendor prompts were used for these tests.
 - Production executable built with
-  `cargo build --release --locked --offline --features state-store --bin herdr-projects`.
+  `cargo build --release --locked --offline --bin herdr-projects`.
 - `target/release/herdr-projects launch --help` succeeded and exposed draft/reserve.
 - `git diff --check` passed.
 
@@ -2179,3 +2179,5 @@ verified creation capability. Full live memory-update/checkpoint, mixed-agent an
 vendor repository-editing certification remains uncompleted and is explicitly
 recorded in the revised dispatch audit. Those capabilities are not inferred from
 a passing launch, and dependency tasks without verified evidence stay blocked.
+
+The `state-store` feature is enabled by default; build recipes above use that default.

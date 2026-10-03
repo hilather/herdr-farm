@@ -32,7 +32,7 @@ for tail-latency certification. Cargo's whole-test duration is not a decision
 sample. Run the disposable fixture with:
 
 ```sh
-cargo test --locked --features state-store --test factory_harness scale_gate_for_32_and_64_workers -- --nocapture --test-threads=1
+cargo test --locked --test factory_harness scale_gate_for_32_and_64_workers -- --nocapture --test-threads=1
 ```
 
 The correction run's [raw samples](../reviews/factory-corrections-evidence/scale-admission-inventory.jsonl),
@@ -66,3 +66,5 @@ unchanged. `factory_admission` stays `off` in production code. The disposable
 fixture temporarily enables admission after creating a synthetic active control
 row, then checks that missing contracts/grants prevent any new reservation.
 It restores the flag to `off`. No live provider. No pull-request poll.
+
+The `state-store` feature is enabled by default; build recipes above use that default.

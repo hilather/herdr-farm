@@ -264,6 +264,9 @@ impl Lab {
         String::from_utf8(out.stdout).unwrap().trim().to_owned()
     }
     fn cli(&self, args: &[&str]) -> Output {
+        let mut legacy_args = args.to_vec();
+        if args.first() == Some(&"new") { legacy_args.insert(1, "--legacy"); }
+        let args = legacy_args.as_slice();
         // Verification's disposable server socket lives under the temporary directory.
         Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", &self.home).env("HERDR_PROJECTS_OWNER_HOME", &self.home).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", self.home.join("bin/herdr"))
             .env("TMPDIR", std::env::var_os("TMPDIR").unwrap_or("/tmp".into())).env("XDG_RUNTIME_DIR", self.runtime.path())

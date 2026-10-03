@@ -20,10 +20,10 @@ projects, real Git and fake Herdr. No new unit or source-text tests.
 ## Checks
 
 - `cargo build --locked --offline -j 3`: passed (default features).
-- `cargo check --locked --offline -j 3 --features state-store`: passed.
-- `cargo clippy --locked --offline -j 3 --features state-store --all-targets`: passed;
+- `cargo check --locked --offline -j 3`: passed.
+- `cargo clippy --locked --offline -j 3 --all-targets`: passed;
   existing warnings remain, none in changed lines.
-- `cargo test --locked --offline -j 3 --features state-store --no-fail-fast
+- `cargo test --locked --offline -j 3 --no-fail-fast
   --test threads --test cleanup --test artifacts --test recovery --test overview
   --test migration -- --test-threads=1`: 12 passed, 30 blocked at Unix socket bind.
   Migration: 9 passed; artifacts: 1 passed; overview: 2 passed.
@@ -83,3 +83,5 @@ these outside this sandbox with nextest, particularly the two new stop tests.
 - `ticker_crash_after_pane_close_resumes_without_repeating_it`
 - `unsafe_resolved_threads_are_kept_and_cleanup_keep_opts_out`
 - `used_quiesced_project_migrates_after_final_copy_and_memory_record`
+
+The `state-store` feature is enabled by default; build recipes above use that default.

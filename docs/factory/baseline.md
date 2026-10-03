@@ -11,10 +11,10 @@ Schema is 26. `const SCHEMA: u32 = 26` in `src/store/mod.rs`.
 `PRAGMA user_version` to 26. `SqliteStore::open` recognizes an existing schema
 and does not migrate (`migrations are never implicit`).
 
-`state-store` is off by default. `Cargo.toml` sets `default = []` and
-`state-store = ["dep:rusqlite"]`. The plugin build in `herdr-plugin.toml` is
-`["cargo", "build", "--release", "--locked"]` and does not pass
-`--features state-store`.
+`state-store` is enabled by default. `Cargo.toml` sets
+`default = ["state-store"]` and `state-store = ["dep:rusqlite"]`. The plugin
+build in `herdr-plugin.toml` uses `["cargo", "build", "--release", "--locked"]`
+and therefore includes canonical SQLite support without extra flags.
 
 ## Prepared dispatch versus automatic admission
 
@@ -118,3 +118,5 @@ stayed at the scheduler default of 0.
 
 No figure in this appendix is a gate. Do not describe this measurement as
 meeting 5 s, 15 s, or 250 ms p95.
+
+The `state-store` feature is enabled by default; build recipes above use that default.

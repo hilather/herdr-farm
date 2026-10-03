@@ -28,7 +28,7 @@ for either. This is not a certification of an OTLP transport.
 | Item | Value |
 | --- | --- |
 | Source | branch `telemetry/tm51-scale-certification` from `main` `20a763f`, plus the fixes in §5 |
-| Build | `cargo test --release --locked --offline -j 3 --features state-store --test telemetry_scale --no-run` (rustc 1.98.0), system SQLite 3.53.4 |
+| Build | `cargo test --release --locked --offline -j 3 --test telemetry_scale --no-run` (rustc 1.98.0), system SQLite 3.53.4 |
 | Stores | canonical `SCHEMA = 68`; sidecar streams `codex` 4, `ingest` 12, `accounting` 17, `quality` 4, `analytics` 4, `health` 1, `policies` 1, `otlp` 2 |
 | CPU / memory | Intel Core i7-8750H, 6 cores / 12 threads, 62 GiB RAM, zram swap |
 | Disk | Intel SSDPEKNW010T8 NVMe, LUKS, btrfs (`compress=zstd:3`). Every dataset lived under `bench-data/` on this disk, never on the RAM-backed `/tmp` |
@@ -56,7 +56,7 @@ Phases: `scale_0_generate`, `scale_1_ingest`, `scale_2_queries`
 (`SCALE_REPEATS`, `SCALE_TAG`, optional `SCALE_HEALTH_BIN` for a preserved
 pre-change CLI). Each writes `results-<phase>[-<tag>].json` in the dataset
 directory. The gate test (§3) runs in the ordinary suite:
-`cargo test --features state-store --test telemetry_scale`.
+`cargo test --test telemetry_scale`.
 
 ## 2. Workload
 
@@ -452,7 +452,7 @@ and is excluded from the live-load comparison. The baseline freshness run
 used the original ingested tree and had no such backlog. Builds and benches
 were serialized; one bench process, at most four bench threads.
 
-Build: `cargo test --release --locked --offline -j 3 --features state-store
+Build: `cargo test --release --locked --offline -j 3
 --test telemetry_scale --no-run`. Use §1's environment with
 `SCALE_EVENTS=100000 SCALE_ACTIVE=64 SCALE_REPEATS=3`. Freshness uses
 `scale_4_freshness_burst`, `SCALE_CADENCE_MS=1000` (120 s steady, 60 s burst,
@@ -498,7 +498,7 @@ The requested 15 suites had **170 passed, four socket-only failures**
 `telemetry_workspace::thread_start_records_the_dispatch_reason_and_the_sidebar_suffix`.
 Affected suites were rerun after the final re-read/restore compatibility
 changes; all 12 operations tests passed and accounting's only failure was
-its socket bind. Clippy (`--locked --offline -j 3 --features state-store
+its socket bind. Clippy (`--locked --offline -j 3
 --test telemetry_accounting --test telemetry_scale`) found no warning in
 changed lines; existing warnings remain elsewhere.
 
@@ -741,7 +741,7 @@ These noisy, small read samples are inconclusive for a read-path speedup.
 The pane meets 250 ms p95; the digest exceeds 100 ms in both runs. P3c fixes
 the snapshot write-lock regression, not L5's remaining certification limit.
 
-Final P3c verification used `--locked --offline -j 3 --features state-store`
+Final P3c verification used `--locked --offline -j 3`
 and `RUST_TEST_THREADS=1`. All 15 requested suites ran: **175 passed,
 10 ignored, four socket-only failures** (`Operation not permitted`):
 
@@ -1048,7 +1048,7 @@ creation race. After the bounded WAL transition retry, that existing E2E
 passed ten serial runs and the final full suite. The unchanged debug load
 gate passed in the final full and focused runs; the unchanged release gate
 also passed in 12.26 s. Clippy (`--locked --offline
--j 3 --features state-store --test telemetry_query --test telemetry_scale
+-j 3 --test telemetry_query --test telemetry_scale
 --test telemetry_operations`) completed; no warning location falls on a line
 changed from `origin/main`. Existing unrelated warnings remain. No unit or
 source-text tests were added; only the stream-version expectation advances.
@@ -1062,7 +1062,7 @@ metric, coverage rule or existing expected value changes. No 1M run.
 The requested debug reproduction used `TMPDIR=$PWD/target/tmp`, one test
 thread, ten `scale_gates_hold_under_load` commands beside a second cargo
 process looping the complete `telemetry_operations` suite ten times. Both
-cargo commands used `--locked --offline -j 3 --features state-store`; the
+cargo commands used `--locked --offline -j 3`; the
 five gate racers plus the operations subprocess allow at most six CLI children;
 the appender sleeps between one-second bursts.
 Each loop finished within ten minutes. Before: **2/10 gates failed** (run 2:
@@ -1182,7 +1182,7 @@ socket failure or hidden by editing its expectation. The uninstrumented scale
 suite passes all three workflows; the final release gate also passes unchanged
 in 21.44 s. They retain the exact totals, single acceptance,
 pinned as-of, byte-identical rebuild and canonical digest oracles. Clippy with
-`--locked --offline -j 3 --features state-store` and the scale/accounting/collect/
+`--locked --offline -j 3` and the scale/accounting/collect/
 operations targets reports no warning in changed lines; unrelated warnings
 remain. No new crate or source process spawn. Temporary instrumentation and all
 `bench-data/` datasets are removed before committing.
@@ -1221,7 +1221,7 @@ for the required accounting version pins.
 
 **Same disk dataset, 100k events / 64 active / 10,000 attempts / eight homes,
 seed 5100, three repeats. Pending the steward's serial 1M certification.**
-Built each release with §1's `--locked --offline -j 3 --features state-store
+Built each release with §1's `--locked --offline -j 3
 --test telemetry_scale --no-run`, then ran `scale_2_queries` and
 `scale_9_analytics_refresh` serially with `SCALE_EVENTS=100000`,
 `SCALE_ACTIVE=64`, `SCALE_REPEATS=3`, `SCALE_PER_ROUND=1`, tags `p2d-before`
@@ -1270,7 +1270,7 @@ scale gates beside twelve full `telemetry_operations` cargo runs, all
 controller-latency target nor a universal contention bound.
 
 All 18 `tests/telemetry*.rs` suites ran with `TMPDIR=$PWD/target/tmp`,
-`RUST_TEST_THREADS=1`, `--locked --offline -j 3 --features state-store
+`RUST_TEST_THREADS=1`, `--locked --offline -j 3
 --no-fail-fast`: **192 passed, 12 ignored**, six socket-only failures. Unix
 bind EPERM affects `attempts_show_attention_summary`,
 `attention_intervals_union_and_censor`,
@@ -1334,7 +1334,7 @@ durability, gate assertions or existing golden values changed.
 
 Final correctness validation ran all **20** `tests/telemetry*.rs` targets with
 `TMPDIR=$PWD/target/tmp`, `RUST_TEST_THREADS=1`, `cargo test --locked --offline
--j 3 --features state-store --no-fail-fast`: **207 passed, 12 ignored, six
+-j 3 --no-fail-fast`: **207 passed, 12 ignored, six
 socket-only failures**. Every scale workflow passes, including the unchanged
 `scale_gates_hold_under_load`. The final release gate also passes unchanged
 in **14.30 s**. Unix socket bind EPERM affects:
@@ -1350,7 +1350,7 @@ change was made for these failures. Clippy checks the adapter, collect, query,
 scale and operations targets against changed lines from `origin/main`.
 
 The final reproduction prebuilt `telemetry_scale` and `telemetry_operations`
-with `--locked --offline -j 3 --features state-store --no-run`, then ran ten
+with `--locked --offline -j 3 --no-run`, then ran ten
 exact `scale_gates_hold_under_load` cargo commands beside ten complete
 `telemetry_operations` cargo commands. Both loops used `TMPDIR=$PWD/target/tmp`
 and one test thread; **10/10 gates and 10/10 operations suites passed, zero
@@ -1363,7 +1363,7 @@ reported **zero warnings on changed lines**; unrelated warnings remain.
 
 **Same on-disk 100k/64 dataset, three repeats; pending the steward's serial
 1M certification. No 1M run.** Both releases used §1's exact
-`cargo test --release --locked --offline -j 3 --features state-store
+`cargo test --release --locked --offline -j 3
 --test telemetry_scale --no-run`. The rebased P2d code with migration 0015
 renumbered, before the adapter/correctness follow-up, supplies the baseline.
 Phases 0 and 1 generate/ingest the seed-5100 dataset once. Run phase 2 and
@@ -1517,7 +1517,7 @@ pinned as-of reproducibility, byte-identical rebuild and canonical digest.
 Every existing expected metric value is preserved; only registry/comparison
 version pins advance. No unit/source-text coverage, crate or source process
 spawn was added. The final release gate also passed unchanged in **11.36 s**.
-Clippy (`--locked --offline -j 3 --features state-store --test telemetry_query
+Clippy (`--locked --offline -j 3 --test telemetry_query
 --test telemetry_scale --test telemetry_operations`) completed with **zero
 warning locations on lines changed from origin/main**; 98 existing unrelated
 diagnostics remain. Benchmark data is removed before committing.
@@ -1727,7 +1727,7 @@ session, checks the original pinned answer and verifies stored digests/rebuilds.
 The retention E2E additionally checks incremental-vacuum mode and dictionary
 cleanup. No unit/source-text tests, crates or process spawns were added.
 
-Validation command: `cargo test --locked --offline -j 3 --features state-store
+Validation command: `cargo test --locked --offline -j 3
 --no-fail-fast --test telemetry --test telemetry_accounting --test
 telemetry_certification --test telemetry_collect --test telemetry_conformance
 --test telemetry_health --test telemetry_query --test telemetry_views --test
@@ -1748,7 +1748,7 @@ fail only because TCP loopback bind also returns `Operation not permitted`.
 These are separate from the four requested-suite Unix-socket failures.
 The final release load gate also passes unchanged (11.34 s).
 Clippy with
-`--locked --offline -j 3 --features state-store` and the touched test targets
+`--locked --offline -j 3` and the touched test targets
 reports no warning in changed lines; existing warnings remain elsewhere.
 
 Files: `migrations/telemetry/0004_compact_native.sql`,
@@ -1821,7 +1821,7 @@ identical 19,800 accepted records: input 202,285,731, cached 50,862,666, output
 provisional until the steward's serial 1M certification.
 
 Validation used `TMPDIR=$PWD/target/tmp`, `RUST_TEST_THREADS=1` and
-`cargo test --locked --offline -j 3 --features state-store --no-fail-fast`.
+`cargo test --locked --offline -j 3 --no-fail-fast`.
 The requested operations/accounting/Claude/scale command passed **51 tests**,
 with **12 ignored** and only the accounting Unix-bind failure below. The
 subsequent run of every **20** telemetry suite passed **212 tests**, with
@@ -2000,7 +2000,7 @@ Configuration comparisons remain unsupported because project hours have no
 observed attribution to configuration arms.
 
 **Reproduction and scope.** Built before and after with
-`cargo test --release --locked --offline -j 3 --features state-store --test telemetry_scale --no-run`.
+`cargo test --release --locked --offline -j 3 --test telemetry_scale --no-run`.
 One deterministic disk-backed dataset lived entirely under `$PWD/bench-data/`
 (including `TMPDIR=$PWD/bench-data/tmp`), with `SCALE_EVENTS=100000`,
 `SCALE_ACTIVE=64`, `SCALE_REPEATS=3`, `SCALE_PER_ROUND=1`, seed 5100 and 10,000
@@ -2414,7 +2414,7 @@ all quoted completed runs were serial, without overlapping builds or tests.
 Every dataset, seed and fixture home stayed under `$PWD/bench-data/` on disk.
 
 Build each version with §1's exact release/no-run command (`--locked --offline
--j 3 --features state-store --test telemetry_scale`). Use §1's environment,
+-j 3 --test telemetry_scale`). Use §1's environment,
 `SCALE_ACTIVE=64 SCALE_REPEATS=3 SCALE_CADENCE_MS=1000`, `SCALE_EVENTS=1000000`
 only for phases `scale_4_freshness_burst` and `scale_6_fairness`; use
 `SCALE_EVENTS=100000` for the freshness regression. Freshness retains 120 s
@@ -2496,7 +2496,7 @@ replay byte for byte; a blocked hot derived refresh leaves another project's
 public ingestion available and preserves current/pinned answers and rebuilds.
 No unit/source-text tests, new crate or source process spawn was added.
 The final debug run uses `TMPDIR=$PWD/target/tmp RUST_TEST_THREADS=1`,
-`cargo test --locked --offline -j 3 --features state-store --no-fail-fast`,
+`cargo test --locked --offline -j 3 --no-fail-fast`,
 all fifteen requested targets and the five remaining telemetry targets.
 The requested targets pass **191 tests**, with **13 ignored** and only the
 following four sandbox-denied Unix-socket binds (`Operation not permitted`):
@@ -2745,7 +2745,7 @@ necessary. No timing ratio is asserted to be a causal regression or speedup.
 
 **Final loaded-gate proof.** After the foreground collector adjustment,
 `scale_gates_hold_under_load` passes **10/10**, with no edits to its body.
-Each invocation uses `cargo test --locked --offline -j 3 --features state-store
+Each invocation uses `cargo test --locked --offline -j 3
 --test telemetry_scale -- --exact scale_gates_hold_under_load --test-threads=1`,
 `TMPDIR=$PWD/target/tmp`. A concurrent serial loop runs `--no-fail-fast
 --test telemetry_workspace --test telemetry_operations` (five iterations),
@@ -2769,7 +2769,7 @@ Gate loadavg (1 / 5 / 15 minutes), start → end:
 | 10 | pass | 8.73 / 6.05 / 4.81 | 8.95 / 6.40 / 4.97 |
 
 **Final correctness and lint checks.** Run `cargo test --locked --offline
--j 3 --features state-store --no-fail-fast` with all 21 `tests/telemetry*.rs`
+-j 3 --no-fail-fast` with all 21 `tests/telemetry*.rs`
 targets plus `--test cli --test canonical_worker`, `TMPDIR=$PWD/target/tmp`
 and `RUST_TEST_THREADS=1`; leave paid/live tests ignored and unset
 `HP_CODEX_SANDBOX_BIN` so worker fixtures use their deterministic stand-in.
@@ -3539,14 +3539,14 @@ missed an asynchronous health evaluation in the full run and passed alone
 in 2.14 s without changes. Both scale workflows passed (49.46 s combined
 in debug, below the 60 s gate budget); after settling prior unavailable
 producer observations was covered, both passed again in 37.24 s combined.
-Clippy (`cargo clippy --locked --offline -j 3 --features state-store --test
+Clippy (`cargo clippy --locked --offline -j 3 --test
 telemetry_scale`) reported no warning in changed lines; existing library and
 shared-support warnings remain. No expected value in another telemetry suite
 was edited. The ignored fairness phase fails only its documented performance
 criterion; its correctness oracles and the late/slow phase pass.
 
 P3 follow-up verification: all 15 requested telemetry suites were run with
-`--locked --offline -j 3 --features state-store --no-fail-fast` and three
+`--locked --offline -j 3 --no-fail-fast` and three
 test threads. After correcting the new fixture's retry limit and hand-counted
 coverage alert, 169 tests pass, seven scale phases remain ignored, and only
 these four existing tests fail because their Unix socket bind returns
@@ -3578,3 +3578,5 @@ check failed in both full runs and passed in isolation; it is recorded as a
 flaky result, not a socket failure. The new operations fixture's intermediate
 assertions were corrected; its final complete suite passes all 12 tests.
 Clippy has no warnings in changed lines; unrelated existing warnings remain.
+
+The `state-store` feature is enabled by default; build recipes above use that default.

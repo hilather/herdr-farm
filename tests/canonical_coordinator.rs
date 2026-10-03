@@ -72,6 +72,9 @@ impl Lab {
         lab
     }
     fn cli(&self, args: &[&str]) -> Output {
+        let mut legacy_args = args.to_vec();
+        if args.first() == Some(&"new") { legacy_args.insert(1, "--legacy"); }
+        let args = legacy_args.as_slice();
         Command::new(BIN)
             .env_clear()
             .env("HOME", self.home.path())

@@ -1,6 +1,6 @@
 # Getting started: open your first project
 
-Install the plugin, create a project, and let a coordinator agent start threads for you.
+Install the plugin and create a canonical project. The default build includes SQLite support. Use the [operator runbook](operator-runbook.md) for canonical worker launch.
 
 ## 1. Check the prerequisites
 
@@ -42,7 +42,16 @@ herdr-farm open billing
 
 Edit `PROJECT.md` in the project folder to write your standing instructions and to change the agent kind, `max_parallel_threads`, or the listed repos.
 
-## 4. Tell the coordinator what you want
+## 4. Canonical workers
+
+New projects are canonical and paused until `open` or `launch run` activates them.
+Use `task`, `approval` and `launch` commands as described in the
+[operator runbook](operator-runbook.md); legacy `thread` commands refuse canonical
+projects. First creation sets up approval authority and available starter profiles.
+
+The thread workflow below applies to projects created with `new --legacy`.
+
+## Legacy: tell the coordinator what you want
 
 Type in the coordinator's pane, for example: "Add a billing page: API endpoint, the page itself, and end-to-end tests."
 
@@ -171,3 +180,23 @@ setup is needed. Owner `.claude` settings stay untouched. Other coordinator kind
 receive no generated file. `context PROJECT` shows retained launchable profiles,
 control state and settings startup provenance; focus-only open does not reload
 agent settings. See [coordinator permissions](operations.md#the-allow-list-for-your-coordinator).
+
+New projects use the canonical SQLite store by default: `herdr-farm new demo`
+creates the project at its final path, paused, even while the ticker runs.
+`open demo` or `launch demo run` activates it. Use `new --legacy demo` for
+legacy Markdown behavior. Migration is only needed for existing legacy projects.
+Canonical projects pin their absolute path; choose the final name and location
+before creation rather than moving the directory afterward.
+
+On the first canonical `new`, absent authority settings are appended to the owner
+config without rewriting existing content. An Ed25519 approval key is generated
+at `owner-approval` (0600), with `owner-approval.pub` (0644), beside config.toml.
+If no profiles are configured, executable `codex` and `claude` commands on PATH
+receive interactive starter profiles with a one-hour budget and no model pin.
+Claude workers need `claude setup-token` once; setup never runs that command.
+Existing authority and profile tables are preserved.
+
+An interrupted creation retains a `.creating` marker. `list` reports `creating`,
+and ticker passes, doctor scans and open leave it inert. A second `new` explains
+that, after confirming no creation command is running, you can remove that
+project directory and run `new` again. Do not move a partially created store.

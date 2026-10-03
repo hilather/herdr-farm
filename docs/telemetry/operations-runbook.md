@@ -12,7 +12,7 @@ The transcripts below are real output of the fixture run in
 change per run: `sha256:<digest>`, `<unix_ms>`, SQLite file sizes
 (`<bytes>`), the temporary root (`<tmp>`) and the attempt id (`<attempt>`).
 The test fails when a transcript here differs from the product's output;
-`HERDR_RUNBOOK_WRITE=1 cargo test --features state-store --test
+`HERDR_RUNBOOK_WRITE=1 cargo test --test
 telemetry_operations runbook` rewrites them.
 
 ## 1. Authority and scope
@@ -532,3 +532,5 @@ valuation/latest history can grow indefinitely. Certificate-scale §4.15 records
 the 100k storage, default-retention and vacuum measurements.
 
 Compatibility: legacy environment variables and existing data/config locations remain supported; see [renaming](../renaming.md).
+
+The `state-store` feature is enabled by default; build recipes above use that default.

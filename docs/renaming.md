@@ -27,3 +27,10 @@ The legacy config directory also remains usable through the fallback; renaming i
 Worker submission environments set `HERDR_FARM_SUBMISSION_SPOOL` and the legacy `HERDR_PROJECTS_SUBMISSION_SPOOL` to the same directory, so retained briefs and scripts continue to submit. New briefs invoke `herdr-farm`. New popup bindings use `HERDR_FARM_ROOT` and `HERDR_FARM_HANDOFF`; reads accept the legacy names.
 
 Signature namespaces ending in `@herdr-projects`, internal persisted job ids, worktree intent tags, capture Git identity, memory projection markers, host identity and export cursor hash salts deliberately retain their old spelling. SQLite schemas, migrations, event kinds, telemetry streams, signed documents and certification registry identifiers are unchanged.
+
+New projects use canonical SQLite storage by default and must be created at
+their final path. Canonical stores pin absolute paths and refuse relocation;
+renaming the product or changing config selection does not move a store.
+Use `new --legacy NAME` if you need the legacy project format.
+An interrupted `new` retains `.creating`; after confirming no creation command
+is running, remove that directory and recreate it at the intended final path.

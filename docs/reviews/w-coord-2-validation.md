@@ -23,11 +23,11 @@ migration-workflow and telemetry contracts documentation.
 ## Commands and results
 
 ```sh
-cargo check --locked --offline -j 3 --features state-store
 cargo check --locked --offline -j 3
-cargo clippy --locked --offline -j 3 --features state-store --all-targets
-cargo test --locked --offline -j 3 --features state-store --test canonical_coordinator --test operator_launch --test canonical_worker --test cli --no-fail-fast
-cargo test --locked --offline -j 3 --features state-store --test canonical_coordinator
+cargo check --locked --offline -j 3
+cargo clippy --locked --offline -j 3 --all-targets
+cargo test --locked --offline -j 3 --test canonical_coordinator --test operator_launch --test canonical_worker --test cli --no-fail-fast
+cargo test --locked --offline -j 3 --test canonical_coordinator
 ```
 
 Both build configurations compile. Clippy exits successfully; existing repository
@@ -132,3 +132,5 @@ All lab CLI/ticker processes use `tests/support/time-scale.txt`.
 - `launch_run_with_a_dedicated_server_after_verify_interaction_reserves_both_kinds`
 - `verify_interaction_produces_launchable_evidence_for_codex_and_claude_from_the_cli`
 - `verify_interaction_tolerates_agents_writing_into_their_execution_home`
+
+The `state-store` feature is enabled by default; build recipes above use that default.

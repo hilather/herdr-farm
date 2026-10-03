@@ -225,3 +225,5 @@ shown with their `basis`/`trust` labels, and missing producers stay
 8. **Proxies** (M45–M48) remain a separate, labelled family and never stand
    in for a validated-quality metric; M46 and `flaky_tests` need their
    producers.
+
+The `state-store` feature is enabled by default; build recipes above use that default.
