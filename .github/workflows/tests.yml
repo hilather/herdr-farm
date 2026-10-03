@@ -43,6 +43,9 @@ jobs:
         run: |
           echo "PKG_CONFIG_PATH=$HOME/sqlite/lib/pkgconfig" >> "$GITHUB_ENV"
           echo "LD_LIBRARY_PATH=$HOME/sqlite/lib" >> "$GITHUB_ENV"
+          # Tests start the CLI with a cleared environment; an rpath keeps the
+          # binaries on this SQLite without LD_LIBRARY_PATH.
+          echo "RUSTFLAGS=-C link-arg=-Wl,-rpath,$HOME/sqlite/lib" >> "$GITHUB_ENV"
           echo "$HOME/sqlite/bin" >> "$GITHUB_PATH"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -88,6 +91,9 @@ jobs:
         run: |
           echo "PKG_CONFIG_PATH=$HOME/sqlite/lib/pkgconfig" >> "$GITHUB_ENV"
           echo "LD_LIBRARY_PATH=$HOME/sqlite/lib" >> "$GITHUB_ENV"
+          # Tests start the CLI with a cleared environment; an rpath keeps the
+          # binaries on this SQLite without LD_LIBRARY_PATH.
+          echo "RUSTFLAGS=-C link-arg=-Wl,-rpath,$HOME/sqlite/lib" >> "$GITHUB_ENV"
           echo "$HOME/sqlite/bin" >> "$GITHUB_PATH"
       # Some tests compile stand-in agents with rustc at runtime.
       - uses: dtolnay/rust-toolchain@stable
