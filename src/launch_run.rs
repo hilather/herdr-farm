@@ -252,15 +252,24 @@ fn activate(run: &mut Run, name: &'static str, force: bool) -> Result<()> {
         return Ok(());
     }
     let reacknowledged = control.state == ProjectState::Active && control.config_digest != current;
-    retry(|| crate::reconcile_live::run(run.ctx, &project, true))?;
-    let control = runtime::snapshot(&project)?.control.context("project has no control state")?;
-    if control.state != ProjectState::Active || control.config_digest != current {
-        retry(|| {
-            let fresh = runtime::snapshot(&project)?;
-            runtime::set_state(&project, fresh.head, fresh.control.context("control missing")?.revision, ProjectState::Active, &config)
-        })?;
-    }
+    // Shared with `open`; retried because the ticker can move the head between collection and activation.
+    retry(|| activate_project(run.ctx, &project, false))?;
     run.done(name, json!({"state":"active","owner_configuration_reacknowledged":reacknowledged}));
+    Ok(())
+}
+
+/// Shared activation path: collect fresh evidence, then use store admission checks.
+pub(crate) fn activate_project(ctx: &Ctx, project: &Path, held: bool) -> Result<()> {
+    let config = std::path::absolute(ctx.config_dir.join("config.toml"))?;
+    let batch = crate::reconcile_live::collect(ctx, project)?;
+    if held { runtime::record_observations_held(project, &batch)?; }
+    else { runtime::record_observations(project, &batch)?; }
+    let snapshot = runtime::snapshot(project)?;
+    // Open retains a project guard; re-check owner intent after native I/O.
+    // Launch run is an explicit operator activation and may resume owner pauses.
+    if held && !runtime::automatically_paused(&snapshot) { return Ok(()); }
+    let control = snapshot.control.context("project has no control state")?;
+    runtime::set_state(project, snapshot.head, control.revision, ProjectState::Active, &config)?;
     Ok(())
 }
 

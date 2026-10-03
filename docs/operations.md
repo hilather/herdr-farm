@@ -150,6 +150,39 @@ The table is keyed by the project folder's canonical path. It stays when you del
 
 ## The allow-list for your coordinator
 
+For canonical projects, `open PROJECT` generates Claude Code permissions at
+`<project>/.state/coordinator/claude-settings.json` whenever it starts the
+coordinator. The directory is 0700 and the file is 0600. The product passes
+`--settings <file>` alongside the owner's kind-bound `coordinator_agent_args`;
+owner arguments containing `--settings` are refused. Other coordinator kinds
+receive no generated file; `doctor` reports this.
+
+The exact command prefix from `context` is allowed by coordinator verb, including
+canonical task, launch, result inspection/capture/submission, scheduler and
+operations inspection, planned reconciliation, runtime inspection, read-only
+telemetry and memory-review. The `~/git/herdr-projects` binary alias is included
+only when it resolves to the same executable. Owner decisions (approvals,
+delegation, budgets, lifecycle, runtime state/ownership and task completion or
+cancellation) require confirmation. Signing with `ssh-keygen` is denied; the
+owner signs through the product's authorized launch path.
+
+Read/Edit/Write deny rules protect owner configuration directories, SSH files,
+the generated settings file and the project's `.claude` directory. Owner
+`.claude/settings*.json` files stay untouched: Claude Code merges settings and
+deny wins. Absolute path rules use `//path`; home-relative rules use `~/path`
+([Claude Code permission syntax](https://code.claude.com/docs/en/permissions#read-and-edit)).
+These are Claude Code tool permissions, not an OS sandbox for arbitrary shell
+programs. A running coordinator picks up the file only when `open` starts its
+agent; focus-only opens do not reload settings. `context` reports startup
+provenance, retained launchable profile evidence and control state.
+
+`open` re-adopts current owner configuration and re-activates automatic
+reconciliation pauses after fresh observations and admission checks. Explicit
+owner pauses and archived state remain owner decisions. Blockers print one per
+line and leave control paused while `open` succeeds.
+
+### Legacy projects
+
 The coordinator runs the binary every turn, so allow-list it in your agent **by subcommand, never the bare binary**. `context` prints the exact prefix (`Commands: <binary> --root <root>`); the patterns must start with it. For Claude Code, in the project folder's `.claude/settings.local.json`:
 
 ```json
@@ -629,7 +662,7 @@ action. It never falls back to another action's most recent context. The old sha
 `handoff.json` is no longer read. Expired recognized handoffs are pruned as new
 handoffs are created; corrupt handoff files are left for inspection.
 
-Paused and archived projects refuse coordinator open, thread restart, follow-up
+Legacy paused and archived projects refuse coordinator open, thread restart, follow-up
 prompts and adoption. Resume or unarchive the project first. Restart also refuses
 conflicting pane ownership instead of reusing another thread's pane.
 

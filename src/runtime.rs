@@ -30,6 +30,13 @@ pub fn rename_task(project:&Path,id:&TaskId,title:String,expected_revision:u64,e
     task.revision=task.revision.checked_add(1).context("task revision exhausted")?;task.title=title;
     Ok(db.commit(Commit{expected_head,mutations:vec![Mutation::Task{expected:Some(expected_revision),next:task}]})?)
 }
+/// Explicit owner control survives subsequent reconciliation invalidations.
+/// Imported migration control has no owner control event and can be activated.
+pub fn automatically_paused(snapshot: &Snapshot) -> bool {
+    snapshot.control.as_ref().is_some_and(|c| c.state == crate::domain::ProjectState::Paused && c.reconciliation_required)
+        && !snapshot.events.iter().rev().find(|e| e.kind == "project.control_changed")
+            .is_some_and(|e| e.payload["state"].as_str().is_some_and(|s| s == "paused" || s == "archived"))
+}
 pub fn context(project:&Path)->Result<String> { Ok(context_snapshot(project)?.0) }
 pub fn coordinator_context(project:&Path,herdr_session:&str,profile:&crate::domain::CheckpointProfile,instructions:&str)->Result<crate::memory::CoordinatorContext> {
     crate::memory::coordinator_context(project,herdr_session,profile,instructions)
