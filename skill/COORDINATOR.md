@@ -82,6 +82,12 @@ signs the task contract and launch approval and reserves the attempt. Herdr Farm
 signs automatically within the owner's policy: sandboxed workers only, local
 repositories listed in PROJECT.md, profiles in the current owner configuration,
 and at most `[launch] max_workers` unfinished attempts (default 4).
+The profile's `max_wall_seconds` wall budget ends the worker. `launch run`
+reports it as `worker_wall_seconds` and in the reservation progress line. If a
+task looks longer than that budget, tell the owner before launching. After an
+`attempt.ended_without_submission` notice, run
+`herdr-farm result <slug> submit-captured ATTEMPT` and review what was captured.
+
 The coordinator never passes `--sign-with`, never looks for or reads key files,
 and never edits config.toml. If policy refuses, tell the owner the exact rule.
 Run `launch run` as a background command or with a long timeout (at least five

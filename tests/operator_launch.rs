@@ -729,7 +729,12 @@ fn launch_run_with_a_dedicated_server_after_verify_interaction_reserves_both_kin
     let mut attempts = Vec::new();
     for (task, profile) in jobs {
         let output = format!("docs/{task}.md");
-        let report = lab.ok(&lab.run_args(task, profile, &output, prompt.to_str().unwrap()));
+        let out = lab.cli(&lab.run_args(task, profile, &output, prompt.to_str().unwrap()));
+        let progress = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{progress}");
+        assert!(progress.contains("worker wall budget 600 seconds"), "{progress}");
+        let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(report["worker_wall_seconds"], 600, "{report}");
         let attempt = report["attempt"].as_str().unwrap().to_owned();
         assert!(report["worktree"].as_str().unwrap().contains(".state/worktrees"), "{report}");
         let again = lab.ok(&lab.run_args(task, profile, &output, prompt.to_str().unwrap()));

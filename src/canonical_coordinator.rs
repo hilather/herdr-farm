@@ -211,13 +211,24 @@ pub fn doctor_manifest(
     dir: &Path,
     runner: &dyn crate::runner::Runner,
 ) -> Result<Vec<String>> {
+    let snapshot = runtime::snapshot(dir)?;
+    let binding = snapshot.runtime_bindings.iter().find(|b| b.id == "coordinator");
+    let mut lines = vec![match binding {
+        Some(b) => format!("canonical coordinator binding: pane {} at {} (revision {})", b.identity.pane_id, b.identity.socket, b.revision),
+        None => "canonical coordinator binding: none; run `open`".into(),
+    }];
     let Some(text) =
         paths::read_control_text(&dir.join(".state/canonical-coordinator.json"), 64 * 1024)?
     else {
-        return Ok(vec![permission_status(env, dir, runner)?]);
+        lines.push(permission_status(env, dir, runner)?);
+        return Ok(lines);
     };
     let j = read_journal(&text)?;
-    let mut lines = vec![permission_status(env, dir, runner)?];
+    lines.push(permission_status(env, dir, runner)?);
+    lines.push(format!("canonical coordinator journal: pane {} at {} ({})", j.route.pane_id, j.socket, j.phase));
+    if binding.is_some_and(|b| RuntimeRoute::from_identity(&b.identity) != j.route) {
+        lines.push("canonical coordinator journal differs from runtime binding; inspect reconciliation".into());
+    }
     if let Some(evidence) = &j.priming_manifest {
         lines.push(format!(
             "coordinator priming manifest: {} version {} (override {})",
@@ -426,8 +437,8 @@ pub fn open(ctx: &Ctx, slug: &str, options: &OpenOptions) -> Result<()> {
     // Retain operator intent across the short root publication section. The
     // project guard excludes background effects during native I/O without
     // excluding foreground commands in other projects.
-    let _intent = herdr_farm::execution_guard::CoordinatorOpenGuard::acquire(&dir)?;
-    let guard = herdr_farm::execution_guard::ProjectGuard::acquire(&dir)?;
+    let _intent = herdr_farm::execution_guard::retry_open(|| herdr_farm::execution_guard::CoordinatorOpenGuard::acquire(&dir))?;
+    let guard = herdr_farm::execution_guard::retry_open(|| herdr_farm::execution_guard::ProjectGuard::acquire(&dir))?;
     let snapshot = runtime::snapshot(&dir).context(
         "legacy runtime is disabled; canonical coordinator requires an active migrated store",
     )?;
@@ -668,13 +679,10 @@ pub fn open(ctx: &Ctx, slug: &str, options: &OpenOptions) -> Result<()> {
         runtime::record_observations_held(&dir, &batch)?;
     }
     // Never upgrade shared ownership. Only root-wide conflict validation and
-    // binding publication require exclusivity; no native calls or waits here.
+    // binding publication require exclusivity; no native calls while held.
     drop(guard);
-    let root_guard = herdr_farm::execution_guard::RootGuard::exclusive_by(
-        &ctx.root,
-        Instant::now() + timing::job_retry(),
-        &crate::runner::Cancellation::default(),
-    )?;
+    let root_guard = herdr_farm::execution_guard::retry_open(||
+        herdr_farm::execution_guard::RootGuard::exclusive(&ctx.root))?;
     let current = runtime::snapshot(&dir)?;
     crate::runtime_ownership::check_conflicts(
         ctx,
@@ -697,7 +705,7 @@ pub fn open(ctx: &Ctx, slug: &str, options: &OpenOptions) -> Result<()> {
         &root_guard,
     )?;
     drop(root_guard);
-    let guard = herdr_farm::execution_guard::ProjectGuard::acquire(&dir)?;
+    let guard = herdr_farm::execution_guard::retry_open(|| herdr_farm::execution_guard::ProjectGuard::acquire(&dir))?;
     let agents = call(&h, "coordinator-start-inventory", "agent.list", json!({}))?;
     let matching = agents["agents"]
         .as_array()

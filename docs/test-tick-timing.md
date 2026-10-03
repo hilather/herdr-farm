@@ -27,6 +27,7 @@ values, doctor diagnostics, normal draining, and the unset 15-second cadence.
 | Stop wait / telemetry drain wait | 60 s | Scale; minimum 50 ms |
 | Idle exit | 300 s | Scale; minimum 50 ms |
 | Lock acquisition retry window | 1 s | Scale; minimum 250 ms so transient status/start probes can release their OS lock |
+| Foreground open guard wait / poll | 30 s / 100 ms | Retry only would-block contention; scale both with a 20 ms floor (600 ms / 20 ms at test scale) |
 | Lock poll | 25 ms | Scale; minimum 20 ms |
 | Stop poll | 250 ms | Scale; minimum 50 ms |
 | Main loop wake/spool poll | 500 ms | Scale; minimum 20 ms |

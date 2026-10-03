@@ -5296,13 +5296,13 @@ fn doctor_checks_coordinator_identity_priming_and_memory_owner_without_writing()
     agents("hp-demo-coordinator", "codex", "idle");
     assert!(doctor().0.contains("coordinator kind mismatch: configured `claude` but live agent kind is `codex`"));
 
-    // A migrated SQLite-memory project gets the same identity check, and its
-    // memory-owner and instruction checks, still without writes.
+    // A migrated SQLite-memory marker keeps memory-owner diagnostics and
+    // stops consulting the legacy coordinator identity, still without writes.
     let format = project.join(".state/format.json");
     fs::write(&format, r#"{"version":1,"runtime":"sqlite-v2","memory":"sqlite-v1","migration":"abc","reconciliation_required":true}"#).unwrap();
     let (text, _) = doctor();
     assert!(text.contains("migrated runtime=sqlite-v2 memory=sqlite-v1"), "{text}");
-    assert!(text.contains("coordinator kind mismatch: configured `claude` but live agent kind is `codex`"), "{text}");
+    assert!(!text.contains("coordinator kind mismatch"), "{text}");
     assert!(!text.contains("capability mismatch"), "{text}");
     let instructions = fs::read_to_string(project.join("PROJECT.md")).unwrap();
     fs::write(project.join("PROJECT.md"), format!("{instructions}\nDo not edit MEMORY.md; it is a generated projection.\n")).unwrap();
