@@ -23,7 +23,7 @@ if a==['remote-api-bridge']:
  r=json.loads(sys.stdin.readline());m=r['method'];p=r.get('params') or {};res=None
  if m=='pane.list':res={'panes':[pane()] if s['live'] else []}
  elif m=='agent.list':res={'type':'agent_list','agents':[agent()] if s['live'] and s['agent'] else []}
- elif m=='agent.explain':res={'explain':{'agent':'claude','state':'working' if s['accepted'] else 'idle','manifest_source':'bundled','manifest_version':'fixture-1','matched_rule':{'id':'prompt','state':'idle'},'visible_idle':not s['accepted'],'visible_working':s['accepted'],'visible_blocker':False,'screen_detection_skipped':False,'skip_state_update':False,'local_override_shadowing_remote':False,'fallback_reason':None,'warning':None}}
+ elif m=='agent.explain':res={'explain':{'agent':'claude','state':'working' if s['accepted'] else 'idle','manifest_source':s.get('manifest_source','bundled'),'manifest_version':'fixture-1','matched_rule':{'id':'prompt','state':'idle'},'visible_idle':not s['accepted'],'visible_working':s['accepted'],'visible_blocker':False,'screen_detection_skipped':False,'skip_state_update':False,'local_override_shadowing_remote':s.get('shadow',False),'fallback_reason':None,'warning':None}}
  elif m=='agent.prompt':
   s['prompts'].append(p['text'])
   s['accepted']=len(s['prompts'])>s.get('swallow',0)
@@ -296,4 +296,60 @@ fn socket_open_primes_owned_coordinator_retries_swallowed_prompt_and_recreates_c
     l.ok(&["open", "demo"]);
     l.stop();
     assert_eq!(l.state()["prompts"].as_array().unwrap().len(), sent);
+}
+
+#[test]
+fn socket_coordinator_remote_manifest_and_explicit_local_override_policy() {
+    for mode in ["remote", "remote-shadow", "local", "outside", "symlink", "relative"] {
+        let l = Lab::new();
+        let _listener = UnixListener::bind(l.home.path().join("s"))
+            .expect("socket fixture: sandbox may deny Unix sockets");
+        let state_dir = l.home.path().join(".local/state/herdr/agent-detection/remote");
+        fs::create_dir_all(&state_dir).unwrap();
+        let manifest = state_dir.join("claude.toml");
+        fs::write(&manifest, "fixture").unwrap();
+        let outside = l.home.path().join("outside.toml");
+        fs::write(&outside, "fixture").unwrap();
+        let link = state_dir.join("link.toml");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        let source = match mode {
+            "local" => format!("local:{}", manifest.display()),
+            "outside" => format!("remote:{}", outside.display()),
+            "symlink" => format!("remote:{}", link.display()),
+            "relative" => "remote:relative.toml".into(),
+            _ => format!("remote:{}", manifest.display()),
+        };
+        fs::write(l.home.path().join("herdr-state.json"), serde_json::to_vec(&json!({
+            "creates":0,"starts":0,"prompts":[],"live":false,"agent":false,"accepted":false,
+            "manifest_source":source,"shadow":mode == "local" || mode == "remote-shadow"
+        })).unwrap()).unwrap();
+        let out = l.settled(&["open", "demo"]);
+        if mode != "remote" {
+            assert!(!out.status.success());
+            let error = String::from_utf8_lossy(&out.stderr);
+            assert!(error.contains(if mode == "local" || mode == "remote-shadow" { "local manifest override shadowing remote refused" }
+                else if mode == "relative" { "must be absolute" } else { "outside owner's Herdr state dir" }), "{error}");
+            assert!(l.state()["prompts"].as_array().unwrap().is_empty());
+            let doctor = l.cli(&["doctor"]);
+            assert!(String::from_utf8_lossy(&doctor.stdout).contains("refused:"));
+            if mode != "local" && mode != "remote-shadow" { continue; }
+            let config = l.home.path().join(".config/herdr-farm/config.toml");
+            fs::create_dir_all(config.parent().unwrap()).unwrap();
+            fs::write(config, "[coordinator]\nallow_local_manifest_override = true\n").unwrap();
+            l.ok(&["open", "demo", "--reprime"]);
+        } else {
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        }
+        l.stop();
+        assert_eq!(l.state()["prompts"].as_array().unwrap().len(), 1);
+        let journal: Value = serde_json::from_slice(&fs::read(l.project.join(".state/canonical-coordinator.json")).unwrap()).unwrap();
+        assert_eq!(journal["priming_manifest"]["source"], source);
+        assert_eq!(journal["priming_manifest"]["version"], "fixture-1");
+        assert_eq!(journal["phase"], "accepted");
+        assert!(runtime::snapshot(&l.project).unwrap().ownership.iter().any(|o| o.binding == "coordinator"));
+        let doctor = l.cli(&["doctor"]);
+        let report = String::from_utf8_lossy(&doctor.stdout);
+        assert!(report.contains("coordinator priming manifest:") && report.contains(&source), "{report}");
+        assert!(report.contains("manifest policy accepted"), "{report}");
+    }
 }

@@ -292,6 +292,10 @@ fn report(
                 check(&mut out, Some(true), &label, format!("migrated runtime={runtime} memory={memory}; legacy thread/inbox files are pre-cutover originals"));
                 #[cfg(feature="state-store")]
                 {
+                    match crate::canonical_coordinator::doctor_manifest(env, config_dir, &dir, runner) {
+                        Ok(lines) => for line in lines { check(&mut out, None, &label, line); },
+                        Err(error) => check(&mut out, None, &label, format!("coordinator manifest diagnostics: {error:#}; inspect owner session agent explain")),
+                    }
                     // Doctor always runs the whole-store check and shows the ticker's last one.
                     let last = herdr_farm::store::integrity::load(&dir.join(".state/state.db"))
                         .map_or("none recorded".to_string(), |r| format!("{} at {} (schema {})", r.result, r.checked_unix_ms, r.schema));
