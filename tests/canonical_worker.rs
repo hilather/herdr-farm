@@ -702,6 +702,9 @@ fn accepted_editing_worker_completes_automatically_after_integration() {
     for id in wake["ids"].as_array().unwrap() {
         assert!(items.as_array().unwrap().iter().any(|i| i["content"]["id"] == *id && i["seen"] == false && i["done"] == false));
     }
+    // The lab writes bare instructions into PROJECT.md; context needs the settings header.
+    let instructions = fs::read_to_string(lab.project.join("PROJECT.md")).unwrap();
+    fs::write(lab.project.join("PROJECT.md"), format!("+++\nname = \"demo\"\n+++\n{instructions}")).unwrap();
     let context = lab.cli(&["context", "demo"]);
     assert!(context.status.success(), "{}", String::from_utf8_lossy(&context.stderr));
     let text = String::from_utf8(context.stdout).unwrap();
