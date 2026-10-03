@@ -821,7 +821,7 @@ fn row(project: &Project, t: &Thread, view: Option<&SessionView>, now: jiff::Tim
 pub fn print_list(ctx: &Ctx, slug: &str) -> Result<()> {
     let project = Project::load(&ctx.root, slug)?;
     for row in rows(ctx, &project) {
-        let hint = if row.note == "blocked" { "possible trust or permission prompt; inspect the pane" } else { "" };
+        let hint = if row.note == "blocked" { format!("{}; inspect the pane", crate::agents::blocked_hint(&row.thread.agent)) } else { String::new() };
         println!("{}\t{}\t{}\t{}\t{}", row.thread.id, row.group.label(), row.note, row.thread.title, hint);
     }
     Ok(())

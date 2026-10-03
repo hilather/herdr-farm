@@ -32,3 +32,12 @@ pub fn worker_arguments(safety: &crate::project::Safety, t: &crate::thread::Thre
     }
     safety.effective_worker_arguments(&t.agent, &t.cwd, &repository)
 }
+
+/// Herdr's blocked state has no typed reason; inspect the pane to confirm.
+pub fn blocked_hint(kind: &str) -> &'static str {
+    if kind == "claude" {
+        "possible trust or permission prompt; command may be outside the Claude allow-list (see safety show)"
+    } else {
+        "possible trust or permission prompt"
+    }
+}

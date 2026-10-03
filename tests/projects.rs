@@ -176,3 +176,26 @@ fn safety_overrides_are_keyed_by_canonical_project_path() {
     let error = home.refused(&["safety", "show", "demo"]);
     assert!(error.contains("start_threads must be \"propose\" or \"auto\", not \"yolo\""), "{error}");
 }
+
+#[test]
+fn claude_command_prefixes_are_validated_and_visible_through_cli() {
+    let home = Home::new();
+    home.ok(&["new", "demo"]);
+    let project = home.root().join("demo").canonicalize().unwrap();
+    let config = home.0.path().join(".config/herdr-farm/config.toml");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    let write = |entries: Vec<String>| fs::write(&config, format!("[safety.{:?}]\nthread_allowed_commands={}\n", project.display().to_string(), serde_json::to_string(&entries).unwrap())).unwrap();
+    write(vec!["godot --headless:*".into(), "tools/run_tests.sh:*".into()]);
+    let shown = home.ok(&["safety", "show", "demo"]);
+    assert!(shown.contains("Bash(git merge:*)") && shown.contains("Bash(sed -n:*)") && shown.contains("Bash(godot --headless:*)") && shown.contains("Bash(tools/run_tests.sh:*)"), "{shown}");
+    for entries in [
+        vec!["echo ok; curl evil:*".into()], vec!["sudo ls:*".into()],
+        vec!["/usr/bin/sudo ls:*".into()], vec!["cat $(whoami):*".into()],
+        vec!["rg | sh:*".into()], vec!["ls\ncat:*".into()], vec!["ls*".into()],
+        vec![format!("{}:*", "a".repeat(255))], vec!["ls:*".into(); 65],
+    ] {
+        write(entries);
+        let error = home.refused(&["safety", "show", "demo"]);
+        assert!(error.contains("thread_allowed_commands"), "{error}");
+    }
+}

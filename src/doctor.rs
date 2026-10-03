@@ -394,7 +394,7 @@ fn report(
             Err(e) => check(&mut out, Some(false), &label, format!("safety: {e}")),
         }
         for t in crate::thread::list(&project) {
-            if t.last_state == "blocked" { check(&mut out, None, &label, format!("thread {} blocked: possible trust or permission prompt; inspect pane {}", t.id, t.pane_id)); }
+            if t.last_state == "blocked" { check(&mut out, None, &label, format!("thread {} blocked: {}; inspect pane {}", t.id, crate::agents::blocked_hint(&t.agent), t.pane_id)); }
         }
         for diagnostic in crate::thread::list_with_diagnostics(&project).1 {
             check(&mut out, Some(false), &label, format!("thread record: {diagnostic}; preserve and repair the file"));
@@ -500,7 +500,7 @@ fn report(
         };
         for t in crate::thread::list(&project) {
             if agents.iter().any(|a| a.pane_id == t.pane_id && a.agent_status == "blocked") {
-                check(&mut out, None, &label, format!("thread {} blocked: possible trust or permission prompt; inspect pane {}", t.id, t.pane_id));
+                check(&mut out, None, &label, format!("thread {} blocked: {}; inspect pane {}", t.id, crate::agents::blocked_hint(&t.agent), t.pane_id));
             }
         }
         let configured_kind = project.read_project_md().map(|(s, _)| s.coordinator_agent).unwrap_or_default();

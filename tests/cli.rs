@@ -1618,7 +1618,11 @@ fn ticker_local_and_remote_launches_acknowledge_once_and_recover_lost_replies() 
         assert!(Command::new("git").arg("-C").arg(&repository).args(["worktree","add","-qb","worker"]).arg(&source).status().unwrap().success());
         let kind=match case {"claude"=>"claude", "other"=>"gemini", _=>"codex"};
         let expected: Vec<String> = match case {
-            "claude" => vec!["--permission-mode".into(),"acceptEdits".into()],
+            "claude" => {
+                let mut args = vec!["--permission-mode".into(), "acceptEdits".into(), "--allowedTools".into()];
+                args.extend(["git status", "git log", "git diff", "git show", "git branch", "git checkout", "git switch", "git add", "git commit", "git merge", "git rebase", "git cherry-pick", "git restore", "git rev-parse", "git ls-files", "git worktree list", "ls", "cat", "head", "tail", "wc", "grep", "rg", "find", "sed -n"].map(|prefix| format!("Bash({prefix}:*)")));
+                args
+            },
             "empty" | "empty-bound" | "other" => Vec::new(),
             "explicit" => vec!["--custom".into()],
             _ => {
@@ -5266,7 +5270,7 @@ fn doctor_checks_coordinator_identity_priming_and_memory_owner_without_writing()
     fs::write(&thread_record,toml::to_string(&serde_json::json!({"id":"t-0001","status":"open","kind":"adopted","cwd":cwd,"thread_dir":cwd,"workspace_id":"w1","tab_id":"w1:t1","pane_id":"w1:p1","agent":"claude","agent_name":"hp-demo-coordinator","created":jiff::Timestamp::now().to_string()})).unwrap()).unwrap();
     agents("hp-demo-coordinator", "claude", "blocked");
     let text=doctor().0;
-    assert!(text.contains("thread t-0001 blocked: possible trust or permission prompt"), "{text}");
+    assert!(text.contains("thread t-0001 blocked: possible trust or permission prompt") && text.contains("Bash(git merge:*)") && text.contains("command may be outside the Claude allow-list"), "{text}");
     let out=Command::new(BIN).env_clear().env("HOME",h).env("PATH","/usr/bin:/bin").env("HERDR_BIN_PATH",&herdr).args(["--root",r,"thread","status","demo"]).output().unwrap();
     assert!(out.status.success(), "{}",String::from_utf8_lossy(&out.stderr));
     assert!(String::from_utf8_lossy(&out.stdout).contains("possible trust or permission prompt"));

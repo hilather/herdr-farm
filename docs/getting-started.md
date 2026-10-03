@@ -57,8 +57,16 @@ Each code thread opens as its own workspace on a branch named `hp/<project>/<id>
 Codex workers start with launch-only trust for their worktree and repository root,
 a workspace-write sandbox and on-request approval. Network is off; set
 `thread_network = true` in the project's safety settings when workers need
-downloads. Claude workers use `--permission-mode acceptEdits`, but the first
-thread in a new repository may still need you to answer Claude's folder-trust
+downloads. Claude workers use `--permission-mode acceptEdits` and a built-in
+`--allowedTools` list for local Git workflows and shell reads. To pre-approve a
+project command, add `thread_allowed_commands = ["godot --headless:*",
+"tools/run_tests.sh:*"]` under `[safety."<canonical project path>"]` in the
+config file printed by `safety show`. These validated prefixes extend Claude's
+defaults; Codex workers use their sandbox instead. Legacy Claude workers run
+with your permissions: prefix approvals do not enforce worktree confinement.
+`safety show` and `doctor` display the effective rules. A blocked command may
+be outside the allow-list; inspect its pane before approving or adding a prefix.
+The first thread in a new repository may still need you to answer Claude's folder-trust
 dialog in its pane. `thread list` preserves the `blocked` state and shows a
 separate hint column; `doctor` flags possible trust or permission prompts.
 An explicit `thread_agent_args` replaces the defaults,

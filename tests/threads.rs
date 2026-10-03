@@ -210,7 +210,7 @@ fn thread_list_groups_every_record_and_live_state() {
     for line in output.lines() {
         let fields: Vec<_> = line.split('\t').collect();
         assert_eq!(fields.len(), 5, "{line}");
-        assert_eq!(fields[4], if fields[2] == "blocked" { "possible trust or permission prompt; inspect the pane" } else { "" });
+        assert_eq!(fields[4], if fields[2] == "blocked" { "possible trust or permission prompt; command may be outside the Claude allow-list (see safety show); inspect the pane" } else { "" });
     }
     // Listing observes; it never rewrites a record.
     let after = fs::read_dir(lab.project().join("threads")).unwrap().map(|e| fs::read(e.unwrap().path()).unwrap()).collect::<Vec<_>>();
@@ -551,6 +551,8 @@ fn thread_start_uses_agent_arguments_only_for_the_kind_they_are_bound_to() {
         ("thread_agent_args=['--vendor-option']\n", "claude", "thread_agent_args is not bound to an agent kind"),
         ("thread_agent_args=['--vendor-option']\nthread_agent_args_kind='claude'\n", "codex", "thread_agent_args belongs to agent kind `claude`, not requested kind `codex`"),
         ("thread_agent_args=[\"bad\\u0000argument\"]\nthread_agent_args_kind='claude'\n", "claude", "exceeds argument limits or contains NUL"),
+        ("thread_allowed_commands=['echo ok; curl evil:*']\n", "claude", "invalid thread_allowed_commands entry"),
+        ("thread_allowed_commands=['sudo ls:*']\n", "claude", "invalid thread_allowed_commands entry"),
         ("", "9bad", "invalid agent kind identifier"),
     ] {
         fs::write(&config, format!("{safety}{args}")).unwrap();

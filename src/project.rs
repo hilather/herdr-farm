@@ -206,11 +206,21 @@ pub struct Safety {
     pub coordinator_agent_args_kind: Option<String>,
     pub thread_agent_args: Vec<String>,
     pub thread_agent_args_kind: Option<String>,
+    pub thread_allowed_commands: Vec<String>,
     pub thread_network: bool,
     #[serde(skip)]
     pub thread_agent_args_explicit: bool,
     pub routine_commands: bool,
 }
+
+// Claude Code Bash prefix permission rules; never allow a bare `git` or shell.
+const CLAUDE_WORKER_COMMANDS: &[&str] = &[
+    "git status", "git log", "git diff", "git show", "git branch",
+    "git checkout", "git switch", "git add", "git commit", "git merge",
+    "git rebase", "git cherry-pick", "git restore", "git rev-parse",
+    "git ls-files", "git worktree list", "ls", "cat", "head", "tail", "wc",
+    "grep", "rg", "find", "sed -n",
+];
 
 impl Safety {
     pub fn worker_arguments(&self,kind:&str)->Result<&[String]> {crate::agents::arguments(kind,self.thread_agent_args_kind.as_deref(),&self.thread_agent_args,"thread_agent_args")}
@@ -231,10 +241,30 @@ impl Safety {
                 args.extend(["--sandbox", "workspace-write", "--ask-for-approval", "on-request"].map(String::from));
                 if self.thread_network { args.extend(["-c".into(), "sandbox_workspace_write.network_access=true".into()]); }
             }
-            "claude" => args.extend(["--permission-mode", "acceptEdits"].map(String::from)),
+            "claude" => {
+                self.validate_thread_allowed_commands()?;
+                args.extend(["--permission-mode", "acceptEdits", "--allowedTools"].map(String::from));
+                args.extend(CLAUDE_WORKER_COMMANDS.iter().map(|prefix| format!("Bash({prefix}:*)")));
+                args.extend(self.thread_allowed_commands.iter().map(|prefix| format!("Bash({prefix})")));
+            }
             _ => {}
         }
         Ok(args)
+    }
+    fn validate_thread_allowed_commands(&self) -> Result<()> {
+        anyhow::ensure!(self.thread_allowed_commands.len() <= 64, "thread_allowed_commands accepts at most 64 entries");
+        for command in &self.thread_allowed_commands {
+            let prefix = command.strip_suffix(":*").unwrap_or("");
+            let executable = prefix.split_whitespace().next().unwrap_or("");
+            anyhow::ensure!(
+                command.len() <= 256 && !prefix.is_empty() && prefix.trim() == prefix
+                    && prefix.bytes().all(|c| c.is_ascii_alphanumeric() || b" /._-".contains(&c))
+                    && !executable.starts_with('-')
+                    && executable.rsplit('/').next() != Some("sudo"),
+                "invalid thread_allowed_commands entry {command:?}: use a command prefix ending in :*, at most 256 bytes, without shell metacharacters or leading sudo"
+            );
+        }
+        Ok(())
     }
     pub fn worker_summary(&self) -> String {
         let mut kinds = vec!["codex", "claude", "other"];
@@ -267,6 +297,7 @@ impl Default for Safety {
             coordinator_agent_args_kind: None,
             thread_agent_args: Vec::new(),
             thread_agent_args_kind: None,
+            thread_allowed_commands: Vec::new(),
             thread_network: false,
             thread_agent_args_explicit: false,
             routine_commands: false,
@@ -450,6 +481,7 @@ pub fn parse_safety(text:&str,canonical_project_dir:&Path)->Result<Safety> {
     }
     anyhow::ensure!(matches!(safety.cleanup_resolved.as_str(), "auto" | "keep"), "cleanup_resolved must be auto or keep");
     anyhow::ensure!(matches!(safety.resolve_threads.as_str(), "propose" | "auto"), "resolve_threads must be propose or auto");
+    safety.validate_thread_allowed_commands()?;
     Ok(safety)
 }
 
