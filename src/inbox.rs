@@ -229,7 +229,8 @@ mod tests {
 /// Poll without holding a project lock or marking anything seen.
 pub fn wait(ctx: &crate::paths::Ctx, slug: &str, timeout: u64) -> Result<()> {
     let dir = ctx.root.join(slug);
-    let deadline = std::time::Instant::now() + crate::timing::retry(std::time::Duration::from_secs(timeout));
+    // The caller's timeout is a real deadline; only the poll interval follows the test time scale.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout);
     loop {
         let ids: Vec<String>;
         #[cfg(feature="state-store")]
