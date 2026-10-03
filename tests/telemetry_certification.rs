@@ -238,7 +238,7 @@ fn replayed_observations_are_accepted_once() {
 
 /// Run `n` copies of a telemetry command at once; returns the failures' stderr.
 fn race(f: &Fixture, args: &[&str], n: usize) -> Vec<String> {
-    let racers: Vec<_> = (0..n).map(|_| Command::new(BIN).env_clear().env("HOME", f.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
+    let racers: Vec<_> = (0..n).map(|_| Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", f.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
         .args(["--root", f.root.to_str().unwrap(), "telemetry", "demo"]).args(args)
         .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).spawn().unwrap()).collect();
     racers.into_iter().map(|c| c.wait_with_output().unwrap()).filter(|o| !o.status.success()).map(|o| String::from_utf8_lossy(&o.stderr).into_owned()).collect()
@@ -778,7 +778,7 @@ fn killed_collectors_partial_lines_and_outages_replay_identically() {
         f.sidecar().query_row("SELECT count(*) FROM codex_usage WHERE session_id LIKE '%0a1_'", [], |r| r.get::<_, i64>(0)).unwrap_or(0) } else { 0 };
     let (mut delay, mut interrupted) = (20, false);
     loop {
-        let mut child = Command::new(BIN).env_clear().env("HOME", f.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
+        let mut child = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", f.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
             .args(["--root", f.root.to_str().unwrap(), "telemetry", "demo", "collect"]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap();
         std::thread::sleep(Duration::from_millis(delay));
         let killed = child.try_wait().unwrap().is_none();

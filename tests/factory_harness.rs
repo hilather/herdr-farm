@@ -1325,7 +1325,7 @@ fn task_without_contract_is_unscoped() {
 #[cfg(target_os = "linux")]
 fn telemetry_attempts(project: &Path) -> serde_json::Value {
     let root = project.parent().unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_herdr-farm")).env_clear().env("HOME", root)
+    let out = Command::new(env!("CARGO_BIN_EXE_herdr-farm")).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", root)
         .args(["--root", root.to_str().unwrap(), "telemetry", project.file_name().unwrap().to_str().unwrap(), "attempts", "--json"]).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     serde_json::from_slice(&out.stdout).unwrap()
@@ -4342,11 +4342,11 @@ fn main() {
                 assert_eq!(observations[1]["outcome"],"pass");
                 assert_eq!(observations[1]["tests"]["results"],serde_json::json!([{"name":"racy","outcome":"pass"}]));
                 for _ in 0..2 {
-                    let collect = Command::new(env!("CARGO_BIN_EXE_herdr-farm")).env_clear().env("HOME",tmp.path())
+                    let collect = Command::new(env!("CARGO_BIN_EXE_herdr-farm")).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME",tmp.path())
                         .args(["--root",tmp.path().to_str().unwrap(),"telemetry","project","quality","collect"]).output().unwrap();
                     assert!(collect.status.success(),"{}",String::from_utf8_lossy(&collect.stderr));
                 }
-                let report = Command::new(env!("CARGO_BIN_EXE_herdr-farm")).env_clear().env("HOME",tmp.path())
+                let report = Command::new(env!("CARGO_BIN_EXE_herdr-farm")).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME",tmp.path())
                     .args(["--root",tmp.path().to_str().unwrap(),"telemetry","project","quality","flaky"]).output().unwrap();
                 assert!(report.status.success(),"{}",String::from_utf8_lossy(&report.stderr));
                 let report:serde_json::Value=serde_json::from_slice(&report.stdout).unwrap();

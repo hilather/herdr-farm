@@ -11,9 +11,9 @@ use crate::herdr::{Agent, Pane, ready_state};
 use crate::project::{self, Project, slugify, write_atomic};
 use crate::runner::{Cmd, Runner};
 
-pub const STARTING_TIMEOUT_SECS: i64 = 300;
-pub const BLOCKED_DEBOUNCE_SECS: i64 = 30;
-pub const NOT_READY_SECS: i64 = 60;
+pub use crate::timing::STARTING_TIMEOUT_SECS;
+pub use crate::timing::BLOCKED_DEBOUNCE_SECS;
+pub use crate::timing::NOT_READY_SECS;
 pub const MEMORY_CAP_CHARS: usize = 32_000;
 pub const LIBRARY_CAP_KB: u64 = 50 * 1024;
 pub const MAX_LAUNCH_ATTEMPTS: u32 = 3;
@@ -489,7 +489,7 @@ pub fn group(thread: &Thread, live: &Live, now: jiff::Timestamp) -> Group {
     }
     // 2
     if thread.status == Status::Starting {
-        return if seconds_since(&thread.created, now) < STARTING_TIMEOUT_SECS {
+        return if seconds_since(&thread.created, now) < crate::timing::seconds(STARTING_TIMEOUT_SECS) {
             Group::Working
         } else {
             Group::WaitingOnYou
@@ -498,9 +498,9 @@ pub fn group(thread: &Thread, live: &Live, now: jiff::Timestamp) -> Group {
     // 3
     let stuck_launch = thread.prompt_pending
         && state.is_some_and(|s| !ready_state(s))
-        && live.state_secs >= NOT_READY_SECS;
+        && live.state_secs >= crate::timing::seconds(NOT_READY_SECS);
     let pane_gone_without_report = !live.pane_exists && !has_report;
-    let blocked_long = state == Some("blocked") && live.state_secs >= BLOCKED_DEBOUNCE_SECS;
+    let blocked_long = state == Some("blocked") && live.state_secs >= crate::timing::seconds(BLOCKED_DEBOUNCE_SECS);
     if thread.status == Status::Failed || stuck_launch || pane_gone_without_report || blocked_long || launch_delivery::needs_reconciliation(thread,live) {
         return Group::WaitingOnYou;
     }

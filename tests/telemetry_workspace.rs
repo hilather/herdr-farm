@@ -39,7 +39,7 @@ fn hex(seed: &str) -> String { format!("{:x}", Sha256::digest(seed.as_bytes())) 
 
 /// Run the binary with a clean environment: `home` as HOME, the fake herdr, optional stdin.
 fn run(home: &Path, root: &Path, args: &[&str], env: &[(&str, &str)], stdin: &str) -> Output {
-    let mut child = Command::new(BIN).env_clear().env("HOME", home).env("PATH", "/usr/bin:/bin").envs(env.iter().copied())
+    let mut child = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", home).env("PATH", "/usr/bin:/bin").envs(env.iter().copied())
         .args(["--root", root.to_str().unwrap()]).args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
     child.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
     child.wait_with_output().unwrap()
@@ -601,7 +601,7 @@ impl Lab {
     fn root(&self) -> PathBuf { self.home.path().join("root") }
     fn cli(&self, args: &[&str]) -> Output { run(self.home.path(), &self.root(), args, &[("HERDR_BIN_PATH", self.fake.to_str().unwrap())], "") }
     fn ticker(&self) -> Ticker {
-        let spawn = || Ticker(Command::new(BIN).env_clear().env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", &self.fake)
+        let spawn = || Ticker(Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", &self.fake)
             .args(["--root", self.root().to_str().unwrap(), "ticker", "run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
         let mut ticker = spawn();
         let deadline = Instant::now() + Duration::from_secs(20);

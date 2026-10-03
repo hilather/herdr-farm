@@ -21,11 +21,7 @@ use crate::project::{self, Project, Status};
 use crate::steps::{self, Memory, Transition};
 use crate::{inbox, thread, threads};
 
-pub const TICK: Duration = Duration::from_secs(15);
-const STOP_WAIT: Duration = Duration::from_secs(60);
-const IDLE_EXIT: Duration = Duration::from_secs(300);
 const LOG_CAP: u64 = 1_000_000;
-const LOCK_RETRY: Duration = Duration::from_secs(1);
 
 fn lock_path(root: &Path) -> PathBuf {
     root.join(".ticker.lock")
@@ -185,7 +181,7 @@ fn read_info(file: &mut File) -> Info {
 /// probe (`ticker status`, `ticker start`'s decision) must not read as a
 /// running ticker.
 fn acquire(lock: &File) -> bool {
-    let deadline = Instant::now() + LOCK_RETRY;
+    let deadline = Instant::now() + crate::timing::lock_retry();
     loop {
         if lock.try_lock().is_ok() {
             return true;
@@ -193,7 +189,7 @@ fn acquire(lock: &File) -> bool {
         if Instant::now() >= deadline {
             return false;
         }
-        std::thread::sleep(Duration::from_millis(25));
+        std::thread::sleep(crate::timing::lock_poll());
     }
 }
 
@@ -278,16 +274,16 @@ pub fn stop(root: &Path) -> Result<()> {
         return Ok(());
     }
     std::fs::write(stop_path(root), b"")?;
-    let deadline = Instant::now() + STOP_WAIT;
+    let deadline = Instant::now() + crate::timing::stop_wait();
     while Instant::now() < deadline {
         if lock_state(root) == LockState::Free {
             let _ = std::fs::remove_file(stop_path(root));
             return Ok(());
         }
-        std::thread::sleep(Duration::from_millis(250));
+        std::thread::sleep(crate::timing::stop_poll());
     }
     let _ = std::fs::remove_file(stop_path(root));
-    bail!("the ticker did not exit within {} seconds", STOP_WAIT.as_secs())
+    bail!("the ticker did not exit within {} seconds", crate::timing::stop_wait().as_secs())
 }
 
 pub fn status(root: &Path) -> Result<()> {
@@ -349,7 +345,8 @@ impl Log {
 /// The loop. Exits when another ticker holds the lock, when the stop file
 /// appears, or when no project has had a reachable session or enabled canonical
 /// routine for five minutes.
-pub fn run(ctx: &Ctx) -> Result<()> {
+pub fn run_passes(ctx: &Ctx, passes: Option<u64>) -> Result<()> {
+    anyhow::ensure!(passes.is_none() || crate::timing::scale().is_some(), "--passes requires HERDR_FARM_TEST_TIME_SCALE in an isolated test lab");
     let root = &ctx.root;
     if project::list_slugs(root).is_empty() {
         return Ok(());
@@ -389,6 +386,7 @@ pub fn run(ctx: &Ctx) -> Result<()> {
     log.line(&format!("ticker {} started (pid {})", info.version, info.pid));
     let mut last_reachable = Instant::now();
     let mut memory = background_memory(ctx)?;
+    let mut completed = 0;
     loop {
         if stop_path(root).exists() {
             log.line("stop file found; cancelling and draining shared executor");
@@ -397,8 +395,13 @@ pub fn run(ctx: &Ctx) -> Result<()> {
         let entered = Instant::now();
         if tick(ctx, &log, &mut memory) {
             last_reachable = Instant::now();
-        } else if last_reachable.elapsed() > IDLE_EXIT && !memory.observations_unknown() {
+        } else if passes.is_none() && last_reachable.elapsed() > crate::timing::idle_exit() && !memory.observations_unknown() {
             log.line("no reachable session or enabled canonical routine for five minutes; draining shared executor");
+            return drain_executor(root, &log, &mut memory);
+        }
+        completed += 1;
+        if passes.is_some_and(|limit| completed >= limit) {
+            log.line(&format!("completed {completed} passes; draining shared executor"));
             return drain_executor(root, &log, &mut memory);
         }
         let wake=entered+next_tick_delay(&memory);
@@ -417,7 +420,7 @@ pub fn run(ctx: &Ctx) -> Result<()> {
                     Err(error)=>log.line(&format!("{slug}: submission spool: {error:#}")),
                 }
             }
-            std::thread::sleep(Duration::from_millis(500).min(wake.saturating_duration_since(Instant::now())));
+            std::thread::sleep(crate::timing::wake_poll().min(wake.saturating_duration_since(Instant::now())));
         }
     }
 }
@@ -426,10 +429,10 @@ pub fn run(ctx: &Ctx) -> Result<()> {
 /// launch lease. Ordinary idle and legacy polling keeps the normal cadence.
 pub(crate) fn next_tick_delay(memory:&Memory)->Duration {
     #[cfg(feature="state-store")]
-    if memory.copy_jobs.as_ref().is_some_and(|q|q.canonical_work_pending()){return Duration::from_millis(250);}
+    if memory.copy_jobs.as_ref().is_some_and(|q|q.canonical_work_pending()){return crate::timing::canonical_pass();}
     #[cfg(not(feature="state-store"))]
     let _=memory;
-    TICK
+    crate::timing::tick()
 }
 
 /// Shared production executor and services, also exercised by ticker acceptance.
@@ -676,12 +679,9 @@ static TELEMETRY_DERIVED:std::sync::Mutex<Option<herdr_farm::telemetry::backgrou
 // Graceful shutdown preserves a whole telemetry pass, but crash-safe work must
 // not keep the ticker alive indefinitely if a lane stalls.
 #[cfg(feature="state-store")]
-const TELEMETRY_SHUTDOWN_WAIT:Duration=Duration::from_secs(60);
-
-#[cfg(feature="state-store")]
 fn drain_telemetry(log:&Log) {
     let Ok(mut running)=TELEMETRY_RUNNING.lock() else {return};
-    let deadline=Instant::now()+TELEMETRY_SHUTDOWN_WAIT;
+    let deadline=Instant::now()+crate::timing::stop_wait();
     if running.as_ref().is_some_and(|pass|!pass.is_finished()) {log.line("waiting for telemetry pass");}
     while running.as_ref().is_some_and(|pass|!pass.is_finished()) {
         let remaining=deadline.saturating_duration_since(Instant::now());
@@ -689,7 +689,7 @@ fn drain_telemetry(log:&Log) {
             log.line("telemetry pass still running at shutdown; exiting (the pass is crash-safe)");
             return;
         }
-        std::thread::sleep(Duration::from_millis(50).min(remaining));
+        std::thread::sleep(crate::timing::shutdown_poll().min(remaining));
     }
     if let Some(pass)=running.take() {let _=pass.join();}
     if let Ok(mut derived)=TELEMETRY_DERIVED.lock() && let Some(worker)=derived.as_mut() {
@@ -700,7 +700,7 @@ fn drain_telemetry(log:&Log) {
                 log.line("telemetry derived lanes still running at shutdown; exiting (the pass is crash-safe)");
                 return;
             }
-            std::thread::sleep(Duration::from_millis(50).min(remaining));
+            std::thread::sleep(crate::timing::shutdown_poll().min(remaining));
         }
         worker.reap();
     }
@@ -723,16 +723,16 @@ fn telemetry_pass(ctx:&Ctx,log:&Log,session:&str) {
     // Last operating sample and collection, respectively; only this scheduler
     // touches these clocks, so the worker never holds a scheduling mutex.
     static LAST:std::sync::Mutex<std::collections::BTreeMap<PathBuf,TelemetryTimes>>=std::sync::Mutex::new(std::collections::BTreeMap::new());
-    let secs=ctx.env.var("HERDR_FARM_TELEMETRY_COLLECT_SECS").and_then(|v|v.parse().ok()).unwrap_or(300u64);
+    let secs=ctx.env.var("HERDR_FARM_TELEMETRY_COLLECT_SECS").and_then(|v|v.parse().ok()).unwrap_or(crate::timing::TELEMETRY_COLLECT_SECS);
     if secs==0 {return;}
     let Ok(mut running)=TELEMETRY_RUNNING.lock() else {return};
     if running.as_ref().is_some_and(|pass|!pass.is_finished()) {return;}
     if let Some(pass)=running.take() {let _=pass.join();}
     // Cadence slots start before controller work. Comparing callback times
     // directly can miss every other 15-s tick when a later poll is faster.
-    let slot=TELEMETRY_START.get_or_init(Instant::now).elapsed().as_secs()/TICK.as_secs();
+    let slot=(TELEMETRY_START.get_or_init(Instant::now).elapsed().as_nanos()/crate::timing::tick().as_nanos()).min(u64::MAX as u128) as u64;
     let Ok(mut scan)=SCAN.lock() else {return};
-    if scan.is_some_and(|(at,old)|old==slot&&at.elapsed()<Duration::from_secs(secs)) {return;}
+    if scan.is_some_and(|(at,old)|old==slot&&at.elapsed()<crate::timing::pass(Duration::from_secs(secs))) {return;}
     *scan=Some((Instant::now(),slot));
     let Ok(mut last)=LAST.lock() else {return};
     let mut observations=Vec::new();
@@ -745,7 +745,7 @@ fn telemetry_pass(ctx:&Ctx,log:&Log,session:&str) {
         if existing && observed!=Some(slot) {
             observations.push((slug.clone(),project.clone()));
         }
-        if collected.is_none_or(|at|at.elapsed()>=Duration::from_secs(secs)) {
+        if collected.is_none_or(|at|at.elapsed()>=crate::timing::pass(Duration::from_secs(secs))) {
             let configured=existing || match codex::collection_configured(&project).and_then(|native| {
                 if native {Ok(true)} else {herdr_farm::telemetry::otlp::configured(&project,&ctx.config_dir)}
             }) {
@@ -764,7 +764,7 @@ fn telemetry_pass(ctx:&Ctx,log:&Log,session:&str) {
     let pass=std::thread::Builder::new().name("telemetry-pass".into()).spawn(move||{
         herdr_farm::telemetry::background::idle_priority(|warning|line.line(warning));
         for (slug,project) in &observations {
-            if let Err(error)=operating::observe_project(project,&session,TICK.as_millis() as i64) {line.line(&format!("{slug}: operating observation: {error:#}"));}
+            if let Err(error)=operating::observe_project(project,&session,crate::timing::tick().as_millis() as i64) {line.line(&format!("{slug}: operating observation: {error:#}"));}
         }
         let Some((slug,project,existing,_))=due else {return};
         if let Err(error)=herdr_farm::telemetry::otlp::start_configured(&project,&otlp_config) {line.line(&format!("{slug}: OTLP config: {error}"));}
@@ -772,7 +772,7 @@ fn telemetry_pass(ctx:&Ctx,log:&Log,session:&str) {
         // A source-backed collect can opt a previously untouched project in.
         // Start its observed prefix now, without backfilling any earlier time.
         if !existing&&sidecar::path(&project).is_file()
-            && let Err(error)=operating::observe_project(&project,&session,TICK.as_millis() as i64) {line.line(&format!("{slug}: operating observation: {error:#}"));}
+            && let Err(error)=operating::observe_project(&project,&session,crate::timing::tick().as_millis() as i64) {line.line(&format!("{slug}: operating observation: {error:#}"));}
         if let Err(error)=herdr_farm::telemetry::accounting::tick(&project,codex::Budget::TICK) {line.line(&format!("{slug}: telemetry accounting tick: {error:#}"));}
         if let Ok(mut derived)=TELEMETRY_DERIVED.lock() {
             if derived.is_none() {
@@ -877,7 +877,7 @@ fn admit_effects(log:&Log,memory:&mut Memory)->bool {
 
 #[cfg(test)]
 pub fn tick_for_test(ctx: &Ctx, memory: &mut Memory) -> bool {
-    memory.advance_clock(TICK);
+    memory.advance_clock(crate::timing::tick());
     let dir = std::env::temp_dir().join(format!("hp-test-log-{}", std::process::id()));
     tick(ctx, &Log { path: dir }, memory)
 }
@@ -931,7 +931,7 @@ fn thread_pass(project: &Project, herdr: &Herdr, threads: &[thread::Thread], age
     let mut pass = Pass { transitions: Vec::new(), recorded_panes: 0, missing_panes: 0, error: None };
     for t in threads {
         if t.status == thread::Status::Starting {
-            if thread::seconds_since(&t.created, now) >= thread::STARTING_TIMEOUT_SECS {
+            if thread::seconds_since(&t.created, now) >= crate::timing::seconds(thread::STARTING_TIMEOUT_SECS) {
                 thread::update(project, &t.id, |t| {
                     t.status = thread::Status::Failed;
                     t.error = "still starting after five minutes".into();
@@ -951,7 +951,7 @@ fn thread_pass(project: &Project, herdr: &Herdr, threads: &[thread::Thread], age
         // A remote thread is polled once a minute, so `blocked` at a poll
         // already counts: there is no finer clock to debounce against.
         if t.is_remote() && state == "blocked" {
-            live.state_secs = live.state_secs.max(thread::BLOCKED_DEBOUNCE_SECS);
+            live.state_secs = live.state_secs.max(crate::timing::seconds(thread::BLOCKED_DEBOUNCE_SECS));
         }
 
         let mut delivered = false;

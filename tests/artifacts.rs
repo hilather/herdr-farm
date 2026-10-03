@@ -51,7 +51,7 @@ impl Lab {
     fn project(&self, slug: &str) -> PathBuf { self.path("root").join(slug) }
     fn command(&self) -> Command {
         let mut command = Command::new(BIN);
-        command.env_clear().env("HOME", self.home.path()).env("PATH", format!("{}:/usr/bin:/bin", self.path("bin").display()))
+        command.env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.home.path()).env("PATH", format!("{}:/usr/bin:/bin", self.path("bin").display()))
             .env("HERDR_BIN_PATH", self.path("herdr")).env("HERDR_PROJECTS_REMOTE_BIN", self.path("helper")).arg("--root").arg(self.path("root"));
         command
     }
@@ -142,7 +142,7 @@ impl Lab {
 struct Ticker<'a> { lab: &'a Lab, child: std::process::Child }
 impl Ticker<'_> {
     fn wait_for(&mut self, what: &str, done: impl Fn() -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(300);
+        let deadline = Instant::now() + Duration::from_secs(75);
         while !done() {
             assert!(self.child.try_wait().unwrap().is_none(), "ticker exited while waiting for {what}");
             assert!(Instant::now() < deadline, "timed out waiting for {what}; ticker log:\n{}",

@@ -445,7 +445,7 @@ fn tv_ms(tv: libc::timeval) -> f64 { tv.tv_sec as f64 * 1e3 + tv.tv_usec as f64 
 /// The CLI command for dataset `d`, clean environment, no real Herdr.
 fn command(d: &Dataset, args: &[&str]) -> Command {
     let mut c = Command::new(BIN);
-    c.env_clear().env("HOME", d.home()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", "/bin/false")
+    c.env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", d.home()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", "/bin/false")
         .args(["--root", d.root.to_str().unwrap()]).args(args);
     c
 }
@@ -770,7 +770,7 @@ fn ticker_collects_recorded_sources_before_observing_a_new_sidecar() {
     for suffix in ["","-wal","-shm"] {let _=fs::remove_file(format!("{}{suffix}",d.sidecar().display()));}
     let mut child=Ticker(command(&d,&["ticker","run"]).env("HERDR_PROJECTS_TELEMETRY_COLLECT_SECS","1")
         .stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
-    let deadline=Instant::now()+Duration::from_secs(30);
+    let deadline=Instant::now()+Duration::from_secs(15);
     loop {
         let ready=rusqlite::Connection::open_with_flags(d.sidecar(),rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()
             .and_then(|db|db.query_row("SELECT count(*) FROM usage_entries WHERE basis='delta'",[],|r|r.get::<_,i64>(0)).ok())==Some(d.totals.records);
@@ -823,7 +823,7 @@ fn ticker_batched_telemetry_resumes_after_kill() {
         .stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
     let log = || fs::read_to_string(d.root.join(".ticker.log")).unwrap_or_default();
     let mut killed = start();
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(15);
     let mut observed_priority = false;
     loop {
         for entry in fs::read_dir(format!("/proc/{}/task", killed.0.id())).unwrap().flatten() {
@@ -852,7 +852,7 @@ fn ticker_batched_telemetry_resumes_after_kill() {
     let persisted: (u64, u64) = rusqlite::Connection::open(d.sidecar()).unwrap().query_row("SELECT o.byte_offset,c.byte_offset FROM collect_offsets o JOIN source_cursors c ON c.source=o.path_digest WHERE o.path_digest=?1", [&key], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
     assert_eq!(persisted, (prefix, prefix), "input and envelope cursors commit together");
     let mut resumed = start();
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         let records: i64 = rusqlite::Connection::open(d.sidecar()).unwrap().query_row("SELECT count(*) FROM usage_entries WHERE basis='delta'", [], |r| r.get(0)).unwrap();
         if offset() == end && records == d.totals.records { break; }
@@ -914,7 +914,7 @@ fn stalled_exporter(d: &Dataset) -> (std::process::Child, std::os::fd::OwnedFd) 
     let child = command(d, &["telemetry", "demo", "export", "--metric", "M02", "--drill", "denominator", "--page-size", "500", "--external"])
         .stdout(Stdio::from(writer)).stderr(Stdio::null()).spawn().unwrap();
     // Until its query has run and the page is waiting on the pipe.
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
         let stat = fs::read_to_string(format!("/proc/{}/wchan", child.id())).unwrap_or_default();
         if stat.contains("pipe") { break; }
@@ -1119,13 +1119,13 @@ fn scale_2_queries() {
                     // Preserve the normal fixture environment when comparing
                     // a preserved release CLI on the same disk dataset.
                     let mut c = Command::new(binary);
-                    c.env_clear().env("HOME", d.home()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", "/bin/false")
+                    c.env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", d.home()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", "/bin/false")
                         .args(["--root", d.root.to_str().unwrap(), "telemetry", "demo"]).args(args);
                     measure(c).ok()
                 } else { telemetry(&d, args).ok() };
                 if let Some(binary) = &comparison_bin && (*name == "compare M02" || set == "p9") {
                     let mut c = Command::new(binary);
-                    c.env_clear().env("HOME", d.home()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", "/bin/false")
+                    c.env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", d.home()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", "/bin/false")
                         .args(["--root", d.root.to_str().unwrap(), "telemetry", "demo"]).args(args);
                     let baseline = measure(c).ok().stdout;
                     if *name == "compare M02" { assert_eq!(run.stdout, baseline, "compare bytes differ from baseline"); }
@@ -1819,7 +1819,7 @@ fn scale_8_accounting_pass() {
         None => telemetry(d, args),
         Some(bin) => measure({
             let mut c = Command::new(bin);
-            c.env_clear().env("HOME", d.home()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", "/bin/false")
+            c.env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", d.home()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", "/bin/false")
                 .args(["--root", d.root.to_str().unwrap(), "telemetry", "demo"]).args(args);
             c
         }),
@@ -1859,7 +1859,7 @@ fn scale_9_health_evaluate() {
         let mut cmd = match std::env::var_os("SCALE_HEALTH_BIN") {
             Some(bin) => {
                 let mut c = Command::new(bin);
-                c.env_clear().env("HOME", d.home()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", "/bin/false")
+                c.env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", d.home()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", "/bin/false")
                     .args(["--root", d.root.to_str().unwrap()]).args(args);
                 c
             }
@@ -1895,7 +1895,7 @@ fn scale_9_analytics_refresh() {
             None => telemetry(&d, &["analytics", "refresh"]),
             Some(bin) => measure({
                 let mut c = Command::new(bin);
-                c.env_clear().env("HOME", d.home()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", "/bin/false")
+                c.env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", d.home()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", "/bin/false")
                     .args(["--root", d.root.to_str().unwrap(), "telemetry", "demo", "analytics", "refresh"]);
                 c
             }),

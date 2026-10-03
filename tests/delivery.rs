@@ -55,7 +55,7 @@ impl Lab {
     fn project(&self) -> PathBuf { self.path("root/demo") }
     fn command(&self) -> Command {
         let mut command = Command::new(BIN);
-        command.env_clear().env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", self.path("herdr"))
+        command.env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", self.path("herdr"))
             .arg("--root").arg(self.path("root"));
         command
     }
@@ -75,7 +75,7 @@ impl Lab {
     /// Waits for `done` while a ticker that this test or `thread restart`
     /// started runs, then stops it through its stop file.
     fn until(&self, what: &str, done: impl Fn() -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(120);
+        let deadline = Instant::now() + Duration::from_secs(30);
         while !done() {
             assert!(Instant::now() < deadline, "timed out waiting for {what}; ticker log:\n{}", fs::read_to_string(self.path("root/.ticker.log")).unwrap_or_default());
             std::thread::sleep(Duration::from_millis(20));

@@ -37,7 +37,7 @@ impl Lab {
     fn project(&self) -> PathBuf { self.root().join("demo") }
     fn command(&self) -> Command {
         let mut command = Command::new(BIN);
-        command.env_clear().env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", &self.fake).arg("--root").arg(self.root());
+        command.env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", &self.fake).arg("--root").arg(self.root());
         command
     }
     fn cli(&self, args: &[&str]) -> Output { self.command().args(args).output().unwrap() }
@@ -58,7 +58,7 @@ impl Lab {
         struct Child(std::process::Child);
         impl Drop for Child { fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); } }
         let mut child = Child(self.command().args(["ticker", "run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + Duration::from_secs(15);
         while !done() {
             assert!(child.0.try_wait().unwrap().is_none(), "ticker exited");
             assert!(Instant::now() < deadline, "ticker log: {}", fs::read_to_string(self.root().join(".ticker.log")).unwrap_or_default());

@@ -8,7 +8,7 @@ use std::{
 const BIN: &str = env!("CARGO_BIN_EXE_herdr-farm");
 fn run(home: &Path, vars: &[(&str, &Path)], args: &[&str]) -> Output {
     let mut cmd = Command::new(BIN);
-    cmd.env_clear()
+    cmd.env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim())
         .env("HOME", home)
         .env("PATH", "/usr/bin:/bin")
         .env("HERDR_BIN_PATH", "/nonexistent-herdr-farm-fixture");

@@ -1,0 +1,136 @@
+//! Process-local test acceleration. Production durations are returned unchanged.
+//! Never use this for external execution budgets or approval validity.
+use std::{sync::OnceLock, time::Duration};
+
+pub const ENV: &str = "HERDR_FARM_TEST_TIME_SCALE";
+static SCALE: OnceLock<Option<f64>> = OnceLock::new();
+
+/// Only the actual process environment is consulted, never project configuration.
+/// Invalid, zero, negative, infinite and greater-than-one values are ignored.
+pub fn scale() -> Option<f64> {
+    *SCALE.get_or_init(|| {
+        std::env::var(ENV)
+            .ok()?
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite() && *value > 0.0 && *value <= 1.0)
+    })
+}
+
+fn scaled(duration: Duration, floor: Duration) -> Duration {
+    match scale() {
+        Some(factor) if !duration.is_zero() => duration.mul_f64(factor).max(floor),
+        _ => duration,
+    }
+}
+
+/// Controller passes and observation intervals never fall below 50 ms.
+pub fn pass(duration: Duration) -> Duration {
+    scaled(duration, Duration::from_millis(50))
+}
+/// Queue backoffs and loop polling never fall below 20 ms.
+pub fn retry(duration: Duration) -> Duration {
+    scaled(duration, Duration::from_millis(20))
+}
+/// Second-resolution historical timestamps require a whole-second floor and ceil.
+pub fn seconds(seconds: i64) -> i64 {
+    let duration = pass(Duration::from_secs(seconds.max(0) as u64));
+    duration
+        .as_secs()
+        .saturating_add(u64::from(duration.subsec_nanos() != 0)) as i64
+}
+pub fn tick() -> Duration {
+    pass(Duration::from_secs(15))
+}
+pub fn stop_wait() -> Duration {
+    pass(Duration::from_secs(60))
+}
+pub fn idle_exit() -> Duration {
+    pass(Duration::from_secs(300))
+}
+pub fn lock_retry() -> Duration {
+    // Status/start probes hold a real OS lock across process scheduling.
+    // Preserve a practical window even when the nominal retry scales to 20 ms.
+    retry(Duration::from_secs(1)).max(Duration::from_millis(250))
+}
+
+/// Scale a freshness lease while preserving time for unscaled external work.
+/// Production values are exact; accelerated leases always outlive one pass.
+pub fn lease(duration: Duration, execution: Duration) -> Duration {
+    if scale().is_none() {
+        return duration;
+    }
+    pass(duration).max(execution + tick())
+}
+
+// Default policies live here so CLI and ticker comparisons cannot drift.
+pub const STARTING_TIMEOUT_SECS: i64 = 300;
+pub const BLOCKED_DEBOUNCE_SECS: i64 = 30;
+pub const NOT_READY_SECS: i64 = 60;
+pub const PR_INTERVAL_SECS: i64 = 120;
+pub const REMOTE_INTERVAL: Duration = Duration::from_secs(60);
+pub const REMOTE_RETRY_DELAY: Duration = Duration::from_secs(120);
+pub const TELEMETRY_COLLECT_SECS: u64 = 300;
+pub const ANALYTICS_INTERVAL_MS: i64 = 60_000;
+pub const HEALTH_INTERVAL_MS: i64 = 300_000;
+
+pub fn canonical_pass() -> Duration {
+    pass(Duration::from_millis(250))
+}
+pub fn lock_poll() -> Duration {
+    retry(Duration::from_millis(25))
+}
+pub fn stop_poll() -> Duration {
+    pass(Duration::from_millis(250))
+}
+pub fn wake_poll() -> Duration {
+    retry(Duration::from_millis(500))
+}
+pub fn shutdown_poll() -> Duration {
+    retry(Duration::from_millis(50))
+}
+pub fn queue_retention() -> Duration {
+    pass(Duration::from_secs(180))
+}
+pub fn launch_retry() -> Duration {
+    retry(Duration::from_secs(1))
+}
+pub fn worker_retry() -> Duration {
+    retry(Duration::from_secs(2))
+}
+pub fn job_retry() -> Duration {
+    retry(Duration::from_secs(30))
+}
+pub fn worker_recovery_retry() -> Duration {
+    retry(Duration::from_secs(15))
+}
+pub fn routine_retention() -> Duration {
+    retry(Duration::from_secs(120))
+}
+pub fn observation_lease(execution: Duration) -> Duration {
+    lease(Duration::from_secs(60), execution)
+}
+pub fn pr_retention() -> Duration {
+    pass(Duration::from_secs(120))
+}
+pub fn pr_pending_retention() -> Duration {
+    lease(Duration::from_secs(120), Duration::from_secs(30))
+}
+pub fn brief_accept_window() -> Duration {
+    pass(Duration::from_secs(6))
+}
+pub fn brief_accept_poll() -> Duration {
+    retry(Duration::from_millis(500))
+}
+
+/// Store delivery retries use actual UTC deadlines at millisecond precision.
+pub fn delivery_backoff(attempts: u32) -> Duration {
+    retry(Duration::from_millis(
+        (1_000_u64 * (1_u64 << attempts.saturating_sub(1).min(8))).min(300_000),
+    ))
+}
+pub fn legacy_delivery_backoff(attempts: u32, jitter: u64) -> Duration {
+    retry(Duration::from_secs(
+        (15_u64 * (1_u64 << attempts.saturating_sub(1).min(5)) + jitter).min(300),
+    ))
+}

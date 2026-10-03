@@ -19,7 +19,7 @@ impl Home {
     fn path(&self, name: &str) -> PathBuf { self.dir.path().join(name) }
     fn config(&self, text: &str) { fs::write(self.path(".config/herdr-farm/config.toml"), text).unwrap(); }
     fn cli(&self, args: &[&str]) -> Output {
-        Command::new(BIN).env_clear().env("HOME", self.dir.path()).env("PATH", "/usr/bin:/bin").args(args).output().unwrap()
+        Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.dir.path()).env("PATH", "/usr/bin:/bin").args(args).output().unwrap()
     }
     fn ok(&self, args: &[&str]) -> (Value, String) {
         let out = self.cli(args);

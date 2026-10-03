@@ -104,6 +104,9 @@ fn report(
 ) -> (String, bool) {
     let mut out = String::new();
     let mut healthy = true;
+    if let Some(scale) = crate::timing::scale() {
+        let _ = writeln!(out, "warn: test time scale active ({scale}); ticker pass {} ms, retry floor 20 ms", crate::timing::tick().as_millis());
+    }
     let mut check = |out: &mut String, ok: Option<bool>, label: &str, detail: String| {
         let mark = match ok {
             Some(true) => "ok  ",

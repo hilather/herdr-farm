@@ -55,7 +55,7 @@ fn remove_sidecar(f: &Fixture) {
 
 fn collect_command(f: &Fixture) -> Command {
     let mut command = Command::new(BIN);
-    command.env_clear().env("HOME", f.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
+    command.env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", f.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
         .args(["--root", f.root.to_str().unwrap(), "telemetry", "demo", "collect"]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
     command
 }

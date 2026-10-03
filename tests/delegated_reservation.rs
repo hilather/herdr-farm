@@ -9,7 +9,7 @@ use std::{fs, os::unix::fs::MetadataExt, path::{Path, PathBuf}, process::{Comman
 const BIN: &str = env!("CARGO_BIN_EXE_herdr-farm");
 
 fn cli(home: &Path, args: &[&str]) -> Output {
-    Command::new(BIN).env_clear().env("HOME", home).env("PATH", "/usr/bin:/bin")
+    Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", home).env("PATH", "/usr/bin:/bin")
         .args(["--root", home.join("root").to_str().unwrap()]).args(args).output().unwrap()
 }
 fn accepted(output: Output) -> serde_json::Value {
@@ -97,7 +97,7 @@ struct Scenario { _home: tempfile::TempDir, db: PathBuf, grant_id: String, attem
 const VERIFIER_POLICY: &str = r#"{"version":1,"checks":["/usr/bin/git","diff","--quiet"]}"#;
 
 fn git(home: &Path, repository: &Path, args: &[&str]) -> String {
-    let output = Command::new("/usr/bin/git").env_clear().env("PATH", "/usr/bin:/bin")
+    let output = Command::new("/usr/bin/git").env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("PATH", "/usr/bin:/bin")
         .env("HOME", home).env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_AUTHOR_NAME", "fixture").env("GIT_AUTHOR_EMAIL", "fixture@example.com")
         .env("GIT_COMMITTER_NAME", "fixture").env("GIT_COMMITTER_EMAIL", "fixture@example.com")

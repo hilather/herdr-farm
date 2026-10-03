@@ -12,7 +12,7 @@ impl Home {
     fn new() -> Self { Home(tempfile::tempdir().unwrap()) }
     fn root(&self) -> PathBuf { self.0.path().join("root") }
     fn cli(&self, args: &[&str]) -> Output {
-        Command::new(BIN).env_clear().env("HOME", self.0.path()).env("PATH", "/usr/bin:/bin")
+        Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.0.path()).env("PATH", "/usr/bin:/bin")
             .args(["--root", self.root().to_str().unwrap()]).args(args).output().unwrap()
     }
     fn ok(&self, args: &[&str]) -> String {

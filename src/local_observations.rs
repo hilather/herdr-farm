@@ -8,7 +8,7 @@ const BUDGET:Duration=Duration::from_secs(30);
 const LIMIT:usize=1024*1024;
 // Collection remains <=30 s. A separate admission-based age allows the next
 // 15 s ticker pass to apply a late successful collection, without renewing it.
-const SAMPLE_AGE:Duration=Duration::from_secs(60);
+fn sample_age()->Duration {crate::timing::observation_lease(BUDGET)}
 #[derive(Clone,Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Input {project:PathBuf,identity:(u64,u64),socket:PathBuf,socket_identity:Option<(u64,u64)>,bin:String,config:PathBuf,config_digest:Option<String>,bindings:String}
@@ -142,7 +142,7 @@ impl Reads {
     }
     pub fn admit(&mut self)->Vec<String> {
         self.classified.retain(|_,(_,_,touched)|*touched);let mut errors=Vec::new();let mut cursor=self.cursor.clone();
-        while self.pending.len()<PENDING_LIMIT {let Some(key)=self.offers.keys().min_by(|a,b|cursor.compare(a,b)).cloned()else{break;};let candidate=self.offers.remove(&key).unwrap();let identity=candidate.request.identity.clone();let deadline=candidate.request.deadline+(SAMPLE_AGE-BUDGET);
+        while self.pending.len()<PENDING_LIMIT {let Some(key)=self.offers.keys().min_by(|a,b|cursor.compare(a,b)).cloned()else{break;};let candidate=self.offers.remove(&key).unwrap();let identity=candidate.request.identity.clone();let deadline=candidate.request.deadline+(sample_age()-BUDGET);
             match self.executor.submit(candidate.request){Ok(ticket)=>{cursor.accepted(&key);self.pending.insert(key,Pending{input:candidate.input,fingerprint:candidate.fingerprint,identity,ticket,deadline});},Err(error)=>{self.unknown=true;errors.push(format!("{}: local observation admission: {error:#}",key.0));}}
         }errors
     }

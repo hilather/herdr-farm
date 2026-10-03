@@ -41,7 +41,7 @@ impl Root {
     fn project(&self, slug: &str) -> PathBuf { self.path("root").join(slug) }
     fn command(&self) -> Command {
         let mut command = Command::new(BIN);
-        command.env_clear().env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", self.path("herdr")).arg("--root").arg(self.path("root"));
+        command.env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", self.path("herdr")).arg("--root").arg(self.path("root"));
         command
     }
     /// Signs and imports routine `name` of `slug`, due now and hourly, whose script is `script`.
@@ -69,7 +69,7 @@ impl Root {
 struct Ticker<'a> { root: &'a Root, child: std::process::Child }
 impl Ticker<'_> {
     fn wait_for(&mut self, what: &str, done: impl Fn() -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(90);
+        let deadline = Instant::now() + Duration::from_secs(22);
         while !done() {
             assert!(self.child.try_wait().unwrap().is_none(), "ticker exited while waiting for {what}");
             assert!(Instant::now() < deadline, "timed out waiting for {what}: {}", fs::read_to_string(self.root.path("root/.ticker.log")).unwrap_or_default());

@@ -80,7 +80,7 @@ impl World {
         use herdr_farm::{migration, runtime};
         let home = tempfile::tempdir().unwrap();
         let root = home.path().join("root");
-        let world_cmd = |args: &[&str]| Command::new(BIN).env_clear().env("HOME", home.path()).args(args).output().unwrap();
+        let world_cmd = |args: &[&str]| Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", home.path()).args(args).output().unwrap();
         for action in ["new", "pause"] { assert!(world_cmd(&["--root", root.to_str().unwrap(), action, "demo"]).status.success()); }
         let key = home.path().join("owner");
         assert!(Command::new("/usr/bin/ssh-keygen").args(["-q", "-t", "ed25519", "-N", "", "-f"]).arg(&key).output().unwrap().status.success());
@@ -137,7 +137,7 @@ impl World {
         world
     }
     fn hp(&self, args: &[&str]) -> std::process::Output {
-        Command::new(BIN).env_clear().env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").arg("--root").arg(&self.root).args(args).output().unwrap()
+        Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").arg("--root").arg(&self.root).args(args).output().unwrap()
     }
     fn policies(&self, args: &[&str]) -> Value {
         let mut all = vec!["telemetry", "demo", "policies"];
@@ -264,7 +264,7 @@ fn simulate(dir: &Path, input: &Value, extra: &[&str]) -> Value {
     let root = dir.join("root");
     let mut args = vec!["--root", root.to_str().unwrap(), "telemetry", "demo", "policies", "simulate", "--input", file.to_str().unwrap()];
     args.extend_from_slice(extra);
-    let out = Command::new(BIN).env_clear().env("HOME", dir).args(&args).output().unwrap();
+    let out = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", dir).args(&args).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     serde_json::from_slice(&out.stdout).unwrap()
 }

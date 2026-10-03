@@ -5,7 +5,7 @@ use anyhow::{Result,ensure};
 use crate::{executor::{Executor,Request,Identity,Lane,Ticket},pr};
 #[cfg(test)]
 use crate::{executor::Limits,runner::Runner};
-const RETAIN:Duration=Duration::from_secs(120);
+fn retain()->Duration {crate::timing::pr_retention()}
 const MAX_ENTRIES:usize=128;
 pub enum Poll {Pending,NotDue,Ready(Result<String>)}
 struct Entry {fingerprint:String,url:String,touched:Instant,state:ReadState}
@@ -27,7 +27,7 @@ impl Reads {
                 ReadState::Pending{ticket,identity}=>{
                     let Some(completion)=ticket.try_recv()? else{return Ok(Poll::Pending);};
                     ensure!(completion.identity==*identity,"PR completion identity mismatch");
-                    entry.state=ReadState::Consumed{until:if completion.runner_entered {now+RETAIN}else{now}};
+                    entry.state=ReadState::Consumed{until:if completion.runner_entered {now+retain()}else{now}};
                     ensure!(completion.runner_entered,"PR read expired or was cancelled in the local queue; retry without recording a remote outage");
                     return Ok(Poll::Ready(completion.result.and_then(pr::view_output)));
                 }
@@ -44,7 +44,7 @@ impl Reads {
     pub fn metrics(&self)->crate::executor::Metrics {self.executor.metrics()}
     pub fn stop(&mut self)->Result<()> {ensure!(self.executor.stop(Duration::from_secs(2)),"observation executor cleanup remains uncertain; inspect before restart");Ok(())}
     fn remove(&mut self,key:&(PathBuf,String)) {if let Some(Entry{state:ReadState::Pending{ticket,..},..})=self.entries.remove(key){ticket.cancel();}}
-    fn prune(&mut self,now:Instant) {let stale=self.entries.iter().filter(|(_,e)|now.duration_since(e.touched)>=RETAIN).map(|(k,_)|k.clone()).collect::<Vec<_>>();for key in stale {self.remove(&key);}}
+    fn prune(&mut self,now:Instant) {let stale=self.entries.iter().filter(|(_,e)|now.duration_since(e.touched)>=if matches!(e.state,ReadState::Pending{..}) {crate::timing::pr_pending_retention()}else{retain()}).map(|(k,_)|k.clone()).collect::<Vec<_>>();for key in stale {self.remove(&key);}}
 }
 fn pr_host(url:&str)->String {url.strip_prefix("https://").unwrap_or(url).split('/').next().unwrap_or("github").to_ascii_lowercase()}
 

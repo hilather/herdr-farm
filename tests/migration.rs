@@ -24,7 +24,7 @@ impl Project {
         p
     }
     fn cli(&self, args: &[&str]) -> Output {
-        Command::new(BIN).env_clear().env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin")
+        Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin")
             .args(["--root", self.home.path().join("root").to_str().unwrap()]).args(args).output().unwrap()
     }
     fn ok(&self, args: &[&str]) -> Value {
@@ -367,7 +367,7 @@ fn preflight_observes_the_recorded_session_and_fingerprints_config_without_mutat
 'pane list') cat \"$HOME/panes.json\" || exit 1;;\n'agent list') echo '{\"result\":{\"agents\":[]}}';;\n*) exit 9;;\nesac\n").unwrap();
         fs::set_permissions(home.join("herdr"), fs::Permissions::from_mode(0o700)).unwrap();
         let before = (p.ok(&["migration", "demo", "inspect"])["digest"].clone(), fs::read_dir(p.project.join(".state")).unwrap().count());
-        let out = Command::new(BIN).env_clear().env("HOME", home).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", home.join("herdr"))
+        let out = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", home).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", home.join("herdr"))
             .env("HERDR_SESSION", "wrong-inherited-session").args(["--root", home.join("root").to_str().unwrap(), "migration", "demo", "preflight"]).output().unwrap();
         assert!(out.status.success(), "{state}: {}", String::from_utf8_lossy(&out.stderr));
         let text = String::from_utf8(out.stdout).unwrap();
@@ -402,7 +402,7 @@ fn canonical_root_relocation_is_actionable_and_reversible() {
     let moved = p.home.path().join("moved-root");
     fs::rename(&root, &moved).unwrap();
     let cli = |selected_root: &std::path::Path, args: &[&str]| {
-        Command::new(BIN).env_clear().env("HOME", p.home.path()).env("PATH", "/usr/bin:/bin")
+        Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", p.home.path()).env("PATH", "/usr/bin:/bin")
             .env("HERDR_BIN_PATH", &herdr).arg("--root").arg(selected_root).args(args).output().unwrap()
     };
     let expected = format!(

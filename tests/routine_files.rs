@@ -42,7 +42,7 @@ impl Lab {
     fn project(&self) -> PathBuf { self.path("root/demo") }
     fn command(&self) -> Command {
         let mut command = Command::new(BIN);
-        command.env_clear().env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").env("TZ", "UTC")
+        command.env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").env("TZ", "UTC")
             .env("HERDR_BIN_PATH", self.path("herdr")).arg("--root").arg(self.path("root"));
         command
     }
@@ -94,7 +94,7 @@ impl Ticker<'_> {
         Ticker { lab, child: lab.command().args(["ticker", "run"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap() }
     }
     fn wait_for(&mut self, what: &str, done: impl Fn() -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(90);
+        let deadline = Instant::now() + Duration::from_secs(22);
         while !done() {
             assert!(self.child.try_wait().unwrap().is_none(), "ticker exited while waiting for {what}");
             assert!(Instant::now() < deadline, "timed out waiting for {what}; items: {:?}\nlog:\n{}", self.lab.items(),
@@ -105,7 +105,7 @@ impl Ticker<'_> {
     fn stop(mut self) {
         let stop = self.lab.path("root/.ticker.stop");
         fs::write(&stop, b"").unwrap();
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + Duration::from_secs(15);
         while self.child.try_wait().unwrap().is_none() {
             assert!(Instant::now() < deadline, "ticker ignored its stop file");
             std::thread::sleep(Duration::from_millis(20));

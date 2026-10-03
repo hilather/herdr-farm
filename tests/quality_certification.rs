@@ -56,7 +56,7 @@ impl Lab {
         use herdr_farm::{domain::ProjectState, migration, runtime};
         let home = tempfile::tempdir().unwrap();
         let root = home.path().join("root");
-        let run = |args: &[&str]| Command::new(BIN).env_clear().env("HOME", home.path()).args(args).output().unwrap();
+        let run = |args: &[&str]| Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", home.path()).args(args).output().unwrap();
         for action in ["new", "pause"] { assert!(run(&["--root", root.to_str().unwrap(), action, "demo"]).status.success()); }
         let key = home.path().join("owner");
         assert!(Command::new("/usr/bin/ssh-keygen").args(["-q", "-t", "ed25519", "-N", "", "-f"]).arg(&key).output().unwrap().status.success());
@@ -99,7 +99,7 @@ impl Lab {
         lab
     }
     fn hp(&self, args: &[&str]) -> Output {
-        Command::new(BIN).env_clear().env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").arg("--root").arg(&self.root).args(args).output().unwrap()
+        Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").arg("--root").arg(&self.root).args(args).output().unwrap()
     }
     fn ok(&self, args: &[&str]) -> Value {
         let out = self.hp(args);
@@ -125,7 +125,7 @@ impl Lab {
     /// The head of the one review/triage/fix/seed ordering.
     fn ledger_head(&self) -> i64 { self.t(&["review", "findings", "show"])["findings"]["head_seq"].as_i64().unwrap() }
     fn git(&self, args: &[&str]) -> String {
-        let out = Command::new("/usr/bin/git").env_clear().env("PATH", "/usr/bin:/bin").env("HOME", self.home.path()).env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null")
+        let out = Command::new("/usr/bin/git").env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("PATH", "/usr/bin:/bin").env("HOME", self.home.path()).env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_AUTHOR_NAME", "fixture").env("GIT_AUTHOR_EMAIL", "fixture@example.com").env("GIT_COMMITTER_NAME", "fixture").env("GIT_COMMITTER_EMAIL", "fixture@example.com")
             .current_dir(&self.repo).args(args).output().unwrap();
         assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
@@ -290,7 +290,7 @@ fn assert_rebuilds(lab: &Lab, captured: &[(i64, Value, Value, Value, Value)]) {
     // A consistent copy of the canonical store (the WAL folded in by VACUUM INTO).
     lab.db().execute("VACUUM INTO ?1", [fresh_root.join("demo/.state/state.db").to_str().unwrap()]).unwrap();
     let fresh_view = |args: &[&str], key: &str, seq: i64| -> Value {
-        let out = Command::new(BIN).env_clear().env("HOME", fresh.path()).env("PATH", "/usr/bin:/bin").arg("--root").arg(&fresh_root)
+        let out = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", fresh.path()).env("PATH", "/usr/bin:/bin").arg("--root").arg(&fresh_root)
             .args(["telemetry", "demo"]).args(args).args(["--as-of", &seq.to_string()]).output().unwrap();
         assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
         serde_json::from_slice::<Value>(&out.stdout).unwrap()[key].clone()
@@ -308,7 +308,7 @@ fn assert_rebuilds(lab: &Lab, captured: &[(i64, Value, Value, Value, Value)]) {
         let show_body = |mut v: Value| { let o = v.as_object_mut().unwrap(); o.remove("head_seq"); o.remove("as_of_seq"); v };
         assert_eq!(replayed_show["as_of_seq"], json!(seq), "review show as of {seq}");
         assert_eq!(show_body(replayed_show), show_body(shown.clone()), "review show as of {seq}");
-        let fresh_show = Command::new(BIN).env_clear().env("HOME", fresh.path()).env("PATH", "/usr/bin:/bin").arg("--root").arg(&fresh_root)
+        let fresh_show = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", fresh.path()).env("PATH", "/usr/bin:/bin").arg("--root").arg(&fresh_root)
             .args(["telemetry", "demo", "review", "show", "--as-of", &seq.to_string()]).output().unwrap();
         assert!(fresh_show.status.success(), "{}", String::from_utf8_lossy(&fresh_show.stderr));
         assert_eq!(show_body(serde_json::from_slice(&fresh_show.stdout).unwrap()), show_body(shown.clone()), "fresh review show as of {seq}");
@@ -782,7 +782,7 @@ impl Lab {
     }
     /// The CLI as a worker runs it: `HOME` is a retained profile's execution home.
     fn as_worker(&self, home: &str, args: &[&str]) -> Output {
-        Command::new(BIN).env_clear().env("HOME", self.home.path().join(home)).env("PATH", "/usr/bin:/bin").arg("--root").arg(&self.root).args(args).output().unwrap()
+        Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.home.path().join(home)).env("PATH", "/usr/bin:/bin").arg("--root").arg(&self.root).args(args).output().unwrap()
     }
 }
 
@@ -891,7 +891,7 @@ fn selection_that_disagrees_with_verification_verifies_and_releases_nothing() {
     let fresh = tempfile::tempdir().unwrap();
     fs::create_dir_all(fresh.path().join("root/demo/.state")).unwrap();
     lab.db().execute("VACUUM INTO ?1", [fresh.path().join("root/demo/.state/state.db").to_str().unwrap()]).unwrap();
-    let out = Command::new(BIN).env_clear().env("HOME", fresh.path()).env("PATH", "/usr/bin:/bin").arg("--root").arg(fresh.path().join("root"))
+    let out = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", fresh.path()).env("PATH", "/usr/bin:/bin").arg("--root").arg(fresh.path().join("root"))
         .args(["telemetry", "demo", "quality", "groups", "report", "--min-groups", "1"]).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(serde_json::from_slice::<Value>(&out.stdout).unwrap()["metrics"], report["metrics"]);
@@ -1431,12 +1431,12 @@ fn field(json: &str, key: &str) -> String {
     json.find(&marker).map(|i| json[i + marker.len()..].split('"').next().unwrap().to_owned()).unwrap_or_default()
 }
 fn hp(args: &[&str]) -> String {
-    let out = Command::new(BIN).args(["--root", ROOT, "telemetry", "demo"]).args(args).output().unwrap();
+    let out = Command::new(BIN).env("HERDR_FARM_TEST_TIME_SCALE", TEST_TIME_SCALE).args(["--root", ROOT, "telemetry", "demo"]).args(args).output().unwrap();
     format!("{}\n{}{}", out.status.success(), String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
 }
 /// The same command after shedding both worker markers (another directory, another HOME).
 fn evading(args: &[&str]) -> String {
-    let out = Command::new(BIN).current_dir("/").env("HOME", "/tmp").args(["--root", ROOT, "telemetry", "demo"]).args(args).output().unwrap();
+    let out = Command::new(BIN).env("HERDR_FARM_TEST_TIME_SCALE", TEST_TIME_SCALE).current_dir("/").env("HOME", "/tmp").args(["--root", ROOT, "telemetry", "demo"]).args(args).output().unwrap();
     format!("{}\n{}{}", out.status.success(), String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
 }
 fn main() {

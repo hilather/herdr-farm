@@ -16,7 +16,7 @@ fn git(repo: &Path, args: &[&str]) -> String { git_at(repo, None, args) }
 /// `git` with author and committer dates at `at` (Unix seconds), if given.
 fn git_at(repo: &Path, at: Option<i64>, args: &[&str]) -> String {
     let mut command = Command::new("git");
-    command.current_dir(repo).env_clear().env("PATH", "/usr/bin:/bin");
+    command.current_dir(repo).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("PATH", "/usr/bin:/bin");
     if let Some(at) = at { command.env("GIT_AUTHOR_DATE", format!("@{at} +0000")).env("GIT_COMMITTER_DATE", format!("@{at} +0000")); }
     let out = command
         .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]).args(args).output().unwrap();
@@ -682,7 +682,7 @@ fn a_worker_cannot_create_a_group_or_select_its_own_arm() {
     let sub = planted.subs[&("g".to_owned(), 1)].clone();
     assert!(format!("{:?}", store.select_candidate_by_judge(&group, &sub, "g-a1", None, &[], unix_ms()).unwrap_err()).contains("cannot select a candidate"));
     drop(store);
-    let as_worker = |args: &[&str]| Command::new(BIN).env_clear().env("HOME", f.tmp.path().join("fast-home")).env("PATH", "/usr/bin:/bin")
+    let as_worker = |args: &[&str]| Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", f.tmp.path().join("fast-home")).env("PATH", "/usr/bin:/bin")
         .args(["--root", f.root.to_str().unwrap(), "telemetry", "demo", "quality", "groups"]).args(args).output().unwrap();
     for args in [vec!["select", group.as_str(), "--arm", "1"], vec!["create", "work", "--arm", "codex", "--arm", "fast"]] {
         let out = as_worker(&args);

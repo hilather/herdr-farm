@@ -398,7 +398,7 @@ pub fn restart_plan(thread: &Thread, live: &Live, branch_exists: bool, now: jiff
     if thread.status == Status::Resolved {
         bail!("{} is resolved; `thread resolve --reopen` first", thread.id);
     }
-    if thread.status == Status::Starting && thread::seconds_since(&thread.created, now) < thread::STARTING_TIMEOUT_SECS {
+    if thread.status == Status::Starting && thread::seconds_since(&thread.created, now) < crate::timing::seconds(thread::STARTING_TIMEOUT_SECS) {
         bail!("{} is still starting", thread.id);
     }
     // (d)

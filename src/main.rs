@@ -79,6 +79,7 @@ mod steps;
 mod thread;
 mod threads;
 mod ticker;
+use herdr_farm::timing;
 mod memory_review;
 
 /// Crate version plus a build identifier (short git hash and build time), so a

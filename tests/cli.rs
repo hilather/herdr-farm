@@ -41,7 +41,7 @@ fn launch_exec_consumes_one_private_digest_bound_spec_and_execs_the_supervisor()
     let digest=format!("{:x}",Sha256::digest(serde_json::to_vec(&argv).unwrap()));
     let body=serde_json::to_vec(&serde_json::json!({"version":1,"operation":"cli","cwd":base,"command_digest":digest,"argv":argv})).unwrap();
     let spec=dir.join(format!("{digest}.spec"));let other=dir.join(format!("{}.spec","0".repeat(64)));
-    let run=|path:&Path|Command::new(BIN).env_clear().env("PATH","/usr/bin:/bin").arg("launch-exec").arg(path).output().unwrap();
+    let run=|path:&Path|Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("PATH","/usr/bin:/bin").arg("launch-exec").arg(path).output().unwrap();
     // A spec bound to another digest, or readable by others, is refused and kept.
     for (path,mode) in [(&other,0o600),(&spec,0o644)] {
         fs::write(path,&body).unwrap();fs::set_permissions(path,fs::Permissions::from_mode(mode)).unwrap();
@@ -77,7 +77,7 @@ else:sys.exit(3)
 print(json.dumps({{'result':r}}))
 "#,home=home.path().display().to_string())).unwrap();fs::set_permissions(&helper,fs::Permissions::from_mode(0o700)).unwrap();
     struct Child(std::process::Child);impl Drop for Child {fn drop(&mut self){let _=self.0.kill();let _=self.0.wait();}}
-    let spawn=||Child(Command::new(BIN).env_clear().env("HOME",home.path()).env("PATH","/usr/bin:/bin").env("HERDR_BIN_PATH",&helper).args(["--root",r,"ticker","run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
+    let spawn=||Child(Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME",home.path()).env("PATH","/usr/bin:/bin").env("HERDR_BIN_PATH",&helper).args(["--root",r,"ticker","run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
     let wait=|child:&mut Child,predicate:&dyn Fn()->bool|{let end=Instant::now()+Duration::from_secs(8);while !predicate(){assert!(child.0.try_wait().unwrap().is_none());assert!(Instant::now()<end,"{}",fs::read_to_string(root.join(".ticker.log")).unwrap_or_default());std::thread::sleep(Duration::from_millis(10));}};
     let stop=|child:&mut Child|{fs::write(root.join(".ticker.stop"),b"").unwrap();let end=Instant::now()+Duration::from_secs(8);while child.0.try_wait().unwrap().is_none(){assert!(Instant::now()<end);std::thread::sleep(Duration::from_millis(10));}fs::remove_file(root.join(".ticker.stop")).unwrap();};
     let mut child=spawn();wait(&mut child,&||runtime::snapshot(&project).unwrap().observations.iter().any(|o|o.pane==ResourceState::Present));stop(&mut child);
@@ -256,7 +256,7 @@ fn effect_commands_read_only_their_rows_with_ten_thousand_retired_neighbors() {
     let fake=home.path().join(".local/bin/herdr");std::fs::create_dir_all(fake.parent().unwrap()).unwrap();
     std::fs::write(&fake,b"#!/bin/sh\nif [ \"$1\" = '--version' ]; then echo 'herdr 0.9.1'; exit 0; fi\n[ \"$1\" = notification ] && [ \"$2\" = show ] || exit 9\nprintf 'effect\\n' >> \"$HOME/effects\"\nprintf '%s\\n' '{\"result\":{\"shown\":true}}'\n").unwrap();
     { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(&fake,std::fs::Permissions::from_mode(0o700)).unwrap(); }
-    let out=Command::new(BIN).env_clear().env("HOME",home.path()).env("HERDR_BIN_PATH",&fake).args(["--root",r,"operations","note","deliver-notification",&note_op,"--expected-revision","1"]).output().unwrap();
+    let out=Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME",home.path()).env("HERDR_BIN_PATH",&fake).args(["--root",r,"operations","note","deliver-notification",&note_op,"--expected-revision","1"]).output().unwrap();
     assert!(out.status.success(),"notification delivery scanned retained history: {}",String::from_utf8_lossy(&out.stderr));
     assert_eq!(delivery_of(&note,&note_op).0,"confirmed");assert_eq!(std::fs::read_to_string(home.path().join("effects")).unwrap(),"effect\n");
 
@@ -412,7 +412,7 @@ fn profile_resolve_prints_envelope_without_argv_and_selects_unique_kind() {
 
 fn hp(home: &Path, args: &[&str]) -> std::process::Output {
     Command::new(BIN)
-        .env_clear()
+        .env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim())
         .env("HOME", home)
         .args(args)
         .output()
@@ -541,7 +541,7 @@ fn context_prints_a_usable_prefix_in_a_scrubbed_environment() {
 
     // The printed prefix works as typed, from a bare shell.
     let listed = Command::new("/bin/sh")
-        .env_clear()
+        .env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim())
         .env("HOME", home.path())
         .args(["-c", &format!("{prefix} list")])
         .output()
@@ -597,7 +597,7 @@ fn ticker_run_outlasts_a_transient_lock_probe_and_names_a_real_holder() {
     struct Child(std::process::Child);impl Drop for Child{fn drop(&mut self){let _=self.0.kill();let _=self.0.wait();}}
     let home=tempfile::tempdir().unwrap();let root=home.path().join("root");let r=root.to_str().unwrap();
     assert!(hp(home.path(),&["--root",r,"new","demo"]).status.success());
-    let spawn=||Child(Command::new(BIN).env_clear().env("HOME",home.path()).env("PATH","/usr/bin:/bin").env("HERDR_BIN_PATH","/bin/false").args(["--root",r,"ticker","run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
+    let spawn=||Child(Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME",home.path()).env("PATH","/usr/bin:/bin").env("HERDR_BIN_PATH","/bin/false").args(["--root",r,"ticker","run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
     let open=||fs::File::options().read(true).write(true).create(true).truncate(false).open(root.join(".ticker.lock")).unwrap();
     let log=||fs::read_to_string(root.join(".ticker.log")).unwrap_or_default();
     // A probe holds the lock across the ticker's start; afterwards the ticker must own it.
@@ -658,18 +658,18 @@ fn native_artifact_helper_needs_no_configuration_and_preserves_large_binary_payl
     std::fs::create_dir(&path).unwrap();
     let bytes = vec![255u8; 2 * 1024 * 1024];
     std::fs::write(path.join("report.md"), &bytes).unwrap();
-    let output = Command::new(BIN).env_clear().args(["artifact-stream", "--probe"]).output().unwrap();
+    let output = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).args(["artifact-stream", "--probe"]).output().unwrap();
     assert!(output.status.success());
     assert_eq!(serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()["schema"], 1);
     assert_eq!(serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()["live_versions"], serde_json::json!([1]));
-    let output = Command::new(BIN).env_clear().args(["artifact-stream", "--path", path.to_str().unwrap()]).output().unwrap();
+    let output = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).args(["artifact-stream", "--path", path.to_str().unwrap()]).output().unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert_eq!(&output.stdout[..8], b"HPAR\x01\0\0\0");
     let size = u32::from_be_bytes(output.stdout[8..12].try_into().unwrap()) as usize;
     assert_eq!(&output.stdout[12 + size..], bytes);
     std::os::unix::fs::symlink("report.md", path.join("library")).unwrap();
-    assert!(!Command::new(BIN).env_clear().args(["artifact-stream", "--path", path.to_str().unwrap()]).output().unwrap().status.success());
-    let live=Command::new(BIN).env_clear().args(["artifact-stream","--live","--path",path.to_str().unwrap()]).output().unwrap();
+    assert!(!Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).args(["artifact-stream", "--path", path.to_str().unwrap()]).output().unwrap().status.success());
+    let live=Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).args(["artifact-stream","--live","--path",path.to_str().unwrap()]).output().unwrap();
     assert!(live.status.success(),"{}",String::from_utf8_lossy(&live.stderr));
     assert_eq!(&live.stdout[..8],b"HPLV\x01\0\0\0");
     let size=u32::from_be_bytes(live.stdout[8..12].try_into().unwrap()) as usize;
@@ -808,7 +808,7 @@ fn preflight_refuses_fifo_and_oversized_external_config_without_hanging() {
             assert_eq!(unsafe{libc::mkfifo(path.as_ptr(),0o600)},0);
         } else {std::fs::File::create(&config).unwrap().set_len(16*1024*1024+1).unwrap();}
         let output=std::fs::File::create(home.path().join("preflight.json")).unwrap();
-        let mut child=Command::new(BIN).env_clear().env("HOME",home.path()).args(["--root",root_arg,"migration","demo","preflight"]).stdout(output).stderr(Stdio::inherit()).spawn().unwrap();
+        let mut child=Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME",home.path()).args(["--root",root_arg,"migration","demo","preflight"]).stdout(output).stderr(Stdio::inherit()).spawn().unwrap();
         let deadline=Instant::now()+Duration::from_secs(5);
         loop {if let Some(status)=child.try_wait().unwrap(){assert!(status.success());break;}
         if Instant::now()>deadline{let _=child.kill();let _=child.wait();panic!("preflight blocked on config");}std::thread::sleep(Duration::from_millis(10));}
@@ -848,7 +848,7 @@ fn root_config_special_files_fail_promptly_without_an_explicit_root() {
             // SAFETY: valid NUL-terminated path in a disposable directory.
             assert_eq!(unsafe{libc::mkfifo(path.as_ptr(),0o600)},0);
         } else {std::fs::File::create(&config).unwrap().set_len(16*1024*1024+1).unwrap();}
-        let mut child=Command::new(BIN).env_clear().env("HOME",home.path()).arg("list").stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+        let mut child=Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME",home.path()).arg("list").stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
         let deadline=Instant::now()+Duration::from_secs(5);
         loop {if let Some(status)=child.try_wait().unwrap(){assert!(!status.success());break;}
         if Instant::now()>deadline{let _=child.kill();let _=child.wait();panic!("root resolution blocked on config");}std::thread::sleep(Duration::from_millis(10));}
@@ -1221,7 +1221,7 @@ fn canonical_notification_cli_delivers_once_to_recorded_socket() {
     let head=runtime::snapshot(&project).unwrap().head;let task=TaskId::new("notification").unwrap();let head=runtime::add_task(&project,task.clone(),"notification".into(),head).unwrap();runtime::create_binding(&project,None,None,head,&RuntimeRoute{socket:"/explicit/notification.sock".into(),..Default::default()}).unwrap();assert!(hp(home.path(),&["--root",root_arg,"reconcile","demo","--record"]).status.success());let snapshot=runtime::snapshot(&project).unwrap();runtime::set_state(&project,snapshot.head,snapshot.control.unwrap().revision,ProjectState::Active,&home.path().join(".config/herdr-farm/config.toml")).unwrap();
     let head=runtime::snapshot(&project).unwrap().head.to_string();let out=hp(home.path(),&["--root",root_arg,"operations","demo","notify","notification","--expected-head",&head]);assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stderr));let op:serde_json::Value=serde_json::from_slice(&out.stdout).unwrap();let id=op["id"].as_str().unwrap();
     let fake=home.path().join(".local/bin/herdr");std::fs::create_dir_all(fake.parent().unwrap()).unwrap();std::fs::write(&fake,b"#!/bin/sh\nif [ \"$1\" = '--version' ]; then echo 'herdr 0.9.1'; exit 0; fi\n[ \"$HERDR_SOCKET_PATH\" = '/explicit/notification.sock' ] || exit 8\n[ \"$1\" = notification ] && [ \"$2\" = show ] || exit 9\nprintf 'effect\\n' >> \"$HOME/effects\"\nprintf '%s\\n' '{\"result\":{\"shown\":true}}'\n").unwrap();std::fs::set_permissions(&fake,std::fs::Permissions::from_mode(0o700)).unwrap();
-    let deliver=|args:&[&str]|Command::new(BIN).env_clear().env("HOME",home.path()).env("HERDR_BIN_PATH",&fake).args(args).output().unwrap();
+    let deliver=|args:&[&str]|Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME",home.path()).env("HERDR_BIN_PATH",&fake).args(args).output().unwrap();
     let args=["--root",root_arg,"operations","demo","deliver-notification",id,"--expected-revision","1"];let out=deliver(&args);assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stderr));assert_eq!(serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap()["state"],"confirmed");assert!(!deliver(&args).status.success());assert_eq!(std::fs::read_to_string(home.path().join("effects")).unwrap(),"effect\n");let snapshot=runtime::snapshot(&project).unwrap();assert!(!snapshot.inbox[0].seen&&!snapshot.inbox[0].done);
 }
 
@@ -1256,7 +1256,7 @@ if mode=='lost':sys.exit(0)
 print(json.dumps({{'id':request['id'],'result':{{'type':'notification_show','shown':True,'reason':'shown'}}}}))
 "#,home=home.path().display().to_string(),project=project.display().to_string())).unwrap();fs::set_permissions(&helper,fs::Permissions::from_mode(0o700)).unwrap();
         struct Child(std::process::Child);impl Drop for Child{fn drop(&mut self){let _=self.0.kill();let _=self.0.wait();}}
-        let spawn=||Child(Command::new(BIN).env_clear().env("HOME",home.path()).env("PATH","/usr/bin:/bin").env("HERDR_BIN_PATH",&helper).args(["--root",r,"ticker","run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
+        let spawn=||Child(Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME",home.path()).env("PATH","/usr/bin:/bin").env("HERDR_BIN_PATH",&helper).args(["--root",r,"ticker","run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
         let read=||runtime::snapshot(&project).unwrap().deliveries.into_iter().find(|d|d.operation==op.id).unwrap();
         let wait=|child:&mut Child,predicate:&dyn Fn()->bool|{let end=Instant::now()+Duration::from_secs(8);while !predicate(){assert!(child.0.try_wait().unwrap().is_none());assert!(Instant::now()<end,"{}",fs::read_to_string(root.join(".ticker.log")).unwrap_or_default());std::thread::sleep(Duration::from_millis(10));}};
         let stop=|child:&mut Child|{fs::write(root.join(".ticker.stop"),b"").unwrap();let end=Instant::now()+Duration::from_secs(8);while child.0.try_wait().unwrap().is_none(){assert!(Instant::now()<end);std::thread::sleep(Duration::from_millis(10));}fs::remove_file(root.join(".ticker.stop")).unwrap();};
@@ -1289,7 +1289,7 @@ fn canonical_ownership_cli_adopts_recorded_coordinator_without_prompting() {
     use std::os::unix::{fs::PermissionsExt,net::UnixListener};use herdr_farm::{migration,runtime,domain::RuntimeRoute};
     let home=tempfile::tempdir().unwrap();let root=home.path().join("root");let root_arg=root.to_str().unwrap();for command in ["new","pause"] {assert!(hp(home.path(),&["--root",root_arg,command,"demo"]).status.success());}
     let project=root.join("demo");let plan=migration::inspect(&project).unwrap();migration::apply(&project,&plan,true).unwrap();let socket=home.path().join("fixture.sock");let _listener=UnixListener::bind(&socket).unwrap();let head=runtime::snapshot(&project).unwrap().head;runtime::create_binding(&project,None,None,head,&RuntimeRoute{socket:socket.to_str().unwrap().into(),workspace_id:"w".into(),tab_id:"t".into(),pane_id:"p".into(),cwd:project.to_str().unwrap().into(),..Default::default()}).unwrap();
-    std::fs::write(home.path().join("panes.json"),serde_json::json!({"result":{"panes":[{"pane_id":"p","tab_id":"t","workspace_id":"w","cwd":project}]}}).to_string()).unwrap();std::fs::write(home.path().join("agents.json"),serde_json::json!({"result":{"agents":[{"pane_id":"p","tab_id":"t","workspace_id":"w","cwd":project,"agent":"claude","name":"coordinator","agent_status":"working"}]}}).to_string()).unwrap();let fake=home.path().join("fake-herdr");std::fs::write(&fake,b"#!/bin/sh\ncase \"$1 $2\" in\n'--version ') echo 'herdr 0.9.1';;\n'pane list') cat \"$HOME/panes.json\";;\n'agent list') cat \"$HOME/agents.json\";;\n*) exit 99;;\nesac\n").unwrap();std::fs::set_permissions(&fake,std::fs::Permissions::from_mode(0o700)).unwrap();let command=|args:&[&str]|Command::new(BIN).env_clear().env("HOME",home.path()).env("HERDR_BIN_PATH",&fake).args(args).output().unwrap();
+    std::fs::write(home.path().join("panes.json"),serde_json::json!({"result":{"panes":[{"pane_id":"p","tab_id":"t","workspace_id":"w","cwd":project}]}}).to_string()).unwrap();std::fs::write(home.path().join("agents.json"),serde_json::json!({"result":{"agents":[{"pane_id":"p","tab_id":"t","workspace_id":"w","cwd":project,"agent":"claude","name":"coordinator","agent_status":"working"}]}}).to_string()).unwrap();let fake=home.path().join("fake-herdr");std::fs::write(&fake,b"#!/bin/sh\ncase \"$1 $2\" in\n'--version ') echo 'herdr 0.9.1';;\n'pane list') cat \"$HOME/panes.json\";;\n'agent list') cat \"$HOME/agents.json\";;\n*) exit 99;;\nesac\n").unwrap();std::fs::set_permissions(&fake,std::fs::Permissions::from_mode(0o700)).unwrap();let command=|args:&[&str]|Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME",home.path()).env("HERDR_BIN_PATH",&fake).args(args).output().unwrap();
     let before=runtime::snapshot(&project).unwrap();let out=command(&["--root",root_arg,"reconcile","demo","--plan"]);assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stderr));let plan:serde_json::Value=serde_json::from_slice(&out.stdout).unwrap();assert_eq!(plan["dispatch_allowed"],false);assert!(plan["items"].as_array().unwrap().iter().any(|i|i["action"]=="adopt_resources"));assert_eq!(runtime::snapshot(&project).unwrap(),before);assert!(!command(&["--root",root_arg,"reconcile","demo","--plan","--record"]).status.success());
     let head=runtime::snapshot(&project).unwrap().head.to_string();let out=command(&["--root",root_arg,"runtime","demo","adopt","coordinator","--expected-revision","1","--expected-head",&head]);assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stderr));let change:serde_json::Value=serde_json::from_slice(&out.stdout).unwrap();assert_eq!(change["ownership"]["origin"],"adopted");assert!(change["ownership"]["attempt"].is_null());assert!(command(&["--root",root_arg,"reconcile","demo","--record"]).status.success());let snapshot=runtime::snapshot(&project).unwrap();let out=command(&["--root",root_arg,"runtime","demo","state","active","--expected-head",&snapshot.head.to_string(),"--expected-revision",&snapshot.control.unwrap().revision.to_string()]);assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stderr));assert!(runtime::snapshot(&project).unwrap().attempts.is_empty());
     let before=runtime::snapshot(&project).unwrap();let out=command(&["--root",root_arg,"runtime","demo","relinquish","coordinator","--expected-revision","1","--expected-head",&before.head.to_string(),"--reason","hand back"]);assert!(!out.status.success());assert_eq!(runtime::snapshot(&project).unwrap(),before);
@@ -1385,10 +1385,10 @@ else:print('{"result":{"shown":true}}')
 "#).unwrap();fs::set_permissions(&fake,fs::Permissions::from_mode(0o700)).unwrap();
     struct Child(std::process::Child);
     impl Drop for Child {fn drop(&mut self){let _=self.0.kill();let _=self.0.wait();}}
-    let spawn=||Child(Command::new(BIN).env_clear().env("HOME",home.path()).env("PATH","/usr/bin:/bin").env("HERDR_BIN_PATH",&fake).args(["--root",r,"ticker","run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
+    let spawn=||Child(Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME",home.path()).env("PATH","/usr/bin:/bin").env("HERDR_BIN_PATH",&fake).args(["--root",r,"ticker","run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
     let read=||->toml::Value {toml::from_str(&fs::read_to_string(&record).unwrap()).unwrap()};
     let wait=|child:&mut Child,predicate:&dyn Fn()->bool| {
-        let deadline=Instant::now()+Duration::from_secs(75);
+        let deadline=Instant::now()+Duration::from_secs(18);
         while !predicate(){assert!(child.0.try_wait().unwrap().is_none(),"ticker exited");assert!(Instant::now()<deadline,"ticker log: {}",fs::read_to_string(root.join(".ticker.log")).unwrap_or_default());std::thread::sleep(Duration::from_millis(10));}
     };
     let stop=|child:&mut Child| {
@@ -1411,7 +1411,7 @@ else:print('{"result":{"shown":true}}')
 fn native_report_hash_is_bounded_binary_and_configuration_independent() {
     use std::fs;use sha2::{Digest,Sha256};
     let home=tempfile::tempdir().unwrap();let source=home.path().join("source '$λ");fs::create_dir(&source).unwrap();
-    let run=||Command::new(BIN).env_clear().args(["report-hash","--path"]).arg(&source).output().unwrap();
+    let run=||Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).args(["report-hash","--path"]).arg(&source).output().unwrap();
     let missing=run();assert!(missing.status.success());assert_eq!(serde_json::from_slice::<serde_json::Value>(&missing.stdout).unwrap(),serde_json::json!({"hash":null}));
     fs::write(source.join("report.md"),b"binary\0\xff").unwrap();let output=run();assert!(output.status.success());
     assert_eq!(serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()["hash"],format!("{:x}",Sha256::digest(b"binary\0\xff")));
@@ -1438,11 +1438,11 @@ fn native_ticker_claims_legacy_routine_and_restart_delivers_without_rerun() {
     let fake=home.path().join("herdr");fs::write(&fake,b"#!/bin/sh\ncase \"$1 $2\" in\n'agent list') echo '{\"result\":{\"agents\":[]}}';;\n'pane list') echo '{\"result\":{\"panes\":[]}}';;\n*) echo '{\"result\":{\"shown\":true}}';;\nesac\n").unwrap();fs::set_permissions(&fake,fs::Permissions::from_mode(0o700)).unwrap();
     struct Child(std::process::Child);
     impl Drop for Child {fn drop(&mut self){let _=self.0.kill();let _=self.0.wait();}}
-    let spawn=||Child(Command::new(BIN).env_clear().env("HOME",home.path()).env("PATH","/usr/bin:/bin").env("HERDR_BIN_PATH",&fake).args(["--root",r,"ticker","run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
+    let spawn=||Child(Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME",home.path()).env("PATH","/usr/bin:/bin").env("HERDR_BIN_PATH",&fake).args(["--root",r,"ticker","run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
     let read=||->serde_json::Value {serde_json::from_slice(&fs::read(&state).unwrap()).unwrap()};
     let wait=|child:&mut Child,predicate:&dyn Fn()->bool| {
         // The first asynchronous session result is applied on the next 15 s pass.
-        let deadline=Instant::now()+Duration::from_secs(35);
+        let deadline=Instant::now()+Duration::from_secs(15);
         while !predicate(){assert!(child.0.try_wait().unwrap().is_none(),"ticker exited");assert!(Instant::now()<deadline,"ticker log: {}",fs::read_to_string(root.join(".ticker.log")).unwrap_or_default());std::thread::sleep(Duration::from_millis(10));}
     };
     let stop=|child:&mut Child| {
@@ -1475,10 +1475,10 @@ fn ticker_native_merged_finalization_resolves_and_replays_notice_after_restart()
     let fake=home.path().join("herdr");fs::write(&fake,b"#!/bin/sh\ncase \"$1 $2\" in\n'agent list') /bin/cat \"$HOME/agents.json\";;\n'pane list') echo poll >> \"$HOME/polls\"; /bin/cat \"$HOME/panes.json\";;\n*) echo '{\"result\":{\"shown\":true}}';;\nesac\n").unwrap();fs::set_permissions(&fake,fs::Permissions::from_mode(0o700)).unwrap();
     struct Child(std::process::Child);
     impl Drop for Child {fn drop(&mut self){let _=self.0.kill();let _=self.0.wait();}}
-    let spawn=||Child(Command::new(BIN).env_clear().env("HOME",home.path()).env("PATH","/usr/bin:/bin").env("HERDR_BIN_PATH",&fake).args(["--root",r,"ticker","run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
+    let spawn=||Child(Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME",home.path()).env("PATH","/usr/bin:/bin").env("HERDR_BIN_PATH",&fake).args(["--root",r,"ticker","run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
     let read=||->toml::Value {toml::from_str(&fs::read_to_string(&record).unwrap()).unwrap()};
     let wait=|child:&mut Child,predicate:&dyn Fn()->bool| {
-        let deadline=Instant::now()+Duration::from_secs(45);
+        let deadline=Instant::now()+Duration::from_secs(15);
         while !predicate(){assert!(child.0.try_wait().unwrap().is_none(),"ticker exited");assert!(Instant::now()<deadline,"ticker log: {}",fs::read_to_string(root.join(".ticker.log")).unwrap_or_default());std::thread::sleep(Duration::from_millis(10));}
     };
     let stop=|child:&mut Child| {
@@ -1519,9 +1519,9 @@ fn ticker_native_briefs_confirm_or_recover_uncertainty_without_replay() {
         let response=if outcome=="lost" {"exit 1"}else{"/bin/cat \"$HOME/ack.json\""};
         let fake=home.path().join("herdr");fs::write(&fake,format!("#!/bin/sh\ncase \"$1 $2\" in\n'agent list') /bin/cat \"$HOME/agents.json\";;\n'pane list') echo poll >> \"$HOME/polls\"; /bin/cat \"$HOME/panes.json\";;\n'agent prompt') printf send >> \"$HOME/sent\"; {response};;\n*) echo '{{\"result\":{{\"shown\":true}}}}';;\nesac\n")).unwrap();fs::set_permissions(&fake,fs::Permissions::from_mode(0o700)).unwrap();
         struct Child(std::process::Child);impl Drop for Child {fn drop(&mut self){let _=self.0.kill();let _=self.0.wait();}}
-        let spawn=||Child(Command::new(BIN).env_clear().env("HOME",home.path()).env("PATH","/usr/bin:/bin").env("HERDR_BIN_PATH",&fake).args(["--root",r,"ticker","run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
+        let spawn=||Child(Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME",home.path()).env("PATH","/usr/bin:/bin").env("HERDR_BIN_PATH",&fake).args(["--root",r,"ticker","run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
         let read=||->toml::Value {toml::from_str(&fs::read_to_string(&record).unwrap()).unwrap()};
-        let wait=|child:&mut Child,predicate:&dyn Fn()->bool| {let end=Instant::now()+Duration::from_secs(45);while !predicate(){assert!(child.0.try_wait().unwrap().is_none());assert!(Instant::now()<end,"{}",fs::read_to_string(root.join(".ticker.log")).unwrap_or_default());std::thread::sleep(Duration::from_millis(10));}};
+        let wait=|child:&mut Child,predicate:&dyn Fn()->bool| {let end=Instant::now()+Duration::from_secs(15);while !predicate(){assert!(child.0.try_wait().unwrap().is_none());assert!(Instant::now()<end,"{}",fs::read_to_string(root.join(".ticker.log")).unwrap_or_default());std::thread::sleep(Duration::from_millis(10));}};
         let stop=|child:&mut Child| {fs::write(root.join(".ticker.stop"),b"").unwrap();let end=Instant::now()+Duration::from_secs(8);while child.0.try_wait().unwrap().is_none(){assert!(Instant::now()<end);std::thread::sleep(Duration::from_millis(10));}fs::remove_file(root.join(".ticker.stop")).unwrap();};
         let mut child=spawn();wait(&mut child,&||fs::read(home.path().join("sent")).is_ok_and(|b|b==b"send")&&read().get("prompt_claim").is_some_and(|c|c.get("phase").and_then(|p|p.as_str())==Some(if outcome=="confirmed"{"confirmed"}else{"pending"})));stop(&mut child);
         let polls=fs::read(home.path().join("polls")).unwrap().len();let mut child=spawn();
@@ -1585,9 +1585,9 @@ if 'remote-api-bridge' in sys.argv[-1]:assert sys.argv[1:4]==['-T','-o','StrictH
 sys.exit(subprocess.call(sys.argv[-1],shell=True))
 "#).unwrap();fs::set_permissions(&ssh,fs::Permissions::from_mode(0o700)).unwrap();
         struct Child(std::process::Child);impl Drop for Child {fn drop(&mut self){let _=self.0.kill();let _=self.0.wait();}}
-        let spawn=||Child(Command::new(BIN).env_clear().env("HOME",home.path()).env("PATH",format!("{}:/usr/bin:/bin",home.path().display())).env("HERDR_BIN_PATH",&fake).env("HERDR_PROJECTS_REMOTE_HERDR_BIN",&bridge).args(["--root",r,"ticker","run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
+        let spawn=||Child(Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME",home.path()).env("PATH",format!("{}:/usr/bin:/bin",home.path().display())).env("HERDR_BIN_PATH",&fake).env("HERDR_PROJECTS_REMOTE_HERDR_BIN",&bridge).args(["--root",r,"ticker","run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
         let read=||->toml::Value {toml::from_str(&fs::read_to_string(&record).unwrap()).unwrap()};
-        let wait=|child:&mut Child,predicate:&dyn Fn()->bool| {let end=Instant::now()+Duration::from_secs(45);while !predicate(){assert!(child.0.try_wait().unwrap().is_none());assert!(Instant::now()<end,"{}",fs::read_to_string(root.join(".ticker.log")).unwrap_or_default());std::thread::sleep(Duration::from_millis(10));}};
+        let wait=|child:&mut Child,predicate:&dyn Fn()->bool| {let end=Instant::now()+Duration::from_secs(15);while !predicate(){assert!(child.0.try_wait().unwrap().is_none());assert!(Instant::now()<end,"{}",fs::read_to_string(root.join(".ticker.log")).unwrap_or_default());std::thread::sleep(Duration::from_millis(10));}};
         let stop=|child:&mut Child| {fs::write(root.join(".ticker.stop"),b"").unwrap();let end=Instant::now()+Duration::from_secs(8);while child.0.try_wait().unwrap().is_none(){assert!(Instant::now()<end);std::thread::sleep(Duration::from_millis(10));}fs::remove_file(root.join(".ticker.stop")).unwrap();};
         let mut child=spawn();wait(&mut child,&||fs::read(home.path().join("sent")).is_ok_and(|b|b==b"send")&&read().get("prompt_claim").is_some_and(|c|c.get("phase").and_then(|p|p.as_str())==Some(if outcome=="confirmed"{"confirmed"}else{"pending"})));stop(&mut child);
         let polls=fs::read(home.path().join("polls")).unwrap().len();let mut child=spawn();
@@ -1679,9 +1679,9 @@ if 'remote-api-bridge' in sys.argv[-1]:assert sys.argv[1:4]==['-T','-o','StrictH
 sys.exit(subprocess.call(sys.argv[-1],shell=True))
 "#).unwrap();fs::set_permissions(&ssh,fs::Permissions::from_mode(0o700)).unwrap();
         struct Child(std::process::Child);impl Drop for Child {fn drop(&mut self){let _=self.0.kill();let _=self.0.wait();}}
-        let spawn=||Child(Command::new(BIN).env_clear().env("HOME",home.path()).env("PATH",format!("{}:/usr/bin:/bin",home.path().display())).env("HERDR_BIN_PATH",&fake).env("HERDR_PROJECTS_REMOTE_HERDR_BIN",&bridge).args(["--root",r,"ticker","run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
+        let spawn=||Child(Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME",home.path()).env("PATH",format!("{}:/usr/bin:/bin",home.path().display())).env("HERDR_BIN_PATH",&fake).env("HERDR_PROJECTS_REMOTE_HERDR_BIN",&bridge).args(["--root",r,"ticker","run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
         let read=||->toml::Value {toml::from_str(&fs::read_to_string(&record).unwrap()).unwrap()};
-        let wait=|child:&mut Child,predicate:&dyn Fn()->bool| {let end=Instant::now()+Duration::from_secs(45);while !predicate(){assert!(child.0.try_wait().unwrap().is_none());assert!(Instant::now()<end,"{}",fs::read_to_string(root.join(".ticker.log")).unwrap_or_default());std::thread::sleep(Duration::from_millis(10));}};
+        let wait=|child:&mut Child,predicate:&dyn Fn()->bool| {let end=Instant::now()+Duration::from_secs(15);while !predicate(){assert!(child.0.try_wait().unwrap().is_none());assert!(Instant::now()<end,"{}",fs::read_to_string(root.join(".ticker.log")).unwrap_or_default());std::thread::sleep(Duration::from_millis(10));}};
         let stop=|child:&mut Child| {fs::write(root.join(".ticker.stop"),b"").unwrap();let end=Instant::now()+Duration::from_secs(8);while child.0.try_wait().unwrap().is_none(){assert!(Instant::now()<end);std::thread::sleep(Duration::from_millis(10));}fs::remove_file(root.join(".ticker.stop")).unwrap();};
         let mut child=spawn();wait(&mut child,&||fs::read(home.path().join("started")).is_ok_and(|b|b==b"start")&&read().get("launch_claim").is_some_and(|c|c.get("phase").and_then(|p|p.as_str())==Some(if outcome=="confirmed"{"confirmed"}else{"pending"})));stop(&mut child);
         let polls=fs::read(home.path().join("polls")).unwrap().len();let mut child=spawn();
@@ -1726,9 +1726,9 @@ elif args[:2] in [['agent','prompt'],['agent','start']]:
 else:print('{"result":{"shown":true}}')
 "#).unwrap();fs::set_permissions(&fake,fs::Permissions::from_mode(0o700)).unwrap();
         struct Child(std::process::Child);impl Drop for Child {fn drop(&mut self){let _=self.0.kill();let _=self.0.wait();}}
-        let spawn=||Child(Command::new(BIN).env_clear().env("HOME",home.path()).env("PATH","/usr/bin:/bin").env("HERDR_BIN_PATH",&fake).args(["--root",r,"ticker","run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
+        let spawn=||Child(Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME",home.path()).env("PATH","/usr/bin:/bin").env("HERDR_BIN_PATH",&fake).args(["--root",r,"ticker","run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
         let read=||->serde_json::Value{serde_json::from_str(&fs::read_to_string(&record).unwrap()).unwrap()};
-        let wait=|child:&mut Child,predicate:&dyn Fn()->bool|{let end=Instant::now()+Duration::from_secs(30);while !predicate(){assert!(child.0.try_wait().unwrap().is_none());assert!(Instant::now()<end,"{}",fs::read_to_string(root.join(".ticker.log")).unwrap_or_default());std::thread::sleep(Duration::from_millis(10));}};
+        let wait=|child:&mut Child,predicate:&dyn Fn()->bool|{let end=Instant::now()+Duration::from_secs(15);while !predicate(){assert!(child.0.try_wait().unwrap().is_none());assert!(Instant::now()<end,"{}",fs::read_to_string(root.join(".ticker.log")).unwrap_or_default());std::thread::sleep(Duration::from_millis(10));}};
         let stop=|child:&mut Child|{fs::write(root.join(".ticker.stop"),b"").unwrap();let end=Instant::now()+Duration::from_secs(8);while child.0.try_wait().unwrap().is_none(){assert!(Instant::now()<end);std::thread::sleep(Duration::from_millis(10));}fs::remove_file(root.join(".ticker.stop")).unwrap();};
         let mut child=spawn();wait(&mut child,&||home.path().join("sent").exists()&&read()["prime_claim"]["delivery"]["phase"].as_str()==Some(if outcome=="confirmed"{"confirmed"}else{"pending"}));stop(&mut child);
         let polls=fs::read(home.path().join("polls")).unwrap().len();let mut child=spawn();wait(&mut child,&||fs::read(home.path().join("polls")).unwrap().len()>polls&&read()["prime_claim"]["delivery"]["notified"].as_bool()==Some(true));stop(&mut child);
@@ -1776,9 +1776,9 @@ elif args[:2] in [['agent','prompt'],['agent','start']]:
 else:print('{"result":{"shown":true}}')
 "#).unwrap();fs::set_permissions(&fake,fs::Permissions::from_mode(0o700)).unwrap();
         struct Child(std::process::Child);impl Drop for Child {fn drop(&mut self){let _=self.0.kill();let _=self.0.wait();}}
-        let spawn=||Child(Command::new(BIN).env_clear().env("HOME",home.path()).env("PATH","/usr/bin:/bin").env("HERDR_BIN_PATH",&fake).args(["--root",r,"ticker","run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
+        let spawn=||Child(Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME",home.path()).env("PATH","/usr/bin:/bin").env("HERDR_BIN_PATH",&fake).args(["--root",r,"ticker","run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
         let read=||->serde_json::Value{serde_json::from_str(&fs::read_to_string(&record).unwrap()).unwrap()};
-        let wait=|child:&mut Child,predicate:&dyn Fn()->bool|{let end=Instant::now()+Duration::from_secs(30);while !predicate(){assert!(child.0.try_wait().unwrap().is_none());assert!(Instant::now()<end,"{}",fs::read_to_string(root.join(".ticker.log")).unwrap_or_default());std::thread::sleep(Duration::from_millis(10));}};
+        let wait=|child:&mut Child,predicate:&dyn Fn()->bool|{let end=Instant::now()+Duration::from_secs(15);while !predicate(){assert!(child.0.try_wait().unwrap().is_none());assert!(Instant::now()<end,"{}",fs::read_to_string(root.join(".ticker.log")).unwrap_or_default());std::thread::sleep(Duration::from_millis(10));}};
         let stop=|child:&mut Child|{fs::write(root.join(".ticker.stop"),b"").unwrap();let end=Instant::now()+Duration::from_secs(8);while child.0.try_wait().unwrap().is_none(){assert!(Instant::now()<end);std::thread::sleep(Duration::from_millis(10));}fs::remove_file(root.join(".ticker.stop")).unwrap();};
         let mut child=spawn();wait(&mut child,&||home.path().join("sent").exists()&&read()["launch_claim"]["phase"].as_str()==Some(if outcome=="confirmed"{"confirmed"}else{"pending"}));stop(&mut child);
         if outcome=="confirmed" {let mut child=spawn();wait(&mut child,&||read()["prime_pending"]==false);stop(&mut child);assert_eq!(fs::read(home.path().join("primed")).unwrap(),b"prime");}else{assert!(!home.path().join("primed").exists());}
@@ -1825,10 +1825,10 @@ elif args[:2] in [['agent','prompt'],['notification','show']]:
 else:print('{"result":{"shown":true}}')
 "#).unwrap();fs::set_permissions(&fake,fs::Permissions::from_mode(0o700)).unwrap();
         struct Child(std::process::Child);impl Drop for Child{fn drop(&mut self){let _=self.0.kill();let _=self.0.wait();}}
-        let command=||{let mut c=Command::new(BIN);c.env_clear().env("HOME",home.path()).env("PATH","/usr/bin:/bin").env("HERDR_BIN_PATH",&fake).args(["--root",r]);c};
+        let command=||{let mut c=Command::new(BIN);c.env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME",home.path()).env("PATH","/usr/bin:/bin").env("HERDR_BIN_PATH",&fake).args(["--root",r]);c};
         let spawn=||Child(command().args(["ticker","run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
         let record=p.join(".state/ticker.json");let read=||->serde_json::Value{serde_json::from_str(&fs::read_to_string(&record).unwrap_or_else(|_|"{}".into())).unwrap()};
-        let wait=|child:&mut Child,predicate:&dyn Fn()->bool|{let end=Instant::now()+Duration::from_secs(40);while !predicate(){assert!(child.0.try_wait().unwrap().is_none());assert!(Instant::now()<end,"{}",fs::read_to_string(root.join(".ticker.log")).unwrap_or_default());std::thread::sleep(Duration::from_millis(10));}};
+        let wait=|child:&mut Child,predicate:&dyn Fn()->bool|{let end=Instant::now()+Duration::from_secs(15);while !predicate(){assert!(child.0.try_wait().unwrap().is_none());assert!(Instant::now()<end,"{}",fs::read_to_string(root.join(".ticker.log")).unwrap_or_default());std::thread::sleep(Duration::from_millis(10));}};
         let stop=|child:&mut Child|{fs::write(root.join(".ticker.stop"),b"").unwrap();let end=Instant::now()+Duration::from_secs(8);while child.0.try_wait().unwrap().is_none(){assert!(Instant::now()<end);std::thread::sleep(Duration::from_millis(10));}fs::remove_file(root.join(".ticker.stop")).unwrap();};
         let mut child=spawn();wait(&mut child,&||home.path().join("sent").exists()&&read()["notification_claim"]["phase"]==if outcome=="confirmed"{"confirmed"}else{"pending"});stop(&mut child);
         let polls=fs::read(home.path().join("polls")).unwrap().len();if outcome=="lost"{item("item-b");}
@@ -1891,8 +1891,8 @@ else:print('{"result":{"shown":true}}')
         struct Child(std::process::Child);impl Drop for Child{fn drop(&mut self){let _=self.0.kill();let _=self.0.wait();}}
         let read=||fs::read_to_string(home.path().join("tokens")).unwrap_or_default().lines().map(|s|serde_json::from_str::<serde_json::Value>(s).unwrap()).collect::<Vec<_>>();
         for expected in 1..=2 {
-            let mut child=Child(Command::new(BIN).env_clear().env("HOME",home.path()).env("PATH",format!("{}:/usr/bin:/bin",home.path().display())).env("HERDR_BIN_PATH",&fake).env("HERDR_PROJECTS_REMOTE_HERDR_BIN",&fake).args(["--root",r,"ticker","run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
-            let end=Instant::now()+Duration::from_secs(45);while read().len()<expected {assert!(child.0.try_wait().unwrap().is_none());assert!(Instant::now()<end,"{mode}: {}",fs::read_to_string(root.join(".ticker.log")).unwrap_or_default());std::thread::sleep(Duration::from_millis(10));}
+            let mut child=Child(Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME",home.path()).env("PATH",format!("{}:/usr/bin:/bin",home.path().display())).env("HERDR_BIN_PATH",&fake).env("HERDR_PROJECTS_REMOTE_HERDR_BIN",&fake).args(["--root",r,"ticker","run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
+            let end=Instant::now()+Duration::from_secs(15);while read().len()<expected {assert!(child.0.try_wait().unwrap().is_none());assert!(Instant::now()<end,"{mode}: {}",fs::read_to_string(root.join(".ticker.log")).unwrap_or_default());std::thread::sleep(Duration::from_millis(10));}
             fs::write(root.join(".ticker.stop"),b"").unwrap();let end=Instant::now()+Duration::from_secs(8);while child.0.try_wait().unwrap().is_none(){assert!(Instant::now()<end);std::thread::sleep(Duration::from_millis(10));}fs::remove_file(root.join(".ticker.stop")).unwrap();
         }
         let values=read();assert_eq!(values.len(),2);assert_eq!(values[0],values[1]);assert_eq!(values[0]["tokens"]["thread"],if mode=="coordinator"{"coordinator"}else{"t-0001"});if mode!="coordinator"{assert_eq!(values[0]["tokens"]["review"],"working");}
@@ -1914,7 +1914,7 @@ fn ticker_canonical_finalization_preserves_once_and_recovers_receipt_after_resta
         let raw=rusqlite::Connection::open(project.join(".state/state.db")).unwrap();
         if interrupted {raw.execute_batch("CREATE TRIGGER reject_confirmation BEFORE UPDATE ON operation_delivery WHEN NEW.state='confirmed' BEGIN SELECT RAISE(ABORT,'fixture'); END;").unwrap();}
         struct Child(std::process::Child);impl Drop for Child {fn drop(&mut self){let _=self.0.kill();let _=self.0.wait();}}
-        let spawn=||Child(Command::new(BIN).env_clear().env("HOME",home.path()).env("PATH","/usr/bin:/bin").env("HERDR_BIN_PATH","/bin/false").args(["--root",r,"ticker","run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
+        let spawn=||Child(Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME",home.path()).env("PATH","/usr/bin:/bin").env("HERDR_BIN_PATH","/bin/false").args(["--root",r,"ticker","run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
         let read=||runtime::snapshot(&project).unwrap().deliveries.into_iter().find(|d|d.operation==op.id).unwrap();
         let wait=|child:&mut Child,predicate:&dyn Fn()->bool|{let deadline=Instant::now()+Duration::from_secs(10);while !predicate(){assert!(child.0.try_wait().unwrap().is_none());assert!(Instant::now()<deadline,"{}",fs::read_to_string(root.join(".ticker.log")).unwrap_or_default());std::thread::sleep(Duration::from_millis(10));}};
         let stop=|child:&mut Child|{fs::write(root.join(".ticker.stop"),b"").unwrap();let deadline=Instant::now()+Duration::from_secs(8);while child.0.try_wait().unwrap().is_none(){assert!(Instant::now()<deadline);std::thread::sleep(Duration::from_millis(10));}fs::remove_file(root.join(".ticker.stop")).unwrap();};
@@ -1948,14 +1948,18 @@ fn ticker_canonical_routine_admits_from_hint_and_restart_keeps_one_execution() {
     let document=home.path().join("routine.json");fs::write(&document,serde_json::to_vec(&definition).unwrap()).unwrap();assert!(Command::new("/usr/bin/ssh-keygen").args(["-Y","sign","-f"]).arg(&key).args(["-n",authority::ROUTINE_SIGNATURE_NAMESPACE]).arg(&document).output().unwrap().status.success());
     let signature=home.path().join("routine.json.sig");let out=hp(home.path(),&["--root",r,"routine-store","demo","import",document.to_str().unwrap(),signature.to_str().unwrap(),"--expected-head",&runtime::snapshot(&project).unwrap().head.to_string()]);assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stderr));
     struct Child(std::process::Child);impl Drop for Child{fn drop(&mut self){let _=self.0.kill();let _=self.0.wait();}}
-    let spawn=||Child(Command::new(BIN).env_clear().env("HOME",home.path()).env("PATH","/usr/bin:/bin").env("HERDR_BIN_PATH","/bin/false").args(["--root",r,"ticker","run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
-    let wait=|child:&mut Child,predicate:&dyn Fn()->bool|{let deadline=Instant::now()+Duration::from_secs(35);while !predicate(){assert!(child.0.try_wait().unwrap().is_none());assert!(Instant::now()<deadline,"{}",fs::read_to_string(root.join(".ticker.log")).unwrap_or_default());std::thread::sleep(Duration::from_millis(10));}};
+    let spawn=||Child(Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME",home.path()).env("PATH","/usr/bin:/bin").env("HERDR_BIN_PATH","/bin/false").args(["--root",r,"ticker","run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
+    let wait=|child:&mut Child,predicate:&dyn Fn()->bool|{let deadline=Instant::now()+Duration::from_secs(15);while !predicate(){assert!(child.0.try_wait().unwrap().is_none());assert!(Instant::now()<deadline,"{}",fs::read_to_string(root.join(".ticker.log")).unwrap_or_default());std::thread::sleep(Duration::from_millis(10));}};
     let stop=|child:&mut Child|{fs::write(root.join(".ticker.stop"),b"").unwrap();let deadline=Instant::now()+Duration::from_secs(8);while child.0.try_wait().unwrap().is_none(){assert!(Instant::now()<deadline);std::thread::sleep(Duration::from_millis(10));}fs::remove_file(root.join(".ticker.stop")).unwrap();};
     let mut child=spawn();wait(&mut child,&||runtime::snapshot(&project).unwrap().routine_receipts.len()==1);stop(&mut child);
     let before=runtime::snapshot(&project).unwrap();assert_eq!(before.deliveries.len(),1);assert_eq!(before.deliveries[0].state,DeliveryState::Confirmed);assert_eq!(before.deliveries[0].attempts,1);assert!(before.routine_receipts[0].cleanup_verified&&before.routine_receipts[0].succeeded);
     // No bindings or due occurrence means a successful restart need not append
-    // an event. Keep it alive across the initial pass and the next 15-second tick.
-    let restarted=Instant::now();let mut child=spawn();wait(&mut child,&||restarted.elapsed()>=Duration::from_secs(16));stop(&mut child);
+    // an event. Observe two completed passes through published executor metrics.
+    use std::os::unix::fs::MetadataExt;
+    let metrics=root.join(".ticker-metrics.json");
+    let inode=||fs::metadata(&metrics).map(|m|m.ino()).ok();
+    let previous=inode();let mut child=spawn();wait(&mut child,&||inode()!=previous);
+    let first=inode();wait(&mut child,&||inode()!=first);stop(&mut child);
     let after=runtime::snapshot(&project).unwrap();assert_eq!(after.routine_receipts,before.routine_receipts);assert_eq!(after.deliveries,before.deliveries);assert_eq!(fs::read(project.join("ROUTINE_MARKER")).unwrap(),b"once");
 }
 
@@ -1993,16 +1997,44 @@ impl VerifyFixture {
     fn r(&self)->&str {self.root.to_str().unwrap()}
     fn db(&self)->rusqlite::Connection {rusqlite::Connection::open(self.project.join(".state/state.db")).unwrap()}
     fn git(&self,args:&[&str])->String {
-        let out=Command::new("/usr/bin/git").env_clear().env("PATH","/usr/bin:/bin").env("HOME",self.home.path()).env("GIT_CONFIG_NOSYSTEM","1").env("GIT_CONFIG_GLOBAL","/dev/null")
+        let out=Command::new("/usr/bin/git").env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("PATH","/usr/bin:/bin").env("HOME",self.home.path()).env("GIT_CONFIG_NOSYSTEM","1").env("GIT_CONFIG_GLOBAL","/dev/null")
             .env("GIT_AUTHOR_NAME","fixture").env("GIT_AUTHOR_EMAIL","fixture@example.com").env("GIT_COMMITTER_NAME","fixture").env("GIT_COMMITTER_EMAIL","fixture@example.com")
             .current_dir(&self.repo).args(args).output().unwrap();
         assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stderr));String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    }
+    /// Public CLI ingress may contend with an accelerated ticker's effect writer.
+    /// Only a refused busy request is retried; other refusals retain their meaning.
+    fn ingress(&self,args:&[&str])->std::process::Output {
+        let deadline=std::time::Instant::now()+std::time::Duration::from_secs(15);
+        loop {
+            let out=hp(self.home.path(),args);
+            let error=String::from_utf8_lossy(&out.stderr);
+            if out.status.success() || (!error.contains("owns lock") && !error.contains("state store: Busy")) {return out;}
+            assert!(std::time::Instant::now()<deadline,"CLI ingress remained busy: {error}");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
     /// A task with a running attempt, a signed contract carrying `policies`, and one submitted result.
     fn submit(&self,task:&str,policies:&[(&str,String)])->String {self.submit_at(task,policies,&self.candidate)}
     fn submit_at(&self,task:&str,policies:&[(&str,String)],candidate:&str)->String {
         use std::fs;use herdr_farm::{authority::CONTRACT_SIGNATURE_NAMESPACE,domain::TaskId,runtime};
-        let head=runtime::add_task(&self.project,TaskId::new(task).unwrap(),"work".into(),runtime::snapshot(&self.project).unwrap().head).unwrap();
+        // A confirmed background outcome can become visible before its writer
+        // releases effect ownership. Retry that public ingress refusal, refreshing
+        // the optimistic head each time; never race raw setup ahead of the task.
+        let deadline=std::time::Instant::now()+std::time::Duration::from_secs(15);
+        let head=loop {
+            let expected=runtime::snapshot(&self.project).unwrap().head;
+            match runtime::add_task(&self.project,TaskId::new(task).unwrap(),"work".into(),expected) {
+                Ok(head)=>break head,
+                Err(error) if matches!(error.downcast_ref::<std::fs::TryLockError>(),Some(std::fs::TryLockError::WouldBlock))
+                    || error.downcast_ref::<std::io::Error>().is_some_and(|e|e.kind()==std::io::ErrorKind::WouldBlock)
+                    || matches!(error.downcast_ref::<herdr_farm::store::StoreError>(),Some(herdr_farm::store::StoreError::Conflict))=>{
+                    assert!(std::time::Instant::now()<deadline,"task ingress remained busy: {error:#}");
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                },
+                Err(error)=>panic!("task ingress: {error:#}"),
+            }
+        };
         self.db().execute("INSERT INTO attempts(id,task_id,revision,state,snapshot,reservation,termination_observed) VALUES(?1,?2,1,'running',NULL,?1,0)",[format!("{task}-attempt"),task.to_owned()]).unwrap();
         let repository=self.repo.canonicalize().unwrap().display().to_string();
         let mut document=serde_json::to_vec_pretty(&serde_json::json!({
@@ -2014,7 +2046,7 @@ impl VerifyFixture {
         })).unwrap();document.push(b'\n');
         let doc_path=self.home.path().join(format!("{task}-contract.json"));fs::write(&doc_path,&document).unwrap();
         assert!(Command::new("/usr/bin/ssh-keygen").args(["-Y","sign","-f"]).arg(&self.key).args(["-n",CONTRACT_SIGNATURE_NAMESPACE]).arg(&doc_path).status().unwrap().success());
-        let installed=hp(self.home.path(),&["--root",self.r(),"task","demo","contract","put","--input-file",doc_path.to_str().unwrap(),"--signature",doc_path.with_extension("json.sig").to_str().unwrap()]);
+        let installed=self.ingress(&["--root",self.r(),"task","demo","contract","put","--input-file",doc_path.to_str().unwrap(),"--signature",doc_path.with_extension("json.sig").to_str().unwrap()]);
         assert!(installed.status.success(),"{}",String::from_utf8_lossy(&installed.stderr));let installed:serde_json::Value=serde_json::from_slice(&installed.stdout).unwrap();
         let objects=self.git(&["rev-list","--objects","--all"]).lines().map(|line|{let oid=line.split_whitespace().next().unwrap();serde_json::json!({"oid":oid,"relative_path":format!("{}/{}",&oid[..2],&oid[2..])})}).collect::<Vec<_>>();
         // Every worker claims success; only verification evidence may release anything.
@@ -2022,7 +2054,7 @@ impl VerifyFixture {
         fs::write(&submission,serde_json::to_vec(&serde_json::json!({"idempotency_key":format!("{task}-key"),"task_id":task,"contract_revision":1,"contract_digest":installed["digest"],"attempt_id":format!("{task}-attempt"),
             "repository":repository,"base_oid":self.base,"candidate_oid":candidate,"object_format":"sha256",
             "artifact_manifest":[{"path":"src/lib.rs","oid":candidate}],"claimed_checks":["all checks passed"],"objects":objects})).unwrap()).unwrap();
-        let submitted=hp(self.home.path(),&["--root",self.r(),"result","demo","submit","--input-file",submission.to_str().unwrap()]);
+        let submitted=self.ingress(&["--root",self.r(),"result","demo","submit","--input-file",submission.to_str().unwrap()]);
         assert!(submitted.status.success(),"{}",String::from_utf8_lossy(&submitted.stderr));
         serde_json::from_slice::<serde_json::Value>(&submitted.stdout).unwrap()["submission_id"].as_str().unwrap().to_owned()
     }
@@ -2038,11 +2070,11 @@ impl VerifyFixture {
     }
     fn spawn(&self)->Ticker {self.spawn_with("/bin/false")}
     fn spawn_with(&self,herdr:&str)->Ticker {
-        Ticker(Command::new(BIN).env_clear().env("HOME",self.home.path()).env("PATH","/usr/bin:/bin").env("HERDR_BIN_PATH",herdr).args(["--root",self.r(),"ticker","run"])
+        Ticker(Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME",self.home.path()).env("PATH","/usr/bin:/bin").env("HERDR_BIN_PATH",herdr).args(["--root",self.r(),"ticker","run"])
             .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap())
     }
     fn wait(&self,child:&mut Ticker,seconds:u64,predicate:&dyn Fn()->bool) {
-        let deadline=std::time::Instant::now()+std::time::Duration::from_secs(seconds);
+        let deadline=std::time::Instant::now()+std::time::Duration::from_secs((seconds / 4).max(15));
         // Predicates usually read `runtime::snapshot`: a whole-store integrity
         // check plus a full read. Polled every 10 ms across 15 s ticker passes
         // they burned a core against the ticker being waited on (147 GB read by
@@ -2361,7 +2393,7 @@ fn operator_verify_releases_project_ownership_during_the_check() {
     runtime::add_task(&f.project,herdr_farm::domain::TaskId::new("other").unwrap(),"other".into(),runtime::snapshot(&f.project).unwrap().head).unwrap();
     let runs=|submission:&str|f.db().query_row("SELECT count(*) FROM verification_runs WHERE submission_id=?1",[submission],|row|row.get::<_,u64>(0)).unwrap();
     let work=|name:&str|f.home.path().join(format!("work-{name}"));
-    let verify=|submission:&str,key:&str,dir:&str|Command::new(BIN).env_clear().env("HOME",f.home.path()).args(["--root",f.r(),"result","demo","verify",submission,"--policy-id","waits",
+    let verify=|submission:&str,key:&str,dir:&str|Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME",f.home.path()).args(["--root",f.r(),"result","demo","verify",submission,"--policy-id","waits",
         "--policy-file",policy.to_str().unwrap(),"--idempotency-key",key,"--work-dir",work(dir).to_str().unwrap(),"--timeout-seconds","60"])
         .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
     let wait_for=|count:usize|{let deadline=std::time::Instant::now()+std::time::Duration::from_secs(60);
@@ -2702,7 +2734,7 @@ fn integration_releases_project_ownership_during_the_candidate_check() {
     f.stop(&mut child);
     let result:String=f.db().query_row("SELECT result_id FROM verified_results WHERE submission_id=?1",[&three],|row|row.get(0)).unwrap();
     let work=f.home.path().join("operator-work");
-    let operator=Command::new(BIN).env_clear().env("HOME",f.home.path()).env("PATH","/usr/bin:/bin").args(["--root",f.r(),"result","demo","integrate",&result,
+    let operator=Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME",f.home.path()).env("PATH","/usr/bin:/bin").args(["--root",f.r(),"result","demo","integrate",&result,
         "--repository",f.repo.to_str().unwrap(),"--idempotency-key","operator-three","--work-dir",work.to_str().unwrap()])
         .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
     checking(6);
@@ -3002,7 +3034,7 @@ fn controller_captures_uncommitted_worker_edits_for_submission_and_verification(
     let gitdir=PathBuf::from(wt(&["rev-parse","--absolute-git-dir"]));let mode=fs::metadata(&gitdir).unwrap().permissions().mode();
     fs::set_permissions(&gitdir,fs::Permissions::from_mode(0o555)).unwrap();
     fs::write(worktree.join("src/a.txt"),"CAPTURED_OK\n").unwrap();fs::write(worktree.join("src/.gitignore"),"*.log\n").unwrap();fs::write(worktree.join("src/scratch.log"),"ignored\n").unwrap();
-    let sandboxed=Command::new("/usr/bin/git").env_clear().env("PATH","/usr/bin:/bin").env("HOME",f.home.path()).env("GIT_CONFIG_NOSYSTEM","1").env("GIT_CONFIG_GLOBAL","/dev/null")
+    let sandboxed=Command::new("/usr/bin/git").env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("PATH","/usr/bin:/bin").env("HOME",f.home.path()).env("GIT_CONFIG_NOSYSTEM","1").env("GIT_CONFIG_GLOBAL","/dev/null")
         .args(["-C",worktree.to_str().unwrap(),"add","src/a.txt"]).output().unwrap();
     assert!(!sandboxed.status.success(),"a sandboxed worker cannot stage");
     fs::set_permissions(&gitdir,fs::Permissions::from_mode(mode)).unwrap();
@@ -3116,7 +3148,7 @@ fn outcome_success_path() {
         "kind='claude'\npermission_policy='interactive'\n[profiles.worker.budget]\nmax_wall_seconds=600\nunknown_usage='allow_with_warning'\n");
     let start=f.candidate.clone();let repository=f.repo.canonicalize().unwrap();
     let head=||runtime::snapshot(&f.project).unwrap().head;
-    let run=|args:&[&str]|{let mut all=vec!["--root",f.r()];all.extend_from_slice(args);let deadline=Instant::now()+Duration::from_secs(60);
+    let run=|args:&[&str]|{let mut all=vec!["--root",f.r()];all.extend_from_slice(args);let deadline=Instant::now()+Duration::from_secs(15);
         loop {let out=hp(f.home.path(),&all);if out.status.success()||!String::from_utf8_lossy(&out.stderr).contains("owns lock")||Instant::now()>deadline{return out;}std::thread::sleep(Duration::from_millis(200));}};
     let cli=|args:&[&str]|{let out=run(args);assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stderr));serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap_or(serde_json::Value::Null)};
     let sign=|path:&Path,namespace:&str|assert!(Command::new("/usr/bin/ssh-keygen").args(["-Y","sign","-f"]).arg(&f.key).args(["-n",namespace]).arg(path).output().unwrap().status.success());
@@ -3344,7 +3376,7 @@ fn live_f1_worker_result_integrates_and_dependent_launches_on_integrated_sha() {
     let ok=|out:std::process::Output|{assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stderr));serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap_or(serde_json::Value::Null)};
     // A running ticker can hold the effect lock briefly, and a running worker's
     // observations advance the head; the CLI asks for a retry at the new head.
-    let cli=|args:&[&str]|{let mut all=vec!["--root".to_owned(),f.r().to_owned()];all.extend(args.iter().map(|a|a.to_string()));let deadline=Instant::now()+Duration::from_secs(60);
+    let cli=|args:&[&str]|{let mut all=vec!["--root".to_owned(),f.r().to_owned()];all.extend(args.iter().map(|a|a.to_string()));let deadline=Instant::now()+Duration::from_secs(15);
         loop {let out=hp(f.home.path(),&all.iter().map(String::as_str).collect::<Vec<_>>());let stderr=String::from_utf8_lossy(&out.stderr);
             if out.status.success()||!(stderr.contains("; retry")||stderr.contains("state store: Conflict"))||Instant::now()>deadline{return ok(out);}
             if let Some(i)=all.iter().position(|a|a=="--expected-head") {all[i+1]=head().to_string();}
@@ -3377,7 +3409,7 @@ fn live_f1_worker_result_integrates_and_dependent_launches_on_integrated_sha() {
             fs::create_dir_all(&home).unwrap();fs::create_dir(&runtime_dir).unwrap();fs::set_permissions(&runtime_dir,fs::Permissions::from_mode(0o700)).unwrap();
             fs::write(&config,"onboarding = false\n[terminal]\ndefault_shell = '/bin/sh'\nshell_mode = 'non_login'\n[update]\nversion_check = false\nmanifest_check = false\n").unwrap();
             let log=fs::File::create(dir.join("server.log")).unwrap();
-            cleanup.servers.push(Command::new(&herdr).arg("server").env_clear().env("HOME",&home).env("PATH","/usr/bin:/bin").env("SHELL","/bin/sh")
+            cleanup.servers.push(Command::new(&herdr).arg("server").env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME",&home).env("PATH","/usr/bin:/bin").env("SHELL","/bin/sh")
                 .env("TERM","xterm-256color").env("LANG","C.UTF-8").env("HERDR_CONFIG_PATH",&config).env("HERDR_SOCKET_PATH",socket)
                 .env("XDG_RUNTIME_DIR",&runtime_dir).current_dir(dir).stdin(std::process::Stdio::null()).stdout(log.try_clone().unwrap()).stderr(log).spawn().unwrap());
             let deadline=Instant::now()+Duration::from_secs(15);
@@ -3615,7 +3647,7 @@ fn live_f1_worker_result_integrates_and_dependent_launches_on_integrated_sha() {
     assert_eq!(events("runtime.launch_started"),2,"the controller started both workers");
     // Stop both workers through the product and wait for proven termination.
     // The running ticker advances revisions; retry a stale compare-and-swap.
-    for attempt in [&a_attempt,&b_attempt] {let deadline=Instant::now()+Duration::from_secs(60);loop {
+    for attempt in [&a_attempt,&b_attempt] {let deadline=Instant::now()+Duration::from_secs(15);loop {
         let revision=runtime::snapshot(&f.project).unwrap().attempts.into_iter().find(|x|x.id.as_str()==attempt.as_str()).unwrap().revision;
         let out=hp(f.home.path(),&["--root",f.r(),"task","demo","cancel-attempt",attempt,"--expected-revision",&revision.to_string(),"--expected-head",&head().to_string(),"--reason","F1.7 acceptance complete"]);
         let stderr=String::from_utf8_lossy(&out.stderr);
@@ -3735,7 +3767,7 @@ fn task_contract_put_and_result_submit_keep_worker_bytes_untrusted() {
     let repo = home.path().join("repo");
     std::fs::create_dir(&repo).unwrap();
     let git = |args: &[&str]| {
-        let out = Command::new("/usr/bin/git").env_clear().env("PATH","/usr/bin:/bin").env("HOME",home.path())
+        let out = Command::new("/usr/bin/git").env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("PATH","/usr/bin:/bin").env("HOME",home.path())
             .env("GIT_CONFIG_NOSYSTEM","1").env("GIT_CONFIG_GLOBAL","/dev/null")
             .env("GIT_AUTHOR_NAME","fixture").env("GIT_AUTHOR_EMAIL","fixture@example.com")
             .env("GIT_COMMITTER_NAME","fixture").env("GIT_COMMITTER_EMAIL","fixture@example.com")
@@ -3984,7 +4016,7 @@ fn task_contract_put_and_result_submit_keep_worker_bytes_untrusted() {
     // itself if the production interruption ever regresses.
     let before_queue = runtime::snapshot(&project).unwrap();
     raw.execute_batch("CREATE TRIGGER stall_receipt_attachment BEFORE INSERT ON dependency_satisfactions WHEN NEW.task_id='scope-consumer' BEGIN SELECT count(*) FROM (WITH RECURSIVE slow(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM slow WHERE n<1000000000) SELECT n FROM slow); END;").unwrap();
-    let stalled = Command::new("/usr/bin/timeout").env_clear().env("HOME",home.path())
+    let stalled = Command::new("/usr/bin/timeout").env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME",home.path())
         .args(["--kill-after=1","10",BIN,"--root",root_arg,"task","demo","queue","scope-consumer","--input-file",queue_scope.to_str().unwrap(),"--expected-revision","1","--expected-head",&before_queue.head.to_string()]).output().unwrap();
     assert!(!stalled.status.success()); assert_ne!(stalled.status.code(), Some(124), "receipt attachment exceeded the test watchdog");
     assert!(String::from_utf8_lossy(&stalled.stderr).to_ascii_lowercase().contains("deadline"), "{}", String::from_utf8_lossy(&stalled.stderr));
@@ -4781,11 +4813,11 @@ fn hot_paths_skip_the_whole_store_check_and_the_ticker_checks_off_its_pass_then_
     let turn = |interval: Option<&str>, budget: Option<&str>, until: &dyn Fn() -> bool| {
         let _ = fs::remove_file(&metrics);
         let mut command = Command::new(BIN);
-        command.env_clear().env("HOME", h).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", &helper);
+        command.env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", h).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", &helper);
         if let Some(seconds) = interval { command.env("HERDR_PROJECTS_INTEGRITY_CHECK_SECS", seconds); }
         if let Some(ms) = budget { command.env("HERDR_PROJECTS_INTEGRITY_CHECK_BUDGET_MS", ms); }
         let mut child = Child(command.args(["--root", r, "ticker", "run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
-        let end = Instant::now() + Duration::from_secs(35);
+        let end = Instant::now() + Duration::from_secs(15);
         while !metrics.is_file() || !until() {
             assert!(child.0.try_wait().unwrap().is_none(), "{}", log());
             assert!(Instant::now() < end, "{}", log());
@@ -5115,9 +5147,9 @@ fn ticker_delivers_one_memory_review_row_and_a_crash_retry_neither_duplicates_no
     // One full canonical `ticker run` pass: metrics publish at the end of a tick.
     let turn = || {
         let _ = fs::remove_file(&metrics);
-        let mut child = Child(Command::new(BIN).env_clear().env("HOME", h).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", "/bin/false")
+        let mut child = Child(Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", h).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", "/bin/false")
             .args(["--root", r, "ticker", "run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
-        let end = Instant::now() + Duration::from_secs(35);
+        let end = Instant::now() + Duration::from_secs(15);
         while !metrics.is_file() {
             assert!(child.0.try_wait().unwrap().is_none(), "{}", log());
             assert!(Instant::now() < end, "{}", log());
@@ -5219,7 +5251,7 @@ fn doctor_checks_coordinator_identity_priming_and_memory_owner_without_writing()
     };
     let doctor = || {
         let before = fs::read(project.join(".state/coordinator.json")).ok();
-        let out = Command::new(BIN).env_clear().env("HOME", h).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", &herdr).args(["--root", r, "doctor"]).output().unwrap();
+        let out = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", h).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", &herdr).args(["--root", r, "doctor"]).output().unwrap();
         assert_eq!(fs::read(project.join(".state/coordinator.json")).ok(), before, "doctor must not write the coordinator record");
         (String::from_utf8_lossy(&out.stdout).into_owned(), out.status.success())
     };
@@ -5492,7 +5524,7 @@ fn fleet_action_opens_the_fleet_pane() {
     std::fs::write(&fake,"#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$HOME/herdr-call\"\necho '{\"result\":{\"type\":\"ok\"}}'\n").unwrap();
     std::fs::set_permissions(&fake,std::fs::Permissions::from_mode(0o700)).unwrap();
     let state=home.path().join("plugin-state");
-    let out=Command::new(BIN).env_clear().env("HOME",home.path()).env("PATH","/usr/bin:/bin").env("HERDR_BIN_PATH",&fake)
+    let out=Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME",home.path()).env("PATH","/usr/bin:/bin").env("HERDR_BIN_PATH",&fake)
         .env("HERDR_SOCKET_PATH",home.path().join("herdr.sock")).env("HERDR_PLUGIN_STATE_DIR",&state).env("HERDR_PROJECTS_ROOT",&r)
         .args(command("actions")).output().unwrap();
     assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stderr));
@@ -5502,7 +5534,7 @@ fn fleet_action_opens_the_fleet_pane() {
     let envs:Vec<(&str,&str)>=call.windows(2).filter(|pair|pair[0]=="--env").map(|pair|pair[1].split_once('=').unwrap()).collect();
     assert_eq!(envs.iter().map(|(name,_)|*name).collect::<Vec<_>>(),["HERDR_FARM_HANDOFF","HERDR_FARM_ROOT"]);
     assert_eq!(envs[1].1,r);
-    let out=Command::new(BIN).env_clear().env("HOME",home.path()).env("PATH","/usr/bin:/bin").env("HERDR_PLUGIN_STATE_DIR",&state)
+    let out=Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME",home.path()).env("PATH","/usr/bin:/bin").env("HERDR_PLUGIN_STATE_DIR",&state)
         .env("HERDR_SOCKET_PATH",home.path().join("herdr.sock")).envs(envs.iter().copied()).args(command("panes")).stdin(std::process::Stdio::null()).output().unwrap();
     assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stderr));
     let text=String::from_utf8(out.stdout).unwrap();

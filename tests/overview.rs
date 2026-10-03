@@ -37,7 +37,7 @@ impl Lab {
     fn root(&self) -> PathBuf { self.home.path().join("root") }
     fn path(&self, name: &str) -> PathBuf { self.home.path().join(name) }
     fn cli_env(&self, env: &[(&str, &str)], args: &[&str]) -> Output {
-        Command::new(BIN).env_clear().env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", &self.fake)
+        Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", &self.fake)
             .envs(env.iter().copied()).args(["--root", self.root().to_str().unwrap()]).args(args).output().unwrap()
     }
     fn ok_env(&self, env: &[(&str, &str)], args: &[&str]) -> String {
@@ -194,7 +194,7 @@ fn unfocus_reads_herdr_stdout_reports_its_stderr_on_failure_and_survives_a_missi
 
     // A herdr that does not exist is an error, not a panic or a hang.
     let missing = lab.path("no-such-herdr");
-    let out = Command::new(BIN).env_clear().env("HOME", lab.home.path()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", &missing)
+    let out = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", lab.home.path()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", &missing)
         .args(["--root", lab.root().to_str().unwrap(), "unfocus", "--session", "work"]).output().unwrap();
     assert_eq!(out.status.code(), Some(1), "{}", String::from_utf8_lossy(&out.stderr));
     let stderr = String::from_utf8_lossy(&out.stderr);

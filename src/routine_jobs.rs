@@ -59,7 +59,7 @@ impl Queue {
         let mut errors=Vec::new();let now=Instant::now();
         self.entries.retain(|path,entry| {
             let result=match entry {
-                Entry::Cooldown{until,..}=>return now<*until+Duration::from_secs(120),
+                Entry::Cooldown{until,..}=>return now<*until+crate::timing::routine_retention(),
                 Entry::Pending{identity,ticket,..}=>match ticket.try_recv() {
                     Ok(None)=>return true,
                     Ok(Some(completion))=>{
@@ -76,7 +76,7 @@ impl Queue {
             if let Err(error)=result {
                 errors.push(format!("{}: routine queue: {error:#}",path.display()));
             }
-            *entry=Entry::Cooldown{until:now+if retry {Duration::from_secs(30)} else {Duration::ZERO},last};true
+            *entry=Entry::Cooldown{until:now+if retry {crate::timing::job_retry()} else {Duration::ZERO},last};true
         });errors
     }
     pub fn unknown(&self)->bool {self.unknown}

@@ -124,8 +124,8 @@ fn slow_session_cannot_block_healthy_status_or_fall_back_to_synchronous_observat
 #[test]
 fn late_success_survives_the_actual_fifteen_second_ticker_cadence() {
     let f=Fixture::new("slow");let pool=f.pool();let mut reads=Reads::new(pool.clone());reads.poll(&f.ctx(),&f.p).unwrap();reads.admit();let admitted=Instant::now();
-    std::thread::sleep(crate::ticker::TICK);reads.begin_pass();assert!(matches!(reads.poll(&f.ctx(),&f.p).unwrap(),Poll::Pending));assert!(reads.unknown());
-    std::thread::sleep(crate::ticker::TICK);reads.begin_pass();assert!(admitted.elapsed()>=BUDGET);
-    let Poll::Ready(sample)=reads.poll(&f.ctx(),&f.p).unwrap()else{panic!("successful second-half collection must survive the next ticker pass")};assert!(sample.current(&f.ctx(),&f.p).is_ok());assert!(sample.deadline<=admitted+SAMPLE_AGE);
+    std::thread::sleep(crate::timing::tick());reads.begin_pass();assert!(matches!(reads.poll(&f.ctx(),&f.p).unwrap(),Poll::Pending));assert!(reads.unknown());
+    std::thread::sleep(crate::timing::tick());reads.begin_pass();assert!(admitted.elapsed()>=BUDGET);
+    let Poll::Ready(sample)=reads.poll(&f.ctx(),&f.p).unwrap()else{panic!("successful second-half collection must survive the next ticker pass")};assert!(sample.current(&f.ctx(),&f.p).is_ok());assert!(sample.deadline<=admitted+sample_age());
     let expired=Sample{deadline:Instant::now(),..sample};assert!(expired.current(&f.ctx(),&f.p).is_err());assert!(pool.stop(Duration::from_secs(2)));
 }

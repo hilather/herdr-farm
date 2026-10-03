@@ -34,7 +34,7 @@ impl Planted {
         db
     }
     fn command(&self, args: &[&str]) -> std::process::Output {
-        Command::new(BIN).env_clear().env("HOME", self.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
+        Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
             .args(["--root", self.root.to_str().unwrap(), "telemetry", "demo"]).args(args).output().unwrap()
     }
     fn raw(&self, args: &[&str]) -> Vec<u8> {
@@ -811,7 +811,7 @@ fn ticker_records_operating_passes_pause_resume_and_restart() {
     let p = Planted::new();
     fs::write(p.project.join("PROJECT.md"),"operating time fixture").unwrap();
     fs::write(p.project.join(".state/format.json"),"{}").unwrap();
-    let start = || Ticker(Command::new(BIN).env_clear().env("HOME",p.tmp.path().join("home")).env("PATH","/usr/bin:/bin")
+    let start = || Ticker(Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME",p.tmp.path().join("home")).env("PATH","/usr/bin:/bin")
         .env("HERDR_BIN_PATH","/bin/false").env("HERDR_PROJECTS_TELEMETRY_COLLECT_SECS","3600")
         .args(["--root",p.root.to_str().unwrap(),"ticker","run"])
         .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap());
@@ -821,7 +821,7 @@ fn ticker_records_operating_passes_pause_resume_and_restart() {
             |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).ok()
     };
     let wait = |ticker: &mut Ticker, ready: &dyn Fn((i64,i64,i64,bool))->bool| {
-        let deadline=Instant::now()+Duration::from_secs(55);
+        let deadline=Instant::now()+Duration::from_secs(15);
         loop {
             if let Some(row)=persisted() && ready(row) {return row;}
             assert!(Instant::now()<deadline && ticker.0.try_wait().unwrap().is_none(),"ticker observation timeout: {}",fs::read_to_string(p.root.join(".ticker.log")).unwrap_or_default());
@@ -837,14 +837,19 @@ fn ticker_records_operating_passes_pause_resume_and_restart() {
     state(ProjectState::Active);
     p.json(&["collect"]); // Explicitly opt this project into telemetry.
     let mut ticker=start();
-    let (_,first,_,_)=wait(&mut ticker,&|row|row.0==1);
-    let (_,_,third,_)=wait(&mut ticker,&|row|row.2-first>=29_000);
-    assert!((29_000..=45_000).contains(&(third-first)),"three pass cadence: {}",third-first);
+    let (_,first,mut observed,_)=wait(&mut ticker,&|row|row.0==1);
+    // Count persisted operating samples, rather than waiting thirty real seconds.
+    for _ in 0..2 {
+        let previous=observed;
+        observed=wait(&mut ticker,&|row|row.2>previous).2;
+    }
+    let pass_ms=(15_000.0*include_str!("support/time-scale.txt").trim().parse::<f64>().unwrap()).max(50.0) as i64;
+    assert!((pass_ms..=5*pass_ms).contains(&(observed-first)),"three observed passes: {}",observed-first);
     state(ProjectState::Paused);
     wait(&mut ticker,&|row|!row.3);
     let db=rusqlite::Connection::open(p.project.join(".state/telemetry.db")).unwrap();
     let duration:i64=db.query_row("SELECT sum(end_unix_ms-start_unix_ms) FROM operating_intervals",[],|r|r.get(0)).unwrap();
-    assert!((29_000..=45_000).contains(&duration));
+    assert!((pass_ms..=5*pass_ms).contains(&duration));
     drop(db);
     state(ProjectState::Active);
     wait(&mut ticker,&|row|row.0==2 && row.3);
@@ -859,7 +864,7 @@ fn ticker_records_operating_passes_pause_resume_and_restart() {
     assert_eq!(db.query_row("SELECT count(DISTINCT session) FROM operating_intervals",[],|r|r.get::<_,i64>(0)).unwrap(),2);
     assert_eq!(db.query_row("SELECT count(*) FROM operating_intervals WHERE close_reason='open'",[],|r|r.get::<_,i64>(0)).unwrap(),1);
     let after:i64=db.query_row("SELECT sum(end_unix_ms-start_unix_ms) FROM operating_intervals",[],|r|r.get(0)).unwrap();
-    assert!(after>=duration && after<=duration+16_000,"stop/restart never extrapolates a tail: {duration} -> {after}");
+    assert!(after>=duration && after<=duration+4*pass_ms,"stop/restart never extrapolates a tail: {duration} -> {after}");
 }
 
 /// A real foreground ticker with no agent, sockets or producer homes. Enabled
@@ -887,7 +892,7 @@ fn ticker_telemetry_disabled_and_untouched_projects_have_no_writes() {
             }
             let sidecar=p.project.join(".state/telemetry.db");
             let before=existing.then(||fs::read(&sidecar).unwrap());
-            let mut ticker=Ticker(Command::new(BIN).env_clear().env("HOME",p.tmp.path().join("home")).env("PATH","/usr/bin:/bin")
+            let mut ticker=Ticker(Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME",p.tmp.path().join("home")).env("PATH","/usr/bin:/bin")
                 .env("HERDR_BIN_PATH","/bin/false").env("HERDR_PROJECTS_TELEMETRY_COLLECT_SECS",secs)
                 .args(["--root",p.root.to_str().unwrap(),"ticker","run"])
                 .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap());

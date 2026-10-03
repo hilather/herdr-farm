@@ -138,8 +138,7 @@ pub fn executable(
 /// How long one delivery of the brief is watched for the agent accepting it,
 /// how often, and how many deliveries are tried while it stays idle. Together
 /// they fit the 30 s claim lease.
-const BRIEF_ACCEPT_WINDOW: Duration = Duration::from_secs(6);
-const BRIEF_ACCEPT_POLL: Duration = Duration::from_millis(500);
+use crate::timing::{brief_accept_window, brief_accept_poll};
 const BRIEF_DELIVERIES: u32 = 3;
 
 struct Native<'a> {
@@ -236,7 +235,7 @@ impl Native<'_> {
     /// Herdr's visible-screen detector sees it working. `false` means it stayed
     /// idle the whole window.
     fn await_acceptance(&self, id: &str, delivery: u32) -> Result<bool> {
-        let until = Instant::now() + BRIEF_ACCEPT_WINDOW;
+        let until = Instant::now() + brief_accept_window();
         let mut poll = 0;
         loop {
             poll += 1;
@@ -257,10 +256,10 @@ impl Native<'_> {
                     return Ok(true);
                 }
             }
-            if Instant::now() + BRIEF_ACCEPT_POLL >= until || Instant::now() + BRIEF_ACCEPT_POLL >= self.deadline {
+            if Instant::now() + brief_accept_poll() >= until || Instant::now() + brief_accept_poll() >= self.deadline {
                 return Ok(false);
             }
-            std::thread::sleep(BRIEF_ACCEPT_POLL);
+            std::thread::sleep(brief_accept_poll());
         }
     }
     fn ready(&self, id: &str) -> Result<()> {
