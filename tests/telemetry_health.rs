@@ -166,29 +166,32 @@ fn ticker_health_requires_operator_opt_in_obeys_interval_and_never_notifies() {
     let evaluations = || p.sidecar().query_row("SELECT count(*),count(CASE WHEN source='cli' THEN 1 END),count(CASE WHEN source='tick' THEN 1 END) FROM health_evaluations",
         [], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))).unwrap();
     let synced = || p.sidecar().query_row("SELECT synced_unix_ms FROM usage_ledger", [], |r| r.get::<_, i64>(0)).ok();
-    let pass = || {
+    let pass = |expected_ticks: i64| {
         let before = synced();
         let mut child = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", p.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
             .args(["--root", p.root.to_str().unwrap(), "ticker", "run"])
             .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while synced() == before {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        // Health runs in deferred lanes after accounting. Wait for its
+        // observable result before stopping the ticker; the scaled shutdown
+        // drain budget alone cannot guarantee that work has finished.
+        while synced() == before || evaluations().2 != expected_ticks {
             let exited = child.try_wait().unwrap();
             if exited.is_some() || Instant::now() >= deadline {
                 let _ = child.kill();
                 let _ = child.wait();
-                panic!("ticker did not complete accounting: {exited:?} {}", fs::read_to_string(p.root.join(".ticker.log")).unwrap_or_default());
+                panic!("ticker did not complete accounting/health: {exited:?} {}", fs::read_to_string(p.root.join(".ticker.log")).unwrap_or_default());
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-        // Accounting precedes health. Graceful stop waits for the whole pass.
+        // Stop after the requested observable work, rather than mid-lane.
         fs::write(p.root.join(".ticker.stop"), b"").unwrap();
         assert!(child.wait().unwrap().success());
         fs::remove_file(p.root.join(".ticker.stop")).unwrap();
         assert_eq!(inbox(), before_inbox);
     };
 
-    pass();
+    pass(0);
     assert_eq!(evaluations(), (0, 0, 0));
     assert_eq!(p.alerts()["last_evaluated_unix_ms"], Value::Null);
 
@@ -201,14 +204,14 @@ fn ticker_health_requires_operator_opt_in_obeys_interval_and_never_notifies() {
     // No health interval override exists. Seed an elapsed operator evaluation,
     // without waiting five minutes or changing the production clock.
     p.sidecar().execute("UPDATE health_evaluations SET evaluated_unix_ms=?1", [now - 300_001]).unwrap();
-    pass();
+    pass(1);
     assert_eq!(evaluations(), (2, 1, 1));
     let first_tick = p.alerts();
     assert!(first_tick["last_evaluated_unix_ms"].as_i64().unwrap() >= now);
     let alert = open_alert(&first_tick, "collector_stale").unwrap();
     assert_eq!((&alert["state"], &alert["occurrences"], &alert["notified_unix_ms"]), (&json!("warn"), &json!(2), &Value::Null));
 
-    pass();
+    pass(1);
     assert!(unix_ms() - first_tick["last_evaluated_unix_ms"].as_i64().unwrap() < 300_000);
     assert_eq!(evaluations(), (2, 1, 1));
     assert_eq!(p.alerts(), first_tick);

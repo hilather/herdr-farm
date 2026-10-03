@@ -516,3 +516,240 @@ regressions above require Unix socket fixture binds and are compile-only here,
 as requested. Their outside-sandbox execution remains with the steward. The
 historical socket-only failure lists earlier in this document remain the prior
 sandbox evidence; this follow-up does not claim those workflows passed.
+
+## CI-PORTABILITY-1: sandbox suites in the CI merge gate
+
+The `ci` nextest profile now runs the complete default test selection (four
+partitions, four test threads per runner, one retry). There are no CI-specific
+exclusions. The existing workflow already supplies `TMPDIR=${{ runner.temp }}`
+and enables AppArmor unprivileged user namespaces; no workflow change is needed.
+A retry pass is still reported as flaky rather than hiding the first failure.
+
+The checkout on GitHub runners is under `/home/runner/work`. The worker sandbox
+makes owner homes recursively read-only and hides owner secrets. Tests that
+pin fixtures to `CARGO_TARGET_TMPDIR` put them under that protected checkout,
+even when the runner supplies an external `TMPDIR`. Use the runtime temporary
+directory for sandbox-writable fixtures. The sandbox already preserves needed
+fixture subtrees when privatizing `/tmp`; neither read-only anchors nor secret
+hiding need to change.
+
+| Suite | Fixture-path finding and disposition |
+| --- | --- |
+| `operator_launch` | Changed its lab root from `CARGO_TARGET_TMPDIR` to `std::env::temp_dir()`; its runtime directory already honored `TMPDIR`. |
+| `worker_login_share` | Changed the owner/project/execution-home fixture root to `std::env::temp_dir()`; credentials remain synthetic and the declared fixture owner home selects login lookup. |
+| `thread_sandbox` | Changed the lab root to `std::env::temp_dir()`. This binary was already enabled in CI, despite the task's initial description. Extended its existing public isolation workflow with a fake owner checkout at `owner/work/herdr-farm/target/tmp`. |
+| `canonical_worker` | Already uses `tempfile::tempdir()` and honors runner `TMPDIR`; the whole-binary exclusion was broader than the fixture-path problem. Socket-backed launch workflows require outside-sandbox validation. |
+| `replay_suite` | Its shared `support::replay::Lab` already uses `tempfile::tempdir()`; hidden-check protections remain unchanged. Socket-backed launches require outside-sandbox validation. |
+
+The fake-owner workflow sets `HERDR_PROJECTS_OWNER_HOME`, rejects writes and
+execution-home creation under the fake checkout with `Read-only file system`,
+then commits in the intended worktree and persists a report in the intended
+execution home outside that declared owner. It also checks that neither the
+forbidden directory nor the forbidden file was created. Existing secret-read,
+Git isolation and restart assertions remain. This exercises public isolation
+APIs and real gated processes, without source-text assertions or new unit tests.
+Local cargo commands use `TMPDIR=$PWD/target/tmp`, not `/dev/shm`.
+
+Precisely the newly enabled CI selection is every test in `canonical_worker`,
+`operator_launch`, `worker_login_share`, and `replay_suite`, plus these eight
+previously excluded named tests (not seven):
+
+- `quality_certification::a_sandboxed_worker_cannot_elevate_its_own_report`
+- `cli::outcome_success_path`
+- `cli::ticker_canonical_notification_confirms_or_retains_ambiguity_after_owner_death`
+- `lib::admission::tests::admission_resumes_after_a_full_page_of_unsigned_candidates`
+- `lib::canonical_worker::tests::launch_advancement_recovers_each_boundary_then_delivers_brief_and_stops`
+- `bin::finalization_delivery::tests::cancelled_finalization_and_receipt_io_preserve_unresolved_intent`
+- `bin::canonical_finalization_jobs::tests::stop_snapshot_finalizes_without_source_in_foreground_and_queued_paths`
+- `telemetry_health::ticker_health_requires_operator_opt_in_obeys_interval_and_never_notifies`
+
+No product, schema, dependency, retention, or backup classification changes.
+GitHub Actions cannot be run from this worker; the steward must push and inspect
+all four partitions before treating this as confirmed runner validation.
+
+The health exclusion had a separate reproducible cause: its pass helper stopped
+when the accounting ledger changed, but health now runs later in deferred lanes.
+With test-scaled shutdown draining, the process can exit before that lane runs.
+The existing E2E helper now waits for both accounting and the expected persisted
+tick evaluation count before requesting stop, with a generous 60-second wait
+deadline. This changes no production interval or external execution budget.
+
+The admission paging test initially exceeded the public API's 2-second read
+budget while a broad library test run and builds competed with the focused
+suite. Two attempts failed with `state store: Deadline`; after the broad run
+finished, the focused test passed (11.48 seconds for the whole fixture/workflow).
+This is not a socket-only failure and is recorded separately. It does not
+justify a permanent runner exclusion; the existing CI retry policy remains.
+
+### Local validation and sandbox limits
+
+All cargo commands used `TMPDIR=$PWD/target/tmp` and
+`--locked --offline -j 3`. The fixture scripts stand in for agents; no real
+agent CLI, owner credentials, owner project root, or running owner ticker/server
+was used. No `/dev/shm` scratch and no push.
+
+| Check | Result |
+| --- | --- |
+| Five sandbox integration suites, `cargo test ... --no-run` | All compiled. |
+| Final fake-owner `thread_sandbox` binary | 2 passed, including the EROFS reproduction and successful intended writes. |
+| `worker_login_share` | 1 passed. |
+| `operator_launch` | 12 passed, 5 socket-startup failures. |
+| `canonical_worker` | 6 passed, 32 socket-startup failures. |
+| `replay_suite` | 6 passed, 2 socket-startup failures. |
+| Finalization cancellation/receipt I/O | Passed through cargo and a focused test-binary invocation. |
+| Foreground/queued stop snapshots | Passed through cargo and a focused test-binary invocation. |
+| Corrected health interval workflow | Passed through cargo (43.39 s under load) and focused execution (8.17 s). |
+| Admission paging focused rerun after broad run | Passed (11.48 s); earlier deadline failures recorded above. |
+| `cargo clippy ... --features state-store --all-targets` | Completed successfully; existing warnings, no diagnostics in changed test files. |
+
+A broader existing library check also ran: **523 passed, 89 failed, 13 ignored**.
+Of its failures, 84 were explicit Unix socket `Operation not permitted` errors.
+The other five are not classified as socket-only and no unrelated fixes were
+made: `admission::tests::integration_backlog_returns_capacity_full_and_terminal_rows_do_not`
+(deadline), the admission paging test above (deadline, later passed),
+`source_tree::tests::cleanup_budget_accepts_a_maximum_live_library_plus_stage_metadata`
+(source-read deadline),
+`store::barriers::tests::ancestor_memory_expiry_during_later_release_rolls_back_publication`
+(memory completion blocked), and
+`store::controlled::tests::core_snapshot_accounting_is_shared_across_tables_and_resets_per_snapshot`
+(expected limit assertion). The broad cargo command stopped at the library
+failure; its CLI and quality selections are instead exercised by focused nextest.
+
+The consolidated focused nextest command selected the five sandbox binaries
+and all eight formerly excluded named tests: **74 run, 30 passed, 44 failed**
+(1604 unselected). Of the 44 failures, **43 were socket-only**, listed below;
+the remaining admission deadline subsequently passed as recorded above.
+The CI profile also passed a nextest compile-only run.
+
+### Socket-only failures in the focused portability run (43)
+
+- `canonical_worker::a_brief_swallowed_by_the_agent_is_redelivered_and_confirmed_only_once_accepted`
+- `canonical_worker::a_brief_the_agent_never_accepts_is_left_ambiguous_not_confirmed`
+- `canonical_worker::a_hidden_path_covering_the_execution_home_refuses_the_launch_before_creation`
+- `canonical_worker::a_launch_reaches_running_while_another_holder_takes_the_shared_root_intermittently`
+- `canonical_worker::a_legacy_thread_holding_the_planned_worktree_blocks_its_creation`
+- `canonical_worker::a_proven_worker_end_keeps_the_project_admitted_but_an_unexplained_pane_loss_pauses_it`
+- `canonical_worker::a_sandboxed_reviewer_uses_its_worker_channel_through_the_spool`
+- `canonical_worker::a_subdirectory_binding_runs_in_the_same_subdirectory_of_the_new_worktree`
+- `canonical_worker::a_worker_branch_reaching_a_corrupt_quarantined_object_is_refused`
+- `canonical_worker::accepted_editing_worker_completes_automatically_after_integration`
+- `canonical_worker::accepted_verify_only_editing_worker_completes_without_integration_automation`
+- `canonical_worker::an_isolated_codex_worker_commits_through_codex_workspace_write_sandbox`
+- `canonical_worker::an_isolated_worker_cannot_read_owner_secrets_or_lift_the_hiding_but_still_commits_and_submits`
+- `canonical_worker::an_isolated_worker_submits_only_through_its_own_spool`
+- `canonical_worker::an_operator_finishes_a_worker_that_never_submitted_and_the_result_lands_automatically`
+- `canonical_worker::an_untracked_working_directory_is_refused_before_the_approval_is_used`
+- `canonical_worker::canonical_attempt_sidebar_clears_after_termination_in_an_active_project`
+- `canonical_worker::canonical_attempt_sidebar_does_not_publish_to_a_replaced_terminal`
+- `canonical_worker::canonical_attempt_sidebar_refreshes_and_clears_on_pause_and_termination`
+- `canonical_worker::canonical_attempt_sidebar_restart_offers_no_historical_cleanup_or_native_request`
+- `canonical_worker::canonical_attempt_sidebar_uses_collected_usage_and_observed_waiting`
+- `canonical_worker::dedicated_worker_refuses_remote_manifest_before_its_brief`
+- `canonical_worker::editing_worker_requires_operator_completion_when_automation_is_off`
+- `canonical_worker::launch_sets_the_intended_permission_mode_over_a_stale_one_in_the_home`
+- `canonical_worker::rejected_editing_worker_stays_running_and_can_resubmit`
+- `canonical_worker::review_assignment_launches_with_blind_brief_and_records_session`
+- `canonical_worker::ticker_does_not_dispatch_a_launch_cancelled_before_creation`
+- `canonical_worker::ticker_launches_and_briefs_once_then_stops_a_cancelled_worker_while_paused_and_revoked`
+- `canonical_worker::ticker_launches_nothing_on_a_server_without_the_launch_contract_or_while_paused`
+- `canonical_worker::ticker_recovers_a_lost_creation_reply_without_creating_again`
+- `canonical_worker::ticker_retires_a_cancelled_gated_worker_without_starting_it`
+- `canonical_worker::ticker_stops_the_dedicated_herdr_server_of_a_finished_task`
+- `cli::outcome_success_path`
+- `cli::ticker_canonical_notification_confirms_or_retains_ambiguity_after_owner_death`
+- `lib::canonical_worker::tests::launch_advancement_recovers_each_boundary_then_delivers_brief_and_stops`
+- `operator_launch::launch_run_retries_after_termination_but_refuses_an_unobserved_live_worker`
+- `operator_launch::launch_run_with_a_dedicated_server_after_verify_interaction_reserves_both_kinds`
+- `operator_launch::stale_profile_evidence_is_refreshed_by_launch_run`
+- `operator_launch::verify_interaction_produces_launchable_evidence_for_codex_and_claude_from_the_cli`
+- `operator_launch::verify_interaction_tolerates_agents_writing_into_their_execution_home`
+- `quality_certification::a_sandboxed_worker_cannot_elevate_its_own_report`
+- `replay_suite::launched_replay_candidate_cannot_read_hidden_checks_and_is_verified_by_them`
+- `replay_suite::ordinary_task_on_the_source_repository_still_launches_without_replay_hides`
+
+### Socket-only failures in the additional library run (84)
+
+- `lib::canonical_worker::tests::a_starting_agent_whose_own_display_state_moves_is_named_once_but_identity_drift_is_refused`
+- `lib::canonical_worker::tests::barrier_revocation_during_prompt_preserves_stale_delivery_and_stop_recovery`
+- `lib::canonical_worker::tests::brief_preparation_and_delivery_do_not_decode_unrelated_approval_history`
+- `lib::canonical_worker::tests::brief_preparation_expiry_and_failed_commit_leave_no_delivery_obligation`
+- `lib::canonical_worker::tests::brief_rendering_accounts_selected_inputs_before_decode_or_claim`
+- `lib::canonical_worker::tests::brief_rendering_shares_deadline_and_does_not_scan_retained_history`
+- `lib::canonical_worker::tests::busy_foreign_and_changed_executable_workers_are_not_claimed`
+- `lib::canonical_worker::tests::conflicting_legacy_socket_alias_prevents_brief_claim`
+- `lib::canonical_worker::tests::controller_recovers_missing_initial_brief_without_sending_or_duplicating_it`
+- `lib::canonical_worker::tests::corrupt_target_payload_cannot_hide_a_retained_resource_using_a_terminated_peer`
+- `lib::canonical_worker::tests::creation_and_recovery_refuse_terminal_replacement_during_process_observation`
+- `lib::canonical_worker::tests::creation_claim_and_recovery_intent_roll_back_together_before_native_effects`
+- `lib::canonical_worker::tests::creation_retains_observed_supervisor_after_authority_changes`
+- `lib::canonical_worker::tests::direct_workers_require_positive_visible_readiness_not_managed_launch_flag`
+- `lib::canonical_worker::tests::exit_before_any_identity_observation_keeps_uncertain_creation_reserved`
+- `lib::canonical_worker::tests::exited_worker_reconciles_after_handles_are_lost_without_claiming_task_success`
+- `lib::canonical_worker::tests::gate_release_boundary_is_one_use_and_does_not_confirm_a_start`
+- `lib::canonical_worker::tests::gate_release_refuses_changed_target_authority_and_failed_commit_is_atomic`
+- `lib::canonical_worker::tests::gate_selection_claim_and_render_share_bounded_reads`
+- `lib::canonical_worker::tests::last_moment_brief_preflight_blocks_changed_authority_without_submission`
+- `lib::canonical_worker::tests::launch_advancement_recovers_each_boundary_then_delivers_brief_and_stops`
+- `lib::canonical_worker::tests::launch_advancement_refuses_unusable_environment_before_creation`
+- `lib::canonical_worker::tests::launch_advancement_selection_is_bounded_and_operation_scoped`
+- `lib::canonical_worker::tests::launch_reconciliation_ignores_unrelated_history_without_releasing_a_gate`
+- `lib::canonical_worker::tests::live_gate_proof_refuses_the_same_child_after_exec`
+- `lib::canonical_worker::tests::lost_creation_recovers_exact_resource_without_config_or_another_claim`
+- `lib::canonical_worker::tests::lost_or_foreign_brief_acknowledgments_retain_claim_and_never_repeat`
+- `lib::canonical_worker::tests::lost_workspace_reply_recovers_exact_live_marker_even_after_revocation_and_expiry`
+- `lib::canonical_worker::tests::malformed_neighbor_identity_never_panics_claims_or_sends_a_brief`
+- `lib::canonical_worker::tests::native_brief_original_deadline_bounds_a_stalled_submission`
+- `lib::canonical_worker::tests::native_gate_refusal_does_not_consume_the_release_opportunity_or_send_input`
+- `lib::canonical_worker::tests::native_gate_submission_is_once_even_when_the_reply_is_lost`
+- `lib::canonical_worker::tests::native_start_confirmation_requires_real_exec_and_exact_agent_then_replays_read_only`
+- `lib::canonical_worker::tests::new_workspace_creation_and_lost_layout_reply_are_one_use`
+- `lib::canonical_worker::tests::observed_resource_exit_before_target_commit_remains_recoverable`
+- `lib::canonical_worker::tests::pane_conflicts_remain_effect_fences_with_ten_thousand_retired_neighbors`
+- `lib::canonical_worker::tests::prepared_launch_selection_rotates_stages_and_excludes_cancelled_or_expired_effects`
+- `lib::canonical_worker::tests::readiness_lost_after_claim_prevents_prompt_and_retains_one_use_claim`
+- `lib::canonical_worker::tests::recovery_target_commit_failure_retains_original_claim_and_can_be_reobserved`
+- `lib::canonical_worker::tests::resource_creation_ignores_cold_approval_history_without_replaying`
+- `lib::canonical_worker::tests::resource_creation_selection_and_render_are_history_bounded`
+- `lib::canonical_worker::tests::resource_preparation_rejects_changed_config_before_consuming_approval_or_creating`
+- `lib::canonical_worker::tests::resource_recovery_selects_its_evidence_without_scanning_history`
+- `lib::canonical_worker::tests::retained_pane_projection_excludes_reused_history_and_tracks_recovery_boundaries`
+- `lib::canonical_worker::tests::retained_pane_projection_tracks_source_mutations_and_preserves_workspaces`
+- `lib::canonical_worker::tests::revoked_barrier_routes_a_real_supervised_stop_and_recovers_after_commit_failure`
+- `lib::canonical_worker::tests::staged_pane_selection_ignores_other_panes_and_preserves_provenance_fences`
+- `lib::canonical_worker::tests::staged_pane_selection_reads_the_real_schema42_without_new_indexes`
+- `lib::canonical_worker::tests::staged_repository_stop_requires_and_records_preserved_partial_files`
+- `lib::canonical_worker::tests::staged_stop_commit_failure_retains_capacity_and_recovers_without_creation`
+- `lib::canonical_worker::tests::staged_stop_requires_output_evidence_and_records_an_empty_directory_as_absent`
+- `lib::canonical_worker::tests::start_selection_is_bounded_and_cancellable_with_retained_history`
+- `lib::canonical_worker::tests::stock_herdr_launch_execs_the_launcher_in_place_of_the_shell`
+- `lib::canonical_worker::tests::stock_herdr_unconfirmed_launch_closes_its_workspace_and_counts_nothing`
+- `lib::canonical_worker::tests::stop_before_brief_atomically_retires_send_and_commit_failure_keeps_capacity`
+- `lib::canonical_worker::tests::supervised_root_creation_and_commit_losses_recover_without_bootstrap_or_replay`
+- `lib::canonical_worker::tests::supervised_root_recovery_needs_exact_process_and_preserves_expired_authority`
+- `lib::canonical_worker::tests::target_inventory_rejects_rehashed_inputs_and_broken_launch_operation_links`
+- `lib::canonical_worker::tests::target_retention_uses_selected_history_and_original_control`
+- `lib::canonical_worker::tests::termination_does_not_decode_unrelated_approval_history`
+- `lib::canonical_worker::tests::termination_selection_is_bounded_and_cancellable_with_retained_history`
+- `lib::canonical_worker::tests::uncertain_creation_refuses_foreign_socket_duplicate_panes_and_changed_command`
+- `lib::canonical_worker::tests::uncertain_initial_brief_never_becomes_a_fresh_preparation_hint`
+- `lib::canonical_worker::tests::workers_sharing_one_herdr_server_are_named_independently_and_recover_unapplied_names`
+- `lib::canonical_worker::tests::workspace_acknowledgment_loss_retains_uncertainty_without_layout_or_recreation`
+- `lib::canonical_worker::tests::workspace_layout_commit_failure_resumes_without_recreating_workspace`
+- `lib::canonical_worker::tests::workspace_receipt_commit_failure_never_submits_layout_or_recreates`
+- `lib::profile_preparation::tests::launch_ingress::canonical_worktree_paths_and_aliases_block_before_approval_consumption`
+- `lib::profile_preparation::tests::launch_ingress::draft_signature_and_reservation_preserve_the_exact_brief_and_one_use_boundary`
+- `lib::profile_preparation::tests::launch_ingress::lost_worktree_receipt_commit_recovers_after_approval_revocation_without_git_add`
+- `lib::profile_preparation::tests::launch_ingress::preparation_capture_releases_sqlite_and_rechecks_selected_state`
+- `lib::profile_preparation::tests::launch_ingress::preparation_stop_preserves_created_repositories_and_records_uncreated_plans_in_order`
+- `lib::profile_preparation::tests::launch_ingress::repository_observation_ignores_replacement_refs_and_refuses_lazy_fetch`
+- `lib::profile_preparation::tests::launch_ingress::signed_worktree_creation_retains_exact_checkout_and_recovers_without_replay`
+- `lib::profile_preparation::tests::launch_ingress::started_worktree_proof_allows_output_but_rejects_reassociation`
+- `lib::profile_preparation::tests::launch_ingress::unsigned_or_changed_launch_inputs_never_create_a_reservation`
+- `lib::profile_preparation::tests::launch_ingress::worktree_creation_supports_multiple_repositories_binary_files_and_symlinks`
+- `lib::profile_preparation::tests::launch_ingress::worktree_inventory_retains_uncertain_paths_and_refuses_corrupt_provenance`
+- `lib::profile_preparation::tests::launch_ingress::worktree_only_stop_fences_late_launch_and_preserves_uncertain_resources`
+- `lib::profile_preparation::tests::launch_ingress::worktree_preparation_uses_selected_history_through_receipt_commit`
+- `lib::profile_preparation::tests::launch_ingress::worktree_refusals_precede_approval_consumption_and_effects`
+- `lib::profile_preparation::tests::launch_ingress::worktree_verification_and_stop_select_only_their_launch_provenance`
+- `lib::runner::socket::tests::reply_is_bounded_and_requires_a_complete_utf8_line`
+- `lib::runner::socket::tests::trickle_reply_cannot_restart_deadline`
