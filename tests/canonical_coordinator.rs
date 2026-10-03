@@ -538,7 +538,7 @@ fn inbox_wait_wakes_for_a_lost_attempt_without_marking_the_notice_seen() {
 #[test]
 fn legacy_inbox_wait_times_out_without_creating_seen_state() {
     let lab = Lab::new();
-    lab.ok(&["new", "--legacy", "legacy"]);
+    lab.ok(&["new", "legacy"]);
     let project = lab.root.join("legacy");
     let timeout: Value = serde_json::from_str(&lab.ok(&["inbox", "legacy", "wait", "--timeout", "1"])).unwrap();
     assert_eq!(timeout, json!({"items":0,"timed_out":true}));
