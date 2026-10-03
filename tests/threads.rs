@@ -604,9 +604,10 @@ fn cleanup_safety(lab: &Lab, cleanup: &str, resolve: &str) {
 fn wait_cleanup(lab: &Lab, expected: &str) {
     let deadline = Instant::now() + Duration::from_secs(100);
     loop {
-        let note = lab.list()["t-0001"].1.clone();
+        let listed = lab.list();
+        let note = listed.get("t-0001").map(|(_, note)| note.clone()).unwrap_or_default();
         if note.contains(expected) { return; }
-        assert!(Instant::now() < deadline, "cleanup did not reach {expected}: {note}; calls: {}", lab.calls());
+        assert!(Instant::now() < deadline, "cleanup did not reach {expected}: {note:?}; listed: {listed:?}; calls: {}", lab.calls());
         std::thread::sleep(Duration::from_millis(100));
     }
 }
