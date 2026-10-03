@@ -2061,7 +2061,11 @@ pub fn run() -> Result<()> {
                 if !safety.thread_sandbox { println!("  Claude threads are unsandboxed (owner opt-out)"); }
                 println!("  Claude thread sandbox: prepared; the thread launcher does not use it yet");
                 if safety.thread_sandbox {
-                    println!("  sandboxed Claude worker arguments: {:?}", safety.sandboxed_claude_arguments("", "")?);
+                    // Report a refused configuration like worker_summary does, without hiding the rest of the settings.
+                    match safety.sandboxed_claude_arguments("", "") {
+                        Ok(args) => println!("  sandboxed Claude worker arguments: {args:?}"),
+                        Err(error) => println!("  sandboxed Claude worker arguments: refused: {error:#}"),
+                    }
                 }
 
                 println!("  built-in defaults: {}", crate::project::Safety::default().worker_summary());

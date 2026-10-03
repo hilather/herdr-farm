@@ -184,7 +184,9 @@ fn owner_safety_settings_are_reported_and_validated_through_cli() {
     let arguments = output.lines().find(|line| line.contains("sandboxed Claude worker arguments:")).unwrap();
     assert_eq!(arguments.trim(), r#"sandboxed Claude worker arguments: ["--model", "sonnet", "--setting-sources", "user"]"#);
     fs::write(config_dir.join("config.toml"), sandboxed.replace("sonnet", "--settings")).unwrap();
-    assert!(!cli(&["safety", "show", "demo"]).status.success());
+    let out = cli(&["safety", "show", "demo"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8(out.stdout).unwrap().contains("sandboxed Claude worker arguments: refused: sandboxed Claude thread refuses --settings"));
     for invalid in ["thread_wall_hours = 0", "thread_wall_hours = 169", "thread_env = [\"GIT_AUTHOR_NAME=bad\"]", "thread_env = [\"LD_PRELOAD=bad\"]"] {
         fs::write(config_dir.join("config.toml"), format!("[safety.\"{}\"]\n{invalid}\n", root.join("demo").display())).unwrap();
         assert!(!cli(&["safety", "show", "demo"]).status.success());
