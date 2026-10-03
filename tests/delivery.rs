@@ -137,7 +137,11 @@ fn a_lost_start_is_reported_once_and_only_a_restart_starts_the_agent_again() {
     let _ = fs::remove_file(lab.path("root/.ticker.stop"));
     let starts = lab.starts();
     assert_eq!(starts.len(), 2, "{starts:?}");
-    for start in &starts { assert_eq!(start["args"], json!(["--permission-mode", "acceptEdits"])); }
+    for start in &starts {
+        let args: Vec<&str> = start["args"].as_array().unwrap().iter().map(|a| a.as_str().unwrap()).collect();
+        assert_eq!(&args[..3], ["--permission-mode", "acceptEdits", "--allowedTools"], "{args:?}");
+        assert!(args.contains(&"Bash(git merge:*)") && !args.iter().any(|a| a.starts_with("Bash(find") || a.starts_with("Bash(sed") || a.starts_with("Bash(rg")), "{args:?}");
+    }
     assert_eq!(starts[1]["name"], "hp-demo-t-0001");
     assert_eq!((lab.get(&["status"]), lab.get(&["launch_sequence"])), (Some("open".into()), Some(2.into())));
     assert_eq!(lab.get(&["launch_claim", "generation"]), lab.get(&["lifecycle_generation"]));
