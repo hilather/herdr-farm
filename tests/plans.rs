@@ -200,7 +200,10 @@ fn verifier_rejections_replan_twice_then_escalate_until_a_new_plan() {
     assert_eq!((escalated[0]["state"].as_str(), &escalated[0]["replan_proposal_id"]), (Some("open"), &Value::Null));
     assert_eq!(f.replan(&ids[3]), third, "a later rejection joins the open escalation");
     assert_eq!(f.replan(&ids[2]), third);
-    assert_eq!(f.inbox().len(), 3);
+    // Worker result notices (submissions, verification outcomes) are counted separately.
+    let results = ["result.submitted", "verification.accepted", "verification.rejected", "verification.errored", "integration.succeeded", "integration.failed", "attempt.ended_without_submission"];
+    assert_eq!(f.inbox().iter().filter(|(kind, _)| !results.contains(&kind.as_str())).count(), 3);
+    assert!(f.inbox_of("verification.rejected") > 0, "each rejection is also announced as a result notice");
     assert!(runtime::snapshot(&f.project).unwrap().inbox.iter().any(|item| item.content.id == inbox_id));
     assert_eq!(f.ok(&["plan", "inspect", "demo"])["plan_revision"], 0, "no replan wrote a proposal");
     // The planner answers the second request, keyed by its replan id.
