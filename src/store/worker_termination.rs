@@ -578,7 +578,10 @@ pub fn service_project_result_completions(project:&Path)->anyhow::Result<(bool,O
 }
 
 impl SqliteStore {
-    pub(crate) fn service_result_completions(&mut self)->Result<(bool,Option<String>)> {
+    /// Service eligible automatic completions while the caller holds project
+    /// ownership. Result adapters use this before confirming their delivery so
+    /// an observed confirmation cannot outrun the completion request.
+    pub fn service_result_completions(&mut self)->Result<(bool,Option<String>)> {
         let db=self;
         let version:u32=db.connection.query_row("PRAGMA user_version",[],|row|row.get(0))?;
         if version<45 {return Ok((false,None));}
