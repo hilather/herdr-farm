@@ -110,3 +110,14 @@ baseline comparisons, and the exact socket-only failure list. The socket-free
 telemetry query group dropped from 66.43 s to 11.15 s (16 tests passing); CLI
 went from 159.37 s to 57.67 s with the same socket failures. Successful socket
 workflows still require the steward's outside-sandbox cargo-nextest run.
+
+W-COORD-2c extends `canonical_coordinator`'s public CLI replacement workflow:
+with the accelerated ticker running, `open demo --reprime` must finish within
+five seconds. Replacement no longer tries to acquire shared root ownership
+inside its own exclusive root guard. Coordinator native calls and acceptance
+polling retain project ownership with a shared root; exclusive root ownership
+is limited to binding publication and local conflict inspection. The short
+publication acquisition uses the normal job retry deadline (and the existing
+bounded exclusive acquisition window). No background canonical coordinator
+replay loop is involved. Socket-bound validation requires an unrestricted lab;
+this sandbox cannot bind Unix sockets.

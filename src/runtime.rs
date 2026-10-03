@@ -210,7 +210,7 @@ pub fn retire_operation(project:&Path,id:&crate::domain::OperationId,revision:u6
     Ok(migration::open_active(project)?.retire_operation(id,revision,head,reason,jiff::Timestamp::now().as_millisecond())?)
 }
 
-/// Coordinator launch retains root-exclusive ownership across external effects.
+/// Coordinator binding publication retains short root-exclusive ownership.
 /// Route changes use the existing versioned binding transactions and publish
 /// control without attempting to acquire a second execution lock.
 pub fn bind_coordinator_held(project:&Path,expected_head:u64,route:&crate::domain::RuntimeRoute,replace_missing:bool,_guard:&crate::execution_guard::RootGuard)->Result<crate::domain::RuntimeBinding> {
@@ -264,6 +264,16 @@ pub fn adopt_observed(project:&Path,id:&str,revision:u64,head:u64,config:&migrat
 /// Explicitly withdraw an adopted claim, retaining the binding and audit history.
 pub fn relinquish(project:&Path,id:&str,expected_revision:u64,expected_head:u64,reason:&str)->Result<u64> {
     let _maintenance=migration::runtime_mutation(project)?;
+    relinquish_inner(project,id,expected_revision,expected_head,reason)
+}
+
+/// Withdraw a claim under existing project ownership; never reacquire the root.
+pub fn relinquish_held(project:&Path,id:&str,expected_revision:u64,expected_head:u64,guard:&crate::execution_guard::ProjectGuard,reason:&str)->Result<u64> {
+    guard.check_project(project)?;
+    relinquish_inner(project,id,expected_revision,expected_head,reason)
+}
+
+fn relinquish_inner(project:&Path,id:&str,expected_revision:u64,expected_head:u64,reason:&str)->Result<u64> {
     let mut db=migration::open_active(project)?;
     let head=db.relinquish_runtime(id,expected_revision,expected_head,reason)?;
     migration::publish_control_marker(project,&db)?;Ok(head)

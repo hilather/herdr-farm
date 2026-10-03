@@ -197,6 +197,16 @@ Compatibility: legacy environment variables and existing data/config locations r
 
 ## Canonical coordinator after migration (W-COORD-2)
 
+Coordinator `open` retains operator intent and project ownership across Herdr
+calls and priming waits. Root exclusivity covers only conflict validation and
+binding publication, with no Herdr I/O. Replacement relinquishes the old claim
+under the existing project guard rather than reacquiring a shared root lock.
+An absent or uncertain pane returns to the owner for `open --reprime`; the
+canonical ticker does not replay coordinator startup or priming each pass.
+The E2E replacement workflow requires foreground reprime to finish within five
+seconds while the accelerated ticker is running.
+
+
 After migration, open the coordinator with `herdr-farm open PROJECT` in the
 owner's Herdr session (or pass `--socket /absolute/session.sock`). It uses
 `PROJECT.md`'s `coordinator_agent` and the project's effective
