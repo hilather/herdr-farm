@@ -271,6 +271,13 @@ pub fn branch_name(slug: &str, id: &str, title: &str) -> String {
     }
 }
 
+/// Branch naming used by threads created before per-thread ref directories.
+pub fn legacy_branch_name(slug: &str, id: &str, title: &str) -> String {
+    let title = slugify(title);
+    if title.is_empty() { format!("hp/{slug}/{id}") }
+    else { format!("hp/{slug}/{id}-{title}") }
+}
+
 pub fn agent_name(slug: &str, id: &str) -> String {
     format!("hp-{slug}-{id}")
 }

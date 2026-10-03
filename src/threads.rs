@@ -230,7 +230,7 @@ fn place_and_brief(ctx: &Ctx, project: &Project, view: &SessionView, id: &str, r
             // through `--machine`.
             let target = remote::ssh_target(runner, &ctx.env.herdr_bin(), &ctx.config_dir, &record.machine)?;
             let (origin, base) = remote::repo_info(runner, &target, &record.repo, &record.base)?;
-            let branch = thread::branch_name(slug, id, &record.title);
+            let branch = if record.branch.is_empty() { thread::branch_name(slug, id, &record.title) } else { record.branch.clone() };
             let (created, path, cwd) = view.herdr.on_machine(&record.machine).worktree_create(&record.repo, &branch, &base, &record.title)?;
             thread::update(project, id, |t| {
                 t.origin = origin;
@@ -262,7 +262,7 @@ fn place_and_brief(ctx: &Ctx, project: &Project, view: &SessionView, id: &str, r
             } else {
                 record.base.clone()
             };
-            let branch = thread::branch_name(slug, id, &record.title);
+            let branch = if record.branch.is_empty() { thread::branch_name(slug, id, &record.title) } else { record.branch.clone() };
             let (created, path, cwd) = view.herdr.worktree_create(&record.repo, &branch, &base, &record.title)?;
             // Recorded immediately, so a command killed midway still leaves a
             // record `thread restart` can act on.
@@ -478,13 +478,19 @@ pub(crate) fn restart_owned(ctx: &Ctx, slug: &str, id: &str) -> Result<Thread> {
     let now = jiff::Timestamp::now();
     let live = thread::live_state(&record, &agents, &panes, now);
     let branch_exists = record.kind == Kind::Worktree && record.worktree_path.is_empty() && {
-        let branch = thread::branch_name(slug, id, &record.title);
-        if record.is_remote() {
-            let target = remote::ssh_target(ctx.runner, &ctx.env.herdr_bin(), &ctx.config_dir, &record.machine)?;
-            remote::branch_exists(ctx.runner, &target, &record.repo, &branch)?
-        } else {
-            git(ctx.runner, &record.repo, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")], GIT_TIMEOUT).is_ok()
+        let branches = if record.branch.is_empty() {
+            vec![thread::legacy_branch_name(slug, id, &record.title), thread::branch_name(slug, id, &record.title)]
+        } else { vec![record.branch.clone()] };
+        let mut exists = false;
+        for branch in branches {
+            exists |= if record.is_remote() {
+                let target = remote::ssh_target(ctx.runner, &ctx.env.herdr_bin(), &ctx.config_dir, &record.machine)?;
+                remote::branch_exists(ctx.runner, &target, &record.repo, &branch)?
+            } else {
+                git(ctx.runner, &record.repo, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")], GIT_TIMEOUT).is_ok()
+            };
         }
+        exists
     };
 
     let plan = restart_plan(&record, &live, branch_exists, now)?;
