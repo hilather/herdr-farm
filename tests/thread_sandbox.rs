@@ -20,9 +20,10 @@ fn run(agent: &Path, cwd: &Path, home: &Path, isolation: &Isolation) {
 
 #[test]
 fn shared_git_thread_and_tab_are_contained_and_restarts_discard_worker_settings() {
-    let base = Path::new(env!("CARGO_TARGET_TMPDIR"));
-    fs::create_dir_all(base).unwrap();
-    let lab = tempfile::tempdir_in(base).unwrap();
+    // Honor TMPDIR: runner workspaces are inside the read-only owner home.
+    let base = std::env::temp_dir();
+    fs::create_dir_all(&base).unwrap();
+    let lab = tempfile::tempdir_in(&base).unwrap();
     let top = lab.path().canonicalize().unwrap();
     let owner = top.join("owner");
     for rel in [".ssh/key", ".claude/secret", ".codex/secret", "plain"] {
@@ -124,6 +125,9 @@ fn shared_git_thread_and_tab_are_contained_and_restarts_discard_worker_settings(
         common.join("refs/heads/hp/demo/other/work"), wt.join(".git"),
         admin.join("commondir"), admin.join("gitdir"), admin.join("config.worktree"), common.join("objects/info/alternates"),
         project.join("homes/other/transcript"), project.join("threads/t-0001.toml"), owner.join("plain"),
+        // Runner checkout/target scratch must remain read-only; the lab
+        // execution home above is outside this declared owner home.
+        owner.join("work/herdr-farm/target/tmp/escape"),
     ] {
         if let Some(parent) = path.parent() { fs::create_dir_all(parent).unwrap(); }
         script.push_str(&format!("if (printf attack > '{}') 2>/dev/null; then echo 'write escaped: {}' >&2; exit 1; fi\n", path.display(), path.display()));
@@ -131,12 +135,18 @@ fn shared_git_thread_and_tab_are_contained_and_restarts_discard_worker_settings(
     for path in [owner.join(".ssh/key"), owner.join(".claude/secret"), owner.join(".codex/secret"), config.clone(), top.join("root/other/secret"), project.join("homes/other/transcript"), token.clone()] {
         script.push_str(&format!("if [ -n \"$(cat '{}' 2>/dev/null || true)\" ]; then echo 'read escaped: {}' >&2; exit 1; fi\n", path.display(), path.display()));
     }
+    // Reproduce the CI failure with a checkout nested under a fake owner home:
+    // creating an execution home under checkout/target/tmp must fail with EROFS.
+    let checkout_tmp = owner.join("work/herdr-farm/target/tmp");
+    script.push_str(&format!("if mkdir '{}' 2> \"$HOME/readonly-error\"; then exit 1; fi\ngrep -F 'Read-only file system' \"$HOME/readonly-error\"\n", checkout_tmp.join("execution-home").display()));
     script.push_str("printf success > \"$HOME/report\"\n");
     fs::write(&agent, script).unwrap();
     run(&agent, &wt, &home, &isolation);
     assert_eq!(fs::read_to_string(wt.join("edit")).unwrap(), "changed");
     assert_eq!(git(&repo, &["show", "hp/demo/t-0001/work:edit"]), "changed");
     assert_eq!(fs::read_to_string(home.join("report")).unwrap(), "success");
+    assert!(!checkout_tmp.join("execution-home").exists());
+    assert!(!checkout_tmp.join("escape").exists());
     assert_eq!(git(&wt, &["log", "-1", "--format=%an <%ae>"]), "Sandbox Owner <sandbox-owner@example.invalid>");
     let overrides = isolation.clone().with_thread_env(&["CARGO_HOME=/tmp/cargo-override".into(), "RUSTUP_HOME=/tmp/rustup-override".into(), "XDG_CACHE_HOME=/tmp/cache-override".into()]).unwrap();
     fs::write(&agent, "#!/bin/sh\nset -eu\n[ \"$CARGO_HOME\" = /tmp/cargo-override ]\n[ \"$RUSTUP_HOME\" = /tmp/rustup-override ]\n[ \"$XDG_CACHE_HOME\" = /tmp/cache-override ]\n").unwrap();

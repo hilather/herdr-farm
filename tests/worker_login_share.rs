@@ -29,7 +29,7 @@ struct World {
     agent: PathBuf,
 }
 
-/// An owner home (outside the private `/tmp`) with logins and private agent
+/// A fixture owner home with logins and private agent
 /// data, a projects root with one project, an execution home and a probe agent.
 fn world(base: &Path) -> World {
     let guard = tempfile::tempdir_in(base).unwrap();
@@ -122,9 +122,10 @@ fn isolation(world: &World) -> Isolation {
 
 #[test]
 fn the_worker_shares_the_owners_single_login_file_and_nothing_else_of_the_agent_directories() {
-    let base = Path::new(env!("CARGO_TARGET_TMPDIR"));
-    fs::create_dir_all(base).unwrap();
-    let world = world(base);
+    // Honor TMPDIR: runner workspaces are inside the read-only owner home.
+    let base = std::env::temp_dir();
+    fs::create_dir_all(&base).unwrap();
+    let world = world(&base);
     // The fixture owner home is declared explicitly: the real owner's home
     // (passwd entry or HOME) is never consulted for logins or hidden paths.
     // SAFETY: this binary has one test and no other thread reads the environment.

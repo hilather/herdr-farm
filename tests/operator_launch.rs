@@ -163,11 +163,11 @@ impl Lab {
     fn new() -> Self { Self::with_herdr(HERDR) }
     /// As `new`, with `herdr` as the Herdr executable's source.
     fn with_herdr(herdr: &str) -> Self {
-        // Not under /tmp: the worker sandbox keeps /tmp private, and the owner's
-        // home (with its logins) is where the shared login files live.
-        let base = Path::new(env!("CARGO_TARGET_TMPDIR"));
-        fs::create_dir_all(base).unwrap();
-        let top = tempfile::tempdir_in(base).unwrap();
+        // The sandbox preserves the fixture subtree when privatizing /tmp.
+        // Honor TMPDIR: runner workspaces are inside the read-only owner home.
+        let base = std::env::temp_dir();
+        fs::create_dir_all(&base).unwrap();
+        let top = tempfile::tempdir_in(&base).unwrap();
         let home = top.path().canonicalize().unwrap().join("home");
         for dir in ["", "bin", "repo", "agent-home-codex", "agent-home-claude", ".codex", ".claude"] {
             fs::create_dir_all(home.join(dir)).unwrap();
