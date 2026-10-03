@@ -58,6 +58,7 @@ jobs:
           git config --global user.name ci
           git config --global user.email ci@invalid
           df -h / /dev/shm
+          mkdir -p nextest-extract
       - uses: actions/download-artifact@v4
         with:
           name: nextest-archive
