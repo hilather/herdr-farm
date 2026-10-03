@@ -31,9 +31,12 @@ pub struct Args {
     pub title: Option<String>,
     /// Planning task: its single deliverable, a Markdown document under `docs/`.
     pub plan_output: Option<String>,
+    pub write: Vec<String>,
+    pub output: Vec<String>,
+    pub deliverable: Option<String>,
     /// The task's instructions (appended to PROJECT.md in the retained brief).
     pub prompt_file: Option<PathBuf>,
-    /// A complete unsigned contract document, instead of the planning one.
+    /// Unsigned contract decisions; product-owned fields are filled before signing.
     pub contract_file: Option<PathBuf>,
     /// Existing, not-checked-out branch that verified results integrate into.
     pub integration_ref: Option<String>,
@@ -94,6 +97,76 @@ fn sign(key: &Path, namespace: &str, file: &Path) -> Result<PathBuf> {
     Ok(signature)
 }
 
+fn retry<T>(mut step: impl FnMut() -> Result<T>) -> Result<T> {
+    for attempt in 0..8 {
+        match step() {
+            Ok(value) => return Ok(value),
+            Err(error) if error.chain().any(|cause|
+                matches!(cause.downcast_ref::<herdr_farm::store::StoreError>(), Some(herdr_farm::store::StoreError::Conflict | herdr_farm::store::StoreError::Busy))
+                    || cause.downcast_ref::<std::fs::TryLockError>().is_some_and(|error| matches!(error, std::fs::TryLockError::WouldBlock))
+                    || cause.to_string() == "project changed during observation; retry") => {
+                if attempt == 7 {
+                    return Err(error.context("the project kept changing while launching; rerun the same command"));
+                }
+                std::thread::sleep(herdr_farm::timing::retry(Duration::from_millis(50 + 30 * attempt)));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!()
+}
+
+fn literal_path(raw: &str, file: bool) -> Result<String> {
+    ensure!(!raw.contains(['*', '?', '[']), "scope paths must not contain globs");
+    let (path, _) = herdr_farm::domain::normalize_scope_path(raw).map_err(anyhow::Error::msg)?;
+    ensure!(!file || !path.ends_with('/'), "--output must name an exact file");
+    Ok(path)
+}
+
+fn code_paths(args: &Args) -> Result<(Vec<String>, Vec<String>)> {
+    ensure!(args.output.is_empty() || !args.write.is_empty(), "--output requires --write: name the paths the task may change");
+    ensure!(args.write.len() <= 64, "give between one and 64 --write paths");
+    ensure!(args.output.len() <= 8, "give at most 8 --output files");
+    ensure!(args.write.is_empty() || !args.output.is_empty(), "--write requires --output: name at least one file the result must contain, an existing file the task changes or a new one such as <dir>/NOTES.md");
+    let writes = args.write.iter().map(|p| literal_path(p, false)).collect::<Result<Vec<_>>>()?;
+    let outputs = args.output.iter().map(|p| literal_path(p, true)).collect::<Result<Vec<_>>>()?;
+    for output in &outputs {
+        ensure!(writes.iter().any(|p| if p.ends_with('/') { output.starts_with(p) } else { output == p }), "--output {output} lies outside every --write path; add its write scope");
+    }
+    Ok((writes, outputs))
+}
+
+fn contract_document(args: &Args, repository: &Path, head: u64, kind: &str, project: &Path) -> Result<Vec<u8>> {
+    let mut contract: Value = if let Some(path) = &args.contract_file {
+        let value: Value = serde_json::from_slice(&migration::read_plan_file(path)?)?;
+        ensure!(value["task_id"] == args.task, "contract task_id must equal --task {}", args.task);
+        ensure!(value["profile_kind"] == kind, "contract profile_kind must equal the profile's kind {kind}");
+        value
+    } else if args.plan_output.is_some() {
+        serde_json::from_slice(&planning_contract(args, repository, head, kind, project)?)?
+    } else {
+        let (writes, outputs) = code_paths(args)?;
+        let policies = outputs.iter().enumerate().map(|(i, output)| {
+            json!({"id":format!("output-{}", i + 1),"text":serde_json::to_string(&json!({"version":1,"checks":["/usr/bin/git","grep","--quiet","--no-index","-e",".","--",output]})).expect("JSON policy")})
+        }).collect::<Vec<_>>();
+        json!({"version":3,"task_id":args.task,"profile_kind":kind,
+            "scope":{"paths":writes.iter().map(|p| json!({"path":p,"access":"write"})).collect::<Vec<_>>()},
+            "outputs":outputs.iter().map(|p| json!({"path":p,"kind":"git_file"})).collect::<Vec<_>>(),
+            "acceptance_policies":policies,
+            "deliverable":args.deliverable.clone().unwrap_or_else(|| format!("{}: the change described in the task instructions, inside the write paths.", args.title.as_deref().unwrap_or(&args.task))),
+            "non_goals":"No change outside the write paths; no network use; no push.",
+            "repository":repository,"base_oid":git(repository, &["rev-parse", "--verify", &format!("{}^{{commit}}", args.base)])?,
+            "object_format":git(repository, &["rev-parse", "--show-object-format"])?,
+            "dependencies":[],"capability_flags":[],"retry_class":"none","result_schema_id":"result-v1",
+            "route":if args.integration_ref.is_some() { "verify_then_integrate" } else { "verify_only" }})
+    };
+    contract["project_store"] = json!(project.join(".state/state.db").canonicalize()?);
+    contract["expected_head"] = json!(head);
+    contract["contract_revision"] = json!(runtime::task_contract(project, &TaskId::new(args.task.clone()).map_err(anyhow::Error::msg)?)?.map_or(1, |r| r.revision + 1));
+    contract["authority"] = serde_json::to_value(authority::policy_reference(project)?)?;
+    Ok(serde_json::to_vec_pretty(&contract)?)
+}
+
 fn planning_contract(args: &Args, repository: &Path, head: u64, kind: &str, project: &Path) -> Result<Vec<u8>> {
     let output = args.plan_output.as_deref().context("planning output missing")?;
     ensure!(
@@ -121,7 +194,7 @@ fn planning_contract(args: &Args, repository: &Path, head: u64, kind: &str, proj
     Ok(bytes)
 }
 
-/// The closing section of the brief: commit the declared outputs and submit
+/// The closing section of the brief: commit changes inside write scopes and submit
 /// the result through the worker's submission spool, with every value the
 /// contract fixes already filled in. Without it nothing ever enters
 /// verification or integration.
@@ -129,14 +202,22 @@ fn finish_instructions(root: &Path, slug: &str, contract: &Value, reference: &Ve
     let text = |key: &str| contract[key].as_str().with_context(|| format!("contract field {key} missing"));
     let outputs: Vec<&str> = contract["outputs"].as_array().context("contract outputs missing")?.iter().filter_map(|o| o["path"].as_str()).collect();
     ensure!(!outputs.is_empty() && outputs.len() <= 8, "a launched task declares between one and eight outputs");
+    let writes: Vec<&str> = contract["scope"]["paths"].as_array().context("contract scope paths missing")?.iter()
+        .filter(|p| p["access"] == "write").filter_map(|p| p["path"].as_str()).collect();
+    ensure!(!writes.is_empty(), "contract write paths missing");
     let safe = |value: &str| !value.is_empty() && !value.contains(['$', '`', '\\', '\'', '"', '\n']);
     let (task, repository, base, format) = (text("task_id")?, text("repository")?, text("base_oid")?, text("object_format")?);
-    ensure!([task, repository, base, format, reference.digest.as_str()].iter().all(|v| safe(v)) && safe(&root.display().to_string()) && outputs.iter().all(|o| safe(o)),
+    ensure!([task, repository, base, format, reference.digest.as_str()].iter().all(|v| safe(v)) && safe(&root.display().to_string()) && outputs.iter().chain(writes.iter()).all(|o| safe(o)),
         "a path or value in the task contract contains a character the submission script cannot carry");
     let mut script = String::from("set -eu\nattempt=$(basename \"$HERDR_FARM_SUBMISSION_SPOOL\")\n");
-    script.push_str(&format!("git add --{}\n", outputs.iter().map(|o| format!(" '{o}'")).collect::<String>()));
+    let patterns = writes.iter().map(|p| if p.ends_with('/') { format!("'{p}'*") } else { format!("'{p}'") }).collect::<Vec<_>>().join("|");
+    script.push_str(&format!("check_scope() {{\nwhile IFS= read -r path; do\ncase \"$path\" in\n{patterns}) ;;\n*) printf '%s\\n' \"$path\" >&2; bad=1 ;;\nesac\ndone\n[ \"$bad\" = 0 ] || {{ echo 'Restore the paths above: verification cancels an attempt whose result changes anything outside its scope.' >&2; exit 1; }}\n}}\nbad=0\n{{ git -c core.quotePath=false diff --name-only --no-renames '{base}'; git -c core.quotePath=false ls-files --others --exclude-standard; }} | check_scope\n"));
+    for output in &outputs {
+        script.push_str(&format!("[ -f '{output}' ] || {{ echo 'declared output missing: {output}' >&2; exit 1; }}\n"));
+    }
+    script.push_str(&format!("git add -A --{}\n", writes.iter().map(|p| format!(" '{p}'")).collect::<String>()));
     script.push_str("git -c user.name=worker -c user.email=worker@invalid commit -q -m 'Deliverable' || true\n");
-    script.push_str(&format!("candidate=$(git rev-parse HEAD)\n[ \"$candidate\" != '{base}' ] || {{ echo 'nothing is committed: write the deliverable first' >&2; exit 1; }}\n"));
+    script.push_str(&format!("git -c core.quotePath=false diff --name-only --no-renames '{base}' HEAD | check_scope\ncandidate=$(git rev-parse HEAD)\n[ \"$candidate\" != '{base}' ] || {{ echo 'nothing is committed: write the deliverable first' >&2; exit 1; }}\n"));
     let mut manifest = Vec::new();
     for (index, output) in outputs.iter().enumerate() {
         script.push_str(&format!("blob{index}=$(git rev-parse \"HEAD:{output}\")\n"));
@@ -153,7 +234,7 @@ objects=$(list | while IFS= read -r oid; do prefix=$(printf %s \"$oid\" | cut -c
         reference.revision, reference.digest, manifest.join(",")));
     script.push_str(&format!("\nEOF\nherdr-farm --root '{}' result {slug} submit --input-file \"$document\"\n", root.display()));
     Ok(format!(
-        "\n## When the deliverable is complete: submit it\n\nA result that is not submitted is never verified or integrated. Run exactly this script in the current directory. It commits the declared output(s) on your attempt branch and submits the result through your submission spool (the product's own command; it needs no network and is safe to run again). It must print a submission receipt containing `submission_id`; if it fails, fix what it reports and run it again. Only then stop and reply DONE.\n\n```sh\n{script}```\n"))
+        "\n## When the deliverable is complete: submit it\n\nA result that is not submitted is never verified or integrated. Run exactly this script in the current directory. It commits every change inside the write paths on your attempt branch and submits the result through your submission spool (the product's own command; it needs no network and is safe to run again). It must print a submission receipt containing `submission_id`; if it fails, fix what it reports and run it again. Only then stop and reply DONE.\n\n```sh\n{script}```\n"))
 }
 
 /// Record current observations and make the project active, unless it already
@@ -171,10 +252,13 @@ fn activate(run: &mut Run, name: &'static str, force: bool) -> Result<()> {
         return Ok(());
     }
     let reacknowledged = control.state == ProjectState::Active && control.config_digest != current;
-    crate::reconcile_live::run(run.ctx, &project, true)?;
+    retry(|| crate::reconcile_live::run(run.ctx, &project, true))?;
     let control = runtime::snapshot(&project)?.control.context("project has no control state")?;
     if control.state != ProjectState::Active || control.config_digest != current {
-        runtime::set_state(&project, run.head()?, control.revision, ProjectState::Active, &config)?;
+        retry(|| {
+            let fresh = runtime::snapshot(&project)?;
+            runtime::set_state(&project, fresh.head, fresh.control.context("control missing")?.revision, ProjectState::Active, &config)
+        })?;
     }
     run.done(name, json!({"state":"active","owner_configuration_reacknowledged":reacknowledged}));
     Ok(())
@@ -265,9 +349,10 @@ fn steps(run: &mut Run, args: &Args) -> Result<Value> {
     let herdr = PathBuf::from(ctx.env.herdr_bin());
     ensure!(herdr.is_absolute(), "set HERDR_BIN_PATH to the absolute path of the Herdr executable the profile was verified with");
     let repository = args.repository.canonicalize().context("--repository must exist")?;
-    ensure!(args.plan_output.is_some() != args.contract_file.is_some()
+    code_paths(args)?;
+    ensure!((usize::from(args.plan_output.is_some()) + usize::from(args.contract_file.is_some()) + usize::from(!args.write.is_empty())) == 1
         || runtime::task_contract(&project, &task_id)?.is_some(),
-        "give --plan-output (planning task) or --contract-file (your own contract), not both");
+        "give --plan-output, --write with --output, or --contract-file");
 
     // 1. The retained, launchable profile evidence.
     let mut store = herdr_farm::store::SqliteStore::open(&project.join(".state/state.db"))?;
@@ -281,6 +366,12 @@ fn steps(run: &mut Run, args: &Args) -> Result<Value> {
     drop(store);
     run.done("profile_evidence", json!({"profile":profile,"kind":kind}));
 
+    if let Some(path) = &args.contract_file {
+        let value: Value = serde_json::from_slice(&migration::read_plan_file(path)?)?;
+        ensure!(value["task_id"] == args.task, "contract task_id must equal --task {}", args.task);
+        ensure!(value["profile_kind"] == kind, "contract profile_kind must equal the profile's kind {kind}");
+    }
+
     // 2. The owner configuration must be acknowledged by an active project
     // before a signed contract can be installed.
     activate(run, "project_control", false)?;
@@ -290,22 +381,22 @@ fn steps(run: &mut Run, args: &Args) -> Result<Value> {
     if snapshot.tasks.iter().any(|t| t.id == task_id) {
         run.skipped("task", json!({"task":args.task}));
     } else {
-        let head = runtime::add_task(&project, task_id.clone(), args.title.clone().unwrap_or_else(|| args.task.clone()), snapshot.head)?;
+        let head = retry(|| runtime::add_task(&project, task_id.clone(), args.title.clone().unwrap_or_else(|| args.task.clone()), run.head()?))?;
         run.done("task", json!({"task":args.task,"head":head}));
     }
     if let Some(installed) = runtime::task_contract(&project, &task_id)? {
         run.skipped("contract", json!({"installed":installed}));
     } else {
         let dir = run.dir(&args.task)?;
-        let bytes = match &args.contract_file {
-            Some(path) => migration::read_plan_file(path)?,
-            None => planning_contract(args, &repository, run.head()?, &kind, &project)?,
-        };
         let document = dir.join("contract.json");
-        fs::write(&document, &bytes)?;
+        fs::write(&document, contract_document(args, &repository, run.head()?, &kind, &project)?)?;
         let key = args.sign_with.as_deref().with_context(|| format!("the contract needs the owner's signature: pass --sign-with KEY, or sign {} with `ssh-keygen -Y sign -n {} -f KEY` and install it with `task contract put`", document.display(), authority::CONTRACT_SIGNATURE_NAMESPACE))?;
-        let signature = sign(key, authority::CONTRACT_SIGNATURE_NAMESPACE, &document)?;
-        let installed = authority::import_contract(&project, &document, &signature)?;
+        let installed = retry(|| {
+            let bytes = contract_document(args, &repository, run.head()?, &kind, &project)?;
+            fs::write(&document, &bytes)?;
+            let signature = sign(key, authority::CONTRACT_SIGNATURE_NAMESPACE, &document)?;
+            authority::import_contract(&project, &document, &signature)
+        })?;
         run.done("contract", json!({"task":installed.task_id,"revision":installed.contract_revision,"digest":installed.digest}));
     }
 
@@ -315,21 +406,28 @@ fn steps(run: &mut Run, args: &Args) -> Result<Value> {
     if snapshot.scheduler.as_ref().is_some_and(|s| s.queue.iter().any(|q| q.task == task_id) && snapshot.tasks.iter().any(|t| t.id == task_id && (t.state == herdr_farm::domain::TaskState::Queued || t.active_attempt.is_some()))) {
         run.skipped("queue", json!({"task":args.task}));
     } else {
-        let task = snapshot.tasks.iter().find(|t| t.id == task_id).context("task missing")?;
         let request = herdr_farm::domain::QueueRequest { priority: 0, dependencies: vec![] };
-        let head = runtime::queue_task(&project, &task_id, task.revision, snapshot.head, &request)?;
+        let head = retry(|| {
+            let fresh = runtime::snapshot(&project)?;
+            let revision = fresh.tasks.iter().find(|t| t.id == task_id).context("task missing")?.revision;
+            runtime::queue_task(&project, &task_id, revision, fresh.head, &request)
+        })?;
         run.done("queue", json!({"head":head}));
     }
     let scheduler_policy = &scheduler.policy;
     if scheduler_policy.max_active_workers >= args.max_active_workers {
         run.skipped("scheduler_capacity", json!({"max_active_workers":scheduler_policy.max_active_workers}));
     } else {
-        let head = runtime::scheduler_policy(&project, run.head()?, scheduler_policy.revision, args.max_active_workers, scheduler_policy.max_attempts_per_task.max(1))?;
+        let head = retry(|| {
+            let fresh = runtime::snapshot(&project)?;
+            let policy = fresh.scheduler.context("scheduler missing")?.policy;
+            runtime::scheduler_policy(&project, fresh.head, policy.revision, policy.max_active_workers.max(args.max_active_workers), policy.max_attempts_per_task.max(1))
+        })?;
         run.done("scheduler_capacity", json!({"max_active_workers":args.max_active_workers,"head":head}));
     }
     if let Some(reference) = &args.integration_ref {
-        herdr_farm::integration::configure_project(&project, &repository, reference)?;
-        herdr_farm::store::set_project_result_automation(&project, run.head()?, Some(true), Some(true))?;
+        retry(|| herdr_farm::integration::configure_project(&project, &repository, reference))?;
+        retry(|| herdr_farm::store::set_project_result_automation(&project, run.head()?, Some(true), Some(true)))?;
         run.done("integration_target", json!({"repository":repository,"reference":reference,"automation":"verify and integrate on"}));
     }
 
@@ -341,14 +439,24 @@ fn steps(run: &mut Run, args: &Args) -> Result<Value> {
         if !history.is_empty() && history.iter().all(|a| !a.retains_capacity()
             && matches!(a.state, AttemptState::Completed | AttemptState::Failed | AttemptState::Cancelled | AttemptState::Lost))
             && (!old.identity.pane_id.is_empty() || !old.identity.worktree_path.is_empty() || old.identity.socket != socket.display().to_string()) {
-            let control = snapshot.control.as_ref().context("project has no control state")?;
-            runtime::set_state(&project, run.head()?, control.revision, ProjectState::Paused,
-                &run.ctx.config_dir.join("config.toml"))?;
+            retry(|| {
+                let fresh = runtime::snapshot(&project)?;
+                runtime::set_state(&project, fresh.head, fresh.control.context("control missing")?.revision, ProjectState::Paused,
+                    &run.ctx.config_dir.join("config.toml"))
+            })?;
             if let Some(owned) = snapshot.ownership.iter().find(|o| o.binding == old.id) {
-                runtime::relinquish(&project, &old.id, owned.revision, run.head()?, "relaunch after observed worker termination; retain old worktree")?;
+                retry(|| {
+                    let fresh = runtime::snapshot(&project)?;
+                    let revision = fresh.ownership.iter().find(|o| o.binding == old.id).map_or(owned.revision, |o| o.revision);
+                    runtime::relinquish(&project, &old.id, revision, fresh.head, "relaunch after observed worker termination; retain old worktree")
+                })?;
             }
             let route = RuntimeRoute { socket: socket.display().to_string(), cwd: repository.display().to_string(), ..Default::default() };
-            runtime::rebind(&project, &old.id, old.revision, run.head()?, &route)?;
+            retry(|| {
+                let fresh = runtime::snapshot(&project)?;
+                let revision = fresh.runtime_bindings.iter().find(|b| b.id == old.id).context("binding missing")?.revision;
+                runtime::rebind(&project, &old.id, revision, fresh.head, &route)
+            })?;
         }
     }
     let snapshot = runtime::snapshot(&project)?;
@@ -365,9 +473,15 @@ fn steps(run: &mut Run, args: &Args) -> Result<Value> {
             if let Some(busy) = snapshot.tasks.iter().find(|t| t.active_attempt.is_some()) {
                 bail!("task {} already has a reserved or running attempt, and a new runtime binding pauses the project until every attempt is finished; prepare every task first with --prepare-only, then reserve them", busy.id.as_str());
             }
-            let task = snapshot.tasks.iter().find(|t| t.id == task_id).context("task missing")?;
             let route = RuntimeRoute { socket: socket.display().to_string(), cwd: repository.display().to_string(), ..Default::default() };
-            let change = runtime::create_binding(&project, Some(&task_id), Some(task.revision), snapshot.head, &route)?;
+            let change = retry(|| {
+                let fresh = runtime::snapshot(&project)?;
+                if let Some(busy) = fresh.tasks.iter().find(|t| t.active_attempt.is_some()) {
+                    bail!("task {} already has a reserved or running attempt; prepare every task first with --prepare-only", busy.id.as_str());
+                }
+                let revision = fresh.tasks.iter().find(|t| t.id == task_id).context("task missing")?.revision;
+                runtime::create_binding(&project, Some(&task_id), Some(revision), fresh.head, &route)
+            })?;
             run.done("binding", json!({"binding":change.binding.id,"socket":socket}));
             (change.binding.id, true)
         }
@@ -396,18 +510,18 @@ fn steps(run: &mut Run, args: &Args) -> Result<Value> {
         instructions.push_str(&format!(
             "\n## Deliverable\n\nWrite the document `{output}` in the current directory (a disposable git worktree), with the plan as its content. Do not change any other file, do not push and do not use the network.\n"));
     }
-    let contract: Value = serde_json::from_slice(&fs::read(dir.join("contract.json")).context("the installed contract document is missing from the run directory")?)?;
+    let contract = migration::open_active(&project)?.task_contract_document(task_id.as_str())?.context("the task has no installed contract document")?;
     let reference = runtime::task_contract(&project, &task_id)?.context("the task has no installed contract")?;
     instructions.push_str(&finish_instructions(&ctx.root, run.slug.as_str(), &contract, &reference)?);
-    let knowledge = {
+    let knowledge = retry(|| {
         let _guard = herdr_farm::memory::mutation_guard(&project)?;
         let resolved = crate::agents::resolve::resolve(&args.profile, &ctx.config_dir.join("config.toml"), None)?;
         let request: herdr_farm::domain::SnapshotRequest = serde_json::from_value(json!({
             "schema_version":1,"task_id":args.task,"profile":args.profile,"domains":[],"paths":[],"pinned_keys":[],"sensitivity":"default"}))?;
         let mut memory = herdr_farm::memory::MemoryStore::from_sqlite(migration::open_active(&project)?, project.join(".state/objects"));
         let created = memory.create_worker_snapshot(request, &resolved.name, &resolved.definition_digest, Some(&resolved.config_digest), resolved.budget.soft_input_chars, &instructions, jiff::Timestamp::now().as_millisecond(), None)?;
-        serde_json::to_value(&created)?
-    };
+        Ok(serde_json::to_value(&created)?)
+    })?;
     let selection = LaunchSelection {
         task: task_id.clone(),
         binding,
@@ -419,16 +533,18 @@ fn steps(run: &mut Run, args: &Args) -> Result<Value> {
     };
     run.done("knowledge_snapshot", json!({"snapshot":selection.knowledge}));
     let deadline = Instant::now() + herdr_farm::profile_preparation::BUDGET;
-    let drafted = launch_preparation::draft(&project, &selection, run.head()?, Duration::from_secs(args.validity_seconds), deadline, Default::default())?;
+    let drafted = retry(|| launch_preparation::draft(&project, &selection, run.head()?, Duration::from_secs(args.validity_seconds), deadline, Default::default()))?;
     let approval = dir.join("approval.json");
     fs::write(&approval, serde_json::to_vec_pretty(&drafted.approval)?)?;
     run.done("draft", json!({"approval_document":approval,"brief_chars":drafted.brief.prompt_chars}));
     let key = args.sign_with.as_deref().with_context(|| format!("the launch approval needs the owner's signature: pass --sign-with KEY, or sign {} with `ssh-keygen -Y sign -n {} -f KEY`, then `approval import` and `launch reserve`", approval.display(), authority::SIGNATURE_NAMESPACE))?;
-    let signature = sign(key, authority::SIGNATURE_NAMESPACE, &approval)?;
-    let imported = authority::import_signed(&project, &approval, &signature, run.head()?)?;
+    let imported = retry(|| {
+        let signature = sign(key, authority::SIGNATURE_NAMESPACE, &approval)?;
+        authority::import_signed(&project, &approval, &signature, run.head()?)
+    })?;
     run.done("approval_import", json!({"approval":imported}));
     let approval_reference = VersionedReference { id: format!("approval-{}", imported.digest), revision: 1, digest: imported.digest.clone() };
-    let reservation = launch_preparation::reserve(&project, &selection, &approval_reference, run.head()?, deadline, Default::default())?;
+    let reservation = retry(|| launch_preparation::reserve(&project, &selection, &approval_reference, run.head()?, deadline, Default::default()))?;
     anyhow::ensure!(reservation.record.inputs == drafted.inputs, "the reservation does not carry the drafted inputs");
     let attempt = reservation.record.attempt.clone();
     let worktree = herdr_farm::domain::worktree_plans(&drafted.inputs, &attempt).map_err(anyhow::Error::msg)?.into_iter().next().map(|p| p.path);
@@ -438,7 +554,12 @@ fn steps(run: &mut Run, args: &Args) -> Result<Value> {
 
 #[allow(clippy::too_many_arguments)]
 fn report(run: &Run, task: &str, profile: &VersionedReference, kind: &str, herdr: &Path, socket: &Path, attempt: Option<String>, worktree: Option<String>) -> Value {
+    let contract = migration::open_active(&run.project).ok().and_then(|store| store.task_contract_document(task).ok().flatten()).unwrap_or(Value::Null);
+    let reference = TaskId::new(task.to_owned()).ok().and_then(|id| runtime::task_contract(&run.project, &id).ok().flatten());
     json!({
+        "contract_digest":reference.map(|r| r.digest),
+        "write_paths":contract["scope"]["paths"].as_array().map(|paths| paths.iter().filter(|p| p["access"] == "write").map(|p| p["path"].clone()).collect::<Vec<_>>()),
+        "outputs":contract["outputs"].as_array().map(|outputs| outputs.iter().map(|o| o["path"].clone()).collect::<Vec<_>>()),
         "project":run.slug,"task":task,"kind":kind,"profile":profile,"attempt":attempt,"worktree":worktree,
         "herdr_socket":socket,
         "steps":run.steps.iter().map(|s| json!({"step":s.name,"outcome":s.outcome,"detail":s.detail})).collect::<Vec<_>>(),

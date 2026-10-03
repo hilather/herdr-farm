@@ -291,3 +291,34 @@ phases. It is effect intent and a receipt, not a second runtime owner. Retain it
 with project backups and reconcile restored pending effects before replay.
 No canonical or telemetry SQLite schema changes or new tables are introduced.
 The maintenance inventory classifies it as canonical and never prunes it.
+
+### One-command code tasks
+
+```sh
+herdr-farm launch PROJECT run --task CODE --title 'Implement the change' --profile codex-sol --repository /absolute/repo --sign-with /absolute/owner-key --write src/ --write tests/ --output src/lib.rs --prompt-file /absolute/brief.md
+```
+
+Repeat `--write` for 1–64 repository-relative files or directory prefixes ending
+in `/` (no globs), and `--output` for 1–8 exact files the result must contain.
+Each output must fall inside a write scope. An existing file the task changes or
+`<dir>/NOTES.md` can be an output. Each gets a file-exists-and-has-content policy.
+`--deliverable` overrides the title-based description. `--base` selects the base;
+`--integration-ref` selects verify-then-integrate rather than verify-only.
+Planning (`--plan-output`), code (`--write`/`--output`) and advanced
+(`--contract-file`) forms are mutually exclusive.
+
+Advanced contract JSON contains the decisions. The product replaces
+`project_store`, `expected_head`, `contract_revision` (latest task revision + 1),
+and `authority` before signing; these fields may be omitted. `task_id` must match
+`--task` and `profile_kind` must match the retained profile. Other values are
+preserved through JSON reserialization. Signing keys and signature namespaces
+are unchanged.
+
+Launch retries store conflicts and transient cooperative lock contention up to
+eight attempts with fresh heads and a short
+50–250 ms backoff (accelerated only in test labs), rebuilding and signing documents
+that embed the head. Fences remain enforced. Exhaustion asks you to rerun the same
+command. The report includes the contract digest, write paths and outputs.
+The brief stages all changes in the write paths, refuses missing outputs and
+names changes outside scope before submission. Restore those paths: verification
+cancels attempts whose results change anything outside their scope.

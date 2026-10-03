@@ -55,6 +55,7 @@ herdr-farm task <slug> list
 herdr-farm task <slug> show TASK
 herdr-farm task <slug> add TASK --title 'Work title' --expected-head HEAD
 herdr-farm launch <slug> run --task TASK --profile PROFILE --repository /absolute/repo --plan-output docs/plan.md
+herdr-farm launch <slug> run --task TASK --profile PROFILE --repository /absolute/repo --write src/ --write tests/ --output src/lib.rs --prompt-file /absolute/brief.md
 herdr-farm result <slug> show
 herdr-farm result <slug> jobs
 herdr-farm result <slug> verify SUBMISSION --policy-id POLICY --policy-file /absolute/policy.json --idempotency-key KEY --work-dir /absolute/new-scratch
@@ -65,9 +66,9 @@ herdr-farm inbox done <slug> ITEM
 ```
 
 Use the event head printed by context for `--expected-head`; refresh after a
-conflict. Launch requires retained launchable profile evidence. Use
-`--contract-file /absolute/contract.json` instead of `--plan-output` for a code
-contract, and `--prompt-file /absolute/brief.md` for the task instructions.
+conflict. Launch requires retained launchable profile evidence. The normal code-task form is repeatable `--write` scopes with `--output` files and
+`--prompt-file /absolute/brief.md` instructions. Launch creates the task itself.
+Use `--contract-file /absolute/contract.json` as the advanced form for custom decisions.
 `launch run` drafts and signs the task contract and launch approval, imports
 them, and reserves the attempt; the ticker launches it. Signing uses the owner's
 configured absolute `[coordinator].signing_key`, or explicit `--sign-with KEY`.

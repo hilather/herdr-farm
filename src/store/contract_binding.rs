@@ -330,6 +330,14 @@ pub(super) fn policy_matches_with_budget(db:&Connection,consumer:&str,predecesso
 }
 
 impl SqliteStore {
+    /// Inspect the latest installed signed contract decisions without modifying state.
+    pub fn task_contract_document(&self, task: &str) -> Result<Option<serde_json::Value>> {
+        let raw: Option<Vec<u8>> = self.connection.query_row(
+            "SELECT raw_bytes FROM task_contracts WHERE task_id=?1 ORDER BY contract_revision DESC LIMIT 1",
+            [task], |row| row.get(0)).optional()?;
+        raw.map(|bytes| serde_json::from_slice(&bytes).map_err(|e| StoreError::Corrupt(e.to_string()))).transpose()
+    }
+
     pub(crate) fn admission_contract(&self,task:&str,budget:Option<&read_budget::ReadBudget>)->Result<Option<PreparedContract>> {
         latest_with_budget(&self.connection,task,budget)
     }
