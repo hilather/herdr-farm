@@ -697,7 +697,13 @@ fn steps(run: &mut Run, args: &Args, plan: ProfilePlan) -> Result<Value> {
     eprintln!("launch run: herdr_server");
     let socket = herdr_server(run, &herdr, &args.task, args.herdr_socket.as_deref())?;
     let directory = run.ctx.root.join(".herdr-run").join(format!("{}-{}", run.slug, args.task)).join("herdr");
-    let viewer = viewer_report(open_viewer(run.ctx, &project, &directory, &args.task, &socket, false));
+    // A server the operator supplied (`--herdr-socket`) is already a session he
+    // watches; a viewer would only nest it inside itself.
+    let viewer = if args.herdr_socket.is_some() {
+        json!({"status":"unavailable","reason":"workers run in the operator-supplied Herdr session"})
+    } else {
+        viewer_report(open_viewer(run.ctx, &project, &directory, &args.task, &socket, false))
+    };
     run.done("viewer", viewer);
     eprintln!("launch run: binding");
     let snapshot = runtime::snapshot(&project)?;
