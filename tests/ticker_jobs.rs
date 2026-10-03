@@ -62,7 +62,14 @@ elif request is not None:
         (home/f'{name}.agents').write_text(json.dumps(read('agents')+[agent]))
     kind={'agent.prompt':'agent_prompted','agent.start':'agent_started'}[request['method']]
     print(json.dumps({'id':request['id'],'result':{'type':kind,'agent':agent,'argv':[params.get('kind', 'claude')]+params.get('args', [])}}))
-elif args[:2] in (['agent','prompt'],['agent','start']):print('{"error":{"code":"unsupported","message":"synchronous effect"}}');sys.exit(2)
+elif args[:2]==['agent','prompt']:
+    agent=next(a for a in read('agents') if a['pane_id']==args[2])
+    with open(home/'prompts','a') as f:f.write(json.dumps({'target':args[2],'text':args[3]})+'\n')
+    print(json.dumps({'result':{'type':'agent_prompted','agent':agent}}))
+elif args[:2]==['pane','close']:
+    (home/f'{name}.panes').write_text(json.dumps([p for p in read('panes') if p['pane_id']!=args[2]]))
+    print('{"result":{}}')
+elif args[:2]==['agent','start']:print('{"error":{"code":"unsupported","message":"synchronous effect"}}');sys.exit(2)
 else:print('{"result":{}}')
 "#;
 
@@ -146,7 +153,7 @@ impl Ticker<'_> {
         while !done() {
             assert!(self.child.try_wait().unwrap().is_none(), "ticker exited while waiting for {what}");
             assert!(Instant::now() < deadline, "timed out waiting for {what}; ticker log:\n{}\ncalls:\n{}",
-                fs::read_to_string(self.lab.root().join(".ticker.log")).unwrap_or_default(), fs::read_to_string(self.lab.path("calls")).unwrap_or_default());
+                fs::read_to_string(self.lab.root().join(".ticker.log")).unwrap_or_default(), fs::read_to_string(self.lab.path("calls")).ok().filter(|calls| !calls.is_empty()).unwrap_or_else(|| "<no fake Herdr calls recorded>".into()));
             std::thread::sleep(Duration::from_millis(20));
         }
     }
@@ -609,6 +616,7 @@ fn a_due_legacy_routine_is_claimed_once_and_delivered_after_its_command_ends() {
 #[test]
 fn worker_permission_grants_restart_preserving_work_and_revoke_next_start() {
     use std::io::Write;
+    use sha2::{Digest, Sha256};
     let mut lab = Lab::new();
     let project = lab.project_in_session("demo", json!({"prime_pending":false}));
     let repo = lab.path("repo");
@@ -716,6 +724,15 @@ fn worker_permission_grants_restart_preserving_work_and_revoke_next_start() {
             .unwrap()
             .contains(&json!("Bash(tools/run-tests.sh:*)"))
     );
+    assert_eq!(record()["launch_claim"]["phase"].as_str(), Some("confirmed"));
+    assert_eq!(record()["prompt_claim"]["phase"].as_str(), Some("confirmed"));
+    assert_eq!(record()["launch_claim"]["arguments_digest"].as_str(),
+        Some(format!("{:x}", Sha256::digest(serde_json::to_vec(&starts()[0]["args"]).unwrap())).as_str()));
+    assert!(fs::read_to_string(work.join(".herdr-project/demo-t-0001/brief.md")).unwrap().contains("Run the tests."));
+    let prompts: Vec<Value> = fs::read_to_string(lab.path("prompts")).unwrap().lines()
+        .map(|line| serde_json::from_str(line).unwrap()).collect();
+    assert_eq!(prompts.len(), 1);
+    assert_eq!(prompts[0]["text"], "Read .herdr-project/demo-t-0001/brief.md and do what it says.");
     assert_eq!(record()["lifecycle_generation"].as_integer(), Some(1));
     assert_eq!(
         fs::read_to_string(work.join("dirty.txt")).unwrap(),
@@ -827,4 +844,47 @@ fn worker_permission_grants_restart_preserving_work_and_revoke_next_start() {
         fs::read_to_string(work.join("dirty.txt")).unwrap(),
         "uncommitted owner work\n"
     );
+}
+
+#[test]
+fn permission_grant_does_not_restart_a_deliberately_stopped_thread() {
+    let mut lab = Lab::new();
+    let project = lab.project_in_session("demo", json!({"prime_pending":false}));
+    let work = lab.path("stopped-work");
+    let artifacts = work.join(".herdr-project/demo-t-0001");
+    fs::create_dir_all(&artifacts).unwrap();
+    fs::write(artifacts.join("report.md"), "Preserve stopped work.").unwrap();
+    fs::write(work.join("dirty.txt"), "keep me").unwrap();
+    fs::write(project.join("threads/t-0001.toml"), toml::to_string(&json!({
+        "id":"t-0001", "title":"Stopped work", "status":"open", "kind":"tab",
+        "created":jiff::Timestamp::now().to_string(), "agent":"claude",
+        "agent_name":"hp-demo-t-0001", "workspace_id":"w", "tab_id":"w:t",
+        "pane_id":"pw", "cwd":work, "thread_dir":artifacts, "prompt_pending":false
+    })).unwrap()).unwrap();
+    lab.session("demo", &[agent_at("p", &project, "coordinator", "idle"),
+        agent_at("pw", &work, "hp-demo-t-0001", "blocked")],
+        &[pane_at("p", &project), pane_at("pw", &work)]);
+    lab.ok(&["thread", "stop", "demo", "t-0001", "--reason", "operator stopped"]);
+    let read_record = || -> toml::Value {
+        toml::from_str(&fs::read_to_string(project.join("threads/t-0001.toml")).unwrap()).unwrap()
+    };
+    let stopped = read_record();
+    assert_eq!(stopped["status"].as_str(), Some("stopped"));
+    assert!(lab.ok(&["safety", "grant", "demo", "--allow", "cargo test:*"]).starts_with("granted"));
+    {
+        let mut ticker = lab.run_ticker(&[]);
+        ticker.next_pass();
+        ticker.next_pass();
+        ticker.stop();
+    }
+    let permissions: Value = serde_json::from_slice(&fs::read(project.join(".state/worker-permissions.json")).unwrap()).unwrap();
+    assert!(permissions["pending_restarts"].as_object().unwrap().is_empty());
+    let after = read_record();
+    for field in ["status", "lifecycle_generation", "prompt_pending", "stopped_reason", "stopped_at"] {
+        assert_eq!(after.get(field), stopped.get(field), "{field}");
+    }
+    assert!(!lab.path("starts").exists());
+    assert!(!lab.path("prompts").exists());
+    assert_eq!(fs::read_to_string(work.join("dirty.txt")).unwrap(), "keep me");
+    assert_eq!(fs::read_to_string(project.join("threads/t-0001.md")).unwrap(), "Preserve stopped work.");
 }

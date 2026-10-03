@@ -135,6 +135,12 @@ fn retention_classes_are_declared_with_doc09_defaults() {
     assert_eq!(row("artefact.backups"), (json!(30), "prune".into(), "source_of_truth".into(), true));
     assert_eq!(row("optin.external_export_files"), (json!(7), "prune".into(), "source_of_truth".into(), true));
     assert_eq!(row("optin.captured_evidence"), (json!(7), "not_built".into(), "source_of_truth".into(), true));
+    assert_eq!(row("canonical.worker_permissions"), (Value::Null, "external_lifecycle".into(), "canonical".into(), true));
+    let text = ok(&f, &["maintenance", "classes"]);
+    for c in classes["classes"].as_array().unwrap() {
+        let id = c["class"].as_str().unwrap();
+        assert_eq!(text.lines().filter(|line| line.split_whitespace().next() == Some(id)).count(), 1, "class {id} must be visible once");
+    }
     assert_eq!(row("canonical.state"), (Value::Null, "external_lifecycle".into(), "canonical".into(), true));
     assert_eq!(row("canonical.coordinator_journal"), (Value::Null, "external_lifecycle".into(), "canonical".into(), true));
     // A deployment override is explicit policy; tombstones are never shortened.

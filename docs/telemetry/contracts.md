@@ -14,6 +14,8 @@ needs a new reviewed revision, not a silent reinterpretation.
   `migrations/worker-permissions/0001.json` and `src/worker_permissions.rs`'s
   MIGRATIONS list. Independent of canonical SQLite and telemetry streams;
   lifetime retention and whole-project backup (profiles.md, worker command grants).
+  Visible as `canonical.worker_permissions` in both text and JSON
+  `telemetry PROJECT maintenance classes`; excluded from sidecar-only backups.
 - Sidecar streams (phase 2, card S0): `telemetry.db` is versioned per stream
   in `telemetry_streams(stream, version)`: `codex` (§5, migrations under
   `migrations/telemetry/`, also `user_version`; 3 adds TM5.1's read indexes,
