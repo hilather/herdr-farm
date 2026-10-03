@@ -26,6 +26,11 @@ pub struct RuntimeObservation {
     pub agent_identity:Option<crate::domain::AgentIdentity>,
 }
 impl RuntimeObservation {
+    pub(crate) fn same_state(&self, other:&Self)->bool {
+        let mut normalized=self.clone();
+        normalized.observed_unix_ms=other.observed_unix_ms;
+        normalized==*other
+    }
     pub(crate) fn validate(&self)->Result<(),String> {
         if self.binding.is_empty() || self.binding.len()>512 || self.binding_revision==0 || self.task_revision==Some(0)
             || self.observed_unix_ms<0 || !matches!(self.collector.as_str(),"herdr-git-v1"|"herdr-git-v2") || self.diagnostic.len()>8192

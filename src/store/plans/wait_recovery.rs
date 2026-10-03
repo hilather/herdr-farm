@@ -1,11 +1,21 @@
 use super::*;
 
 pub(super) fn current(db:&Connection,id:&str,revision:u64,budget:Option<&read_budget::ReadBudget>)->Result<Option<(String,String,i64)>> {
-    // Remove column affinity from the timestamp comparison so SQLite can use
-    // the expression-index key, rather than scan every sample of this binding.
-    read_budget::optional(db,
-        "SELECT e.kind,e.entity,e.sequence FROM runtime_observations o CROSS JOIN events e INDEXED BY runtime_observation_versions ON e.entity=o.binding_id AND e.revision=o.binding_revision AND json_extract(e.payload,'$.observed_unix_ms')=+o.observed_unix_ms AND e.payload=o.payload WHERE o.binding_id=?1 AND o.binding_revision=?2 AND e.kind='runtime.observed' ORDER BY e.sequence DESC LIMIT 1",
-        params![id,integer(revision)?],budget,&[],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)))
+    let Some(observation)=super::super::observations::read_binding(db,id,budget)? else {return Ok(None);};
+    if observation.binding_revision!=revision {return Ok(None);}
+    // Search by indexed collection time, then compare decoded state. The row's
+    // freshness can advance without a publication; retained old publications
+    // must still identify the current state, not merely the binding revision.
+    let mut stmt=db.prepare("SELECT kind,entity,sequence,payload,payload_version FROM events INDEXED BY runtime_observation_versions WHERE entity=?1 AND revision=?2 AND kind='runtime.observed' AND json_extract(payload,'$.observed_unix_ms')<=?3 ORDER BY json_extract(payload,'$.observed_unix_ms') DESC,sequence DESC")?;
+    let mut rows=stmt.query(params![id,integer(revision)?,observation.observed_unix_ms])?;
+    while let Some(row)=rows.next()? {
+        if let Some(budget)=budget {budget.row(row,&[(3,1)])?;}
+        let payload:String=row.get(3)?;
+        if row.get::<_,u32>(4)?!=1 || payload.len()>MAX_RECORD_BYTES {return Err(StoreError::Corrupt("invalid recovery observation event".into()));}
+        let published:crate::reconcile::RuntimeObservation=serde_json::from_str(&payload).map_err(|_|StoreError::Corrupt("invalid recovery observation event".into()))?;
+        if published.same_state(&observation) {return Ok(Some((row.get(0)?,row.get(1)?,row.get(2)?)));}
+    }
+    Ok(None)
 }
 
 pub(super) fn validate_reference(db:&Connection,id:&str,revision:u64,generation:u64,budget:Option<&read_budget::ReadBudget>)->Result<()> {
@@ -33,7 +43,7 @@ pub(super) fn relevant(db:&Connection,id:&str,revision:u64,generation:u64,sequen
     let Some((payload,version))=event else {return Ok(false);};
     if version!=1 || payload.len()>MAX_RECORD_BYTES {return Err(StoreError::Corrupt("invalid recovery observation event".into()));}
     let published:crate::reconcile::RuntimeObservation=serde_json::from_str(&payload).map_err(|_|StoreError::Corrupt("invalid recovery observation event".into()))?;
-    Ok(published==observation)
+    Ok(published.observed_unix_ms<=observation.observed_unix_ms && published.same_state(&observation))
 }
 
 #[cfg(test)]

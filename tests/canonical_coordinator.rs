@@ -353,3 +353,32 @@ fn socket_coordinator_remote_manifest_and_explicit_local_override_policy() {
         assert!(report.contains("manifest policy accepted"), "{report}");
     }
 }
+
+#[test]
+fn unchanged_ticker_observations_preserve_head_and_refresh_coordinator_admission() {
+    let l = Lab::new();
+    let _listener = UnixListener::bind(l.home.path().join("s"))
+        .expect("socket fixture: sandbox may deny Unix sockets");
+    fs::write(l.home.path().join("herdr-state.json"), serde_json::to_vec(&json!({
+        "creates":1,"starts":1,"prompts":[],"live":true,"agent":true,"accepted":false,"pane":"w1:p1","cwd":l.project
+    })).unwrap()).unwrap();
+    let route = l.home.path().join("route.json");
+    fs::write(&route, serde_json::to_vec(&json!({"socket":l.home.path().join("s"),"workspace_id":"w1","tab_id":"w1:t1","pane_id":"w1:p1","cwd":l.project})).unwrap()).unwrap();
+    let initial: Value = serde_json::from_str(&l.ok(&["runtime", "demo", "inspect"])).unwrap();
+    l.ok(&["runtime", "demo", "create", "--route", route.to_str().unwrap(), "--expected-head", &initial["head"].to_string()]);
+    l.ok(&["reconcile", "demo", "--record"]);
+    let bound = runtime::snapshot(&l.project).unwrap();
+    l.ok(&["runtime", "demo", "adopt", "coordinator", "--expected-revision", &bound.runtime_bindings[0].revision.to_string(), "--expected-head", &bound.head.to_string()]);
+    let first: Value = serde_json::from_str(&l.ok(&["runtime", "demo", "inspect"])).unwrap();
+    let started = std::time::Instant::now();
+    // The admission freshness window is 30 real seconds. Keep collecting
+    // beyond it so activation must use the refreshed row, not the first event.
+    while started.elapsed() <= std::time::Duration::from_secs(31) {
+        l.ok(&["ticker", "run", "--passes", "10"]);
+    }
+    let last: Value = serde_json::from_str(&l.ok(&["runtime", "demo", "inspect"])).unwrap();
+    assert_eq!(last["head"], first["head"]);
+    assert!(last["observations"][0]["observed_unix_ms"].as_i64().unwrap() - first["observations"][0]["observed_unix_ms"].as_i64().unwrap() > 30_000);
+    let control = runtime::snapshot(&l.project).unwrap().control.unwrap();
+    l.ok(&["runtime", "demo", "state", "active", "--expected-revision", &control.revision.to_string(), "--expected-head", &first["head"].to_string()]);
+}

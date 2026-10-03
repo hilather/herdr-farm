@@ -26,7 +26,12 @@ repository queries produce explicit unknown observations.
 
 Config fingerprints and the project head are rechecked after collection. Persistence
 requires complete binding coverage, rejects stale revisions or older timestamps,
-and is atomic. Repeating an identical batch at its current head adds no events.
+and is atomic. An observation unchanged except for `observed_unix_ms` refreshes the stored
+observation time, payload and hash without an event or a project head change.
+A changed observation still appends `runtime.observed`. Revision-labelled exports
+with observations also include an observation digest in their directory name, so
+freshness refreshes at the same head preserve earlier exports. Recovery waits
+match publication state excluding its timestamp and use the stored row for freshness.
 Each observation retains its collection time and config fingerprint. Historical
 observations are not automatically current authorization after state/config changes.
 Raw external command output is not stored in the evidence table.
