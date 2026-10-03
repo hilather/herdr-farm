@@ -27,17 +27,23 @@ pub struct Manifest {
     pub version:u32,pub scope:String,pub attempt:AttemptId,pub worktree:WorktreeReceipt,pub entries:Vec<Entry>,
     #[serde(default,skip_serializing_if="Option::is_none")]
     pub git:Option<GitArchive>,
+    #[serde(default,skip_serializing_if="Vec::is_empty")]
+    pub excluded_ignored_paths:Vec<String>,
 }
 #[derive(Debug,Clone,Serialize)]
 pub struct Snapshot {pub digest:String,pub directory:PathBuf,pub manifest:Manifest}
 fn hash(bytes:&[u8])->String {format!("{:x}",Sha256::digest(bytes))}
 
-fn scan(directory:&Directory,relative:&Path,budget:&mut Budget,entries:&mut Vec<Entry>,blobs:&mut BTreeMap<String,Vec<u8>>,depth:usize,skip_git:bool)->Result<()> {
+// Some exclusions select worktree semantics (including skipping the .git pointer);
+// output-directory snapshots pass None and preserve every entry as before.
+fn scan(directory:&Directory,relative:&Path,budget:&mut Budget,entries:&mut Vec<Entry>,blobs:&mut BTreeMap<String,Vec<u8>>,depth:usize,ignored:Option<&[PathBuf]>)->Result<()> {
+    let skip_git=ignored.is_some();
     let before=directory.metadata()?;
     for name in directory.names(budget)? {
         if skip_git && relative.as_os_str().is_empty() && name==".git" {continue;}
-        budget.entry(depth)?;
         let path=relative.join(&name);
+        if ignored.is_some_and(|paths|paths.iter().any(|excluded|path.starts_with(excluded))) {continue;}
+        budget.entry(depth)?;
         let text=path.to_str().context("checkout snapshot paths must be UTF-8")?.to_owned();
         ensure!(text.len()<=4096,"checkout snapshot path exceeds bounds");
         if skip_git && directory.kind(&name)?==Some(source_tree::NodeKind::Link) {
@@ -49,7 +55,7 @@ fn scan(directory:&Directory,relative:&Path,budget:&mut Budget,entries:&mut Vec<
         let metadata=file.metadata()?;
         if metadata.is_dir() {
             entries.push(Entry{symlink:false,path:text,directory:true,executable:false,bytes:0,sha256:String::new()});
-            scan(&Directory::from_file(file)?,&path,budget,entries,blobs,depth+1,skip_git)?;
+            scan(&Directory::from_file(file)?,&path,budget,entries,blobs,depth+1,ignored)?;
         } else {
             budget.size(&file)?;
             let mut file=file;let mut bytes=Vec::new();let mut buffer=[0u8;65536];
@@ -62,6 +68,22 @@ fn scan(directory:&Directory,relative:&Path,budget:&mut Budget,entries:&mut Vec<
     }
     directory.unchanged(&before)?;
     budget.check()
+}
+
+// Worker-controlled ignore rules can only shrink preserved working files:
+// ignored toolchains, caches and build output are by definition not work.
+fn ignored_paths(git:&crate::worktree_preparation::Git,path:&Path)->Result<Vec<PathBuf>> {
+    let raw=git.capture(path,&["ls-files","--others","--ignored","--exclude-standard","--directory","-z"],None,4*1024*1024)?;
+    ensure!(raw.is_empty() || raw.last()==Some(&0),"incomplete ignored path inventory");
+    let mut paths=Vec::new();
+    for record in raw.split(|b|*b==0).filter(|p|!p.is_empty()) {
+        let text=std::str::from_utf8(record)?.trim_end_matches('/');
+        let path=PathBuf::from(text);
+        ensure!(!text.is_empty() && text.len()<=4096 && path.components().all(|c|matches!(c,std::path::Component::Normal(_))),"invalid ignored checkout path");
+        ensure!(paths.len()<10_000,"ignored checkout inventory exceeds bounds");
+        paths.push(path);
+    }
+    Ok(paths)
 }
 
 fn exact_file(directory:&Directory,name:&str,bytes:&[u8],control:&Control)->Result<bool> {
@@ -128,17 +150,18 @@ fn capture_receipts(project:&Path,record:&AttemptInputRecord,proof:crate::worktr
     let mut budget=control.budget();let mut captured=Vec::new();
     for receipt in receipts {
         let source=Directory::open(Path::new(&receipt.plan.path))?;
+        let ignored=ignored_paths(&git,Path::new(&receipt.plan.path))?;
         let mut entries=Vec::new();let mut blobs=BTreeMap::new();
-        scan(&source,Path::new(""),&mut budget,&mut entries,&mut blobs,0,true)?;
+        scan(&source,Path::new(""),&mut budget,&mut entries,&mut blobs,0,Some(&ignored))?;
         source.matches_path(Path::new(&receipt.plan.path))?;
         let archive=if include_git {Some(git::capture(&git,&receipt,&control,&mut remaining,&mut blobs)?)}else{None};
-        captured.push((source,Manifest{version:if entries.iter().any(|e|e.symlink){3}else if include_git{2}else{1},scope:if include_git{"repository_state"}else{"working_files"}.into(),attempt:attempt.clone(),worktree:receipt,entries,git:archive},blobs));
+        captured.push((source,Manifest{version:if !ignored.is_empty(){4}else if entries.iter().any(|e|e.symlink){3}else if include_git{2}else{1},scope:if include_git{"repository_state"}else{"working_files"}.into(),attempt:attempt.clone(),worktree:receipt,entries,git:archive,excluded_ignored_paths:ignored.iter().map(|p|p.to_str().expect("validated UTF-8 ignored path").to_owned()).collect()},blobs,ignored));
     }
     // Verify again using bytes, not Git status or a size/mtime shortcut.
     let mut budget=control.budget();
-    for (source,manifest,_) in &captured {
+    for (source,manifest,_,ignored) in &captured {
         let mut entries=Vec::new();let mut blobs=BTreeMap::new();
-        scan(source,Path::new(""),&mut budget,&mut entries,&mut blobs,0,true)?;
+        scan(source,Path::new(""),&mut budget,&mut entries,&mut blobs,0,Some(ignored))?;
         ensure!(entries==manifest.entries,"checkout changed during capture");
         source.matches_path(Path::new(&manifest.worktree.plan.path))?;
         if let Some(archive)=&manifest.git {git::verify(&git,&manifest.worktree,&control,archive)?;}
@@ -152,7 +175,7 @@ fn capture_receipts(project:&Path,record:&AttemptInputRecord,proof:crate::worktr
     let inventory=parent.names(&control.budget())?;
     ensure!(inventory.len()<=1024,"checkout snapshot inventory is full");
     let mut results=Vec::new();
-    for (_,manifest,blobs) in captured {
+    for (_,manifest,blobs,_) in captured {
         let bytes=serde_json::to_vec(&manifest)?;ensure!(bytes.len()<=4*1024*1024,"checkout manifest exceeds bounds");
         let digest=hash(&bytes);
         if parent.kind(OsStr::new(&digest))?.is_none() {ensure!(inventory.len()+results.len()<1024,"checkout snapshot inventory is full");}
@@ -182,7 +205,7 @@ mod tests {
     use std::fs;
     fn entries(path:&Path,control:&Control)->Result<Vec<Entry>> {
         let mut result=Vec::new();let mut blobs=BTreeMap::new();
-        scan(&Directory::open(path)?,Path::new(""),&mut control.budget(),&mut result,&mut blobs,0,true)?;
+        scan(&Directory::open(path)?,Path::new(""),&mut control.budget(),&mut result,&mut blobs,0,Some(&[]))?;
         Ok(result)
     }
     #[test]

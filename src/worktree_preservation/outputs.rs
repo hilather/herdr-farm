@@ -28,9 +28,9 @@ pub(crate) fn capture_outputs_held(project:&Path,record:&AttemptInputRecord,cont
     }
     let source=output_parent.directory(Path::new(record.attempt.as_str()))?;
     let mut entries=Vec::new();let mut blobs=BTreeMap::new();
-    scan(&source,Path::new(""),&mut control.budget(),&mut entries,&mut blobs,0,false)?;
+    scan(&source,Path::new(""),&mut control.budget(),&mut entries,&mut blobs,0,None)?;
     let mut repeated=Vec::new();
-    scan(&source,Path::new(""),&mut control.budget(),&mut repeated,&mut BTreeMap::new(),0,false)?;
+    scan(&source,Path::new(""),&mut control.budget(),&mut repeated,&mut BTreeMap::new(),0,None)?;
     ensure!(entries==repeated,"worker outputs changed during preservation");
     source.matches_path(Path::new(&path))?;
     // Gate release pre-creates the directory (the sandbox binds only existing

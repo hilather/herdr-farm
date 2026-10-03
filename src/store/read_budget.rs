@@ -1,11 +1,12 @@
 //! Accounting before application copies/decodes SQLite-owned values. These
 //! weights bound admitted input and JSON structure, not exact peak heap usage.
+//! The budget must exceed realistic long-lived stores with retained history.
 use super::{controlled::ReadControl, Result, StoreError};
 use rusqlite::{types::ValueRef, Row};
 use std::cell::Cell;
 
-const MAX_UNITS: usize = 50 * 1024 * 1024;
-const MAX_ROWS: usize = 100_000;
+const MAX_UNITS: usize = 512 * 1024 * 1024;
+const MAX_ROWS: usize = 1_000_000;
 const MAX_FIELD: usize = 16 * 1024 * 1024;
 const MAX_COLUMNS: usize = 64;
 const STRUCTURE_WEIGHT: usize = 128;
@@ -56,7 +57,7 @@ impl ReadBudget {
     fn charge(&self, units: usize) -> Result<()> {
         let next = self.units.get().checked_add(units)
             .filter(|n| *n <= MAX_UNITS)
-            .ok_or_else(|| StoreError::Limit("snapshot input/structure accounting exceeds 50 MiB".into()))?;
+            .ok_or_else(|| StoreError::Limit("snapshot input/structure accounting exceeds 512 MiB".into()))?;
         self.units.set(next);
         Ok(())
     }
@@ -65,7 +66,7 @@ impl ReadBudget {
     pub(crate) fn row(&self, row: &Row<'_>, json: &[(usize, usize)]) -> Result<()> {
         self.control.check()?;
         let count = self.rows.get().checked_add(1).filter(|n| *n <= MAX_ROWS)
-            .ok_or_else(|| StoreError::Limit("snapshot exceeds 100000 returned rows".into()))?;
+            .ok_or_else(|| StoreError::Limit("snapshot exceeds 1000000 returned rows".into()))?;
         self.rows.set(count);
         let columns = row.as_ref().column_count();
         if columns > MAX_COLUMNS { return Err(StoreError::Limit("snapshot row exceeds 64 columns".into())); }
@@ -129,7 +130,7 @@ mod tests {
     fn budget() -> ReadBudget { ReadBudget::new(ReadControl::new(Instant::now()+Duration::from_secs(10), Cancellation::default())) }
     #[test]
     fn dense_json_and_repeated_passes_consume_shared_budget() {
-        let b=budget(); let payload=format!("[{}0]","0,".repeat(150_000));
+        let b=budget(); let payload=format!("[{}0]","0,".repeat(1_500_000));
         b.json(payload.as_bytes(),1).unwrap();
         assert!(matches!(b.json(payload.as_bytes(),1),Err(StoreError::Limit(_))));
         let b=budget(); assert!(matches!(b.json(payload.as_bytes(),2),Err(StoreError::Limit(_))));
@@ -145,7 +146,7 @@ mod tests {
     fn actual_rows_charge_repeated_join_values_before_decode() {
         let db=rusqlite::Connection::open_in_memory().unwrap();
         let mut stmt=db.prepare("SELECT zeroblob(10000000) FROM (SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6)").unwrap();
-        let mut rows=stmt.query([]).unwrap();let b=budget();
+        let mut rows=stmt.query([]).unwrap();let b=budget();b.bytes(460*1024*1024).unwrap();
         for _ in 0..5 {b.row(rows.next().unwrap().unwrap(),&[]).unwrap();}
         assert!(matches!(b.row(rows.next().unwrap().unwrap(),&[]),Err(StoreError::Limit(_))));
     }

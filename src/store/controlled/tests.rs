@@ -32,6 +32,9 @@ fn repeated_active_reads_share_the_original_input_budget() {
     let (_root,path)=fixture();
     padded_active_binding(&path,8*1024*1024);
     let mut db=ControlledStore::open_scoped(&path,ReadControl::new(Instant::now()+Duration::from_secs(30),Cancellation::default())).unwrap();
+    // Leave the old 50 MiB allowance to exercise exhaustion without ten times
+    // as many expensive repeated decodes after the production budget increase.
+    db.work_budget.bytes(462*1024*1024).unwrap();
     let mut completed=0;
     for _ in 0..10 {
         match db.reconcile_active_work(None) {
@@ -217,7 +220,7 @@ fn core_snapshot_accounting_refuses_dense_json_before_decode() {
     // Inject corruption after integrity-checked opening. Accounting must reject
     // before serde sees this invalid payload, below the encoded-row limit.
     raw.execute_batch("PRAGMA ignore_check_constraints=ON").unwrap();
-    let payload="[".repeat(500_000);
+    let payload="[".repeat(5_000_000);
     raw.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES('dense','x',1,1,?1)",[payload]).unwrap();drop(raw);
     assert!(matches!(db.read_snapshot(None),Err(StoreError::Limit(_))));
     assert!(matches!(legacy.read_snapshot(None),Err(StoreError::Corrupt(_))));
@@ -228,22 +231,22 @@ fn core_snapshot_accounting_is_shared_across_tables_and_resets_per_snapshot() {
     let expected=legacy.read_snapshot(None).unwrap();let mut db=ControlledStore::open(&path,control()).unwrap();
     assert_eq!(db.read_snapshot(None).unwrap(),expected);assert_eq!(db.read_snapshot(None).unwrap(),expected);
     let raw=Connection::open(&path).unwrap();
-    // Four 10 MiB task titles plus a 13 MiB JSON string event. Each table fits
-    // separately; the same returned-row budget must cover both.
+    // Four 10 MiB task titles plus a dense event whose structure costs about
+    // 480 MiB. Each table fits separately; the shared budget must cover both.
     raw.execute_batch("DELETE FROM tasks; DELETE FROM events;").unwrap();
     for id in 0..4 {raw.execute("INSERT INTO tasks(id,revision,state,title) VALUES(?1,1,'draft',?2)",params![format!("t{id}"),"x".repeat(10*1024*1024)]).unwrap();}
-    raw.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES('large','x',1,1,?1)",[serde_json::to_string(&"x".repeat(13*1024*1024)).unwrap()]).unwrap();
+    raw.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES('large','x',1,1,?1)",[format!("[{}0]","0,".repeat(1_950_000))]).unwrap();
     assert!(matches!(db.read_snapshot(None),Err(StoreError::Limit(_))));
 }
 #[test]
 fn core_snapshot_accounting_rejects_valid_dense_payload_and_view_amplification() {
     let(_root,path)=fixture();let raw=Connection::open(&path).unwrap();
-    let payload=format!("[{}0]","0,".repeat(210_000));
+    let payload=format!("[{}0]","0,".repeat(2_200_000));
     raw.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES('dense','x',1,1,?1)",[payload]).unwrap();
     let mut db=ControlledStore::open(&path,control()).unwrap();
     assert!(matches!(db.read_snapshot(None),Err(StoreError::Limit(_))));
     assert_eq!(SqliteStore::open(&path).unwrap().read_snapshot(None).unwrap().events.len(),1);
-    raw.execute_batch("DELETE FROM events; INSERT INTO tasks(id,revision,state,title) VALUES('task',1,'draft',''); ALTER TABLE tasks RENAME TO original_tasks; CREATE VIEW tasks AS SELECT original_tasks.id,revision,state,CAST(zeroblob(10000000) AS TEXT) AS title,active_attempt FROM original_tasks CROSS JOIN (SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6);").unwrap();
+    raw.execute_batch("DELETE FROM events; INSERT INTO tasks(id,revision,state,title) VALUES('task',1,'draft',''); ALTER TABLE tasks RENAME TO original_tasks; CREATE VIEW tasks AS SELECT original_tasks.id,revision,state,CAST(zeroblob(10000000) AS TEXT) AS title,active_attempt FROM original_tasks CROSS JOIN (WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<54) SELECT x FROM n);").unwrap();
     // The returned view rows, not the single small base-table row, are charged.
     assert!(matches!(db.read_snapshot(None),Err(StoreError::Limit(_))));
 }
@@ -278,7 +281,7 @@ fn nested_delivery_json_uses_shared_structure_budget_before_decode() {
     // Two passes exceed the allowance; one pass would reach typed decoding and
     // reject this shape as Corrupt instead. No matching operation is needed to
     // reach this projection's ID + singleton query sequence.
-    let payload=format!("[{}0]","0,".repeat(110_000));
+    let payload=format!("[{}0]","0,".repeat(1_100_000));
     raw.execute("INSERT INTO operation_delivery VALUES('operation',1,'pending',0,0,NULL,NULL,0,?1)",[payload]).unwrap();
     assert!(matches!(db.read_snapshot(None),Err(StoreError::Limit(_))));
 }
@@ -290,10 +293,10 @@ fn runtime_provenance_join_amplification_consumes_one_snapshot_budget() {
     let payload=serde_json::to_string(&binding).unwrap();
     raw.execute("INSERT INTO legacy_sources VALUES('.state/coordinator.json','runtime',?1,?2)",params![digest,bytes]).unwrap();
     raw.execute("INSERT INTO runtime_bindings VALUES('coordinator',NULL,1,'.state/coordinator.json',?1,?2)",params![payload,format!("{:x}",Sha256::digest(payload.as_bytes()))]).unwrap();
-    let mut db=ControlledStore::open(&path,ReadControl::new(Instant::now()+Duration::from_secs(30),Cancellation::default())).unwrap();
+    let mut db=ControlledStore::open(&path,ReadControl::new(Instant::now()+Duration::from_secs(120),Cancellation::default())).unwrap();
     assert_eq!(db.read_snapshot(None).unwrap(),SqliteStore::open(&path).unwrap().read_snapshot(None).unwrap());
-    raw.execute_batch("ALTER TABLE runtime_bindings RENAME TO original_bindings; CREATE VIEW runtime_bindings AS SELECT original_bindings.* FROM original_bindings CROSS JOIN (SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5);").unwrap();
-    // Singleton source plus five returned join rows would copy 60 MiB from one
+    raw.execute_batch("ALTER TABLE runtime_bindings RENAME TO original_bindings; CREATE VIEW runtime_bindings AS SELECT original_bindings.* FROM original_bindings CROSS JOIN (WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<54) SELECT x FROM n);").unwrap();
+    // Singleton source plus 54 returned join rows would copy 550 MiB from one
     // 10 MiB source. Reject before the final inventory mismatch/partial return.
     let amplified=db.read_snapshot(None);
     assert!(matches!(amplified,Err(StoreError::Limit(_))),"{amplified:?}");
@@ -322,7 +325,7 @@ fn remaining_snapshot_readers_charge_join_and_nested_json_before_copy() {
         let(_root,path)=fixture();let mut db=ControlledStore::open(&path,control()).unwrap();
         let raw=Connection::open(&path).unwrap();
         raw.execute_batch(ddl).unwrap();
-        let payload=format!("[{}0]","0,".repeat(110_000));
+        let payload=format!("[{}0]","0,".repeat(1_100_000));
         if table=="attempt_inputs" {
             launch_neighbors(&raw);
             raw.execute("INSERT INTO attempt_inputs VALUES('attempt-a','launch-a',?1,'')",[&payload]).unwrap();
@@ -337,7 +340,7 @@ fn remaining_snapshot_readers_charge_join_and_nested_json_before_copy() {
 #[test]
 fn approval_read_does_not_double_count_already_budgeted_inputs() {
     // Not a heap bound. One 7 MiB payload join must remain readable; re-scanning
-    // those inputs from approvals would exceed 50 MiB.
+    // those inputs from approvals must not be charged again.
     let(_root,path)=fixture();
     let mut inputs:LaunchInputs=serde_json::from_str(include_str!("../../../tests/fixtures/launch-inputs-v1.json")).unwrap();
     let profile=crate::domain::profile::fixture(inputs.config.clone());
