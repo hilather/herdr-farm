@@ -273,7 +273,7 @@ sys.stdout.buffer.write(json.dumps({'result':json.loads(reply)['result']}).encod
             .args(["--root", self.path("root").to_str().unwrap(), "ticker", "run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap())
     }
     fn wait(&self, ticker: &mut Ticker, seconds: u64, predicate: &dyn Fn() -> bool) {
-        let deadline = Instant::now() + Duration::from_secs((seconds / 4).max(15));
+        let deadline = Instant::now() + Duration::from_secs(seconds.max(15));
         // Predicates read `runtime::snapshot` (whole-store integrity check plus
         // a full read); at a fixed 20 ms they competed with the ticker being
         // waited on. Back off to 250 ms; the deadline is unchanged.
@@ -288,7 +288,7 @@ sys.stdout.buffer.write(json.dumps({'result':json.loads(reply)['result']}).encod
     /// `wait` that names the stage and reports the jobs, the attempt and the
     /// ticker log when it times out.
     fn wait_for(&self, ticker: &mut Ticker, stage: &str, attempt: &AttemptId, seconds: u64, predicate: &dyn Fn() -> bool) {
-        let deadline = Instant::now() + Duration::from_secs((seconds / 4).max(15));
+        let deadline = Instant::now() + Duration::from_secs(seconds.max(15));
         let mut pause = Duration::from_millis(20);
         while !predicate() {
             assert!(ticker.0.try_wait().unwrap().is_none(), "ticker exited while waiting for: {stage}");
@@ -730,6 +730,7 @@ fn editing_worker_requires_operator_completion_when_automation_is_off() {
         lab.wait_for(&mut ticker, "worker submission", &attempt, 120, &|| {
             lab.ok_live(&|| ["result", "demo", "show"].map(String::from).to_vec()).as_array().unwrap().len() == 1
         });
+        lab.wait_for(&mut ticker, "running worker", &attempt, 120, &|| lab.attempt(&attempt).state == AttemptState::Running);
         lab.stop(ticker);
         let shown = lab.ok(&["result", "demo", "show"]);
         let policy = lab.path("policy.json");

@@ -698,7 +698,8 @@ const FAKE_HERDR: &str = "#!/bin/sh\ncase \"$*\" in\n'agent list') [ -f \"$HOME/
 /// by a `not_observed` gap). Observed = working 0–1 + waiting 1–2 = 120000 ms.
 #[test]
 fn attempts_show_attention_summary() {
-    let f = Fixture::new();
+    let mut f = Fixture::new();
+    f.scale = ""; // Synthetic minute-spaced attention data uses production intervals.
     let first = f.attempt.clone();
     f.readmit("codex");
     let db_path = f.project.join(".state/state.db");
@@ -712,7 +713,7 @@ fn attempts_show_attention_summary() {
     let _server = std::os::unix::net::UnixListener::bind(&socket).unwrap();
     let home = f.tmp.path().join("home");
     let cli = |args: &[&str]| -> String {
-        let out = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", &home).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", &herdr)
+        let out = Command::new(BIN).env_clear().env("HOME", &home).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", &herdr)
             .env("HERDR_PROJECTS_TELEMETRY_COLLECT_SECS", "60").args(["--root", f.root.to_str().unwrap(), "telemetry", "demo"]).args(args).output().unwrap();
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
         String::from_utf8(out.stdout).unwrap()

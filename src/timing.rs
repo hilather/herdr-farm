@@ -32,15 +32,34 @@ pub fn pass(duration: Duration) -> Duration {
 pub fn retry(duration: Duration) -> Duration {
     scaled(duration, Duration::from_millis(20))
 }
-/// Second-resolution historical timestamps require a whole-second floor and ceil.
+/// Related deadlines share a factor, including their smallest member's floor.
+/// This preserves production ordering instead of flooring each deadline alone.
+fn family(duration: Duration, smallest: Duration, floor: Duration) -> Duration {
+    match scale() {
+        Some(factor) if !duration.is_zero() => duration.mul_f64(factor.max(floor.as_secs_f64() / smallest.as_secs_f64())),
+        _ => duration,
+    }
+}
+
+/// Main passes, debounce, polling and background cooldowns share 30 s -> 1 s.
+/// Whole-second history cannot represent a smaller debounce. Quantize the
+/// factor once, so 30/60/120/300 s retain their ratios after rounding.
+pub fn cadence(duration: Duration) -> Duration {
+    match scale() {
+        Some(factor) => duration.mul_f64((factor * 30.0).ceil() / 30.0),
+        None => duration,
+    }
+}
+
+/// Second-resolution historical timestamps use the shared cadence quantum.
 pub fn seconds(seconds: i64) -> i64 {
-    let duration = pass(Duration::from_secs(seconds.max(0) as u64));
+    let duration = cadence(Duration::from_secs(seconds.max(0) as u64));
     duration
         .as_secs()
         .saturating_add(u64::from(duration.subsec_nanos() != 0)) as i64
 }
 pub fn tick() -> Duration {
-    pass(Duration::from_secs(15))
+    cadence(Duration::from_secs(15))
 }
 pub fn stop_wait() -> Duration {
     pass(Duration::from_secs(60))
@@ -61,6 +80,18 @@ pub fn lease(duration: Duration, execution: Duration) -> Duration {
         return duration;
     }
     pass(duration).max(execution + tick())
+}
+
+/// A sidebar batch uses unscaled native calls and yields to the next pass.
+pub fn advisory_pass() -> Duration {
+    lease(Duration::from_secs(15), Duration::from_secs(15))
+}
+
+/// Attention's gap threshold must cover the cadence that actually samples it.
+/// Otherwise the preserved native-call window manufactures not_observed gaps.
+pub fn collection_interval(duration: Duration) -> Duration {
+    if scale().is_none() { return duration; }
+    pass(duration).max(advisory_pass())
 }
 
 // Default policies live here so CLI and ticker comparisons cannot drift.
@@ -93,25 +124,25 @@ pub fn queue_retention() -> Duration {
     pass(Duration::from_secs(180))
 }
 pub fn launch_retry() -> Duration {
-    retry(Duration::from_secs(1))
+    family(Duration::from_secs(1), Duration::from_millis(250), Duration::from_millis(50))
 }
 pub fn worker_retry() -> Duration {
-    retry(Duration::from_secs(2))
+    family(Duration::from_secs(2), Duration::from_millis(250), Duration::from_millis(50))
 }
 pub fn job_retry() -> Duration {
-    retry(Duration::from_secs(30))
+    cadence(Duration::from_secs(30))
 }
 pub fn worker_recovery_retry() -> Duration {
-    retry(Duration::from_secs(15))
+    cadence(Duration::from_secs(15))
 }
 pub fn routine_retention() -> Duration {
-    retry(Duration::from_secs(120))
+    cadence(Duration::from_secs(120))
 }
 pub fn observation_lease(execution: Duration) -> Duration {
     lease(Duration::from_secs(60), execution)
 }
 pub fn pr_retention() -> Duration {
-    pass(Duration::from_secs(120))
+    cadence(Duration::from_secs(120))
 }
 pub fn pr_pending_retention() -> Duration {
     lease(Duration::from_secs(120), Duration::from_secs(30))
@@ -125,12 +156,12 @@ pub fn brief_accept_poll() -> Duration {
 
 /// Store delivery retries use actual UTC deadlines at millisecond precision.
 pub fn delivery_backoff(attempts: u32) -> Duration {
-    retry(Duration::from_millis(
+    family(Duration::from_millis(
         (1_000_u64 * (1_u64 << attempts.saturating_sub(1).min(8))).min(300_000),
-    ))
+    ), Duration::from_secs(1), Duration::from_millis(20))
 }
 pub fn legacy_delivery_backoff(attempts: u32, jitter: u64) -> Duration {
-    retry(Duration::from_secs(
+    cadence(Duration::from_secs(
         (15_u64 * (1_u64 << attempts.saturating_sub(1).min(5)) + jitter).min(300),
     ))
 }

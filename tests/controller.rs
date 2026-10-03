@@ -475,7 +475,7 @@ fn the_ticker_runs_routines_only_while_active_and_never_revives_a_disabled_revis
 ///
 /// A notification Herdr reports as not shown (`busy`) is retried, but not
 /// before its retry is due: the second show comes at least the one-second
-/// backoff after the first, and it is then confirmed once.
+/// scaled backoff after the first, and it is then confirmed once.
 #[test]
 fn a_notification_retry_is_not_delivered_before_it_is_due() {
     let lab = Lab::new("");
@@ -486,8 +486,31 @@ fn a_notification_retry_is_not_delivered_before_it_is_due() {
     lab.run(2, &|| lab.delivery(&op).state == DeliveryState::Confirmed);
     let shows: Vec<i64> = fs::read_to_string(lab.path("shows")).unwrap().lines().map(|l| l.parse().unwrap()).collect();
     assert_eq!(shows.len(), 2, "{shows:?}");
-    assert!(shows[1] - shows[0] >= 1000, "retried before due: {shows:?}");
+    assert!(shows[1] - shows[0] >= (1000.0 * include_str!("support/time-scale.txt").trim().parse::<f64>().unwrap()).max(20.0) as i64, "retried before due: {shows:?}");
     assert_eq!(lab.delivery(&op).attempts, 2);
+
+    // A future deadline must survive several real controller passes. A 20 ms
+    // retry can already be due before the next pass, so elapsed call spacing
+    // alone cannot exercise the controller's early-delivery fence.
+    lab.add("future");
+    let mut db = herdr_farm::store::SqliteStore::open(&lab.store()).unwrap();
+    let (_, row) = db.operation_rows(&op, None).unwrap();
+    let (previous, _) = row.unwrap();
+    let config = herdr_farm::operations::notification::Notification::decode(&previous).unwrap().config;
+    let due = jiff::Timestamp::now().as_millisecond() + 5_000;
+    let future = herdr_farm::operations::notification::build(&db.read_snapshot(None).unwrap(), &TaskId::new("future").unwrap(), "demo", config, due).unwrap();
+    db.commit(Commit { expected_head: db.current_head().unwrap(), mutations: vec![Mutation::Enqueue(future.clone())] }).unwrap();
+    drop(db);
+    let mut ticker = lab.spawn();
+    lab.passes(&mut ticker, 2);
+    assert!(jiff::Timestamp::now().as_millisecond() < due, "fixture failed to observe a pre-deadline pass");
+    assert_eq!(lab.shown(), 2, "future notification delivered before due");
+    assert_eq!(lab.delivery(&future.id).state, DeliveryState::Pending);
+    lab.wait(&mut ticker, &|| lab.delivery(&future.id).state == DeliveryState::Confirmed);
+    lab.stop(ticker);
+    let shows: Vec<i64> = fs::read_to_string(lab.path("shows")).unwrap().lines().map(|l| l.parse().unwrap()).collect();
+    assert_eq!(shows.len(), 3);
+    assert!(shows[2] >= due, "future notification delivered before its persisted deadline: {shows:?}");
 }
 
 impl Lab {
