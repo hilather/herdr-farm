@@ -174,6 +174,13 @@ impl SqliteStore {
         if !binding_current(&tx,&claim.operation,false)? {return Err(StoreError::Conflict);}
         let result=update_outcome(&tx,&old,&outcome,now,&claim.owner)?;tx.commit()?;Ok(result)
     }
+    /// Whether an operation still awaits delivery or its claim's outcome. The
+    /// ticker counts this as scheduled work, so it never idles out with an
+    /// undelivered effect queued.
+    pub fn has_undelivered_operations(&self)->Result<bool> {
+        check_schema(&self.connection)?;
+        Ok(self.connection.query_row("SELECT EXISTS(SELECT 1 FROM operation_delivery WHERE state IN ('pending','claimed'))",[],|r|r.get(0))?)
+    }
     pub fn expire_claims(&mut self,now:i64)->Result<usize> {
         now_check(now)?;
         let tx=self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;check_schema(&tx)?;
@@ -213,4 +220,9 @@ impl SqliteStore {
         let outcome=Outcome::PermanentFailure{diagnostic:format!("Operator retired intent; any prior effect remains possible. Reason: {reason}")};
         let result=update_outcome(&tx,&old,&outcome,now,"operator-retirement")?;tx.commit()?;Ok(result)
     }
+}
+
+/// [`SqliteStore::has_undelivered_operations`] for a project, read without project ownership.
+pub fn project_has_undelivered_operations(project:&std::path::Path)->anyhow::Result<bool> {
+    crate::migration::open_active_unchecked(project)?.has_undelivered_operations().map_err(Into::into)
 }
