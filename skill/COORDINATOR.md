@@ -102,12 +102,6 @@ bundled manifests; the viewer uses a private product config allowing nesting,
 without changing the owner's Herdr config. If the coordinator session is
 unavailable, launch still succeeds and reports the viewer as unavailable.
 
-The profile's `max_wall_seconds` ends a worker that runs out of time. After an
-`attempt.ended_without_submission` inbox notice, run
-`herdr-farm result <slug> submit-captured ATTEMPT` to submit what it produced,
-then review it. Tell the owner before launching a task that looks longer than
-the budget.
-
 After launching workers, start `herdr-farm inbox <slug> wait` as a background
 Bash command. Its exit wakes the coordinator without terminal input. Run
 `context <slug>` when it returns, review the new result data, relaunch a rejected
