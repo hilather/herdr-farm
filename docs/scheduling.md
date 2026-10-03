@@ -173,6 +173,10 @@ Remote polling uses a monotonic 60-second deadline scoped to project, socket and
 machine. Failed commands start a 120-second retry deadline when they finish.
 Fast ticks cannot retry early, and delayed ticks do not require additional ticks
 to become due. An overdue resource receives one poll, without a catch-up burst.
+An unchanged runtime observation refreshes the stored observation time without
+appending an event or changing the project head. Freshness checks use that row;
+`runtime.observed` publications describe changes, not a heartbeat for every pass.
+
 The ticker's 15-second interval starts before each pass, so command duration does
 not add another full interval. Wall-clock changes do not affect these deadlines.
 

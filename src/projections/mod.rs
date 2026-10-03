@@ -12,7 +12,13 @@ pub fn export(project:&Path,db:&mut SqliteStore)->Result<PathBuf> {
     let root=project.join(".state/projections");
     if !root.try_exists()? { fs::create_dir(&root)?; fs::set_permissions(&root,fs::Permissions::from_mode(0o700))?; }
     ensure!(fs::symlink_metadata(&root)?.is_dir(),"projection root must be a real directory");
-    let dir=root.join(format!("schema-{}-revision-{}",snapshot.schema_version,snapshot.head));
+    // Observation freshness can advance at the same event head. Preserve each
+    // immutable export without mistaking a refreshed row for a manual edit.
+    let observation_label=if snapshot.observations.is_empty() {String::new()} else {
+        use sha2::{Digest,Sha256};
+        format!("-observations-{:x}",Sha256::digest(serde_json::to_vec(&snapshot.observations)?))
+    };
+    let dir=root.join(format!("schema-{}-revision-{}{}",snapshot.schema_version,snapshot.head,observation_label));
     if !dir.try_exists()? { fs::create_dir(&dir)?; fs::set_permissions(&dir,fs::Permissions::from_mode(0o700))?; }
     ensure!(fs::symlink_metadata(&dir)?.is_dir(),"projection directory must be a real directory");
     let execution=if snapshot.schema_version>=7 {"External effects require controller epoch, scoped authority and resource ownership."}else{"Dispatch is blocked pending reconciliation."};

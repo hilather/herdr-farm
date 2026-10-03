@@ -260,3 +260,84 @@ fn recovery_plans_advise_without_retrying_ambiguous_effects_or_releasing_lost_ca
     }
     assert!(lab.calls("herdr-calls").is_empty() && lab.calls("git-calls").is_empty());
 }
+
+#[test]
+fn repeated_live_records_refresh_without_events_and_a_pane_change_publishes_once() {
+    let lab = Lab::new();
+    lab.migrate();
+    lab.add_task("worker");
+    let binding = lab.bind("worker", json!({"socket": lab.path("live.sock"), "workspace_id": "w", "tab_id": "t", "pane_id": "p", "cwd": "/cwd"}));
+    lab.session("live", json!([pane("p", "/cwd")]), json!([]));
+    let first = lab.record()[&binding].clone();
+    let before = lab.snapshot();
+    lab.ok(&["migration", "demo", "export"]);
+    let second = lab.record()[&binding].clone();
+    lab.ok(&["migration", "demo", "export"]);
+    assert!(second["observed_unix_ms"].as_i64().unwrap() > first["observed_unix_ms"].as_i64().unwrap());
+    assert_eq!(lab.snapshot()["head"], before["head"]);
+    assert_eq!(lab.snapshot()["events"], before["events"]);
+    lab.session("live", json!([]), json!([]));
+    assert_eq!(lab.record()[&binding]["pane"], "absent");
+    let after = lab.snapshot();
+    let count = |s: &Value| s["events"].as_array().unwrap().iter().filter(|e| e["kind"] == "runtime.observed").count();
+    assert_eq!(count(&after), count(&before) + 1);
+    lab.record();
+    assert_eq!(lab.snapshot()["head"], after["head"]);
+}
+
+#[test]
+fn refreshed_observations_preserve_recovery_waits_and_exact_head_admission() {
+    use herdr_farm::{reconcile::{RuntimeObservation, ResourceState}, store::SqliteStore};
+    let root = tempfile::tempdir().unwrap();
+    let mut db = SqliteStore::create(&root.path().join("state.db")).unwrap();
+    db.commit(Commit { expected_head: db.current_head().unwrap(), mutations: vec![Mutation::Task {
+        expected: None, next: Task { id: TaskId::new("parent").unwrap(), revision: 1, state: TaskState::Running, title: "Parent".into(), active_attempt: None },
+    }] }).unwrap();
+    let binding = db.create_runtime(None, None, db.current_head().unwrap(), &RuntimeRoute {
+        socket: "/fixture/session.sock".into(), workspace_id: "w".into(), tab_id: "t".into(), pane_id: "p".into(), cwd: root.path().display().to_string(), ..Default::default()
+    }).unwrap().binding;
+    let mut observation = RuntimeObservation { binding: binding.id.clone(), binding_revision: binding.revision,
+        observed_unix_ms: now() - 1000, pane: ResourceState::Present, agent_present: true, collector: "herdr-git-v2".into(),
+        session_identity: Some(ResourceIdentity { device: 1, inode: 2, born_secs: 3, born_nanos: 0 }),
+        agent_identity: Some(AgentIdentity { kind: "fixture".into(), name: "coordinator".into() }), ..Default::default() };
+    db.record_observations(db.current_head().unwrap(), &[observation.clone()]).unwrap();
+    let owned = db.adopt_runtime(&binding.id, binding.revision, db.current_head().unwrap(), now(), None).unwrap().ownership;
+    fs::create_dir(root.path().join(".state")).unwrap();
+    let first_export = herdr_farm::projections::export(root.path(), &mut db).unwrap();
+    let original_bytes = fs::read(first_export.join("runtime.json")).unwrap();
+    let older = RuntimeObservation { observed_unix_ms: observation.observed_unix_ms - 1, ..observation.clone() };
+    assert!(db.record_observations(db.current_head().unwrap(), &[older]).is_err());
+    observation.observed_unix_ms += 1;
+    let head = db.current_head().unwrap();
+    assert_eq!(db.record_observations(head, &[observation.clone()]).unwrap(), head);
+    assert_eq!(db.read_snapshot(None).unwrap().observations, vec![observation.clone()]);
+    let refreshed_export = herdr_farm::projections::export(root.path(), &mut db).unwrap();
+    assert_ne!(refreshed_export, first_export);
+    assert_eq!(fs::read(first_export.join("runtime.json")).unwrap(), original_bytes);
+    let exported: Value = serde_json::from_slice(&fs::read(refreshed_export.join("runtime.json")).unwrap()).unwrap();
+    assert_eq!(exported["observations"][0]["observed_unix_ms"], observation.observed_unix_ms);
+    let wait = db.register_wait_with_trigger("parent", None, "adapter_recovery", None, Some(&WaitTrigger::OwnedRuntimeRecovered {
+        binding_id: binding.id.clone(), binding_revision: binding.revision, ownership_revision: owned.revision,
+    })).unwrap();
+    let head = db.current_head().unwrap();
+    observation.observed_unix_ms += 1;
+    assert_eq!(db.record_observations(head, &[observation.clone()]).unwrap(), head);
+    assert!(db.replay_wait(&wait.wait_id).unwrap().wake_requested);
+    // A new resource incarnation must still publish and invalidate active control.
+    // The parent is a wait consumer, so it is completed before admission.
+    let snapshot = db.read_snapshot(None).unwrap();
+    let mut parent = snapshot.tasks[0].clone();
+    let revision = parent.revision;
+    parent.revision += 1;
+    parent.state = TaskState::Succeeded;
+    db.commit(Commit { expected_head: snapshot.head, mutations: vec![Mutation::Task { expected: Some(revision), next: parent }] }).unwrap();
+    let head = db.current_head().unwrap();
+    db.set_project_state(head, db.project_control().unwrap().unwrap().revision, ProjectState::Active, observation.observed_unix_ms, None).unwrap();
+    let before = db.read_snapshot(None).unwrap();
+    observation.observed_unix_ms += 1;
+    observation.agent_identity.as_mut().unwrap().name = "replacement".into();
+    db.record_observations(before.head, &[observation]).unwrap();
+    let after = db.read_snapshot(None).unwrap();
+    assert_eq!(after.events.iter().filter(|e| e.kind == "runtime.observed").count(), before.events.iter().filter(|e| e.kind == "runtime.observed").count() + 1);
+    assert!(after.control.unwrap().reconciliation_required);
+}

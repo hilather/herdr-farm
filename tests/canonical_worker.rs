@@ -1013,8 +1013,8 @@ fn a_proven_worker_end_keeps_the_project_admitted_but_an_unexplained_pane_loss_p
     // whose 100 ms observation-head read overruns (under load) offers none.
     fs::write(lab.path("lab/vanish"), b"").unwrap();
     lab.run_until(4, &|| !lab.events("runtime.relinquished").is_empty());
-    let observed = lab.events("runtime.observed").len();
-    lab.run_until(4, &|| lab.events("runtime.observed").len() > observed);
+    let observed = lab.state().observations.iter().map(|o| o.observed_unix_ms).max().unwrap();
+    lab.run_until(4, &|| lab.state().observations.iter().any(|o| o.observed_unix_ms > observed));
     let state = lab.state();
     let control = state.control.clone().unwrap();
     assert_eq!((control.state, control.reconciliation_required), (ProjectState::Active, false), "{:?}", lab.events("project.reconciliation_invalidated"));

@@ -111,12 +111,12 @@ impl SqliteStore {
         for observation in observations {
             let binding=bindings.get(observation.binding.as_str()).ok_or(StoreError::Conflict)?;
             if observation.binding_revision!=binding.revision || observation.task_revision!=binding.task.as_ref().and_then(|id|tasks.get(id).copied()) {return Err(StoreError::Conflict);}
-            let old:Option<i64>=tx.query_row("SELECT observed_unix_ms FROM runtime_observations WHERE binding_id=?1",[&binding.id],|r|r.get(0)).optional()?;
-            if old.is_some_and(|t|t>observation.observed_unix_ms){return Err(StoreError::Conflict);}
+            let old=read_binding(&tx,&binding.id,budget)?;
+            if old.as_ref().is_some_and(|old|old.observed_unix_ms>observation.observed_unix_ms){return Err(StoreError::Conflict);}
             let payload=serde_json::to_string(observation).map_err(|e|StoreError::Invalid(e.to_string()))?;
-            let unchanged:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM runtime_observations WHERE binding_id=?1 AND payload=?2)",params![binding.id,payload],|r|r.get(0))?;
-            if unchanged {continue;}
+            let unchanged=old.as_ref().is_some_and(|old|old.same_state(observation));
             tx.execute("INSERT INTO runtime_observations VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(binding_id) DO UPDATE SET binding_revision=excluded.binding_revision,task_revision=excluded.task_revision,observed_unix_ms=excluded.observed_unix_ms,payload=excluded.payload,payload_hash=excluded.payload_hash",params![binding.id,integer(binding.revision)?,observation.task_revision.map(integer).transpose()?,observation.observed_unix_ms,payload,format!("{:x}",Sha256::digest(payload.as_bytes()))])?;
+            if unchanged {continue;}
             tx.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES('runtime.observed',?1,?2,1,?3)",params![binding.id,integer(binding.revision)?,payload])?;
         }
         let schema:u32=tx.query_row("PRAGMA user_version",[],|r|r.get(0))?;
