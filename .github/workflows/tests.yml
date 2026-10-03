@@ -12,6 +12,9 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Line tables keep panics readable while shrinking the 73 test binaries
+  # (the archive is uploaded once and unpacked on every runner).
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
   build:
@@ -54,17 +57,20 @@ jobs:
           sudo apt-get install -y -qq openssh-server openssh-client
           git config --global user.name ci
           git config --global user.email ci@invalid
-          mkdir -p /dev/shm/herdr-tests
+          df -h / /dev/shm
       - uses: actions/download-artifact@v4
         with:
           name: nextest-archive
       - name: Run tests (partition ${{ matrix.partition }}/4)
+        # The runner's /dev/shm is too small for the unpacked archive; use
+        # its disk temp directory for test scratch and unpack in the workspace.
         env:
-          TMPDIR: /dev/shm/herdr-tests
+          TMPDIR: ${{ runner.temp }}
         run: >
           cargo nextest run --profile ci
           --archive-file nextest-archive.tar.zst
           --workspace-remap .
+          --extract-to nextest-extract
           --partition count:${{ matrix.partition }}/4
       - uses: actions/upload-artifact@v4
         if: always()
