@@ -49,7 +49,12 @@ block. Inspect, plan and exact-plan apply repeat these checks; the operator must
 also confirm all known writers stopped. No processes are stopped by migration.
 
 Final-copy artifact manifests are typed and checked against thread/generation,
-manifest digest and retained file digests. Artifact files, including nested library
+manifest digest and retained file digests. Retained generations may be earlier
+than the current lifecycle, but must still match the thread's recorded source,
+thread ID and local machine identity. Resolved auto-cleanup journals are preserved
+as typed legacy evidence. Completed removal checkpoints require an absent,
+unregistered worktree and an unchanged retained branch; pending or mismatched
+removals block migration. Pane and agent absence and writer checks still apply. Artifact files, including nested library
 JSON, are preserved verbatim as retained evidence; nested JSON is never evaluated
 or interpreted as runtime control. Memory review obligations of all four
 statuses, notification history, candidate links and candidate digests remain

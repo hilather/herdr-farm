@@ -7,7 +7,19 @@ use serde_json::Value;
 pub(super) fn retained(path: &str) -> bool {
     path.starts_with(".state/artifacts/")
         || path.starts_with(".state/memory-review-evidence/")
+        || path.starts_with(".state/resolved-cleanup-") && path.ends_with(".json")
         || path.starts_with("threads/") && path.ends_with(".md")
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CleanupJournal {
+    version: u32,
+    generation: u64,
+    execution: String,
+    step: String,
+    #[serde(rename = "note")]
+    _note: String,
 }
 
 #[derive(Deserialize)]
@@ -31,6 +43,25 @@ struct Entry {
 }
 
 pub(super) fn validate(project: &Path, source: &Source, bytes: &[u8]) -> Result<()> {
+    if let Some(id) = source.path.strip_prefix(".state/resolved-cleanup-").and_then(|s| s.strip_suffix(".json")) {
+        ensure!(safe_relative(id) && !id.contains('/'), "invalid cleanup thread identity");
+        let journal: CleanupJournal = serde_json::from_slice(bytes)?;
+        let record: toml::Value = toml::from_str(std::str::from_utf8(&read(&safe_join(project, &format!("threads/{id}.toml"))?)?)?)?;
+        ensure!(record.get("id").and_then(|v| v.as_str()) == Some(id) && record.get("machine").and_then(|v| v.as_str()).unwrap_or("").is_empty() && journal.version == 1
+            && Some(journal.generation) == record.get("lifecycle_generation").and_then(|v| v.as_integer()).map(|n| n as u64)
+            && journal.execution.len() == 64 && journal.execution.bytes().all(|b| b.is_ascii_hexdigit())
+            && matches!(journal.step.as_str(), "ready" | "stop" | "pane" | "workspace" | "remove" | "complete" | "skipped"), "invalid cleanup journal");
+        let mut execution_record = record.clone();
+        if let Some(removal) = record.get("removal")
+            && record.get("worktree_path").and_then(|v| v.as_str()) == Some("") {
+                let path = removal.get("path").and_then(|v| v.as_str()).context("missing cleanup path")?;
+                execution_record["worktree_path"] = toml::Value::String(path.into());
+                execution_record["cwd"] = toml::Value::String(path.into());
+        }
+        ensure!(crate::operations::receipts::legacy_execution_fingerprint(&execution_record).as_deref()
+            == Some(journal.execution.as_str()), "cleanup execution identity mismatch");
+        return Ok(());
+    }
     if source.path == ".state/memory-review.json" {
         let state: Value = serde_json::from_slice(bytes)?;
         super::validate_runtime(&source.path, &state)?;
@@ -83,9 +114,14 @@ pub(super) fn validate(project: &Path, source: &Source, bytes: &[u8]) -> Result<
             .get("lifecycle_generation")
             .and_then(|v| v.as_integer())
             .unwrap_or(0) as u64
-            == manifest.generation,
+            >= manifest.generation,
         "artifact generation mismatch"
     );
+    ensure!(thread.get("id").and_then(|v| v.as_str()) == Some(manifest.thread.as_str())
+        && thread.get("machine").and_then(|v| v.as_str()).unwrap_or("").is_empty(),
+        "artifact thread or machine mismatch");
+    // Cleanup retains thread_dir; an older receipt must still name that exact
+    // recorded source. A changed source without historical evidence is rejected.
     ensure!(
         thread
             .get("thread_dir")
