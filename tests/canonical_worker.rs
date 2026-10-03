@@ -52,7 +52,7 @@ while True:
   fd=os.open(s['fifo'],os.O_WRONLY);os.write(fd,p['text'].encode());os.close(fd);s['released']=True;res={'type':'ok'}
  elif m=='agent.list':res={'type':'agent_list','agents':[agent] if live and s.get('released') else []}
  elif m=='agent.rename':s['name']=agent['name']=p['name'];res={'type':'agent_info','agent':agent}
- elif m=='agent.explain':res={'type':'agent_explain','explain':{'agent':kind,'state':'idle','manifest_source':'bundled','manifest_version':'2026.09.14.1',
+ elif m=='agent.explain':res={'type':'agent_explain','explain':{'agent':kind,'state':'idle','manifest_source':open(os.path.join(root,'manifest-source')).read() if os.path.exists(os.path.join(root,'manifest-source')) else 'bundled','manifest_version':'2026.09.14.1',
   'matched_rule':{'id':'prompt','state':'idle'},'visible_idle':True,'visible_blocker':False,'visible_working':False,'screen_detection_skipped':False,
   'skip_state_update':False,'local_override_shadowing_remote':False,'fallback_reason':None,'warning':None}}
  elif m=='agent.prompt':
@@ -2350,4 +2350,19 @@ fn canonical_attempt_sidebar_restart_offers_no_historical_cleanup_or_native_requ
     assert!(!ids.lines().any(|id| id.starts_with("attempt-tokens-")), "{ids}");
     assert_eq!(lab.count("pane.report_metadata"), 0, "{:?}", lab.requests());
     assert_eq!(lab.attempt(&attempt).state, AttemptState::Cancelled);
+}
+
+#[test]
+fn dedicated_worker_refuses_remote_manifest_before_launch_or_brief() {
+    let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+    let (_, attempt) = lab.reserve("Retained instructions");
+    fs::write(lab.path("lab/manifest-source"), "remote:/fixture/herdr/agent-detection/remote/claude.toml").unwrap();
+    lab.serve();
+    let mut ticker = lab.spawn();
+    lab.wait(&mut ticker, 120, &|| lab.count("agent.explain") >= 1);
+    lab.stop(ticker);
+    assert_eq!(lab.count("agent.prompt"), 0);
+    assert!(!lab.events("runtime.launch_started").iter().any(|e| e.payload["attempt"] == attempt.as_str()));
+    assert_ne!(lab.attempt(&attempt).state, AttemptState::Running);
+    assert!(!lab.state().deliveries.iter().any(|d| d.state == DeliveryState::Confirmed));
 }

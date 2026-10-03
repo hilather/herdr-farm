@@ -31,6 +31,8 @@ struct Journal {
     deliveries: u32,
     /// Retained operator authorization to replace this absent coordinator.
     replace_missing: bool,
+    #[serde(default)]
+    priming_manifest: Option<Value>,
 }
 fn save(dir: &Path, journal: &Journal) -> Result<()> {
     project::write_atomic(
@@ -81,16 +83,152 @@ fn agent(h: &Herdr<'_>, j: &Journal, ready: bool) -> Result<Value> {
     )?;
     Ok(matching[0].clone())
 }
-fn ready(h: &Herdr<'_>, j: &Journal) -> Result<()> {
+fn allow_local_manifest(config_dir: &Path) -> Result<bool> {
+    let Some(text) = paths::read_control_text(&config_dir.join("config.toml"), 1024 * 1024)? else {
+        return Ok(false);
+    };
+    let config: toml::Value = toml::from_str(&text)?;
+    config
+        .get("coordinator")
+        .and_then(|c| c.get("allow_local_manifest_override"))
+        .map(|v| {
+            v.as_bool()
+                .context("coordinator.allow_local_manifest_override must be a boolean")
+        })
+        .unwrap_or(Ok(false))
+}
+
+fn manifest_policy(env: &paths::Env, config_dir: &Path, explain: &Value) -> Result<()> {
+    ensure!(
+        explain["manifest_version"]
+            .as_str()
+            .is_some_and(|v| !v.is_empty() && v.len() <= 96),
+        "coordinator manifest version missing or exceeds 96 bytes; update Herdr agent manifests"
+    );
+    ensure!(
+        explain.get("warning").is_none_or(Value::is_null)
+            && explain.get("fallback_reason").is_none_or(Value::is_null),
+        "coordinator manifest warning or fallback refused; inspect herdr agent explain and update or repair manifests"
+    );
+    let source = explain["manifest_source"]
+        .as_str()
+        .context("coordinator manifest source missing")?;
+    ensure!(
+        source.len() <= 4096,
+        "coordinator manifest source exceeds bounds"
+    );
+    let shadow = explain["local_override_shadowing_remote"]
+        .as_bool()
+        .context("coordinator manifest override evidence missing")?;
+    let opted_in = allow_local_manifest(config_dir)?;
+    ensure!(
+        !shadow || opted_in,
+        "coordinator local manifest override shadowing remote refused; inspect the override, remove it or explicitly set [coordinator] allow_local_manifest_override = true in owner config"
+    );
+    if source == "bundled" {
+        return Ok(());
+    }
+    let remote = source.strip_prefix("remote:");
+    let local = source.strip_prefix("local:");
+    ensure!(
+        remote.is_some() || (local.is_some() && opted_in),
+        "coordinator manifest source refused; use bundled or a remote manifest under the owner's Herdr state dir, or inspect and opt in to a local override"
+    );
+    if let Some(path) = remote {
+        let state = env
+            .var("XDG_STATE_HOME")
+            .map(std::path::PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .unwrap_or_else(|| env.home.join(".local/state"))
+            .join("herdr")
+            .canonicalize()
+            .context("owner Herdr state dir unavailable")?;
+        let path = Path::new(path);
+        ensure!(
+            path.is_absolute(),
+            "coordinator remote manifest path must be absolute"
+        );
+        let resolved = path
+            .canonicalize()
+            .context("coordinator remote manifest path unavailable")?;
+        ensure!(
+            resolved.starts_with(&state) && resolved != state && resolved.is_file(),
+            "coordinator remote manifest path is outside owner's Herdr state dir; update Herdr manifests in the owner session"
+        );
+    }
+    Ok(())
+}
+
+fn readiness(env: &paths::Env, config_dir: &Path, kind: &str, explain: &Value) -> Result<()> {
+    manifest_policy(env, config_dir, explain)?;
+    // The worker validator retains all positive visible-idle requirements.
+    // Only the coordinator's independently checked manifest policy differs.
+    let mut checked = explain.clone();
+    checked["manifest_source"] = json!("bundled");
+    checked["local_override_shadowing_remote"] = json!(false);
+    herdr_farm::canonical_worker::validate_visible_readiness(kind, &checked)
+        .context("coordinator lacks verified visible prompt readiness; inspect agent explain for idle state, matched rule, warning/fallback and manifest version before retrying open")
+}
+
+fn ready(ctx: &Ctx, h: &Herdr<'_>, j: &Journal) -> Result<Value> {
     agent(h, j, true)?;
-    let explain = call(
+    let reply = call(
         h,
         "coordinator-ready",
         "agent.explain",
         json!({"target":j.route.pane_id}),
     )?;
-    herdr_farm::canonical_worker::validate_visible_readiness(&j.kind, &explain["explain"])
+    let explain = &reply["explain"];
+    readiness(ctx.env, &ctx.config_dir, &j.kind, explain)?;
+    Ok(
+        json!({"source":explain["manifest_source"], "version":explain["manifest_version"],
+        "local_override_shadowing_remote":explain["local_override_shadowing_remote"]}),
+    )
 }
+
+pub fn doctor_manifest(
+    env: &paths::Env,
+    config_dir: &Path,
+    dir: &Path,
+    runner: &dyn crate::runner::Runner,
+) -> Result<Vec<String>> {
+    let Some(text) =
+        paths::read_control_text(&dir.join(".state/canonical-coordinator.json"), 64 * 1024)?
+    else {
+        return Ok(Vec::new());
+    };
+    let j: Journal = serde_json::from_str(&text)?;
+    let mut lines = Vec::new();
+    if let Some(evidence) = &j.priming_manifest {
+        lines.push(format!(
+            "coordinator priming manifest: {} version {} (override {})",
+            evidence["source"], evidence["version"], evidence["local_override_shadowing_remote"]
+        ));
+    }
+    let h = Herdr::new(env.herdr_bin(), &j.socket, runner);
+    let reply = match call(
+        &h,
+        "coordinator-doctor-manifest",
+        "agent.explain",
+        json!({"target":j.route.pane_id}),
+    ) {
+        Ok(reply) => reply,
+        Err(error) => {
+            lines.push(format!("coordinator live manifest unavailable: {error:#}; inspect owner session agent explain"));
+            return Ok(lines);
+        }
+    };
+    let e = &reply["explain"];
+    if e["manifest_source"].as_str() != Some("bundled")
+        || e["local_override_shadowing_remote"].as_bool() != Some(false)
+    {
+        let decision = manifest_policy(env, config_dir, e);
+        lines.push(format!("coordinator live manifest: {} version {}; {}", e["manifest_source"], e["manifest_version"],
+            match decision { Ok(()) => "manifest policy accepted; priming also requires verified visible idle readiness".into(), Err(error) => format!("refused: {error:#}") }));
+    }
+    Ok(lines)
+}
+
 fn accepted(h: &Herdr<'_>, j: &Journal) -> Result<bool> {
     let until = Instant::now() + timing::brief_accept_window();
     loop {
@@ -318,6 +456,7 @@ pub fn open(ctx: &Ctx, slug: &str, options: &OpenOptions) -> Result<()> {
             phase: "create-pending".into(),
             deliveries: 0,
             replace_missing: options.reprime,
+            priming_manifest: None,
         };
         if live.is_none() {
             save(&dir, &j)?;
@@ -487,7 +626,7 @@ pub fn open(ctx: &Ctx, slug: &str, options: &OpenOptions) -> Result<()> {
     if j.phase == "prime-ready" {
         let prompt = coordinator::priming_prompt(&coordinator::current_prefix(&ctx.root)?, slug);
         while j.deliveries < 3 {
-            ready(&h, &j)?;
+            j.priming_manifest = Some(ready(ctx, &h, &j)?);
             fence(&dir, ctx, &j)?;
             j.deliveries += 1;
             j.phase = "prime-pending".into();

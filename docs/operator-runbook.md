@@ -214,6 +214,31 @@ owner's Herdr session (or pass `--socket /absolute/session.sock`). It uses
 canonical `coordinator`, and records live observation and ownership. It never
 starts a replacement server or imports old thread records as live state.
 
+Coordinator priming accepts bundled manifests and updated `remote:<path>` manifests
+whose resolved file is inside the owner's Herdr state directory
+(`$XDG_STATE_HOME/herdr`, or `~/.local/state/herdr`). Symlinks escaping that
+directory and relative paths are refused. Herdr must report the configured agent,
+an idle matched rule and visible idle prompt, no working/blocker signals, no
+warning or fallback, and a non-empty manifest version of at most 96 bytes.
+Dedicated canonical workers continue to require bundled manifests.
+
+Local manifests and local overrides shadowing remote manifests are refused by
+default. Inspect the override first; remove it to use Herdr's updated detection,
+or explicitly authorize it in the owner `config.toml`:
+
+```toml
+[coordinator]
+allow_local_manifest_override = true
+```
+
+After changing config for a refused priming attempt, inspect the pane and use
+`open PROJECT --reprime`. The opt-in does not relax visible readiness checks.
+The coordinator journal `.state/canonical-coordinator.json` retains the manifest
+source, version and override flag used before submitting each priming prompt.
+`doctor` reports this priming evidence and the live remote/override manifest
+policy as information, including refusal reasons and recovery actions. A busy
+coordinator can have an accepted manifest policy while priming waits for idle.
+
 Priming runs the coordinator skill and canonical context. A prompt acknowledgement
 is insufficient: the adapter waits for working/blocked status or visible working
 evidence, using the worker brief confirmation window. Startup screens that
