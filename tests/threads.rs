@@ -11,6 +11,11 @@ const BIN: &str = env!("CARGO_BIN_EXE_herdr-farm");
 
 const FAKE_HERDR: &str = r#"#!/bin/sh
 printf '%s\n' "$*" >> "$HOME/herdr-calls"
+if [ -e "$HOME/stop-bridge.py" ]; then
+  case "$1 $2" in
+    'remote-api-bridge --check'|'remote-api-bridge '|'agent prompt') exec python3 "$HOME/stop-bridge.py" "$@";;
+  esac
+fi
 case "$1 $2" in
  'agent send-keys'|'pane close'|'workspace close')
   python3 - "$HOME" "$1" "$2" "$3" <<'PYFIX'
@@ -654,7 +659,7 @@ fn unsafe_resolved_threads_are_kept_and_cleanup_keep_opts_out() {
         if mode == "dirty" { fs::write(work.join("untracked.txt"), "do not lose").unwrap(); }
         if mode == "ignored" { fs::write(work.join(".herdr-project/demo-t-0001/uncopied.txt"), "do not lose ignored data").unwrap(); }
         if mode == "keep" { cleanup_safety(&lab, "keep", "propose"); }
-        lab.ok(&["thread", "resolve", "demo", "t-0001"]);
+        lab.ok_beside_ticker(&["thread", "resolve", "demo", "t-0001"]);
         let ticker = lab.ticker();
         if mode == "keep" {
             let before = lab.calls().lines().filter(|l| *l == "pane list").count();
@@ -784,4 +789,163 @@ fn used_quiesced_project_migrates_after_final_copy_and_memory_record() {
     let restored=lab.path("restored");
     lab.ok(&["migration","demo","restore","--destination",restored.to_str().unwrap()]);
     for (path,bytes) in originals {assert_eq!(fs::read(restored.join(path)).unwrap(),bytes);}
+}
+
+/// Public stop/restart/resolve workflows retain dirty Git state, including a
+/// process crash after pane close but before acknowledgement.
+#[test]
+fn stop_blocked_worker_preserves_work_and_recovers_crash() {
+    for crash in [false, true] {
+        let lab = Lab::new();
+        let repo = lab.path("stop-repo");
+        fs::create_dir(&repo).unwrap();
+        lab.git(&repo, &["init", "-q", "-b", "main"]);
+        lab.git(&repo, &["commit", "-q", "--allow-empty", "-m", "base"]);
+        let task = lab.path("stop-task.md");
+        fs::write(&task, "Keep this task brief.").unwrap();
+        let md = fs::read_to_string(lab.project().join("PROJECT.md")).unwrap();
+        // Set the public project capacity to one.
+        let md = md.lines().map(|line| if line.starts_with("max_parallel_threads") { "max_parallel_threads = 1" } else { line }).collect::<Vec<_>>().join("\n");
+        fs::write(lab.project().join("PROJECT.md"), md).unwrap();
+        let _ticker = lab.ticker();
+        let start = |title: &str| lab.ok_beside_ticker(&["thread", "start", "demo", "--title", title, "--repo", repo.to_str().unwrap(), "--task-file", task.to_str().unwrap()]);
+        start("Stopped work");
+        let before = lab.record("t-0001");
+        lab.ok_beside_ticker(&["pause", "demo"]);
+        let work = Path::new(before["worktree_path"].as_str().unwrap());
+        let dir = Path::new(before["thread_dir"].as_str().unwrap());
+        fs::write(work.join("uncommitted.txt"), "keep me").unwrap();
+        fs::write(dir.join("report.md"), "## Report\nBlocked on permission.\n").unwrap();
+        fs::create_dir_all(dir.join("library")).unwrap();
+        fs::write(dir.join("library/result.txt"), "preserved artifact").unwrap();
+        let pane = json!({"workspace_id": before["workspace_id"].as_str(), "tab_id": before["tab_id"].as_str(), "pane_id": before["pane_id"].as_str(), "cwd": before["cwd"].as_str()});
+        let mut agent = pane.clone();
+        agent["name"] = json!(before["agent_name"].as_str());
+        agent["agent_status"] = json!("blocked");
+        lab.session(&[agent], &[pane]);
+        let stop = ["thread", "stop", "demo", "t-0001", "--reason", "permission blocked"];
+        if crash {
+            fs::write(lab.path("crash-pane"), "").unwrap();
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                let out = lab.cli(&stop);
+                if String::from_utf8_lossy(&out.stderr).contains("another operation owns lock") {
+                    assert!(Instant::now() < deadline);
+                    std::thread::sleep(Duration::from_millis(20));
+                    continue;
+                }
+                assert!(!out.status.success());
+                break;
+            }
+            assert!(lab.path("crashed").exists());
+            assert_eq!(lab.record("t-0001")["status"].as_str(), Some("stopping"));
+        }
+        lab.ok_beside_ticker(&stop);
+        let stopped = lab.record("t-0001");
+        assert_eq!(stopped["status"].as_str(), Some("stopped"));
+        assert_eq!(stopped["stopped_reason"].as_str(), Some("permission blocked"));
+        assert!(!stopped["stopped_at"].as_str().unwrap().is_empty());
+        assert_eq!(lab.list()["t-0001"].0, "Stopped");
+        assert!(lab.ok(&["overview"]).contains("Stopped (1)"));
+        assert!(String::from_utf8_lossy(&lab.cli(&["doctor"]).stdout).contains("Stopped"));
+        assert_eq!(fs::read_to_string(lab.project().join("threads/t-0001.md")).unwrap(), "## Report\nBlocked on permission.\n");
+        assert_eq!(fs::read_to_string(lab.project().join("library/t-0001/result.txt")).unwrap(), "preserved artifact");
+        let agents: Value = serde_json::from_str(&fs::read_to_string(lab.path("agents.json")).unwrap()).unwrap();
+        assert!(agents["result"]["agents"].as_array().unwrap().is_empty());
+        let panes: Value = serde_json::from_str(&fs::read_to_string(lab.path("panes.json")).unwrap()).unwrap();
+        assert!(!panes["result"]["panes"].as_array().unwrap().iter().any(|p| p["pane_id"].as_str() == before["pane_id"].as_str()));
+        let workspaces: Value = serde_json::from_str(&fs::read_to_string(lab.path("workspaces.json")).unwrap()).unwrap();
+        assert!(!workspaces["result"]["workspaces"].as_array().unwrap().iter().any(|w| w["workspace_id"].as_str() == before["workspace_id"].as_str()));
+        assert_eq!(fs::read_to_string(work.join("uncommitted.txt")).unwrap(), "keep me");
+        assert!(lab.git(&repo, &["branch", "--list", before["branch"].as_str().unwrap()]).contains(before["branch"].as_str().unwrap()));
+        let calls = lab.calls();
+        lab.ok_beside_ticker(&stop);
+        let new_calls = lab.calls();
+        assert_eq!(calls.matches("agent send-keys").count(), new_calls.matches("agent send-keys").count());
+        assert_eq!(calls.matches("pane close").count(), new_calls.matches("pane close").count());
+        assert_eq!(lab.record("t-0001"), stopped);
+        lab.ok_beside_ticker(&["resume", "demo"]);
+        // The stopped thread no longer reserves the only worker slot.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let output = lab.cli(&["thread", "start", "demo", "--title", "Other work", "--repo", repo.to_str().unwrap(), "--task-file", task.to_str().unwrap()]);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("another operation owns lock") {
+                assert!(Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(20));
+                continue;
+            }
+            assert!(output.status.success(), "{stderr}");
+            assert!(!stderr.contains("max_parallel_threads"), "{stderr}");
+            break;
+        }
+        assert_eq!(lab.record("t-0002")["status"].as_str(), Some("open"));
+        lab.ok_beside_ticker(&["thread", "restart", "demo", "t-0001"]);
+        let restarted = lab.record("t-0001");
+        assert_eq!(restarted["status"].as_str(), Some("open"));
+        assert_eq!(restarted["branch"], before["branch"]);
+        assert_eq!(restarted["worktree_path"], before["worktree_path"]);
+        // A deterministic local Herdr API fixture acknowledges a fresh start
+        // and the brief delivery, without executing any real agent CLI.
+        fs::write(lab.path("stop-bridge.py"), r#"import json, os, pathlib, sys
+root = pathlib.Path(os.environ['HOME'])
+if sys.argv[1:] == ['remote-api-bridge', '--check']:
+    print('herdr-api-bridge-v1'); sys.exit(0)
+if sys.argv[1] == 'remote-api-bridge':
+    request = json.load(sys.stdin)
+    if request['method'] == 'agent.list': result = json.loads((root / 'agents.json').read_text())['result']
+    elif request['method'] == 'pane.list': result = json.loads((root / 'panes.json').read_text())['result']
+    else:
+        assert request['method'] == 'agent.start'
+        params = request['params']
+        agent = next(p.copy() for p in json.loads((root / 'panes.json').read_text())['result']['panes'] if p['pane_id'] == params['pane_id'])
+        agent.update(name=params['name'], agent=params['kind'], agent_status='idle')
+        (root / 'agents.json').write_text(json.dumps({'result': {'agents': [agent]}}))
+        result = {'type': 'agent_started', 'agent': agent, 'argv': ['fixture-agent'] + params['args']}
+        (root / 'fresh-start.json').write_text(json.dumps(request))
+    print(json.dumps({'id': request['id'], 'result': result}))
+else:
+    assert sys.argv[1:3] == ['agent', 'prompt']
+    agent = next(a for a in json.loads((root / 'agents.json').read_text())['result']['agents'] if a['pane_id'] == sys.argv[3])
+    (root / 'resent-brief.txt').write_text(sys.argv[4])
+    print(json.dumps({'result': {'type': 'agent_prompted', 'agent': agent}}))
+"#).unwrap();
+        let new_pane = json!({"workspace_id": restarted["workspace_id"].as_str(), "tab_id": restarted["tab_id"].as_str(), "pane_id": restarted["pane_id"].as_str(), "cwd": restarted["cwd"].as_str(), "terminal_id": "fresh-terminal"});
+        lab.session(&[], &[new_pane]);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while lab.record("t-0001")["prompt_pending"].as_bool() != Some(false) {
+            assert!(Instant::now() < deadline, "fresh worker did not receive brief: {}", lab.calls());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(lab.path("fresh-start.json").exists());
+        assert!(fs::read_to_string(lab.path("resent-brief.txt")).unwrap().contains("brief.md"));
+        assert!(lab.record("t-0001")["launch_sequence"].as_integer().unwrap() > stopped["launch_sequence"].as_integer().unwrap());
+        assert!(fs::read_to_string(dir.join("brief.md")).unwrap().contains("Keep this task brief."));
+        assert_eq!(fs::read_to_string(work.join("uncommitted.txt")).unwrap(), "keep me");
+        lab.ok_beside_ticker(&["pause", "demo"]);
+        lab.ok_beside_ticker(&stop);
+        lab.ok_beside_ticker(&["thread", "resolve", "demo", "t-0001"]);
+        assert_eq!(lab.record("t-0001")["status"].as_str(), Some("resolved"));
+        assert!(work.exists());
+    }
+}
+
+
+#[test]
+fn stop_failed_placement_without_artifacts_and_restart() {
+    let lab = Lab::new();
+    let repo = lab.path("failed-stop-repo");
+    fs::create_dir(&repo).unwrap();
+    lab.git(&repo, &["init", "-q", "-b", "main"]);
+    lab.git(&repo, &["commit", "-q", "--allow-empty", "-m", "base"]);
+    let task = lab.path("task.md");
+    fs::write(&task, "Retry this work.").unwrap();
+    let _ticker = lab.ticker();
+    fs::write(lab.path("refuse-worktree"), "").unwrap();
+    assert!(!lab.cli(&["thread", "start", "demo", "--title", "Retry", "--repo", repo.to_str().unwrap(), "--task-file", task.to_str().unwrap()]).status.success());
+    assert_eq!(lab.record("t-0001")["status"].as_str(), Some("failed"));
+    assert!(lab.ok_beside_ticker(&["thread", "stop", "demo", "t-0001"]).contains("partial"));
+    assert_eq!(lab.record("t-0001")["status"].as_str(), Some("stopped"));
+    lab.ok_beside_ticker(&["thread", "restart", "demo", "t-0001"]);
+    assert_eq!(lab.record("t-0001")["status"].as_str(), Some("open"));
 }

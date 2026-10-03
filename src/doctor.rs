@@ -394,7 +394,9 @@ fn report(
             Err(e) => check(&mut out, Some(false), &label, format!("safety: {e}")),
         }
         for t in crate::thread::list(&project) {
-            if t.last_state == "blocked" { check(&mut out, None, &label, format!("thread {} blocked: {}; inspect pane {}", t.id, crate::agents::blocked_hint(&t.agent), t.pane_id)); }
+            if t.status == crate::thread::Status::Stopping { check(&mut out, Some(false), &label, format!("thread {} stop unfinished; retry `thread stop {} {}`", t.id, slug, t.id)); }
+            if t.status == crate::thread::Status::Stopped { check(&mut out, None, &label, format!("thread {} Stopped: {} ({} by {})", t.id, t.stopped_reason, t.stopped_at, t.stopped_by)); }
+            if !matches!(t.status, crate::thread::Status::Stopped | crate::thread::Status::Stopping) && t.last_state == "blocked" { check(&mut out, None, &label, format!("thread {} blocked: {}; inspect pane {}", t.id, crate::agents::blocked_hint(&t.agent), t.pane_id)); }
         }
         for diagnostic in crate::thread::list_with_diagnostics(&project).1 {
             check(&mut out, Some(false), &label, format!("thread record: {diagnostic}; preserve and repair the file"));

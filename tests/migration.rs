@@ -503,3 +503,29 @@ fn used_legacy_evidence_migrates_and_restores_without_live_routes() {
     p.ok(&["migration","demo","restore","--destination",destination.to_str().unwrap()]);
     for (path,bytes) in originals {assert_eq!(fs::read(destination.join(path)).unwrap(),bytes);}
 }
+
+
+/// A completed stop is quiescent legacy evidence, not an active execution.
+#[test]
+fn stopped_thread_migrates_with_reason_and_dirty_work_preserved() {
+    let p = Project::new("pause");
+    let work = p.home.path().join("retained-work");
+    fs::create_dir(&work).unwrap();
+    fs::write(work.join("uncommitted.txt"), "retain this").unwrap();
+    p.thread("t-0001", &[
+        ("status", toml::Value::String("stopped".into())),
+        ("worktree_path", toml::Value::String(work.display().to_string())),
+        ("stopped_reason", toml::Value::String("superseded".into())),
+        ("stopped_at", toml::Value::String("2026-10-03T12:00:00Z".into())),
+        ("stopped_by", toml::Value::String("coordinator".into())),
+    ]);
+    let before = p.read("threads/t-0001.toml");
+    assert!(p.blockers("threads/").is_empty());
+    p.migrate();
+    assert_eq!(p.read("threads/t-0001.toml"), before);
+    assert_eq!(fs::read_to_string(work.join("uncommitted.txt")).unwrap(), "retain this");
+    assert_eq!(p.snapshot()["tasks"].as_array().unwrap().len(), 1);
+    p.record();
+    let active = p.set_state("active");
+    assert!(active.status.success(), "{}", String::from_utf8_lossy(&active.stderr));
+}

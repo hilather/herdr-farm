@@ -123,6 +123,8 @@ Leave out `--repo` for a task with no repository. Add `--machine <label>` for a 
 
 Send a follow-up the same way: `herdr-farm thread prompt <slug> <id> --text-file -`.
 
+To stop a worker (stuck, blocked, superseded), use `thread stop`; never close panes yourself; resolve is the owner's. Use `herdr-farm thread stop <slug> <id> --reason "..."`; retry an interrupted stop before restarting. Stopped threads keep their branch and worktree.
+
 Use `herdr-farm thread restart <slug> <id>` when a thread's pane is gone or its start failed. Never hand-assemble `herdr` commands for starting, restarting or prompting, and never call `herdr agent prompt` directly: it would not target the project's session or the thread's machine.
 
 ## Tasks

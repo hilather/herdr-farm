@@ -45,7 +45,7 @@ Every thread works from `<its working directory>/.herdr-project/<project>-<id>/`
 | `inbox done <project> <item>... \| --all` | Mark inbox items handled. |
 | `memory-review <project> list/show/ingest/propose/reject/defer/remind/record` | Durable `## Remember` review; see `--help` on each. Works on legacy and migrated projects. |
 | `thread start <project> --title T [--repo PATH] [--machine M] [--agent KIND] [--base REF] --task-file F` | New thread; `-` reads the task from standard input. Returns before the agent is up. |
-| `thread restart`, `thread prompt`, `thread adopt`, `thread list`, `thread show`, `thread ack`, `thread resolve` | See `--help` on each. |
+| `thread stop`, `thread restart`, `thread prompt`, `thread adopt`, `thread list`, `thread show`, `thread ack`, `thread resolve` | See `--help` on each. |
 | `overview [<project>] [--wait]`, `focus [<project>]`, `unfocus` | Threads grouped by what needs you, as text and in the sidebar. |
 | `routine list`, `routine approve`, `safety show` | Routines and safety settings. |
 | `pause`, `resume`, `archive`, `unarchive`, `delete [--force]` | Project lifecycle. `delete` moves the folder to `.trash/`. |
@@ -160,7 +160,8 @@ The coordinator runs the binary every turn, so allow-list it in your agent **by 
   "Bash(<binary> --root <root> thread show:*)",
   "Bash(<binary> --root <root> thread prompt:*)",
   "Bash(<binary> --root <root> thread ack:*)",
-  "Bash(<binary> --root <root> thread restart:*)"
+  "Bash(<binary> --root <root> thread restart:*)",
+  "Bash(<binary> --root <root> thread stop:*)"
 ] } }
 ```
 
@@ -837,3 +838,32 @@ canonical database table. Retain it with the project's `.state` in backups and
 repairs; telemetry retention must not delete it. Existing journals need no upgrade;
 unknown versions refuse cleanup. `cleanup_resolved = "keep"` suspends automatic
 cleanup, including pending checkpoints, without changing logical resolution.
+
+### Stopping workers
+
+To stop a worker (stuck, blocked, superseded), use `thread stop`; never close panes yourself; resolve is the owner's.
+
+`thread stop PROJECT ID [--reason TEXT]` copies the final report and artifacts
+before sending the cleanup path's graceful interruption/EOF sequence. Partial
+copies are reported; a failed copy leaves shutdown pending for retry. It verifies
+the agent is gone before closing its pane, then closes an owned worktree workspace
+only if empty. Tabs and adopted panes do not own their workspace. The branch,
+worktree, uncommitted changes and thread record stay intact. The record keeps
+`stopped_reason`, `stopped_at` and `stopped_by` (the invoking process's `USER`,
+or the effective UID when unavailable).
+
+A durable `stop_journal` records each submitted action. If interrupted, rerun
+the same command. An ambiguous shutdown or close is observed rather than blindly
+repeated; reconcile the terminal if verification still fails. `stopping` remains
+visible as an unfinished stop and reserves capacity; completed `stopped` threads
+appear under Stopped and do not use `max_parallel_threads`. Ticker launch, copy
+and auto-resolution eligibility exclude these states. `cleanup_resolved` never
+cleans a stopped thread. `thread restart` reopens the same worktree and branch,
+sends its brief again and preserves uncommitted changes. Owners can still resolve
+a stopped thread.
+
+Migration accepts stopped threads using the same writer-quiescence checks as
+resolved threads, including verifying that recorded panes are gone. An unfinished
+stop must be recovered first. These are legacy TOML lifecycle fields, retained
+losslessly by conversion; no canonical or telemetry database schema changes. Quiesced stopped runtime
+bindings import as `historical-stopped` and do not block canonical activation.

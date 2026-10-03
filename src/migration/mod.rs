@@ -133,14 +133,14 @@ fn analyze(project: &Path, source: &Source, tasks: &mut Vec<Task>, blockers: &mu
             ensure!(Path::new(&source.path).file_stem().and_then(|s|s.to_str())==Some(id),"thread filename/id mismatch");
             ensure!(ids.insert(id.into()),"duplicate thread identity");
             let status=value.get("status").and_then(|v|v.as_str()).context("missing thread status")?;
-            ensure!(matches!(status,"starting"|"open"|"failed"|"resolved"),"unknown thread status");
-            if matches!(status,"starting"|"open") { blockers.push(format!("{}: active/uncertain execution; quiesce and resolve before migration",source.path)); }
+            ensure!(matches!(status,"starting"|"open"|"failed"|"stopping"|"stopped"|"resolved"),"unknown thread status");
+            if matches!(status,"starting"|"open"|"stopping") { blockers.push(format!("{}: active/uncertain execution; quiesce and resolve before migration",source.path)); }
             if value.get("machine").and_then(|v|v.as_str()).is_some_and(|s|!s.is_empty()) { blockers.push(format!("{}: remote identity requires live reconciliation",source.path)); }
             if value.get("pane_id").and_then(|v|v.as_str()).is_some_and(|s|!s.is_empty()) {
                 let record=serde_json::to_value(&value)?;
-                if status != "resolved" || evidence::quiesced(project, &record).is_err() { blockers.push(format!("{}: pane_id identity requires live reconciliation; writer quiescence is unverified",source.path)); }
+                if !matches!(status,"resolved"|"stopped") || evidence::quiesced(project, &record).is_err() { blockers.push(format!("{}: pane_id identity requires live reconciliation; writer quiescence is unverified",source.path)); }
             }
-            if status=="resolved" && ["cwd","worktree_path","thread_dir"].iter().any(|field|value.get(*field).and_then(|v|v.as_str()).is_some_and(|s|!s.is_empty())) && value.get("pane_id").and_then(|v|v.as_str()).is_none_or(|s|s.is_empty()) && evidence::writer_paths(project,&serde_json::to_value(&value)?).is_err() { blockers.push(format!("{}: writer quiescence is unverified",source.path)); }
+            if matches!(status,"resolved"|"stopped") && ["cwd","worktree_path","thread_dir"].iter().any(|field|value.get(*field).and_then(|v|v.as_str()).is_some_and(|s|!s.is_empty())) && value.get("pane_id").and_then(|v|v.as_str()).is_none_or(|s|s.is_empty()) && evidence::writer_paths(project,&serde_json::to_value(&value)?).is_err() { blockers.push(format!("{}: writer quiescence is unverified",source.path)); }
             let title=value.get("title").and_then(|v|v.as_str()).unwrap_or(id);
             tasks.push(Task { id:TaskId::new(format!("legacy-{id}")).map_err(anyhow::Error::msg)?,revision:1,state:if status=="failed" {TaskState::Failed}else{TaskState::AwaitingReview},title:title.into(),active_attempt:None });
         },
@@ -433,9 +433,10 @@ fn validate_thread(value:&toml::Value)->Result<()> {
         let sequence=value.get("prompt_sequence").and_then(|v|v.as_integer()).filter(|n|*n>=0).context("brief sequence missing")? as u64;claim.validate(sequence)?;
         ensure!(claim.phase==crate::prompt_claim::Phase::Confirmed||(claim.phase==crate::prompt_claim::Phase::Uncertain&&claim.notified&&value.get("status").and_then(|v|v.as_str())==Some("resolved")),"uncertain or pending brief delivery requires reconciliation before migration");
     }
+    ensure!(value.get("stop_journal").is_none(),"unfinished stop requires recovery before migration");
     ensure!(value.get("pending_final_copy").is_none()&&value.get("pending_final_notice").is_none(),"pending final copy or notice requires recovery before migration");
     ensure!(value.get("pending_live_copy").is_none(),"pending live projection requires recovery before migration");
-    for field in ["id", "title", "error", "repo", "origin", "branch", "base", "machine", "worktree_path", "thread_dir", "workspace_id", "tab_id", "pane_id", "agent", "agent_name", "cwd", "created", "updated", "last_state", "last_state_change", "last_group", "report_hash", "last_report_change", "last_review_item_hash", "last_review_execution", "acked_report_hash", "pr", "pr_state", "pr_review", "resolved_reason", "suppressed_merged_pr", "last_finalization", "artifact_snapshot"] { if let Some(v)=value.get(field) { ensure!(v.is_str(),"invalid thread string field"); } }
+    for field in ["id", "title", "error", "repo", "origin", "branch", "base", "machine", "worktree_path", "thread_dir", "workspace_id", "tab_id", "pane_id", "agent", "agent_name", "cwd", "created", "updated", "last_state", "last_state_change", "last_group", "report_hash", "last_report_change", "last_review_item_hash", "last_review_execution", "acked_report_hash", "pr", "pr_state", "pr_review", "resolved_reason", "stopped_reason", "stopped_at", "stopped_by", "suppressed_merged_pr", "last_finalization", "artifact_snapshot"] { if let Some(v)=value.get(field) { ensure!(v.is_str(),"invalid thread string field"); } }
     for field in ["prompt_pending"] { if let Some(v)=value.get(field) { ensure!(v.is_bool(),"invalid thread boolean field"); } }
     for field in ["launch_attempts", "lifecycle_generation", "status_notice_sequence", "review_notice_sequence", "last_review_copy_sequence", "live_copy_sequence", "final_copy_sequence", "prompt_sequence", "launch_sequence"] { if let Some(v)=value.get(field) { ensure!(v.as_integer().is_some_and(|n|n>=0),"invalid thread integer field"); } }
     if let Some(kind)=value.get("kind") { ensure!(matches!(kind.as_str(),Some("worktree"|"tab"|"adopted")),"invalid thread kind"); }

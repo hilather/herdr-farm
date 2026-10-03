@@ -32,10 +32,10 @@ fn import_bindings(db:&Connection,historical:bool)->Result<()> {
             let task=TaskId::new(format!("legacy-{id}")).map_err(StoreError::Corrupt)?;
             let value=serde_json::to_value(&thread).map_err(|_|StoreError::Corrupt("invalid thread identity".into()))?;
             let mut identity=identity(&value,true)?;identity.socket=socket.clone();
-            if !matches!(identity.legacy_status.as_str(),"starting"|"open"|"failed"|"resolved") {return Err(StoreError::Invalid("unsupported imported thread status".into()));}
+            if !matches!(identity.legacy_status.as_str(),"starting"|"open"|"failed"|"stopped"|"resolved") {return Err(StoreError::Invalid("unsupported imported thread status".into()));}
             // Exact original identities remain in legacy_sources. They are not live routes.
-            if historical && identity.legacy_status=="resolved" && (!identity.pane_id.is_empty()||!identity.worktree_path.is_empty()) {
-                identity.legacy_status="historical-resolved".into();identity.pane_id.clear();identity.workspace_id.clear();identity.tab_id.clear();
+            if historical && (identity.legacy_status=="stopped" || identity.legacy_status=="resolved" && (!identity.pane_id.is_empty()||!identity.worktree_path.is_empty())) {
+                identity.legacy_status=format!("historical-{}",identity.legacy_status);identity.pane_id.clear();identity.workspace_id.clear();identity.tab_id.clear();
             }
             identity.execution_fingerprint=Some(crate::operations::receipts::legacy_execution_fingerprint(&thread).ok_or_else(||StoreError::Corrupt("invalid execution identity".into()))?);
             RuntimeBinding{id:format!("thread:{id}"),task:Some(task),revision:1,source_path:Some(source.path.clone()),source_digest:Some(source.digest.clone()),session_source_digest:session_digest.clone(),verification:RuntimeVerification::Unverified,identity}

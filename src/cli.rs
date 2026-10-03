@@ -644,6 +644,8 @@ enum ThreadCommand {
     },
     /// Record that the user has seen the current report
     Ack { slug: String, id: String },
+    /// Stop a worker while keeping its branch, worktree and record
+    Stop { slug: String, id: String, #[arg(long)] reason: Option<String> },
     /// Resolve an idle/done thread only after its branch is integrated
     ResolveIntegrated { slug: String, id: String },
     /// Resolve a thread (final copy first), or reopen a resolved one
@@ -1947,6 +1949,7 @@ pub fn run() -> Result<()> {
             ThreadCommand::List { slug } => threads::print_list(&ctx, &slug),
             ThreadCommand::Show { slug, id } => threads::print_show(&ctx, &slug, &id),
             ThreadCommand::Ack { slug, id } => threads::ack(&ctx, &slug, &id),
+            ThreadCommand::Stop { slug, id, reason } => threads::stop::stop(&ctx, &slug, &id, reason.as_deref()),
             ThreadCommand::ResolveIntegrated { slug, id } => threads::resolve_integrated(&ctx, &slug, &id),
             ThreadCommand::Resolve { slug, id, reopen, remove_worktree, writers_stopped, skip_copy, discard_uncopied } => {
                 threads::resolve(&ctx, &slug, &id, &ResolveArgs { reopen, remove_worktree, writers_stopped, skip_copy, discard_uncopied })
