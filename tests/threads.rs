@@ -729,19 +729,19 @@ fn used_quiesced_project_migrates_after_final_copy_and_memory_record() {
     // Add the version probe to the deterministic local service fixture.
     let fake=FAKE_HERDR.replace("case \"$1 $2\" in", "case \"$1 $2\" in\n'--version ') echo 'herdr 0.9.1';;");
     fs::write(&lab.fake,fake).unwrap();
-    let repo=lab.path("repo");fs::create_dir(&repo).unwrap();
-    lab.git(&repo,&["init","-q","-b","main"]);
-    lab.git(&repo,&["commit","-q","--allow-empty","-m","base"]);
+    let (repo, work)=cleanup_thread(&lab,"done");
+    let head=lab.git(&repo,&["rev-parse","retained"]);
     let task=lab.path("task.md");fs::write(&task,"Keep evidence.").unwrap();
-    let ticker=lab.ticker();
-    lab.ok_beside_ticker(&["thread","start","demo","--title","Evidence","--repo",repo.to_str().unwrap(),"--task-file",task.to_str().unwrap()]);
-    drop(ticker);
-    let record=lab.record("t-0001");
-    let dir=Path::new(record["thread_dir"].as_str().unwrap());
-    fs::create_dir_all(dir.join("library")).unwrap();
+    let dir=work.join(".herdr-project/demo-t-0001");
     fs::write(dir.join("report.md"),"## Report\n\nFinished.\n\n## Remember\n\nKeep evidence.\n").unwrap();
     fs::write(dir.join("library/engine-download.json"),"{\"opaque\":true}").unwrap();
     lab.ok(&["thread","resolve","demo","t-0001"]);
+    let ticker=lab.ticker();
+    wait_cleanup(&lab,"cleanup complete");
+    drop(ticker);
+    assert!(!work.exists());
+    assert_eq!(lab.git(&repo,&["rev-parse","retained"]),head);
+    assert_eq!(lab.record("t-0001")["worktree_path"].as_str(),Some(""));
     lab.ok(&["memory-review","demo","ingest","--all"]);
     let reviews:Value=serde_json::from_str(&lab.ok(&["memory-review","demo","list"])).unwrap();
     let id=reviews[0]["id"].as_str().unwrap();
@@ -750,6 +750,18 @@ fn used_quiesced_project_migrates_after_final_copy_and_memory_record() {
     lab.ok(&["pause","demo"]);
     fs::write(lab.path("panes.json"),"{\"result\":{\"panes\":[]}}").unwrap();
     fs::write(lab.path("agents.json"),"{\"result\":{\"agents\":[]}}").unwrap();
+    // Retained receipts do not authorize a future generation or a foreign source.
+    let record_path=lab.project().join("threads/t-0001.toml");
+    let original_record=fs::read(&record_path).unwrap();
+    for (field,value) in [("lifecycle_generation",toml::Value::Integer(0)),
+        ("thread_dir",toml::Value::String(lab.path("foreign-source").to_string_lossy().into_owned()))] {
+        let mut record:toml::Value=toml::from_str(std::str::from_utf8(&original_record).unwrap()).unwrap();
+        record[field]=value;
+        fs::write(&record_path,toml::to_string(&record).unwrap()).unwrap();
+        let refused:Value=serde_json::from_str(&lab.ok(&["migration","demo","preflight"])).unwrap();
+        assert!(refused["blockers"].as_array().unwrap().iter().any(|v|v.as_str().unwrap().contains("manifest.json")),"{refused}");
+        fs::write(&record_path,&original_record).unwrap();
+    }
     let preflight:Value=serde_json::from_str(&lab.ok(&["migration","demo","preflight"])).unwrap();
     assert_eq!(preflight["blockers"],json!([]));
     let plan=lab.path("plan.json");
@@ -761,8 +773,10 @@ fn used_quiesced_project_migrates_after_final_copy_and_memory_record() {
     lab.ok(&["telemetry","demo","attempts","--json"]);
     let db=herdr_farm::migration::open_active(&lab.project()).unwrap();
     let sources=db.imported_sources().unwrap();
+    assert!(sources.iter().any(|s|s.path==".state/resolved-cleanup-t-0001.json"));
     assert!(sources.iter().any(|s|s.path.ends_with("library/engine-download.json")&&s.bytes==b"{\"opaque\":true}"));
-    assert!(sources.iter().any(|s|s.path.starts_with("memory/")&&s.bytes.windows(b"owner fixture decision".len()).any(|w|w==b"owner fixture decision")));
+    assert!(!sources.iter().any(|s|s.path.starts_with("memory/")));
+    assert!(originals.iter().any(|(path,bytes)|path.starts_with("memory/")&&bytes.windows(b"owner fixture decision".len()).any(|w|w==b"owner fixture decision")));
     drop(db);
     let restored=lab.path("restored");
     lab.ok(&["migration","demo","restore","--destination",restored.to_str().unwrap()]);
