@@ -80,7 +80,7 @@ scope. The certification registry cites this report.
 ## LC1 sandbox validation
 
 All 21 `tests/telemetry*.rs` suites were run with `TMPDIR=$PWD/target/tmp`
-and `cargo test --locked --offline -j 3 --features state-store --no-fail-fast`
+and `cargo test --locked --offline -j 3 --no-fail-fast`
 with each telemetry test target selected. After rerunning the updated
 conformance and workspace expectations: 218 passed, 7 failed, 17 ignored.
 Conformance: 22/22; certification: 13/13. The four paid live tests and thirteen
@@ -101,6 +101,8 @@ failed its racing-process assertion at line 676 because collect encountered
 `database is locked`. A separate focused rerun also failed with collect and
 analytics writer lock errors. No concurrency code was changed in LC1.
 
-`cargo clippy --locked --offline -j 3 --features state-store --all-targets`
+`cargo clippy --locked --offline -j 3 --all-targets`
 completed successfully. Existing warnings remain; none point to changed lines.
 No schema changes, migrations, crates or production process spawns were added.
+
+The `state-store` feature is enabled by default; build recipes above use that default.

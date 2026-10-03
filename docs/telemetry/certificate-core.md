@@ -22,7 +22,7 @@ does not wait for full TM5.
 Command (all green, `--no-fail-fast`):
 
 ```
-CARGO_TARGET_DIR=… RUST_TEST_THREADS=6 cargo test -j 3 --features state-store \
+CARGO_TARGET_DIR=… RUST_TEST_THREADS=6 cargo test -j 3 \
   --test telemetry_certification --test telemetry --test telemetry_accounting \
   --test telemetry_conformance --test telemetry_collect
 ```
@@ -290,3 +290,5 @@ record. Three product defects found here were fixed (D1, D2, D3). M18, M33, M38
 and M39 stay unavailable by design. The core contracts are fit for F4.5
 adoption under restrictions R1–R12. None of these restrictions is a
 fictitious pass.
+
+The `state-store` feature is enabled by default; build recipes above use that default.

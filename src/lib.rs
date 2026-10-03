@@ -1,4 +1,4 @@
-//! Opt-in Phase B storage. Legacy commands do not create or open this database.
+//! Canonical project storage (enabled by default). Legacy commands do not create or open this database.
 /// Test harness only: SQLite's default memory statistics take one process-wide
 /// mutex on every allocation, so parallel tests contend on it and their wall-clock
 /// deadlines and approval windows expire. Disabled before SQLite initializes.
@@ -113,3 +113,6 @@ pub mod product_environment;
 /// Shared process-local ticker and retry timing.
 pub mod timing;
 pub mod writer_quiescence;
+
+/// Append-only owner configuration bootstrap.
+pub mod owner_setup;

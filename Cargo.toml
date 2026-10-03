@@ -11,7 +11,7 @@ name = "herdr-farm"
 path = "src/main.rs"
 
 [features]
-default = []
+default = ["state-store"]
 state-store = ["dep:rusqlite"]
 
 [dependencies]

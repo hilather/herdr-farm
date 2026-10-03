@@ -6,7 +6,7 @@ T03.2 remains partial and W03 acceptance remains open.
 
 ## What is available
 
-Build with `--features state-store`. The disabled-by-default feature adds:
+The default build includes `state-store`. For existing legacy projects it provides:
 
 ```sh
 herdr-projects migration demo inspect
@@ -272,3 +272,25 @@ review uses `result PROJECT show` and verification/integration jobs. `thread`
 commands refuse with canonical replacements. If the coordinator pane was closed,
 run `herdr-farm open PROJECT --reprime`. See the [operator runbook](operator-runbook.md#canonical-coordinator-after-migration-w-coord-2)
 for signing configuration, safety semantics and interrupted-effect recovery.
+
+The `state-store` feature is enabled by default; build recipes above use that default.
+
+New projects use the canonical SQLite store by default: `herdr-farm new demo`
+creates the project at its final path, paused, even while the ticker runs.
+`open demo` or `launch demo run` activates it. Use `new --legacy demo` for
+legacy Markdown behavior. Migration is only needed for existing legacy projects.
+Canonical projects pin their absolute path; choose the final name and location
+before creation rather than moving the directory afterward.
+
+On the first canonical `new`, absent authority settings are appended to the owner
+config without rewriting existing content. An Ed25519 approval key is generated
+at `owner-approval` (0600), with `owner-approval.pub` (0644), beside config.toml.
+If no profiles are configured, executable `codex` and `claude` commands on PATH
+receive interactive starter profiles with a one-hour budget and no model pin.
+Claude workers need `claude setup-token` once; setup never runs that command.
+Existing authority and profile tables are preserved.
+
+An interrupted creation retains a `.creating` marker. `list` reports `creating`,
+and ticker passes, doctor scans and open leave it inert. A second `new` explains
+that, after confirming no creation command is running, you can remove that
+project directory and run `new` again. Do not move a partially created store.

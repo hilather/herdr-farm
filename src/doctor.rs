@@ -104,6 +104,7 @@ fn report(
 ) -> (String, bool) {
     let mut out = String::new();
     let mut healthy = true;
+    for slug in project::creating_slugs(root) { let _ = writeln!(out, "{slug}: creating"); }
     if let Some(scale) = crate::timing::scale() {
         let _ = writeln!(out, "warn: test time scale active ({scale}); ticker pass {} ms, retry floor 20 ms", crate::timing::tick().as_millis());
     }

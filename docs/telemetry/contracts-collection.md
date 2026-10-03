@@ -1619,7 +1619,7 @@ certification rule continues to prohibit live fields on every non-Codex
 adapter, including `gemini-cli`. All existing telemetry suites remain required.
 
 Validation on 2026-09-30 used `TMPDIR=$PWD/target/tmp` and the requested
-`cargo test --locked --offline -j 3 --features state-store --no-fail-fast`
+`cargo test --locked --offline -j 3 --no-fail-fast`
 command selecting every `tests/telemetry*.rs` suite: **197 passed, 11 existing
 scale tests ignored, six socket-only failures across 19 suites**. All seven
 Gemini E2Es and all seven Claude E2Es passed. Sandbox `Operation not permitted`
@@ -1630,7 +1630,7 @@ prevented Unix socket binds in `attempts_show_attention_summary`,
 prevented TCP loopback binds in `http_auth_limits_malformed_and_replay` and
 `http_request_rate_is_bounded`. No socket workaround was attempted; the
 steward must run these outside the sandbox. The requested
-`cargo clippy --locked --offline -j 3 --features state-store --all-targets`
+`cargo clippy --locked --offline -j 3 --all-targets`
 completed successfully with no warnings on changed lines (existing warnings
 elsewhere remain).
 ## DG4d: OpenCode native SQLite sessions (fixture certification)
@@ -1787,7 +1787,7 @@ The six remaining failures are solely sandbox socket permission failures
 | `telemetry_otlp` | `http_request_rate_is_bounded` |
 | `telemetry_workspace` | `thread_start_records_the_dispatch_reason_and_the_sidebar_suffix` |
 
-The requested `cargo clippy --locked --offline -j 3 --features state-store
+The requested `cargo clippy --locked --offline -j 3
 --all-targets` completed successfully. Existing unrelated warnings remain;
 there are no diagnostics in changed lines. Live certification, custom XDG/
 channel database paths and an OpenCode DG4a log/metric mapping remain outside
@@ -1961,11 +1961,11 @@ or schema change is introduced. Live certification remains the steward's rerun.
 ### LC4 sandbox validation (2026-10-01)
 
 All **21** `tests/telemetry*.rs` suites ran with `TMPDIR=$PWD/target/tmp` and
-`cargo test --locked --offline -j 3 --features state-store`. Final outcomes,
+`cargo test --locked --offline -j 3`. Final outcomes,
 including the final OTLP/live rerun and serial scale rerun: **227 passed,
 7 socket-only failures, 17 ignored**. All 15 non-socket OTLP tests passed;
 the four owner-gated live tests stayed ignored. Clippy ran with
-`cargo clippy --locked --offline -j 3 --features state-store --all-targets`:
+`cargo clippy --locked --offline -j 3 --all-targets`:
 exit 0, no warnings in changed lines; existing warnings elsewhere remain.
 No live agent CLI or owner data directory was accessed, and certification
 was not promoted.
@@ -1989,12 +1989,12 @@ with `-- --test-threads 1` after the other verification finished.
 ### DG4e sandbox validation
 
 All 20 `tests/telemetry*.rs` suites ran with `TMPDIR=$PWD/target/tmp` and
-`cargo test --locked --offline -j 3 --features state-store --no-fail-fast`
+`cargo test --locked --offline -j 3 --no-fail-fast`
 with explicit `--test` targets. The Grok E2E, Grok-inclusive backup/restore,
 certification and Claude/Gemini/OpenCode suites passed. The concurrency scale
 test initially encountered `database is locked`; its focused rerun passed.
 The 12 existing opt-in scale benchmarks stayed ignored. The final all-target
-clippy command (`cargo clippy --locked --offline -j 3 --features state-store
+clippy command (`cargo clippy --locked --offline -j 3
 --all-targets`) completed with existing unrelated warnings and no warnings
 in changed files. `git diff --check` passed.
 
@@ -2126,7 +2126,7 @@ executed. No code, capability claim or fixture is added for those harnesses.
 ### DG4f sandbox validation (2026-10-01)
 
 Every `tests/telemetry*.rs` suite ran with `TMPDIR=$PWD/target/tmp` and
-`cargo test --locked --offline -j 3 --features state-store --no-fail-fast`
+`cargo test --locked --offline -j 3 --no-fail-fast`
 (selecting each suite with `--test`): **208 passed, 6 failed, 12 existing
 scale tests ignored across 20 suites**. The final edited-suite rerun passed
 certification **13/13** and OTLP **5/7**. All six failures were solely socket
@@ -2143,7 +2143,7 @@ bind permission failures (`Operation not permitted`), without workarounds:
 
 The two OTLP failures are TCP loopback binds; the other four are Unix socket
 binds. The steward must rerun these outside the hard sandbox. Final
-`cargo clippy --locked --offline -j 3 --features state-store --all-targets`
+`cargo clippy --locked --offline -j 3 --all-targets`
 completed successfully; existing unrelated warnings remain, with no warnings
 in changed files or lines. No live agent/data access was attempted. A usable
 Cursor collector remains unbuilt pending evidence of an eligible signal.
@@ -2259,7 +2259,7 @@ non-Codex adapter, including `otlp:muse`. No invented native fixture is used.
 ### DG4g sandbox validation (2026-10-01)
 
 All twenty `tests/telemetry*.rs` suites ran with `TMPDIR=$PWD/target/tmp`
-and `cargo test --locked --offline -j 3 --features state-store --no-fail-fast`
+and `cargo test --locked --offline -j 3 --no-fail-fast`
 (selecting every suite with `--test`): **218 passed, 6 socket-only failures,
 13 existing scale tests ignored**. Certification passed **13/13** and OTLP
 **7/9**, including the new Muse E2E. The six failures were exclusively
@@ -2275,7 +2275,7 @@ and `cargo test --locked --offline -j 3 --features state-store --no-fail-fast`
 | `telemetry_workspace` | `thread_start_records_the_dispatch_reason_and_the_sidebar_suffix` | Unix |
 
 The steward must rerun these six outside the hard sandbox.
-`cargo clippy --locked --offline -j 3 --features state-store --all-targets`
+`cargo clippy --locked --offline -j 3 --all-targets`
 completed successfully, with existing unrelated warnings and none in changed
 files or lines. `git diff --check` passed. Native usage remains unavailable
 pending stable format evidence; live certification and a protobuf-to-JSON
@@ -2390,7 +2390,7 @@ including WAL/SHM. No tests inspect source files.
 ### DG4h sandbox validation (2026-10-01)
 
 Ran every `tests/telemetry*.rs` suite (21 targets) with
-`TMPDIR=$PWD/target/tmp cargo test --locked --offline -j 3 --features state-store
+`TMPDIR=$PWD/target/tmp cargo test --locked --offline -j 3
 --no-fail-fast` and explicit `--test` targets. After rerunning the affected
 migration/backup suites and refreshing the two operations runbook transcript
 lines, final combined results are **221 passed, 7 socket-only failures,
@@ -2408,7 +2408,7 @@ lines, final combined results are **221 passed, 7 socket-only failures,
 | `telemetry_workspace` | `thread_start_records_the_dispatch_reason_and_the_sidebar_suffix` (Unix) |
 
 All ten non-socket OTLP tests pass, including new protobuf/token workflows.
-`cargo clippy --locked --offline -j 3 --features state-store --all-targets`
+`cargo clippy --locked --offline -j 3 --all-targets`
 completes with no warnings in changed files/lines; existing unrelated warnings
 remain. `git diff --check` passes. The steward must run socket tests outside
 the sandbox and perform the separate disposable live certification runs.
@@ -2484,7 +2484,7 @@ and deduplication; stdout and attribution events cannot inflate reconciliation.
 ### DG4i validation
 
 Ran all 22 `tests/telemetry*.rs` suites with
-`TMPDIR=$PWD/target/tmp cargo test --locked --offline -j 3 --features state-store --no-fail-fast`
+`TMPDIR=$PWD/target/tmp cargo test --locked --offline -j 3 --no-fail-fast`
 and one `--test <suite>` argument per suite: **228 passed, 7 socket-only
 failures, 17 ignored**. Ignored cases include the four owner-gated live harnesses
 and 13 on-disk scale/resource cases; no agent CLI was run.
@@ -2509,7 +2509,7 @@ Every remaining failure is `Operation not permitted` at a socket bind:
 No socket workaround was attempted. The steward reruns these outside the sandbox.
 Native live certification and exporter behavior remain pending that rerun.
 
-`cargo clippy --locked --offline -j 3 --features state-store --all-targets`
+`cargo clippy --locked --offline -j 3 --all-targets`
 completed successfully. No warning points at a changed line or either new Rust
 file; pre-existing warnings elsewhere remain. `git diff --check` passes.
 
@@ -2588,7 +2588,7 @@ steward's live rerun remains pending.
 ### DG4j validation
 
 All **22** `tests/telemetry*.rs` suites ran with
-`TMPDIR=$PWD/target/tmp cargo test --locked --offline -j 3 --features state-store --no-fail-fast`
+`TMPDIR=$PWD/target/tmp cargo test --locked --offline -j 3 --no-fail-fast`
 and one `--test <suite>` argument per suite: **241 passed, 7 socket-only
 failures, 17 ignored**. The ignored cases are four owner-gated live harnesses
 and thirteen on-disk scale/resource cases. No agent CLI or owner agent data
@@ -2606,7 +2606,7 @@ the steward to rerun outside this sandbox:
 - `telemetry_otlp::http_request_rate_is_bounded`
 - `telemetry_workspace::thread_start_records_the_dispatch_reason_and_the_sidebar_suffix`
 
-`cargo clippy --locked --offline -j 3 --features state-store --all-targets`
+`cargo clippy --locked --offline -j 3 --all-targets`
 completed successfully. Compiler diagnostic spans were checked against the
 diff and new Rust module: **no warnings in changed lines**; existing warnings
 elsewhere remain. `git diff --check` passes. The steward's Grok live rerun is
@@ -2752,3 +2752,5 @@ and compares the ledger built from `api_request` with the DELTA
 
 See the worker report for suite results; socket-bind tests fail here only with
 `Operation not permitted` and are rerun by the steward.
+
+The `state-store` feature is enabled by default; build recipes above use that default.

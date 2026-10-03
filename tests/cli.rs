@@ -413,7 +413,11 @@ fn profile_resolve_prints_envelope_without_argv_and_selects_unique_kind() {
     assert!(!home.path().join(".herdr-farm").exists());
 }
 
+// Historical workflows below deliberately start from a legacy project.
 fn hp(home: &Path, args: &[&str]) -> std::process::Output {
+    let mut legacy_args = args.to_vec();
+    if let Some(index) = legacy_args.iter().enumerate().position(|(i, a)| *a == "new" && (i == 0 || (i == 2 && args[0] == "--root"))) { legacy_args.insert(index + 1, "--legacy"); }
+    let args = legacy_args.as_slice();
     Command::new(BIN)
         .env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim())
         .env("HOME", home)
@@ -5629,7 +5633,8 @@ fn legacy_manual_resolution_preserves_artifacts_for_the_resolved_generation() {
 fn long_lived_store_snapshot_above_fifty_mib_remains_readable_from_cli() {
     use herdr_farm::{domain::TaskId,migration,runtime};
     let home=tempfile::tempdir().unwrap();let root=home.path().join("root");let r=root.to_str().unwrap();
-    for action in ["new","pause"] {assert!(hp(home.path(),&["--root",r,action,"demo"]).status.success());}
+    assert!(hp(home.path(),&["--root",r,"new","--legacy","demo"]).status.success());
+    assert!(hp(home.path(),&["--root",r,"pause","demo"]).status.success());
     let project=root.join("demo");migration::apply(&project,&migration::inspect(&project).unwrap(),true).unwrap();
     runtime::add_task(&project,TaskId::new("work").unwrap(),"Retained task".into(),runtime::snapshot(&project).unwrap().head).unwrap();
     let mut raw=rusqlite::Connection::open(project.join(".state/state.db")).unwrap();
@@ -5648,4 +5653,89 @@ fn long_lived_store_snapshot_above_fifty_mib_remains_readable_from_cli() {
     let snapshot=runtime::snapshot(&project).unwrap();
     assert_eq!(snapshot.events.iter().filter(|e|e.kind=="runtime.observed").count(),900);
     assert_eq!(snapshot.tasks[0].title,"Retained task");
+}
+
+#[cfg(all(feature = "state-store", target_os = "linux"))]
+#[test]
+fn canonical_new_bootstraps_owner_and_stays_inert_until_complete() {
+    use std::{fs, os::unix::fs::PermissionsExt, process::Stdio};
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().join("root");
+    let bin = home.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    for kind in ["codex", "claude"] {
+        let path = bin.join(kind);
+        fs::write(&path, "#!/bin/sh\nexit 99\n").unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let command = || {
+        let mut cmd = Command::new(BIN);
+        cmd.env_clear().env("HOME", home.path())
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .env("HERDR_FARM_TEST_TIME_SCALE", include_str!("support/time-scale.txt").trim())
+            .args(["--root", root.to_str().unwrap()]);
+        cmd
+    };
+    let run = |args: &[&str]| {
+        let out = command().args(args).output().unwrap();
+        assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).unwrap()
+    };
+    // Keep a valid legacy project so the ticker holds its singleton lock.
+    run(&["new", "--legacy", "legacy-demo"]);
+    struct Child(std::process::Child);
+    impl Drop for Child { fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); } }
+    let mut ticker = Child(command().args(["ticker", "run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let out = command().args(["ticker", "status"]).output().unwrap();
+        if String::from_utf8_lossy(&out.stdout).contains("ticker: running") { break; }
+        assert!(ticker.0.try_wait().unwrap().is_none(), "ticker exited");
+        assert!(std::time::Instant::now() < deadline, "ticker never became running: {}", String::from_utf8_lossy(&out.stdout));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    run(&["new", "demo"]);
+    assert!(run(&["runtime", "demo", "inspect"]).contains("bindings"));
+    let marker: serde_json::Value = serde_json::from_slice(&fs::read(root.join("demo/.state/format.json")).unwrap()).unwrap();
+    assert_eq!(marker["runtime"], "sqlite-v2");
+    assert_eq!(marker["memory"], "legacy-markdown");
+    let journal: serde_json::Value = serde_json::from_slice(&fs::read(root.join("demo/.state/migration/journal.json")).unwrap()).unwrap();
+    assert_eq!(journal["phase"], "active");
+    assert!(journal["plan"]["config"]["path"].as_str().unwrap().ends_with("config.toml"));
+    assert!(run(&["context", "demo", "--peek"]).contains("Canonical"));
+    let refused = command().args(["thread", "list", "demo"]).output().unwrap();
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("legacy"));
+    let config_dir = home.path().join(".config/herdr-farm");
+    let config = config_dir.join("config.toml");
+    let original = fs::read(&config).unwrap();
+    let value: toml::Value = toml::from_str(std::str::from_utf8(&original).unwrap()).unwrap();
+    assert_eq!(value["authority"]["version"].as_integer(), Some(1));
+    assert_eq!(value["profiles"]["codex"]["budget"]["max_wall_seconds"].as_integer(), Some(3600));
+    assert!(value["profiles"]["claude"].get("model").is_none());
+    for (name, mode) in [("owner-approval", 0o600), ("owner-approval.pub", 0o644), ("config.toml", 0o600)] {
+        assert_eq!(fs::metadata(config_dir.join(name)).unwrap().permissions().mode() & 0o777, mode);
+    }
+    assert!(run(&["approval", "demo", "policy"]).contains("digest"));
+    run(&["new", "other"]);
+    assert_eq!(fs::read(&config).unwrap(), original);
+    run(&["thread", "list", "legacy-demo"]);
+    // Crash before skeleton completion: even a directory with no PROJECT.md is visible as creating.
+    run(&["new", "--legacy", "interrupted"]);
+    let partial = root.join("interrupted");
+    fs::write(partial.join(".creating"), "canonical creation in progress\n").unwrap();
+    assert!(run(&["list"]).contains("interrupted\tcreating"));
+    assert!(run(&["open", "interrupted"]).contains("creating"));
+    let retry = command().args(["new", "interrupted"]).output().unwrap();
+    assert!(!retry.status.success());
+    assert!(String::from_utf8_lossy(&retry.stderr).contains("remove"));
+    drop(ticker);
+    run(&["ticker", "run", "--passes", "2"]);
+    assert_eq!(fs::read_to_string(partial.join(".creating")).unwrap(), "canonical creation in progress\n");
+    assert!(!partial.join(".state/state.db").exists());
+    // Preconfigured owners retain exact content, including comments and ordering.
+    let existing = b"# owner settings\n[authority]\nversion=1\nrevision=1\napproval_public_key='ssh-ed25519 AAAA'\n[profiles.worker]\nkind='codex'\npermission_policy='interactive'\n";
+    fs::write(&config, existing).unwrap();
+    run(&["new", "configured"]);
+    assert_eq!(fs::read(&config).unwrap(), existing);
 }

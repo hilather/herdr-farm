@@ -711,7 +711,7 @@ Run these live contracts with an optimized build, `state-store`, and
 `HP_LIVE_HERDR` pointing to the capability-enabled Herdr binary:
 
 ```
-cargo test --release --locked --offline --features state-store --lib \
+cargo test --release --locked --offline --lib \
   canonical_worker::tests::live_canonical_ -- --ignored --nocapture --test-threads=1
 ```
 
@@ -974,3 +974,5 @@ obeys the existing project safety settings; signing uses `--sign-with` or the
 owner's configured `[coordinator].signing_key`. See the
 [operator runbook](operator-runbook.md#canonical-coordinator-after-migration-w-coord-2)
 and `skill/COORDINATOR.md` for CLI forms and recovery rules.
+
+The `state-store` feature is enabled by default; build recipes above use that default.

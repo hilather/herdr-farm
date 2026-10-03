@@ -495,7 +495,7 @@ open.
 
 Earlier full regression checkpoint, after the accepted-intent, inspection and
 barrier ingress/deadline/expiry corrections:
-`cargo test --locked --features state-store --no-fail-fast -- --test-threads=1`
+`cargo test --locked --no-fail-fast -- --test-threads=1`
 completed successfully in an isolated user/PID namespace with **1,431 passed,
 zero failed, 22 ignored**. Counts are 796 library, 542 binary, 58 CLI, two contract,
 one delegated-reservation, ten factory harness, 13 memory-control and nine
@@ -521,7 +521,7 @@ acceptance gaps remain open.
 
 Earlier full regression checkpoint, after the planner-session and bounded-graph
 changes, **before the accepted-intent projection and inspection below**:
-`cargo test --locked --features state-store --no-fail-fast -- --test-threads=1`
+`cargo test --locked --no-fail-fast -- --test-threads=1`
 completed with **1,413 passed, one failed, 22 ignored** in an isolated user/PID
 namespace. Counts are 779 library passes plus one failure, 542 binary, 57 CLI,
 two contract, one delegated-reservation, ten factory harness, 13 memory-control
@@ -542,7 +542,7 @@ No compilation overlapped process tests. No live provider was run.
 
 An earlier entirely passing full local run, after the retained-launch-resource projection and
 preceding corrections, **before the identity-gap, worktree-binding, wait-renewal, typed-trigger, replan-service and planner-session changes below**:
-`cargo test --locked --features state-store --no-fail-fast -- --test-threads=1`
+`cargo test --locked --no-fail-fast -- --test-threads=1`
 exited successfully in a user/PID namespace, followed by `cargo check --locked`.
 **1,382 tests passed**: 752 library, 541 binary, 54 CLI, two contract, one
 delegated-reservation integration, ten factory harness, 13 memory-control and
@@ -2662,3 +2662,5 @@ appropriate regression checks.
 
 No paid worker sessions have been launched, no real project stores have been
 migrated, and no changes have been published.
+
+The `state-store` feature is enabled by default; build recipes above use that default.

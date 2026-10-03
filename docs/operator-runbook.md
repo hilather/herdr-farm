@@ -8,6 +8,11 @@ the owner policy through gated
 
 ## 0. Once per machine
 
+Run `herdr-farm new PROJECT` at the final project location. The default build
+includes SQLite support. First creation generates the owner approval key and
+appends authority settings and available starter profiles automatically; existing
+tables are preserved. The profile examples below are optional customization.
+
 * The owner is logged in with the agent CLIs (`codex login`). A Codex worker reuses
   that login (see [Shared login](profiles.md#shared-login)); nothing is copied. A
   Claude worker uses a long-lived setup token instead: run `claude setup-token`, save
@@ -194,7 +199,7 @@ unavailable or invalid`; a corrupt or incomplete candidate reports `candidate
 object hash mismatch or missing referenced object`. Restore the owner base or
 correct the submitted closure; never supply an alternate pointing at a worker.
 
-Validation: `cargo test --locked --offline -j 3 --features state-store --test
+Validation: `cargo test --locked --offline -j 3 --test
 canonical_worker --test factory_harness` covers large-base automatic integration,
 replay, wrong object bytes, and an unstaged candidate blob. The canonical worker
 suite needs Unix socket permissions; compile it with `--no-run` in a restricted
@@ -374,3 +379,25 @@ the budget.
 Stopping a dedicated server with `launch PROJECT stop --task T`, or the ticker
 sweep after worker termination, closes only its recorded viewer tab if its ID
 and label still match. A closed viewer or unreachable owner session is harmless.
+
+The `state-store` feature is enabled by default; build recipes above use that default.
+
+New projects use the canonical SQLite store by default: `herdr-farm new demo`
+creates the project at its final path, paused, even while the ticker runs.
+`open demo` or `launch demo run` activates it. Use `new --legacy demo` for
+legacy Markdown behavior. Migration is only needed for existing legacy projects.
+Canonical projects pin their absolute path; choose the final name and location
+before creation rather than moving the directory afterward.
+
+On the first canonical `new`, absent authority settings are appended to the owner
+config without rewriting existing content. An Ed25519 approval key is generated
+at `owner-approval` (0600), with `owner-approval.pub` (0644), beside config.toml.
+If no profiles are configured, executable `codex` and `claude` commands on PATH
+receive interactive starter profiles with a one-hour budget and no model pin.
+Claude workers need `claude setup-token` once; setup never runs that command.
+Existing authority and profile tables are preserved.
+
+An interrupted creation retains a `.creating` marker. `list` reports `creating`,
+and ticker passes, doctor scans and open leave it inert. A second `new` explains
+that, after confirming no creation command is running, you can remove that
+project directory and run `new` again. Do not move a partially created store.

@@ -349,6 +349,9 @@ enum Command {
     },
     /// Create a project folder with its skeleton files
     New {
+        /// Create a legacy Markdown project instead of the default SQLite project
+        #[arg(long)]
+        legacy: bool,
         name: String,
         #[arg(long, default_value = "")]
         goal: String,
@@ -1762,14 +1765,19 @@ pub fn run() -> Result<()> {
             Ok(())
         }
         Command::ReportHash {..}|Command::LaunchExec {..}|Command::ArtifactStream { .. } => unreachable!("artifact transport handled before environment resolution"),
-        Command::New { name, goal, repos } => {
+        Command::New { name, goal, repos, legacy } => {
             let repos = repos.iter().map(|arg| project::parse_repo_arg(arg)).collect();
-            let project = project::create(&ctx.root, &name, &goal, repos)?;
+            let project = if legacy {
+                project::create(&ctx.root, &name, &goal, repos)?
+            } else {
+                project::create_canonical(&ctx.root, &ctx.config_dir, &name, &goal, repos)?
+            };
             println!("created `{}` at {}", project.slug, project.dir().display());
             println!("next: {} open {}", coordinator::current_prefix(&ctx.root)?, project.slug);
             Ok(())
         }
         Command::List { all } => {
+            for slug in project::creating_slugs(&ctx.root) { println!("{slug}\tcreating"); }
             for slug in project::list_slugs(&ctx.root) {
                 if let Err(error) = project::ensure_legacy(&ctx.root.join(&slug)) {
                     println!("{slug}\tstore/maintenance\t{error}");
@@ -1787,6 +1795,10 @@ pub fn run() -> Result<()> {
                 let summary: Vec<String> = counts.values().map(|(label, n)| format!("{label}: {n}")).collect();
                 println!("{slug}\t{status}\t{}", if summary.is_empty() { "no threads".to_string() } else { summary.join(", ") });
             }
+            Ok(())
+        }
+        Command::Open { slug, .. } if project::is_creating(&ctx.root.join(&slug)) => {
+            println!("{slug} is creating; wait for new to finish, or rerun new for recovery instructions");
             Ok(())
         }
         Command::Open { slug, reprime, rebind, session } => coordinator::open(

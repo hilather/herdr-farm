@@ -24,7 +24,7 @@ Use the same validation after copying a package to another compatible Linux host
 For a manual host-default build, keep the separate target directory:
 
 ```sh
-cargo build --release --locked --features state-store --target-dir target/factory
+cargo build --release --locked --target-dir target/factory
 ```
 
 Inspect the exact binary you intend to run (replace the example package path):
@@ -57,7 +57,7 @@ functions in a temporary process; its unsupported-platform preflight mocks
 
 `doctor` additionally inspects the user's setup. Neither command migrates. The
 schema reported by the exact binary is authoritative (currently 43); a default
-build reports no canonical schema or SQLite. macOS and live SSH canonical worker
+build includes the canonical schema and SQLite (`--no-default-features` omits them). macOS and live SSH canonical worker
 execution remain unsupported. A Linux build alone does not grant launch authority.
 
 ## Opt-in onboarding
@@ -94,3 +94,5 @@ Restoring pre-cutover bytes into a new root is distinct from canonical backup
 recovery. Full canonical recovery/live rollout certification remains outstanding.
 See the source checkout's [migration workflow](../migration-workflow.md),
 [factory operations](operations.md), and [fault/recovery notes](faults.md).
+
+The `state-store` feature is enabled by default; build recipes above use that default.

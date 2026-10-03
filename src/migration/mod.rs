@@ -101,7 +101,7 @@ fn inventory(project: &Path, relative: &Path, sources: &mut Vec<Source>, total: 
         let name = rel.to_str().context("non-UTF-8 source path cannot be migrated")?;
         ensure!(safe_relative(name),"unsupported source path");
         if name.starts_with(".state/migration-aborted-") { continue; }
-        if matches!(name,".state/migration"|".state/projections"|".state/lock"|".state/effect.lock"|".state/format.json"|".state/state.db"|".state/state.db-wal"|".state/state.db-shm") { continue; }
+        if matches!(name,".creating"|".state/migration"|".state/projections"|".state/lock"|".state/effect.lock"|".state/format.json"|".state/state.db"|".state/state.db-wal"|".state/state.db-shm") { continue; }
         let meta = entry.file_type()?;
         ensure!(!meta.is_symlink(),"symlink source blocks migration: {name}");
         if meta.is_dir() { inventory(project,&rel,sources,total)?; }
@@ -348,7 +348,25 @@ fn verify_db(project:&Path,path:&Path,plan:&Plan)->Result<()> {
 pub fn apply(project:&Path,plan:&Plan,writers_stopped:bool)->Result<Journal> {
     ensure!(writers_stopped,"confirm known writers are stopped with --writers-stopped");
     let project=checked_project(project)?; let _maintenance=Maintenance::acquire(&project)?;
-    ensure!(plan.blockers.is_empty(),"migration plan has blockers"); verify_sources(&project,plan)?;
+    apply_locked(&project,plan)
+}
+
+/// Only a never-published skeleton may bypass the global ticker maintenance lock.
+pub fn initialize_new(project: &Path, config: &Path) -> Result<Journal> {
+    ensure!(fs::symlink_metadata(project.join(".creating"))?.file_type().is_file(), "regular new project creation marker required");
+    let project=checked_project(project)?;
+    let _maintenance=Maintenance::runtime(&project)?;
+    let plan=inspect_with_config(&project,config)?;
+    ensure!(plan.tasks.is_empty() && plan.operations.is_empty() && plan.sources.len()==4
+        && plan.sources.iter().all(|s| matches!(s.path.as_str(), ".state/project.json"|"PROJECT.md"|"TASKS.md"|"MEMORY.md")),
+        "new project initialization requires an untouched empty skeleton; use legacy migration for existing state");
+    let journal=apply_locked(&project,&plan)?;
+    fs::remove_file(project.join(".creating"))?; sync_dir(&project)?;
+    Ok(journal)
+}
+
+fn apply_locked(project: &Path, plan: &Plan) -> Result<Journal> {
+    ensure!(plan.blockers.is_empty(),"migration plan has blockers"); verify_sources(project,plan)?;
     let storage=storage::inspect(&project.join(".state"),plan.sources.iter().map(|s|s.bytes).sum())?;
     ensure!(storage.supported_type,"filesystem type is unverified for SQLite migration: {}",storage.filesystem);
     ensure!(storage.sufficient_space,"insufficient estimated migration space: need {}, available {}",storage.required_bytes,storage.available_bytes);
@@ -357,11 +375,11 @@ pub fn apply(project:&Path,plan:&Plan,writers_stopped:bool)->Result<Journal> {
         use std::os::unix::fs::MetadataExt;
         ensure!(fs::symlink_metadata(&dir)?.dev()==fs::symlink_metadata(project.join(".state"))?.dev(),"staging directory must share the checked .state filesystem");
         ensure!(fs::symlink_metadata(&dir)?.is_dir(),"invalid migration directory");
-        ensure!(!exists(&journal_path(&project)),"migration already prepared; use recover");
+        ensure!(!exists(&journal_path(project)),"migration already prepared; use recover");
         ensure!(fs::read_dir(&dir)?.all(|e|e.is_ok_and(|e|e.file_name()=="journal.next")),"unrecognized migration reservation; preserve and inspect it");
     } else { mkdir(&dir)?; }
-    let mut journal=Journal{version:1,phase:Phase::Prepared,plan:plan.clone()}; save(&project,&journal)?;
-    advance(&project,&mut journal)?; Ok(journal)
+    let mut journal=Journal{version:1,phase:Phase::Prepared,plan:plan.clone()}; save(project,&journal)?;
+    advance(project,&mut journal)?; Ok(journal)
 }
 pub fn recover(project:&Path,writers_stopped:bool)->Result<Journal> {
     ensure!(writers_stopped,"confirm known writers are stopped with --writers-stopped");

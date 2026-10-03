@@ -36,11 +36,11 @@ with approve/reject/revoke reserved for the owner's terminal.
 
 ## Results
 
-- `cargo check --locked --offline -j 3 --features state-store`: passed.
+- `cargo check --locked --offline -j 3`: passed.
 - `cargo check --locked --offline -j 3`: passed on the final implementation.
-- `cargo clippy --locked --offline -j 3 --features state-store --all-targets`:
+- `cargo clippy --locked --offline -j 3 --all-targets`:
   passed; pre-existing warnings remain, none on changed lines.
-- `cargo test --locked --offline -j 3 --features state-store --test projects --test profiles --test threads --test ticker_jobs --test delivery --no-fail-fast`:
+- `cargo test --locked --offline -j 3 --test projects --test profiles --test threads --test ticker_jobs --test delivery --no-fail-fast`:
   12 passed (`projects`: 6, `profiles`: 6); 23 socket-only failures below.
 - `git diff --check`: passed.
 
@@ -130,9 +130,9 @@ visibility and whole-project versus sidecar backup classification.
 
 Validation:
 
-- `cargo test --locked --offline -j 3 --features state-store --test ticker_jobs --no-run`: passed.
-- `cargo test --locked --offline -j 3 --features state-store --test projects --test profiles --test threads --test ticker_jobs --test delivery --test telemetry_operations --no-fail-fast`: 26 passed (projects 6, profiles 6, telemetry_operations 14); 26 socket-only setup failures below.
-- `cargo clippy --locked --offline -j 3 --features state-store --all-targets`: passed; existing warnings remain, none reference changed test files or changed lines.
+- `cargo test --locked --offline -j 3 --test ticker_jobs --no-run`: passed.
+- `cargo test --locked --offline -j 3 --test projects --test profiles --test threads --test ticker_jobs --test delivery --test telemetry_operations --no-fail-fast`: 26 passed (projects 6, profiles 6, telemetry_operations 14); 26 socket-only setup failures below.
+- `cargo clippy --locked --offline -j 3 --all-targets`: passed; existing warnings remain, none reference changed test files or changed lines.
 - `git diff --check`: passed.
 - The initial telemetry run reproduced the outdated transcript (13 passed, 1 failed); the final suite passed all 14 after the doc update.
 
@@ -223,3 +223,5 @@ above. No workaround was attempted; the steward must run them outside.
 completed successfully; existing warnings remain, none on changed lines.
 `git diff --check` passed. No owner data, running server/ticker, or agent CLI
 was accessed. No push was performed.
+
+The `state-store` feature is enabled by default; build recipes above use that default.

@@ -84,7 +84,7 @@ batch. This tests process death, not hardware power loss.
 Reproduce with Rust 1.89 and supported system SQLite:
 
 ```sh
-cargo test --features state-store --locked --offline --lib
+cargo test --locked --offline --lib
 cargo test --all-features --locked --offline
 cargo test --all-features --release --locked --offline
 cargo build --all-features --release --locked --offline
@@ -141,3 +141,5 @@ exports distinguish the new derived records. Runtime mutation is not yet exposed
 
 Schema v6 adds runtime observations, hashed payloads and binding foreign keys.
 Fresh stores use v6; explicit upgrades retain prior exports and canonical task state.
+
+The `state-store` feature is enabled by default; build recipes above use that default.

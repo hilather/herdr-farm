@@ -990,7 +990,7 @@ Status after the follow-up card in brackets.
 
 ## Tests run
 
-- `cargo test --features state-store --test canonical_worker --test cli
+- `cargo test --test canonical_worker --test cli
   --test factory_harness --test scheduling --test recovery --test ticker_jobs
   --bin herdr-projects --lib`: all pass (lib 612, bin 365, canonical_worker 18,
   cli 81, factory_harness 16, recovery 5, scheduling 7, ticker_jobs 8).
@@ -1006,7 +1006,7 @@ Status after the follow-up card in brackets.
 
 Host under heavy unrelated load throughout (load average 15–22 on 12 cores).
 
-- `cargo test --features state-store --test canonical_worker --test cli
+- `cargo test --test canonical_worker --test cli
   --test factory_harness --test scheduling --test recovery --test ticker_jobs
   --test telemetry_review --bin herdr-projects`: all pass (canonical_worker 18,
   cli 81, factory_harness 16, recovery 5, scheduling 7, telemetry_review 20,
@@ -1029,7 +1029,7 @@ Host under heavy unrelated load throughout (load average 15–22 on 12 cores).
 
 ### Tests run (spool card)
 
-- `cargo test --features state-store --no-fail-fast --test canonical_worker
+- `cargo test --no-fail-fast --test canonical_worker
   --test cli --test factory_harness --test scheduling --test recovery --test
   ticker_jobs --test telemetry_review --test review_signer`: canonical_worker
   20 (two new), cli 81, factory_harness 16, recovery 5, review_signer 3,
@@ -1047,7 +1047,7 @@ Host under heavy unrelated load throughout (load average 15–22 on 12 cores).
 
 ### Tests run (Git quarantine card)
 
-- `cargo test --features state-store --test canonical_worker --test cli
+- `cargo test --test canonical_worker --test cli
   --test factory_harness --test scheduling --test recovery --test ticker_jobs
   --bin herdr-projects --lib --no-fail-fast`: all pass (lib 612, bin 365,
   canonical_worker 19, cli 81, factory_harness 16, recovery 5, scheduling 7,
@@ -1059,7 +1059,7 @@ Host under heavy unrelated load throughout (load average 15–22 on 12 cores).
 
 ### Tests run (Git quarantine card, after rebasing onto the spool card)
 
-- `cargo test --features state-store --no-fail-fast --test canonical_worker
+- `cargo test --no-fail-fast --test canonical_worker
   --test cli --test factory_harness --test recovery --test scheduling --test
   ticker_jobs --test telemetry_review --test review_signer --bin
   herdr-projects --lib`: canonical_worker 21, cli 81, factory_harness 16,
@@ -1073,7 +1073,7 @@ Host under heavy unrelated load throughout (load average 15–22 on 12 cores).
 
 ### Tests run (executables in private scratch directories)
 
-- `CARGO_TARGET_DIR` under `/tmp`: `cargo test --features state-store
+- `CARGO_TARGET_DIR` under `/tmp`: `cargo test
   --no-fail-fast --test canonical_worker --test review_signer --test
   quality_certification`: canonical_worker 21, review_signer 3,
   quality_certification 8 pass (before the fix, four `canonical_worker`
@@ -1092,7 +1092,9 @@ Host under heavy unrelated load throughout (load average 15–22 on 12 cores).
 ### Tests run (live-run findings card)
 
 - `HP_CODEX_SANDBOX_BIN=~/.local/share/mise/installs/codex/0.154.0/bin/codex
-  cargo test --features state-store --test canonical_worker
+  cargo test --test canonical_worker
   an_isolated_codex_worker`: passes (the real Codex sandbox commits only with
   the product's override).
 - See the card's commit for the full suite run.
+
+The `state-store` feature is enabled by default; build recipes above use that default.
