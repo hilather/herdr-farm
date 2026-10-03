@@ -1369,6 +1369,9 @@ fn cancelled_before_launch_is_censored_not_zero() {
     let marks = lifecycle_marks(&db_path);
     assert_eq!(marks.iter().map(|(s, r, _, source)| (s.as_str(), *r, source.as_str())).collect::<Vec<_>>(),
         [("reserved", 1, "admit_prepared"), ("cancelled", 2, "cancel_attempt_in_transaction")]);
+    let notices = SqliteStore::open(&db_path).unwrap().read_snapshot(None).unwrap().inbox;
+    let notice = notices.iter().find(|i| i.content.kind == "attempt.ended_without_submission").unwrap();
+    assert!(notice.content.summary.contains(&attempt) && notice.content.summary.contains("task gone"));
     let classification = classifications(&db_path)[0].0.clone();
     let report = telemetry_attempts(&project);
     assert_eq!(report, serde_json::json!({"attempts": [{
@@ -1416,6 +1419,13 @@ fn outcome_rejected_verification_reason_is_excerpted() {
     let request = herdr_farm::verification::VerifyRequest::new(submitted.clone(), "builds", &policy, "verify-rej", Duration::from_secs(5), &work);
     let outcome = herdr_farm::verification::verify(&mut db, &request).unwrap();
     assert_eq!((outcome.state.as_str(), outcome.reason.as_deref()), ("rejected", Some("policy_digest_mismatch")));
+    let notices = db.read_snapshot(None).unwrap().inbox;
+    for kind in ["result.submitted", "verification.rejected"] {
+        let notice = notices.iter().find(|i| i.content.kind == kind).unwrap();
+        assert!(!notice.seen && !notice.done);
+        assert!(notice.content.summary.contains(&attempt) && notice.content.summary.contains(&submitted));
+    }
+    assert!(notices.iter().find(|i| i.content.kind == "verification.rejected").unwrap().content.summary.contains("policy_digest_mismatch"));
     let submitted_ms: i64 = conn.query_row("SELECT created_unix_ms FROM result_submissions", [], |r| r.get(0)).unwrap();
     let report = telemetry_attempts(&project);
     let record = &report["attempts"][0];
@@ -2058,7 +2068,10 @@ fn planning_gate_ten_logical_workers() {
         sql_count(&db_path, "SELECT count(*) FROM plan_proposals"),
         0
     );
-    assert_eq!(sql_count(&db_path, "SELECT count(*) FROM inbox_items"), 3);
+    let inbox = db.read_snapshot(None).unwrap().inbox;
+    assert_eq!(inbox.len(), 9);
+    assert_eq!(inbox.iter().filter(|i| i.content.kind == "result.submitted").count(), 3);
+    assert_eq!(inbox.iter().filter(|i| i.content.kind == "verification.rejected").count(), 3);
     let kind: String = rusqlite::Connection::open(&db_path)
         .unwrap()
         .query_row(

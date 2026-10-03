@@ -583,6 +583,9 @@ enum MemoryReviewCommand {
 
 #[derive(Subcommand)]
 enum InboxCommand {
+    /// Wait for unseen, unfinished items: inbox <slug> wait [--timeout SECONDS]
+    #[command(external_subcommand)]
+    Project(Vec<String>),
     #[cfg(feature="state-store")]
     /// Inspect canonical inbox records for a migrated project
     List { slug:String },
@@ -1849,6 +1852,18 @@ pub fn run() -> Result<()> {
         Command::Focus { slug } => overview::focus(&ctx, slug.as_deref()),
         Command::Unfocus { session } => overview::unfocus(&ctx, &session.into()),
         Command::Inbox { command } => match command {
+            InboxCommand::Project(args) => {
+                anyhow::ensure!(args.len() == 2 || args.len() == 4, "usage: inbox <slug> wait [--timeout SECONDS]");
+                let slug = &args[0];
+                project::validate_slug(slug)?;
+                anyhow::ensure!(args[1] == "wait", "expected inbox <slug> wait");
+                let timeout = if args.len() == 4 {
+                    anyhow::ensure!(args[2] == "--timeout", "expected --timeout SECONDS");
+                    args[3].parse::<u64>()?
+                } else { 1800 };
+                anyhow::ensure!(timeout <= 7200, "inbox wait timeout must be at most 7200 seconds");
+                inbox::wait(&ctx, slug, timeout)
+            },
             #[cfg(feature="state-store")]
             InboxCommand::List{slug}=>{
                 project::validate_slug(&slug)?;

@@ -260,7 +260,7 @@ pub(super) fn cancel_attempt_in_transaction(tx:&Connection,id:&AttemptId,expecte
         }
         attempt.revision=attempt.revision.checked_add(1).ok_or_else(||invalid("attempt revision exhausted"))?;
         tx.execute("UPDATE attempts SET revision=?2,state=?3,termination_observed=?4 WHERE id=?1",params![id.as_str(),integer(attempt.revision)?,attempt.state.as_str(),attempt.termination_observed])?;
-        if released {super::dispatch_log::mark(tx,&attempt,now,"cancel_attempt_in_transaction")?;}
+        if released {super::inbox::ended_notice(tx, &attempt)?;super::dispatch_log::mark(tx,&attempt,now,"cancel_attempt_in_transaction")?;}
         if task.active_attempt.as_ref()==Some(id)||released {task.revision=task.revision.checked_add(1).ok_or_else(||invalid("task revision exhausted"))?;tx.execute("UPDATE tasks SET revision=?2,state=?3,active_attempt=?4 WHERE id=?1",params![task.id.as_str(),integer(task.revision)?,task.state.as_str(),task.active_attempt.as_ref().map(AttemptId::as_str)])?;event(tx,"task.changed",task.id.as_str(),task.revision,&task)?;}
         let request=CancellationRequest{attempt:id.clone(),requested_unix_ms:now,reason:reason.into()};tx.execute("INSERT INTO attempt_cancellations VALUES(?1,?2,?3)",params![id.as_str(),now,reason])?;
         event(tx,"attempt.cancellation_requested",id.as_str(),attempt.revision,&serde_json::json!({"request":request,"released":released,"attempt":attempt}))?;

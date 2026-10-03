@@ -62,6 +62,12 @@ pub(super) fn import_sources(db:&Connection)->Result<()> {
     Ok(())
 }
 impl SqliteStore {
+    /// Indexed read for a blocking client; no project lock or write transaction.
+    pub fn unseen_inbox(&self) -> Result<Vec<InboxItem>> {
+        check_schema(&self.connection)?;
+        read_unseen(&self.connection)
+    }
+
     /// Safe internal adapter: inspect, insert/deduplicate, and receipt commit in
     /// one SQLite transaction. It never retries an external/terminal effect.
     pub fn drain_inbox(&mut self,expected_head:u64,now:i64)->Result<usize> {
@@ -176,4 +182,22 @@ impl SqliteStore {
         }
         tx.commit()?;Ok(count)
     }
+}
+
+/// Result notices are data, committed atomically with their originating event.
+pub(super) fn result_notice(db: &Connection, kind: &str, event: &str, task: &str, attempt: &str, result: &str, feedback: &str) -> Result<()> {
+    let id = format!("worker-result-{:x}", Sha256::digest(format!("{kind}\0{event}").as_bytes()));
+    if db.query_row("SELECT EXISTS(SELECT 1 FROM inbox_items WHERE id=?1)", [&id], |r| r.get::<_, bool>(0))? { return Ok(()); }
+    let feedback: String = feedback.chars().take(2000).map(|c| if c.is_control() { ' ' } else { c }).collect();
+    let content = InboxContent { id, kind: kind.into(), subject: task.into(),
+        created: jiff::Timestamp::now().to_string(),
+        summary: format!("{kind}: task {task}, attempt {attempt}, submission/result {result}; {feedback}"), body: String::new() };
+    insert(db, &InboxItem { revision: 1, content, seen: false, done: false })
+}
+pub(super) fn ended_notice(db: &Connection, attempt: &Attempt) -> Result<()> {
+    let schema: u32 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if schema < 26 { return Ok(()); }
+    let submitted: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM result_submissions WHERE attempt_id=?1)", [attempt.id.as_str()], |r| r.get(0))?;
+    if !submitted { result_notice(db, "attempt.ended_without_submission", attempt.id.as_str(), attempt.task.as_str(), attempt.id.as_str(), "none", attempt.state.as_str())?; }
+    Ok(())
 }

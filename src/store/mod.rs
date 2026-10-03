@@ -198,6 +198,14 @@ impl SqliteStore {
         integrity::check_if_schema_changed(path, &store)?;
         Ok(store)
     }
+    /// A waiting client cannot change WAL policy or integrity receipts.
+    pub(crate) fn open_read_only(path: &Path) -> Result<Self> {
+        engine_check()?;
+        let connection = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        connection.busy_timeout(std::time::Duration::from_secs(2))?;
+        check_schema(&connection)?;
+        Ok(Self { connection })
+    }
     pub fn integrity_check(&self) -> Result<()> {
         let check: String = self.connection.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
         if check != "ok" { return Err(StoreError::Corrupt(check)); }
@@ -310,6 +318,7 @@ impl SqliteStore {
                     // A newly inserted terminated attempt does not change the retained-row
                     // fingerprint, but it does remove a previously attempt-less binding.
                     active_work::invalidate(&tx)?;
+                    if next.termination_observed || next.state == AttemptState::Lost { inbox::ended_notice(&tx, next)?; }
                     ("attempt.changed", id, next.revision)
                 },
                 Mutation::Enqueue(next) => {

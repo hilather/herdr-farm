@@ -220,7 +220,7 @@ fn socket_open_primes_owned_coordinator_retries_swallowed_prompt_and_recreates_c
     assert_eq!(fs::metadata(settings_path.parent().unwrap()).unwrap().permissions().mode() & 0o777, 0o700);
     let permissions: Value = serde_json::from_slice(&fs::read(&settings_path).unwrap()).unwrap();
     let prefix = format!("{} --root {}", BIN, l.root.display());
-    for verb in ["skill", "context demo", "inbox list", "inbox done", "task demo list", "task demo show", "task demo add", "task demo rename",
+    for verb in ["skill", "context demo", "inbox list", "inbox done", "inbox demo wait", "task demo list", "task demo show", "task demo add", "task demo rename",
         "launch demo run", "launch demo stop", "result demo show", "result demo jobs", "result demo capture", "result demo submit-captured",
         "scheduler demo inspect", "operations demo inspect", "runtime demo inspect", "telemetry demo usage", "memory-review demo propose", "doctor",
         "thread prompt", "safety requests"] {
@@ -482,4 +482,57 @@ fn non_claude_context_and_doctor_explain_permissions_are_not_generated() {
     let out = l.cli(&["doctor"]);
     assert!(String::from_utf8_lossy(&out.stdout).contains("none generated for codex (Claude Code only)"));
     assert!(!l.project.join(".state/coordinator/claude-settings.json").exists());
+}
+
+#[test]
+fn inbox_wait_wakes_for_a_lost_attempt_without_marking_the_notice_seen() {
+    use herdr_farm::domain::{Attempt, AttemptId, AttemptState, TaskState, Commit, Mutation};
+    let lab = Lab::new();
+    let mut db = migration::open_active(&lab.project).unwrap();
+    let head = db.current_head().unwrap();
+    lab.ok(&["task", "demo", "add", "lost-work", "--title", "Lost worker", "--expected-head", &head.to_string()]);
+    let mut task = db.read_snapshot(None).unwrap().tasks.into_iter().find(|t| t.id.as_str() == "lost-work").unwrap();
+    let mut attempt = Attempt { id: AttemptId::new("lost-attempt").unwrap(), task: task.id.clone(), revision: 1,
+        state: AttemptState::Running, snapshot: None, reservation: "lost-reservation".into(), termination_observed: false };
+    task.revision += 1;
+    task.state = TaskState::Running;
+    task.active_attempt = Some(attempt.id.clone());
+    db.commit(Commit { expected_head: db.current_head().unwrap(), mutations: vec![
+        Mutation::Task { expected: Some(task.revision - 1), next: task.clone() },
+        Mutation::Attempt { expected: None, next: attempt.clone() },
+    ] }).unwrap();
+    let mut waiter = Command::new(BIN).env_clear().env("HOME", lab.home.path()).env("PATH", "/usr/bin:/bin")
+        .env("HERDR_FARM_TEST_TIME_SCALE", include_str!("support/time-scale.txt").trim())
+        .args(["--root", lab.root.to_str().unwrap(), "inbox", "demo", "wait", "--timeout", "60"])
+        .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+    assert!(waiter.try_wait().unwrap().is_none());
+    attempt.state = AttemptState::Lost;
+    attempt.revision += 1;
+    db.commit(Commit { expected_head: db.current_head().unwrap(), mutations: vec![
+        Mutation::Attempt { expected: Some(attempt.revision - 1), next: attempt.clone() },
+    ] }).unwrap();
+    let output = waiter.wait_with_output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let wake: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let items: Value = serde_json::from_str(&lab.ok(&["inbox", "list", "demo"])).unwrap();
+    let notice = items.as_array().unwrap().iter().find(|i| i["content"]["kind"] == "attempt.ended_without_submission").unwrap();
+    assert_eq!(wake, json!({"items":1,"ids":[notice["content"]["id"]]}));
+    assert_eq!((notice["seen"].clone(), notice["done"].clone()), (json!(false), json!(false)));
+    let context = lab.ok(&["context", "demo"]);
+    assert!(context.contains(notice["content"]["id"].as_str().unwrap()));
+    let timeout: Value = serde_json::from_str(&lab.ok(&["inbox", "demo", "wait", "--timeout", "1"])).unwrap();
+    assert_eq!(timeout, json!({"items":0,"timed_out":true}));
+    lab.ok(&["inbox", "done", "demo", notice["content"]["id"].as_str().unwrap()]);
+    assert!(db.unseen_inbox().unwrap().is_empty());
+}
+
+#[test]
+fn legacy_inbox_wait_times_out_without_creating_seen_state() {
+    let lab = Lab::new();
+    lab.ok(&["new", "legacy"]);
+    let project = lab.root.join("legacy");
+    let timeout: Value = serde_json::from_str(&lab.ok(&["inbox", "legacy", "wait", "--timeout", "1"])).unwrap();
+    assert_eq!(timeout, json!({"items":0,"timed_out":true}));
+    assert!(!project.join(".state/inbox-seen.json").exists());
+    assert!(fs::read_dir(project.join("inbox")).unwrap().flatten().all(|e| e.path().is_dir()));
 }

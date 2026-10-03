@@ -664,6 +664,12 @@ fn editing_submission_lab(route: &str, policy: &str, verify: bool, integrate: bo
 #[test]
 fn accepted_editing_worker_completes_automatically_after_integration() {
     let (mut lab, attempt, _) = editing_submission_lab("verify_then_integrate", WORK_POLICY, true, true);
+    let mut waiter = Command::new(BIN).env_clear()
+        .env("HERDR_FARM_TEST_TIME_SCALE", include_str!("support/time-scale.txt").trim())
+        .env("HOME", lab.home.path()).env("PATH", "/usr/bin:/bin")
+        .args(["--root", lab.path("root").to_str().unwrap(), "inbox", "demo", "wait", "--timeout", "60"])
+        .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+    assert!(waiter.try_wait().unwrap().is_none());
     lab.serve();
     let mut ticker = lab.spawn();
     lab.wait_for(&mut ticker, "automatic completion and proven worker termination", &attempt, 120, &|| lab.attempt(&attempt).termination_observed);
@@ -682,7 +688,29 @@ fn accepted_editing_worker_completes_automatically_after_integration() {
     let replay = lab.ok_live(&|| ["task", "demo", "complete", "work", "--expected-revision", "0"].map(String::from).to_vec());
     assert_eq!(replay["replayed"], true);
     lab.stop(ticker);
+    let output = waiter.wait_with_output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let wake: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let items = lab.ok(&["inbox", "list", "demo"]);
+    let notices: Vec<_> = items.as_array().unwrap().iter().filter(|i| i["content"]["id"].as_str().unwrap().starts_with("worker-result-")).collect();
+    for kind in ["result.submitted", "verification.accepted", "integration.succeeded"] {
+        let item = notices.iter().find(|i| i["content"]["kind"] == kind).unwrap();
+        let summary = item["content"]["summary"].as_str().unwrap();
+        assert!(summary.contains("task work") && summary.contains(attempt.as_str()), "{summary}");
+    }
+    assert!(wake["items"].as_u64().unwrap() > 0, "{wake}");
+    for id in wake["ids"].as_array().unwrap() {
+        assert!(items.as_array().unwrap().iter().any(|i| i["content"]["id"] == *id && i["seen"] == false && i["done"] == false));
+    }
+    let context = lab.cli(&["context", "demo"]);
+    assert!(context.status.success(), "{}", String::from_utf8_lossy(&context.stderr));
+    let text = String::from_utf8(context.stdout).unwrap();
+    for item in &notices { assert!(text.contains(item["content"]["id"].as_str().unwrap())); }
+    assert_eq!(lab.ok(&["inbox", "demo", "wait", "--timeout", "1"]), json!({"items":0,"timed_out":true}));
+    lab.ok(&["inbox", "done", "demo", "--all"]);
     lab.run_quiet(5);
+    let replayed = lab.ok(&["inbox", "list", "demo"]);
+    assert_eq!(replayed.as_array().unwrap().iter().filter(|i| i["content"]["id"].as_str().unwrap().starts_with("worker-result-")).count(), notices.len());
     assert_eq!(lab.events("attempt.completion_requested").len(), 1);
     assert_eq!(lab.events("runtime.worker_terminated").len(), 1);
 }
@@ -710,6 +738,11 @@ fn rejected_editing_worker_stays_running_and_can_resubmit() {
         let report = herdr_farm::telemetry::outcome::attempts(&lab.project).unwrap();
         report["attempts"].as_array().unwrap().iter().any(|a| a["attempt_id"] == attempt.as_str() && a["verification"]["state"] == "rejected")
     });
+    let items = lab.ok_live(&|| ["inbox", "list", "demo"].map(String::from).to_vec());
+    let rejection = items.as_array().unwrap().iter().find(|i| i["content"]["kind"] == "verification.rejected").unwrap();
+    let feedback = lab.ok_live(&|| ["feedback", "demo", "show"].map(String::from).to_vec());
+    let reason = feedback.as_array().unwrap()[0]["reason"].as_str().unwrap();
+    assert!(rejection["content"]["summary"].as_str().unwrap().contains(reason), "{rejection} / {feedback}");
     // The worker submits before its brief's acceptance window closes, so the
     // rejection can land while the attempt is still launching.
     lab.wait_for(&mut ticker, "the rejected attempt running", &attempt, 60, &|| lab.attempt(&attempt).state == AttemptState::Running);
@@ -2368,4 +2401,13 @@ fn dedicated_worker_refuses_remote_manifest_before_its_brief() {
     let state = lab.state();
     assert!(!state.deliveries.iter().any(|d| d.state == DeliveryState::Confirmed
         && state.operations.iter().any(|o| o.id == d.operation && o.kind == "runtime.worker_brief")), "no brief delivery is confirmed");
+}
+
+#[test]
+fn canonical_inbox_wait_timeout_is_read_only_and_rejects_excessive_timeout() {
+    let lab = Lab::new("unknown_usage='allow_with_warning'");
+    let before = lab.state();
+    assert_eq!(lab.ok(&["inbox", "demo", "wait", "--timeout", "1"]), json!({"items":0,"timed_out":true}));
+    assert_eq!(lab.state(), before);
+    assert!(!lab.cli(&["inbox", "demo", "wait", "--timeout", "7201"]).status.success());
 }

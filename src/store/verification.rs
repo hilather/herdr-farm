@@ -525,6 +525,7 @@ impl SqliteStore {
                 serde_json::json!({"state": state, "reason": reason, "submission_id": target.submission_id}).to_string()
             ],
         )?;
+        super::inbox::result_notice(&tx, if state == "accepted" { "verification.accepted" } else if state == "rejected" { "verification.rejected" } else { "verification.errored" }, &run_id, &target.task_id, &target.attempt_id, &format!("{} / {}", target.submission_id, result_id.as_deref().unwrap_or(&run_id)), reason.unwrap_or(""))?;
         tx.commit()?;
         let returned = if state == "accepted" {
             draft.receipt

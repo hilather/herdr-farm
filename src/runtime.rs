@@ -310,3 +310,8 @@ pub fn cancel_attempt(project:&Path,id:&crate::domain::AttemptId,revision:u64,he
     let _guard=migration::runtime_mutation(project)?;
     Ok(migration::open_active(project)?.cancel_attempt(id,revision,head,reason,jiff::Timestamp::now().as_millisecond())?)
 }
+
+/// Read only unseen, unfinished inbox rows for waiting clients.
+pub fn unseen_inbox(project: &Path) -> Result<Vec<crate::domain::InboxItem>> {
+    Ok(migration::open_active_read_only(project)?.unseen_inbox()?)
+}

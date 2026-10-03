@@ -332,7 +332,7 @@ fn permissions(ctx: &Ctx, dir: &Path, slug: &str) -> Result<String> {
     ensure!(prefixes.iter().all(|p| !p.contains(['*', '\n', '\r'])),
         "coordinator command prefix contains permission-rule wildcards or line breaks");
     let verbs = [
-        "skill".into(), format!("context {slug}"), "inbox list".into(), "inbox done".into(),
+        "skill".into(), format!("context {slug}"), "inbox list".into(), "inbox done".into(), format!("inbox {slug} wait"),
         format!("task {slug} list"), format!("task {slug} show"), format!("task {slug} add"), format!("task {slug} rename"),
         format!("launch {slug} run"), format!("launch {slug} stop"),
         format!("result {slug} show"), format!("result {slug} jobs"), format!("result {slug} capture"), format!("result {slug} submit-captured"),
@@ -841,6 +841,7 @@ pub fn commands(root: &Path, slug: &str) -> Result<String> {
 {p} operations {slug} inspect\n\
 {p} inbox list {slug}\n\
 {p} inbox done {slug} ITEM\n\
+After launching workers, start `{p} inbox {slug} wait` as a background Bash command. When it returns, run context, review result data, relaunch rejected tasks or report to the owner, mark handled items done, and start the wait again. A timeout also restarts the wait.\n\
 Thread commands are legacy-only. Start requires user authorization and owner-signed contracts and approvals; verification is evidence, integration requires the configured target; cleanup requires canonical finalization and proven worker termination. Never edit TASKS.md or old thread records as live state."
     ))
 }
