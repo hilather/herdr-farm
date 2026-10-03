@@ -84,7 +84,7 @@ pub fn open(ctx: &Ctx, slug: &str, options: &OpenOptions) -> Result<()> {
             return crate::canonical_coordinator::open(ctx, slug, options);
         }
     }
-    let _lease = crate::cleanup::lease(&ctx.root)?;
+    let _lease = herdr_farm::execution_guard::retry_open(|| crate::cleanup::lease(&ctx.root))?;
     let project = Project::load(&ctx.root, slug)?;
     if project.status() != Status::Active {
         bail!("`{slug}` is {}; resume or unarchive it before opening its coordinator", project.status());

@@ -542,3 +542,108 @@ fn legacy_inbox_wait_times_out_without_creating_seen_state() {
     assert!(!project.join(".state/inbox-seen.json").exists());
     assert!(fs::read_dir(project.join("inbox")).unwrap().flatten().all(|e| e.path().is_dir()));
 }
+
+// A separate local process owns the same OS guard as a ticker pass. Readiness
+// comes from its stdout, so the CLI always encounters an already-held lock.
+fn hold_lock(path: &std::path::Path, seconds: &str) -> std::process::Child {
+    use std::io::BufRead;
+    let mut child = Command::new("python3")
+        .args(["-c", "import fcntl,sys,time; f=open(sys.argv[1],'a'); fcntl.flock(f,fcntl.LOCK_EX); print('held',flush=True); time.sleep(float(sys.argv[2]))"])
+        .arg(path).arg(seconds)
+        .env("HERDR_FARM_TEST_TIME_SCALE", include_str!("support/time-scale.txt").trim())
+        .stdout(std::process::Stdio::piped()).spawn().unwrap();
+    let mut ready = String::new();
+    std::io::BufReader::new(child.stdout.take().unwrap()).read_line(&mut ready).unwrap();
+    assert_eq!(ready.trim(), "held");
+    child
+}
+
+#[test]
+fn open_waits_for_brief_project_and_root_contention() {
+    let l = Lab::new();
+    let _socket = UnixListener::bind(l.home.path().join("s")).unwrap();
+    for path in [l.project.join(".state/effect.lock"), l.root.join(".execution.lock")] {
+        let mut holder = hold_lock(&path, "0.2");
+        l.ok(&["open", "demo"]);
+        assert!(holder.wait().unwrap().success());
+        l.stop();
+        assert_eq!(runtime::snapshot(&l.project).unwrap().runtime_bindings.iter()
+            .find(|b| b.id == "coordinator").unwrap().identity.pane_id, "w1:p1");
+    }
+}
+
+#[test]
+fn open_reports_existing_refusal_after_bounded_contention() {
+    let l = Lab::new();
+    for path in [l.project.join(".state/effect.lock"), l.root.join(".execution.lock")] {
+        let mut holder = hold_lock(&path, "5");
+        let started = std::time::Instant::now();
+        let out = l.cli(&["open", "demo"]);
+        let elapsed = started.elapsed();
+        holder.kill().unwrap();
+        holder.wait().unwrap();
+        assert!(!out.status.success());
+        let error = String::from_utf8_lossy(&out.stderr);
+        assert!(error.contains("retry") && error.contains("operation would block"), "{error}");
+        let bound = 30.0 * include_str!("support/time-scale.txt").trim().parse::<f64>().unwrap();
+        assert!(elapsed.as_secs_f64() >= bound, "{elapsed:?}");
+        assert!(elapsed.as_secs_f64() < bound + 3.0, "{elapsed:?}");
+        assert!(!l.home.path().join("herdr-state.json").exists());
+        assert!(runtime::snapshot(&l.project).unwrap().runtime_bindings.iter().all(|b| b.id != "coordinator"));
+    }
+}
+
+#[test]
+fn migrated_doctor_reports_canonical_binding_despite_stale_legacy_record() {
+    let l = Lab::new();
+    let _socket = UnixListener::bind(l.home.path().join("s")).unwrap();
+    l.ok(&["open", "demo"]);
+    l.stop();
+    fs::write(l.project.join(".state/coordinator.json"), json!({
+        "socket":l.home.path().join("s"), "pane_id":"w1R:p1",
+        "workspace_id":"w1R", "tab_id":"w1R:t1", "agent_name":"coordinator"
+    }).to_string()).unwrap();
+    let out = l.cli(&["doctor"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("canonical coordinator binding: pane w1:p1"), "{text}");
+    assert!(text.contains("canonical coordinator journal: pane w1:p1"), "{text}");
+    assert!(!text.contains("w1R:p1"), "{text}");
+}
+
+#[test]
+fn migrated_doctor_uses_public_store_binding_without_a_coordinator_journal() {
+    let l = Lab::new();
+    let head = runtime::snapshot(&l.project).unwrap().head;
+    runtime::create_binding(&l.project, None, None, head, &herdr_farm::domain::RuntimeRoute {
+        socket: l.home.path().join("absent-session").display().to_string(),
+        pane_id: "canonical-pane".into(), workspace_id: "canonical-workspace".into(),
+        tab_id: "canonical-tab".into(), cwd: l.project.display().to_string(),
+        ..Default::default()
+    }).unwrap();
+    fs::write(l.project.join(".state/coordinator.json"), json!({
+        "socket":l.home.path().join("old-session"), "pane_id":"w1R:p1",
+        "workspace_id":"w1R", "tab_id":"w1R:t1", "agent_name":"coordinator"
+    }).to_string()).unwrap();
+    let out = l.cli(&["doctor"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("canonical coordinator binding: pane canonical-pane"), "{text}");
+    assert!(!text.contains("w1R:p1") && !text.contains("old-session"), "{text}");
+}
+
+#[test]
+fn legacy_open_waits_then_reports_bounded_root_refusal() {
+    let l = Lab::new();
+    l.ok(&["new", "legacy"]);
+    let mut holder = hold_lock(&l.root.join(".execution.lock"), "5");
+    let started = std::time::Instant::now();
+    let out = l.cli(&["open", "legacy"]);
+    let elapsed = started.elapsed();
+    holder.kill().unwrap();
+    holder.wait().unwrap();
+    let bound = 30.0 * include_str!("support/time-scale.txt").trim().parse::<f64>().unwrap();
+    assert!(elapsed.as_secs_f64() >= bound && elapsed.as_secs_f64() < bound + 3.0, "{elapsed:?}");
+    assert!(!out.status.success());
+    let error = String::from_utf8_lossy(&out.stderr);
+    assert!(error.contains("another operation owns lock") && error.contains("operation would block"), "{error}");
+    assert!(!l.home.path().join("herdr-state.json").exists());
+}

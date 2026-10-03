@@ -631,6 +631,9 @@ fn steps(run: &mut Run, args: &Args, plan: ProfilePlan) -> Result<Value> {
         run.skipped("profile_evidence",json!({"profile":value.0,"kind":value.1})); value
     };
 
+    let worker_wall_seconds = crate::agents::resolve::resolve(&args.profile, &ctx.config_dir.join("config.toml"), None)?
+        .budget.max_wall_seconds.context("profile max_wall_seconds missing")?;
+
     if let Some(path) = &args.contract_file {
         let value: Value = serde_json::from_slice(&migration::read_plan_file(path)?)?;
         ensure!(value["task_id"] == args.task, "contract task_id must equal --task {}", args.task);
@@ -764,14 +767,14 @@ fn steps(run: &mut Run, args: &Args, plan: ProfilePlan) -> Result<Value> {
     activate(run, "reconcile_and_activate", created)?;
 
     if args.prepare_only {
-        return Ok(report(run, &args.task, &profile, &kind, &herdr, &socket, None, None));
+        return Ok(report(run, &args.task, &profile, &kind, &herdr, &socket, None, None, worker_wall_seconds));
     }
 
     // 6. Already reserved? Then stop here: a rerun never reserves a second attempt.
     let snapshot = runtime::snapshot(&project)?;
     if let Some(attempt) = snapshot.tasks.iter().find(|t| t.id == task_id).and_then(|t| t.active_attempt.clone()) {
         run.skipped("reserve", json!({"attempt":attempt}));
-        return Ok(report(run, &args.task, &profile, &kind, &herdr, &socket, Some(attempt.as_str().to_owned()), None));
+        return Ok(report(run, &args.task, &profile, &kind, &herdr, &socket, Some(attempt.as_str().to_owned()), None, worker_wall_seconds));
     }
 
     // 7. Knowledge snapshot, draft, owner approval, import, reservation.
@@ -828,14 +831,18 @@ fn steps(run: &mut Run, args: &Args, plan: ProfilePlan) -> Result<Value> {
     let attempt = reservation.record.attempt.clone();
     let worktree = herdr_farm::domain::worktree_plans(&drafted.inputs, &attempt).map_err(anyhow::Error::msg)?.into_iter().next().map(|p| p.path);
     run.done("reserve", json!({"attempt":attempt}));
-    Ok(report(run, &args.task, &profile, &kind, &herdr, &socket, Some(attempt.as_str().to_owned()), worktree))
+    Ok(report(run, &args.task, &profile, &kind, &herdr, &socket, Some(attempt.as_str().to_owned()), worktree, worker_wall_seconds))
 }
 
 #[allow(clippy::too_many_arguments)]
-fn report(run: &Run, task: &str, profile: &VersionedReference, kind: &str, herdr: &Path, socket: &Path, attempt: Option<String>, worktree: Option<String>) -> Value {
+fn report(run: &Run, task: &str, profile: &VersionedReference, kind: &str, herdr: &Path, socket: &Path, attempt: Option<String>, worktree: Option<String>, worker_wall_seconds: u64) -> Value {
     let contract = migration::open_active(&run.project).ok().and_then(|store| store.task_contract_document(task).ok().flatten()).unwrap_or(Value::Null);
     let reference = TaskId::new(task.to_owned()).ok().and_then(|id| runtime::task_contract(&run.project, &id).ok().flatten());
+    if attempt.is_some() {
+        eprintln!("launch run: attempt reserved; worker wall budget {worker_wall_seconds} seconds");
+    }
     json!({
+        "worker_wall_seconds":worker_wall_seconds,
         "contract_digest":reference.map(|r| r.digest),
         "write_paths":contract["scope"]["paths"].as_array().map(|paths| paths.iter().filter(|p| p["access"] == "write").map(|p| p["path"].clone()).collect::<Vec<_>>()),
         "outputs":contract["outputs"].as_array().map(|outputs| outputs.iter().map(|o| o["path"].clone()).collect::<Vec<_>>()),

@@ -347,48 +347,6 @@ fn report(
                         }
                     }
                 }
-                // Migrated coordinator identity: the legacy record still names
-                // the expected pane/agent; check it against the live agent list
-                // instead of skipping identity for migrated projects.
-                let record: Option<project::Coordinator> = std::fs::read(dir.join(".state/coordinator.json"))
-                    .ok()
-                    .and_then(|b| serde_json::from_slice(&b).ok());
-                match record {
-                    None => check(&mut out, Some(true), &label, "no legacy coordinator record; runtime bindings own identity".into()),
-                    Some(record) if record.socket.is_empty() && record.pane_id.is_empty() => {
-                        check(&mut out, Some(true), &label, "coordinator never opened; runtime bindings own identity".into());
-                    }
-                    Some(record) => {
-                        if !Path::new(&record.socket).exists() {
-                            check(&mut out, None, &label, format!("recorded socket {} no longer exists; `open --rebind` moves it", record.socket));
-                            continue;
-                        }
-                        let herdr = Herdr::new(&bin, &record.socket, runner);
-                        let panes = match herdr.pane_list() {
-                            Err(error) => {
-                                check(&mut out, None, &label, format!("session at {} unreachable: {error}", record.socket));
-                                continue;
-                            }
-                            Ok(panes) => panes,
-                        };
-                        let agents = match herdr.agent_list() {
-                            Err(error) => {
-                                check(&mut out, None, &label, format!("agent inventory unreachable: {error}; cannot verify coordinator identity"));
-                                continue;
-                            }
-                            Ok(agents) => agents,
-                        };
-                        let configured_kind = std::fs::read_to_string(dir.join("PROJECT.md"))
-                            .ok()
-                            .and_then(|t| crate::project::parse_project_md(&t).ok())
-                            .map(|(s, _)| s.coordinator_agent)
-                            .unwrap_or_default();
-                        let ticker_running = !matches!(crate::ticker::lock_state(root), crate::ticker::LockState::Free);
-                        for (mark, detail) in coordinator_lines(&slug, &record, &configured_kind, "migrated", &panes, &agents, ticker_running) {
-                            check(&mut out, mark, &label, detail);
-                        }
-                    }
-                }
                 continue;
             }
         };

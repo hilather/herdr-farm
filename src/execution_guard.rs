@@ -89,6 +89,26 @@ fn exclusive_file_until(path:&Path,until:std::time::Instant,cancelled:&dyn Fn()-
         }
     }
 }
+/// Foreground open waits only for cooperative lock contention. Reacquisition
+/// repeats the entire operation so a failed project lock releases the root.
+pub fn retry_open<T>(mut acquire: impl FnMut() -> Result<T>) -> Result<T> {
+    let until = std::time::Instant::now() + crate::timing::retry(std::time::Duration::from_secs(30));
+    let poll = crate::timing::retry(std::time::Duration::from_millis(100));
+    loop {
+        match acquire() {
+            Ok(guard) => return Ok(guard),
+            Err(error) => {
+                let busy = error.chain().any(|cause|
+                    matches!(cause.downcast_ref::<std::fs::TryLockError>(), Some(std::fs::TryLockError::WouldBlock))
+                    || cause.downcast_ref::<std::io::Error>().is_some_and(|e| e.kind() == std::io::ErrorKind::WouldBlock));
+                let remaining = until.saturating_duration_since(std::time::Instant::now());
+                if !busy || remaining.is_zero() { return Err(error); }
+                std::thread::sleep(poll.min(remaining));
+            }
+        }
+    }
+}
+
 /// How long a root-exclusive effect waits for shared holders to finish.
 const EXCLUSIVE_WAIT:std::time::Duration=std::time::Duration::from_secs(2);
 const EXCLUSIVE_POLL:std::time::Duration=std::time::Duration::from_millis(10);
