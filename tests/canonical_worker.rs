@@ -361,6 +361,9 @@ sys.stdout.buffer.write(json.dumps({'result':json.loads(reply)['result']}).encod
 #[test]
 fn ticker_launches_and_briefs_once_then_stops_a_cancelled_worker_while_paused_and_revoked() {
     let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+    fs::write(lab.repo.join(".gitignore"),".tools/\nignored-file\ntracked.txt\n").unwrap();
+    fs::write(lab.repo.join("tracked.txt"),"tracked base").unwrap();
+    lab.git(&["add","."]);lab.git(&["add","-f","tracked.txt"]);lab.git(&["commit","-q","-m","tracked work and ignore rules"]);
     let (approval, attempt) = lab.reserve("Retained instructions");
     // Instructions changed after approval are not what the worker is sent.
     fs::write(lab.project.join("PROJECT.md"), "Replacement must not be sent").unwrap();
@@ -415,6 +418,14 @@ fn ticker_launches_and_briefs_once_then_stops_a_cancelled_worker_while_paused_an
     // project while that same ticker keeps running. The ticker keeps its store
     // reads' connections across passes, and its next passes must still see
     // these writes.
+    let worktree=lab.planned_worktree(&attempt);
+    fs::write(worktree.join("tracked.txt"),b"tracked edits").unwrap();
+    fs::write(worktree.join("partial.txt"),b"untracked work").unwrap();
+    fs::write(worktree.join("ignored-file"),b"ignored bytes").unwrap();
+    fs::create_dir(worktree.join(".tools")).unwrap();
+    // Sparse file in this lab's TMPDIR: an excluded directory must never be
+    // descended into, so its 218 MiB contents are not read by either scan.
+    fs::File::create(worktree.join(".tools/toolchain")).unwrap().set_len(218*1024*1024).unwrap();
     let report = lab.project.join("REPORT.md");
     fs::write(&report, "retain this report").unwrap();
     lab.ok_live(&|| ["task", "demo", "cancel-attempt", attempt.as_str(), "--expected-revision", &running.revision.to_string(), "--expected-head", &lab.head().to_string(), "--reason", "operator stop"].map(String::from).to_vec());
@@ -432,6 +443,18 @@ fn ticker_launches_and_briefs_once_then_stops_a_cancelled_worker_while_paused_an
     assert_eq!(fs::read_to_string(&report).unwrap(), "retain this report");
     assert_eq!(lab.events("runtime.worker_resources_retained").len(), 1);
     assert_eq!((lab.count("workspace.create_command"), lab.count("agent.prompt")), (1, 1));
+    let snapshots=herdr_farm::worktree_preservation::capture_stopped_files(&lab.project,&attempt,lab.head(),Instant::now()+Duration::from_secs(15),Default::default()).unwrap();
+    let snapshot=&snapshots[0];
+    for (path,bytes) in [("tracked.txt",b"tracked edits".as_slice()),("partial.txt",b"untracked work".as_slice())] {
+        let entry=snapshot.manifest.entries.iter().find(|e|e.path==path).unwrap();
+        assert_eq!(fs::read(snapshot.directory.join(&entry.sha256)).unwrap(),bytes);
+    }
+    assert!(snapshot.manifest.entries.iter().all(|e|!e.path.starts_with(".tools") && e.path!="ignored-file"));
+    fs::File::create(worktree.join("oversized-work")).unwrap().set_len(51*1024*1024).unwrap();
+    let error=herdr_farm::worktree_preservation::capture_stopped_files(&lab.project,&attempt,lab.head(),Instant::now()+Duration::from_secs(15),Default::default()).unwrap_err();
+    assert!(error.to_string().contains("artifact source exceeds 50 MiB"),"{error:#}");
+    assert_eq!(lab.attempt(&attempt),stopped);
+    fs::remove_file(worktree.join("oversized-work")).unwrap();
     // A later pass has nothing left to stop.
     lab.run_for("agent.list", 1);
     lab.assert_only_observed(&after);

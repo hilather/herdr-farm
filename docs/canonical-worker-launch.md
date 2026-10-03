@@ -585,8 +585,12 @@ cleanup acceptance requirements have been satisfied.
 
 Native termination now preserves repository state before committing either a
 staged stop or started-worker termination. The receipt binds every approved
-checkout to its retained manifest. Capture or receipt-commit failure keeps the
-attempt nonterminal and capacity reserved, while retry observes the already
+checkout to its retained manifest. Working-file snapshots preserve tracked and
+untracked non-ignored work; Git-ignored toolchains, caches and build output are
+excluded before traversal and are not preserved. The 50 MiB limit still protects
+non-ignored working files; Git history/index capture is unchanged. See
+[canonical worktree preservation](canonical-worktrees.md) for manifest versions.
+Capture or receipt-commit failure keeps the attempt nonterminal and capacity reserved, while retry observes the already
 stopped worker and reuses verified snapshots. The same boundary now captures the
 attempt output directory into `.state/worker-output-snapshots/<attempt>/<digest>`.
 The stop receipt records either its manifest digest or an explicit observation

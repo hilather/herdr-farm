@@ -3271,6 +3271,15 @@ fn staged_repository_stop_requires_and_records_preserved_partial_files() {
     let mut db=migration::open_active(&f.project).unwrap();let state=db.read_snapshot(None).unwrap();
     let plan=worktree_plans(&state.attempt_inputs[0].inputs,&target.attempt).unwrap().remove(0);
     fs::write(Path::new(&plan.path).join("partial.txt"),b"pre-start partial result").unwrap();
+    let worktree=Path::new(&plan.path);
+    fs::write(worktree.join("source.txt"),b"tracked edits").unwrap();
+    fs::write(worktree.join(".gitignore"),".tools/\nignored-file\nsource.txt\n").unwrap();
+    fs::write(worktree.join("ignored-file"),b"ignored").unwrap();
+    fs::create_dir(worktree.join(".tools")).unwrap();
+    // Sparse fixture under TMPDIR; neither preservation scan reads these bytes.
+    fs::File::create(worktree.join(".tools/toolchain")).unwrap().set_len(218*1024*1024).unwrap();
+    fs::File::create(worktree.join("oversized-work")).unwrap().set_len(51*1024*1024).unwrap();
+
     db.cancel_attempt(&target.attempt,state.attempts[0].revision,state.head,"stop staged repository",now()).unwrap();
     let before=db.read_snapshot(None).unwrap();
     let incomplete=PreparedLaunchStopped{receipt:LaunchStoppedReceipt {
@@ -3278,6 +3287,10 @@ fn staged_repository_stop_requires_and_records_preserved_partial_files() {
     }};
     let error=db.record_launch_stopped(&incomplete,before.attempts[0].revision,before.head,now()).unwrap_err();
     assert!(error.to_string().contains("preservation"));assert_eq!(db.read_snapshot(None).unwrap(),before);
+    let error=reconcile_termination(&f.project,&target.attempt,before.attempts[0].revision,deadline,Default::default()).unwrap_err();
+    assert!(format!("{error:#}").contains("artifact source exceeds 50 MiB"),"{error:#}");
+    assert_eq!(db.read_snapshot(None).unwrap(),before);
+    fs::remove_file(worktree.join("oversized-work")).unwrap();
     let stopped=reconcile_termination(&f.project,&target.attempt,before.attempts[0].revision,deadline,Default::default()).unwrap().unwrap();
     assert!(stopped.termination_observed && !stopped.retains_capacity());
     let state=db.read_snapshot(None).unwrap();
@@ -3287,6 +3300,12 @@ fn staged_repository_stop_requires_and_records_preserved_partial_files() {
     assert_eq!(receipt.repository_snapshots.len(),1);assert_eq!(receipt.repository_snapshots[0].plan,plan);
     let directory=f.project.join(".state/worktree-file-snapshots").join(target.attempt.as_str()).join(&receipt.repository_snapshots[0].digest);
     let manifest:crate::worktree_preservation::Manifest=serde_json::from_slice(&fs::read(directory.join("manifest.json")).unwrap()).unwrap();
+    assert!(manifest.entries.iter().all(|e|!e.path.starts_with(".tools") && e.path!="ignored-file"));
+    assert_eq!(manifest.version,4);
+    assert!(manifest.excluded_ignored_paths.contains(&".tools".to_owned()));
+    assert!(manifest.excluded_ignored_paths.contains(&"ignored-file".to_owned()));
+    let tracked=manifest.entries.iter().find(|e|e.path=="source.txt").unwrap();
+    assert_eq!(fs::read(directory.join(&tracked.sha256)).unwrap(),b"tracked edits");
     let entry=manifest.entries.iter().find(|e|e.path=="partial.txt").unwrap();
     assert_eq!(fs::read(directory.join(&entry.sha256)).unwrap(),b"pre-start partial result");
     assert_eq!(fs::read(Path::new(&plan.path).join("partial.txt")).unwrap(),b"pre-start partial result");

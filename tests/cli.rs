@@ -5623,3 +5623,29 @@ fn legacy_manual_resolution_preserves_artifacts_for_the_resolved_generation() {
     assert_eq!(fs::read_to_string(project.join("threads/t-0001.brief.md")).unwrap(), "generated instructions\n");
     assert!(work.is_dir());
 }
+
+#[cfg(feature="state-store")]
+#[test]
+fn long_lived_store_snapshot_above_fifty_mib_remains_readable_from_cli() {
+    use herdr_farm::{domain::TaskId,migration,runtime};
+    let home=tempfile::tempdir().unwrap();let root=home.path().join("root");let r=root.to_str().unwrap();
+    for action in ["new","pause"] {assert!(hp(home.path(),&["--root",r,action,"demo"]).status.success());}
+    let project=root.join("demo");migration::apply(&project,&migration::inspect(&project).unwrap(),true).unwrap();
+    runtime::add_task(&project,TaskId::new("work").unwrap(),"Retained task".into(),runtime::snapshot(&project).unwrap().head).unwrap();
+    let mut raw=rusqlite::Connection::open(project.join(".state/state.db")).unwrap();
+    let payload=serde_json::to_string(&serde_json::json!({"history":"x".repeat(64*1024)})).unwrap();
+    let tx=raw.transaction().unwrap();
+    for _ in 0..900 {tx.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES('runtime.observed','historical',1,1,?1)",[&payload]).unwrap();}
+    tx.commit().unwrap();drop(raw);
+    let control=herdr_farm::store::controlled::ReadControl::new(std::time::Instant::now()+std::time::Duration::from_secs(30),Default::default());
+    let mut controlled=herdr_farm::store::controlled::ControlledStore::open(&project.join(".state/state.db"),control).unwrap();
+    let bounded=controlled.read_snapshot(None).unwrap();
+    assert_eq!(bounded.events.iter().filter(|e|e.kind=="runtime.observed").count(),900);
+    drop(bounded);drop(controlled);
+    let out=hp(home.path(),&["--root",r,"task","demo","list"]);
+    assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("Retained task"));
+    let snapshot=runtime::snapshot(&project).unwrap();
+    assert_eq!(snapshot.events.iter().filter(|e|e.kind=="runtime.observed").count(),900);
+    assert_eq!(snapshot.tasks[0].title,"Retained task");
+}

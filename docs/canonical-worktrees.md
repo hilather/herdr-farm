@@ -20,8 +20,8 @@ Metadata and checkout files are opened without following symlinks and with
 nonblocking semantics, then checked as single-link regular files by descriptor.
 A named-pipe replacement cannot stall the reader while it holds root ownership.
 Working directories absent from the approved tree are refused before claiming.
-Termination preserves checkout files and retained references; comprehensive
-artifact acceptance and safe cleanup remain separate unfinished work.
+Termination preserves tracked and untracked non-ignored checkout files and
+retained references; comprehensive artifact acceptance and safe cleanup remain separate unfinished work.
 
 The service derives one path and branch per approved repository from the actual
 attempt ID. Callers cannot supply a branch or output directory. Plans appear in
@@ -108,7 +108,8 @@ target bytes, read through pinned link descriptors without following the target.
 Manifests containing links use version 3; older regular-file manifests retain
 their version. Hard links and special nodes remain refused, leaving the source
 in place. Attempt-output snapshots continue to reject symlinks. It records binary bytes, executable bits and empty
-directories, including untracked and ignored files.
+directories, including untracked non-ignored files. Git-ignored files and
+directories (toolchains, caches and build output) are excluded before traversal.
 
 Two byte-based scans must agree before publication. Files are retained by SHA-256
 under `.state/worktree-file-snapshots/<attempt>/<manifest-digest>/`, synced and
@@ -177,3 +178,12 @@ Unrecoverable partial metadata or missing recorded resources remain blocked.
 Report/library finalization can consume verified native-stop snapshots after
 output source loss. Repository restoration remains explicitly tested rather than
 an automatic mutation path. Cleanup acceptance remains unfinished.
+
+Working-file snapshots exclude Git-ignored files and directories, including
+toolchains, caches and build output. Git determines exclusions using the
+worktree’s ignore rules; excluded directories are never descended into or read.
+Both capture and verification use the same exclusions. The 50 MiB working-file
+limit still applies to non-ignored work; Git history and index preservation are
+unchanged. Version 4 manifests record the ignored exclusion roots returned by
+Git in `excluded_ignored_paths`; versions 1–3 remain loadable with an empty list.
+This changes no canonical store schema.
