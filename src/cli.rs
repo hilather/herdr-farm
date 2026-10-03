@@ -1938,7 +1938,7 @@ pub fn run() -> Result<()> {
                 let slug=match &command {
                     ThreadCommand::Start{slug,..}|ThreadCommand::Restart{slug,..}|ThreadCommand::Prompt{slug,..}|
                     ThreadCommand::Adopt{slug,..}|ThreadCommand::List{slug,..}|ThreadCommand::Show{slug,..}|
-                    ThreadCommand::Ack{slug,..}|ThreadCommand::ResolveIntegrated{slug,..}|ThreadCommand::Resolve{slug,..} => slug,
+                    ThreadCommand::Ack{slug,..}|ThreadCommand::ResolveIntegrated{slug,..}|ThreadCommand::Resolve{slug,..}|ThreadCommand::Stop{slug,..} => slug,
                 };
                 project::validate_slug(slug)?;
                 if project::ensure_legacy(&ctx.root.join(slug)).is_err() {
