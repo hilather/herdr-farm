@@ -56,6 +56,8 @@ herdr-farm task <slug> show TASK
 herdr-farm task <slug> add TASK --title 'Work title' --expected-head HEAD
 herdr-farm launch <slug> run --task TASK --profile PROFILE --repository /absolute/repo --plan-output docs/plan.md
 herdr-farm launch <slug> run --task TASK --profile PROFILE --repository /absolute/repo --write src/ --write tests/ --output src/lib.rs --prompt-file /absolute/brief.md
+herdr-farm launch <slug> view --task TASK
+herdr-farm result <slug> submit-captured ATTEMPT
 herdr-farm result <slug> show
 herdr-farm result <slug> jobs
 herdr-farm result <slug> verify SUBMISSION --policy-id POLICY --policy-file /absolute/policy.json --idempotency-key KEY --work-dir /absolute/new-scratch
@@ -83,6 +85,19 @@ Run `launch run` as a background command or with a long timeout (at least five
 minutes); Claude Code's default Bash timeout is two minutes and a profile refresh
 can take 120 seconds. Each step prints progress to stderr. If interrupted, rerun
 the same command; finished steps, including retained profile refresh, are skipped.
+
+Workers appear as `worker: <task>` tabs beside the coordinator in the owner's
+Herdr workspace. `herdr-farm launch <slug> view --task T` reopens a viewer, or
+focuses its existing tab. The dedicated worker server keeps its own shell and
+bundled manifests; the viewer uses a private product config allowing nesting,
+without changing the owner's Herdr config. If the coordinator session is
+unavailable, launch still succeeds and reports the viewer as unavailable.
+
+The profile's `max_wall_seconds` ends a worker that runs out of time. After an
+`attempt.ended_without_submission` inbox notice, run
+`herdr-farm result <slug> submit-captured ATTEMPT` to submit what it produced,
+then review it. Tell the owner before launching a task that looks longer than
+the budget.
 
 After launching workers, start `herdr-farm inbox <slug> wait` as a background
 Bash command. Its exit wakes the coordinator without terminal input. Run

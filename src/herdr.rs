@@ -315,6 +315,26 @@ impl<'a> Herdr<'a> {
         Self::created(&result)
     }
 
+    pub fn tab_matches(&self, workspace: &str, tab: &str, label: &str) -> Result<bool, HerdrError> {
+        let result = self.call(&["tab", "list", "--workspace", workspace], CALL_TIMEOUT)?;
+        let tabs = result["tabs"].as_array().ok_or_else(|| HerdrError {
+            code: "failed".into(), message: "tab list reply changed".into(),
+        })?;
+        Ok(tabs.iter().any(|row| row["tab_id"] == tab && row["label"] == label))
+    }
+
+    pub fn tab_focus(&self, tab: &str) -> Result<(), HerdrError> {
+        self.call(&["tab", "focus", tab], CALL_TIMEOUT).map(|_| ())
+    }
+
+    pub fn tab_close(&self, tab: &str) -> Result<(), HerdrError> {
+        self.call(&["tab", "close", tab], CALL_TIMEOUT).map(|_| ())
+    }
+
+    pub fn pane_run(&self, pane: &str, command: &str) -> Result<(), HerdrError> {
+        self.call(&["pane", "run", pane, "--", command], CALL_TIMEOUT).map(|_| ())
+    }
+
     /// Creates a worktree-backed workspace. Returns the ids and the checkout
     /// path as herdr reports it (on the machine the call ran on).
     pub fn worktree_create(&self, repo: &str, branch: &str, base: &str, label: &str) -> Result<(Created, String, String), HerdrError> {

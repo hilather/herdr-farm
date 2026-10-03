@@ -184,6 +184,7 @@ enum LaunchCommand {
     /// Stop the dedicated Herdr server `launch run` started for a task and
     /// remove its socket directory. The ticker does this by itself once the
     /// task's worker has terminated; this is the explicit form.
+    View { #[arg(long)] task: String },
     Stop {
         #[arg(long)] task: String,
         /// Stop it even while the task's attempt still holds a worker
@@ -1306,6 +1307,7 @@ pub fn run() -> Result<()> {
                     serde_json::to_value(herdr_farm::launch_preparation::draft(&project,&load(&selection)?,expected_head,std::time::Duration::from_secs(validity_seconds),deadline,Default::default())?)?,
                 LaunchCommand::Run { task, profile, repository, sign_with, validity_seconds, title, plan_output, write, output, deliverable, prompt_file, contract_file, integration_ref, base, max_active_workers, herdr_socket, prepare_only } =>
                     crate::launch_run::run(&ctx, &slug, crate::launch_run::Args { task, profile, repository, sign_with, validity_seconds, title, plan_output, write, output, deliverable, prompt_file, contract_file, integration_ref, base, max_active_workers, herdr_socket, prepare_only })?,
+                LaunchCommand::View { task } => crate::launch_run::view(&ctx, &slug, &task)?,
                 LaunchCommand::Stop { task, force } => crate::launch_run::stop(&ctx, &slug, &task, force)?,
                 LaunchCommand::Reserve { selection, approval_digest, expected_head } => {
                     let approval=herdr_farm::domain::VersionedReference{id:format!("approval-{approval_digest}"),revision:1,digest:approval_digest};
