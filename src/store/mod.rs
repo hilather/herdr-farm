@@ -604,3 +604,4 @@ pub(crate) mod integration;
 pub(crate) mod test_schema;
 
 pub use worker_termination::service_project_result_completions;
+pub use delivery::project_has_undelivered_operations;

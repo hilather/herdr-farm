@@ -1273,8 +1273,10 @@ print(json.dumps({{'id':request['id'],'result':{{'type':'notification_show','sho
             let until=read().lease_until_ms.unwrap();assert_eq!(migration::open_active(&project).unwrap().expire_claims(until).unwrap(),1);assert_eq!(read().state,DeliveryState::Ambiguous);
             std::thread::sleep(Duration::from_secs(6));assert!(!home.path().join("escaped").exists());
         }else{wait(&mut child,&||read().state==if mode=="ok"{DeliveryState::Confirmed}else{DeliveryState::Ambiguous});stop(&mut child);}
-        assert!(!home.path().join("WRONG_LOCK").exists());let head=runtime::snapshot(&project).unwrap().head;
-        let mut child=spawn();wait(&mut child,&||runtime::snapshot(&project).unwrap().head>head);stop(&mut child);
+        assert!(!home.path().join("WRONG_LOCK").exists());
+        // A later pass refreshes the observation time (no event when unchanged) and must not resend.
+        let seen=runtime::snapshot(&project).unwrap().observations.iter().map(|o|o.observed_unix_ms).max().unwrap_or(0);
+        let mut child=spawn();wait(&mut child,&||runtime::snapshot(&project).unwrap().observations.iter().any(|o|o.observed_unix_ms>seen));stop(&mut child);
         assert_eq!(fs::read_to_string(home.path().join("sent")).unwrap(),"send\n");assert_eq!(read().attempts,1);
     }
 }
@@ -1935,7 +1937,7 @@ fn ticker_canonical_finalization_preserves_once_and_recovers_receipt_after_resta
         }else{wait(&mut child,&||read().state==DeliveryState::Confirmed);stop(&mut child);fs::remove_dir_all(&source).unwrap();}
         let receipt:herdr_farm::operations::finalization::FinalizationReceipt=serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
         assert_eq!(fs::read(project.join(".state/canonical-artifacts").join(&receipt.artifact_key).join(&receipt.snapshot).join("library/result")).unwrap(),b"preserved bytes");
-        let before=runtime::snapshot(&project).unwrap();let mut child=spawn();wait(&mut child,&||runtime::snapshot(&project).unwrap().head>before.head);stop(&mut child);
+        let before=runtime::snapshot(&project).unwrap();let seen=before.observations.iter().map(|o|o.observed_unix_ms).max().unwrap_or(0);let mut child=spawn();wait(&mut child,&||runtime::snapshot(&project).unwrap().observations.iter().any(|o|o.observed_unix_ms>seen));stop(&mut child);
         let after=runtime::snapshot(&project).unwrap();assert_eq!(read().attempts,1);assert_eq!(read().state,DeliveryState::Confirmed);assert_eq!(after.tasks.iter().find(|t|Some(&t.id)==op.task.as_ref()).unwrap().state,TaskState::AwaitingReview);assert_eq!(fs::read_to_string(project.join("threads/t-0001.toml")).unwrap(),original);
         assert_eq!(fs::read_dir(project.join(".state/canonical-artifacts").join(&receipt.artifact_key)).unwrap().count(),1);
     }
