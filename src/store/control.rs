@@ -99,7 +99,9 @@ impl SqliteStore {
         }
         let required=state!=ProjectState::Active;
         let digest=if required{None}else{config.map(String::from)};
-        if control.state!=state||control.reconciliation_required!=required||control.config_digest!=digest {
+        // A repeated owner pause is still explicit intent: retain its control
+        // event so later reconciliation invalidations cannot resume it on open.
+        if state!=ProjectState::Active||control.state!=state||control.reconciliation_required!=required||control.config_digest!=digest {
             control.state=state;control.reconciliation_required=required;control.config_digest=digest;control.revision=increment(control.revision)?;control.epoch=increment(control.epoch)?;write(&tx,&control,"project.control_changed")?;
         }
         let result=ControlChange{head:head(&tx)?,control};tx.commit()?;Ok(result)

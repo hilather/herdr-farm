@@ -16,6 +16,11 @@ needs a new reviewed revision, not a silent reinterpretation.
   lifetime retention and whole-project backup (profiles.md, worker command grants).
   Visible as `canonical.worker_permissions` in both text and JSON
   `telemetry PROJECT maintenance classes`; excluded from sidecar-only backups.
+- Canonical coordinator effect journal: `.state/canonical-coordinator.json`,
+  stream version 2, `migrations/canonical-coordinator/0001.json` and `0002.json`
+  through `src/canonical_coordinator.rs`'s MIGRATIONS list. v2 records settings
+  startup provenance; `canonical.coordinator_journal` and
+  `canonical.coordinator_permissions` retain project-backup coverage (see the coordinator journal contract below).
 - Sidecar streams (phase 2, card S0): `telemetry.db` is versioned per stream
   in `telemetry_streams(stream, version)`: `codex` (§5, migrations under
   `migrations/telemetry/`, also `user_version`; 3 adds TM5.1's read indexes,
@@ -745,7 +750,7 @@ Compatibility: legacy environment variables and existing data/config locations r
 
 ### Canonical coordinator effect journal (W-COORD-2)
 
-`.state/canonical-coordinator.json` is a version 1 JSON effect journal, outside
+`.state/canonical-coordinator.json` is a version 2 JSON effect journal, outside
 telemetry streams and SQLite schemas. It retains frozen session/terminal/config
 identity, pending layout/start/prime intent and accepted priming receipts. The
 maintenance class `canonical.coordinator_journal` retains it indefinitely, never
@@ -753,5 +758,11 @@ prunes it, and requires inclusion in project backups. Restored pending effects
 require live reconciliation before replay. Runtime ownership and observation
 remain in the existing canonical tables. Replacement records fresh same-session
 pane/agent absence and audits ownership relinquishment before any creation effect;
-uncertainty retains the old claim. No schema migration or new table is
-introduced. See [operator recovery](../operator-runbook.md#canonical-coordinator-after-migration-w-coord-2).
+uncertainty retains the old claim. The sidecar `MIGRATIONS` list uses
+`migrations/canonical-coordinator/0001.json` and `0002.json`; v2 adds the optional
+permission-file startup receipt, migrating v1 to no generated settings recorded.
+The generated `.state/coordinator/claude-settings.json` is derivable product
+configuration (0600, parent 0700), classified as
+`canonical.coordinator_permissions`: retained with project backups for session
+provenance, never telemetry-pruned, regenerated at agent start. No SQLite schema
+change or new table is introduced. See [operator recovery](../operator-runbook.md#canonical-coordinator-after-migration-w-coord-2).

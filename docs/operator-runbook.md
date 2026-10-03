@@ -214,6 +214,24 @@ owner's Herdr session (or pass `--socket /absolute/session.sock`). It uses
 canonical `coordinator`, and records live observation and ownership. It never
 starts a replacement server or imports old thread records as live state.
 
+After observation and adoption, `open` resumes automatic reconciliation pauses
+through the same activation path as `launch run`. A retained owner control event
+setting paused/archived prevents automatic resume even after later invalidation.
+Admission blockers print individually and leave control paused; open succeeds.
+Focus-only opens perform the same check. Owner config edits are re-adopted using
+the current digest. `context` identifies automatic pauses with `open PROJECT`
+re-activation guidance and lists profiles with retained launchable evidence.
+
+Claude Code starts receive `--settings <project>/.state/coordinator/claude-settings.json`
+in addition to owner arguments. The generated directory/file modes are 0700/0600;
+owner `--settings` arguments are refused. Allow rules cover coordinator verbs,
+ask rules cover owner decisions, and deny rules protect configuration, SSH,
+project `.claude` files and the generated file. Owner settings are never edited.
+A running agent picks up permissions only when open starts it; focus does not
+reload them. `context` records startup provenance and `doctor` explains that
+non-Claude kinds have no generated permissions. Retain the generated settings
+and journal in project backups; telemetry never prunes them.
+
 Coordinator priming accepts bundled manifests and updated `remote:<path>` manifests
 whose resolved file is inside the owner's Herdr state directory
 (`$XDG_STATE_HOME/herdr`, or `~/.local/state/herdr`). Symlinks escaping that
@@ -285,9 +303,10 @@ replacements. These are deliberately not aliases: legacy thread prompts and
 resolution cannot preserve sealed contracts, immutable attempts and accepted
 result evidence. Old thread state remains migration provenance.
 
-The version 1 `.state/canonical-coordinator.json` journal stores frozen route,
+The version 2 `.state/canonical-coordinator.json` journal stores frozen route,
 socket incarnation, terminal, settings/config digests and layout/start/prime
-phases. It is effect intent and a receipt, not a second runtime owner. Retain it
+phases and the generated permission file supplied at start. Version 1 journals
+upgrade through `migrations/canonical-coordinator/0002.json` on open. It is effect intent and a receipt, not a second runtime owner. Retain it
 with project backups and reconcile restored pending effects before replay.
 No canonical or telemetry SQLite schema changes or new tables are introduced.
 The maintenance inventory classifies it as canonical and never prunes it.

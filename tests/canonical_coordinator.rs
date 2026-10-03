@@ -192,19 +192,13 @@ fn socket_open_primes_owned_coordinator_retries_swallowed_prompt_and_recreates_c
         ),
     )
     .unwrap();
-    l.ok(&["reconcile", "demo", "--record"]);
-    let snapshot = runtime::snapshot(&l.project).unwrap();
-    let control = snapshot.control.unwrap();
-    l.ok(&[
-        "runtime",
-        "demo",
-        "state",
-        "active",
-        "--expected-revision",
-        &control.revision.to_string(),
-        "--expected-head",
-        &snapshot.head.to_string(),
-    ]);
+    let owner_settings = l.project.join(".claude/settings.local.json");
+    fs::create_dir_all(owner_settings.parent().unwrap()).unwrap();
+    let owner_bytes = b"{\"permissions\":{\"allow\":[\"Bash(echo:*)\"]}}\n";
+    fs::write(&owner_settings, owner_bytes).unwrap();
+    let alias = l.home.path().join("git/herdr-projects");
+    fs::create_dir_all(alias.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(BIN, &alias).unwrap();
     l.ok(&["open", "demo"]);
     l.stop();
     let state = l.state();
@@ -218,6 +212,57 @@ fn socket_open_primes_owned_coordinator_retries_swallowed_prompt_and_recreates_c
             .iter()
             .any(|v| v == "--fixture-safe")
     );
+    let settings_path = l.project.join(".state/coordinator/claude-settings.json");
+    let args = state["args"].as_array().unwrap();
+    let settings_arg = args.iter().position(|v| v == "--settings").unwrap();
+    assert_eq!(args[settings_arg + 1], settings_path.to_string_lossy().as_ref());
+    assert_eq!(fs::metadata(&settings_path).unwrap().permissions().mode() & 0o777, 0o600);
+    assert_eq!(fs::metadata(settings_path.parent().unwrap()).unwrap().permissions().mode() & 0o777, 0o700);
+    let permissions: Value = serde_json::from_slice(&fs::read(&settings_path).unwrap()).unwrap();
+    let prefix = format!("{} --root {}", BIN, l.root.display());
+    for verb in ["skill", "context demo", "inbox list", "inbox done", "task demo list", "task demo show", "task demo add", "task demo rename",
+        "launch demo run", "launch demo stop", "result demo show", "result demo jobs", "result demo capture", "result demo submit-captured",
+        "scheduler demo inspect", "operations demo inspect", "runtime demo inspect", "telemetry demo usage", "memory-review demo propose", "doctor",
+        "thread prompt", "safety requests"] {
+        assert!(permissions["permissions"]["allow"].as_array().unwrap().contains(&json!(format!("Bash({prefix} {verb}:*)"))), "missing allow {verb}");
+    }
+    assert!(permissions["permissions"]["allow"].as_array().unwrap().contains(&json!(format!("Bash({prefix} reconcile demo --plan)"))));
+    for verb in ["safety approve", "safety reject", "safety revoke", "approval", "delegation", "budget", "routine-store", "migration", "archive", "delete",
+        "runtime * state", "runtime * rebind", "runtime * adopt", "runtime * relinquish", "task * cancel-attempt", "task * complete"] {
+        assert!(permissions["permissions"]["ask"].as_array().unwrap().contains(&json!(format!("Bash({prefix} {verb}:*)"))), "missing ask {verb}");
+    }
+    for path in ["~/.config/herdr-projects/**".into(), "~/.config/herdr-farm/**".into(), "~/.ssh/**".into(),
+        format!("/{}", settings_path.display()), format!("/{}/.claude/**", l.project.display())] {
+        for tool in ["Read", "Edit", "Write"] {
+            assert!(permissions["permissions"]["deny"].as_array().unwrap().contains(&json!(format!("{tool}({path})"))));
+        }
+    }
+    assert!(permissions["permissions"]["deny"].as_array().unwrap().contains(&json!("Bash(ssh-keygen:*)")));
+    assert_eq!(serde_json::from_str::<Value>(&l.ok(&["runtime", "demo", "inspect"])).unwrap()["control"]["state"], "active");
+    let context = l.ok(&["context", "demo", "--peek"]);
+    assert!(context.contains("Launchable retained profile evidence: none"));
+    assert!(context.contains("Control state: Active"));
+    assert!(context.contains("claude-settings.json"));
+    // A focus-only open re-adopts changed owner config and resumes automatic pause.
+    let mut changed = fs::read_to_string(&config).unwrap();
+    changed.push_str("# owner configuration changed\n");
+    fs::write(&config, changed).unwrap();
+    l.ok(&["open", "demo"]);
+    l.stop();
+    assert_eq!(serde_json::from_str::<Value>(&l.ok(&["runtime", "demo", "inspect"])).unwrap()["control"]["state"], "active");
+    let adopted = runtime::snapshot(&l.project).unwrap();
+    assert!(adopted.ownership.iter().any(|o| o.binding == "coordinator" && o.config_digest == migration::config_reference(&config).unwrap().digest));
+    let control = adopted.control.unwrap();
+    l.ok(&["runtime", "demo", "state", "paused", "--expected-revision", &control.revision.to_string(), "--expected-head", &adopted.head.to_string()]);
+    l.ok(&["open", "demo"]);
+    l.stop();
+    assert_eq!(serde_json::from_str::<Value>(&l.ok(&["runtime", "demo", "inspect"])).unwrap()["control"]["state"], "paused");
+    // Restore active for the replacement workflow below.
+    let paused = runtime::snapshot(&l.project).unwrap();
+    l.ok(&["runtime", "demo", "state", "active", "--expected-revision", &paused.control.unwrap().revision.to_string(), "--expected-head", &paused.head.to_string()]);
+    assert_eq!(fs::read(owner_settings).unwrap(), owner_bytes);
+    let alias_prefix = format!("{} --root {}", alias.display(), l.root.display());
+    assert!(permissions["permissions"]["allow"].as_array().unwrap().contains(&json!(format!("Bash({alias_prefix} task demo add:*)"))));
     let snapshot = runtime::snapshot(&l.project).unwrap();
     assert!(
         snapshot
@@ -244,6 +289,20 @@ fn socket_open_primes_owned_coordinator_retries_swallowed_prompt_and_recreates_c
     l.stop();
     assert_eq!(l.state()["starts"], 1);
     assert_eq!(l.state()["prompts"].as_array().unwrap().len(), 2);
+    // Older effect journals migrate through a public focus-only open without
+    // inventing startup provenance or restarting the accepted agent.
+    let journal_path = l.project.join(".state/canonical-coordinator.json");
+    let mut old: Value = serde_json::from_slice(&fs::read(&journal_path).unwrap()).unwrap();
+    old["version"] = json!(1);
+    old.as_object_mut().unwrap().remove("permission_file");
+    fs::write(&journal_path, serde_json::to_vec(&old).unwrap()).unwrap();
+    l.ok(&["open", "demo"]);
+    l.stop();
+    let upgraded: Value = serde_json::from_slice(&fs::read(&journal_path).unwrap()).unwrap();
+    assert_eq!(upgraded["version"], 2);
+    assert!(upgraded["permission_file"].is_null());
+    assert_eq!(l.state()["starts"], 1);
+    assert!(l.ok(&["context", "demo", "--peek"]).contains("no generated file recorded"));
     let retained = runtime::snapshot(&l.project).unwrap().ownership;
     let mut state = l.state();
     state["live"] = json!(false);
@@ -381,4 +440,46 @@ fn unchanged_ticker_observations_preserve_head_and_refresh_coordinator_admission
     assert!(last["observations"][0]["observed_unix_ms"].as_i64().unwrap() - first["observations"][0]["observed_unix_ms"].as_i64().unwrap() > 30_000);
     let control = runtime::snapshot(&l.project).unwrap().control.unwrap();
     l.ok(&["runtime", "demo", "state", "active", "--expected-revision", &control.revision.to_string(), "--expected-head", &first["head"].to_string()]);
+}
+
+#[test]
+fn owner_settings_arguments_are_refused_before_coordinator_effects() {
+    for argument in ["--settings", "--settings=/tmp/owner.json"] {
+        let l = Lab::new();
+        let config = l.home.path().join(".config/herdr-farm/config.toml");
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        fs::write(&config, format!("[safety.{:?}]\ncoordinator_agent_args=[{argument:?}]\ncoordinator_agent_args_kind='claude'\n", l.project.to_string_lossy())).unwrap();
+        let out = l.cli(&["open", "demo"]);
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains("must not contain --settings"));
+        assert!(!l.project.join(".state/coordinator/claude-settings.json").exists());
+        assert!(!l.home.path().join("herdr-state.json").exists());
+    }
+}
+
+#[test]
+fn explicit_pause_of_already_paused_control_retains_owner_intent() {
+    let l = Lab::new();
+    let initial = l.ok(&["context", "demo", "--peek"]);
+    assert!(initial.contains("run `open demo` to re-activate"));
+    let s = runtime::snapshot(&l.project).unwrap();
+    l.ok(&["runtime", "demo", "state", "paused", "--expected-revision", &s.control.unwrap().revision.to_string(), "--expected-head", &s.head.to_string()]);
+    let paused = l.ok(&["context", "demo", "--peek"]);
+    assert!(paused.contains("Control state: Paused"));
+    assert!(!paused.contains("run `open demo` to re-activate"));
+    let s = runtime::snapshot(&l.project).unwrap();
+    assert!(s.events.iter().any(|e| e.kind == "project.control_changed" && e.payload["state"] == "paused"));
+}
+
+#[test]
+fn non_claude_context_and_doctor_explain_permissions_are_not_generated() {
+    let l = Lab::new();
+    let md = l.project.join("PROJECT.md");
+    let text = fs::read_to_string(&md).unwrap().replace("coordinator_agent = \"claude\"", "coordinator_agent = \"codex\"");
+    fs::write(md, text).unwrap();
+    let context = l.ok(&["context", "demo", "--peek"]);
+    assert!(context.contains("none generated for codex (Claude Code only)"));
+    let out = l.cli(&["doctor"]);
+    assert!(String::from_utf8_lossy(&out.stdout).contains("none generated for codex (Claude Code only)"));
+    assert!(!l.project.join(".state/coordinator/claude-settings.json").exists());
 }

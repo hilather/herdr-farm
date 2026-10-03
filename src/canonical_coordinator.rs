@@ -15,6 +15,23 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{path::Path, time::Instant};
 
+const MIGRATIONS: &[&str] = &[
+    include_str!("../migrations/canonical-coordinator/0001.json"),
+    include_str!("../migrations/canonical-coordinator/0002.json"),
+];
+fn read_journal(text: &str) -> Result<Journal> {
+    let mut value: Value = serde_json::from_str(text)?;
+    let version = value["version"].as_u64().context("coordinator journal version missing")? as usize;
+    ensure!((1..=MIGRATIONS.len()).contains(&version), "unsupported coordinator journal version");
+    for patch in &MIGRATIONS[version..] {
+        let patch: Value = serde_json::from_str(patch)?;
+        for (key, field) in patch.as_object().context("invalid coordinator migration")? {
+            value[key] = field.clone();
+        }
+    }
+    Ok(serde_json::from_value(value)?)
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Journal {
@@ -33,6 +50,8 @@ struct Journal {
     replace_missing: bool,
     #[serde(default)]
     priming_manifest: Option<Value>,
+    #[serde(default)]
+    permission_file: Option<String>,
 }
 fn save(dir: &Path, journal: &Journal) -> Result<()> {
     project::write_atomic(
@@ -195,10 +214,10 @@ pub fn doctor_manifest(
     let Some(text) =
         paths::read_control_text(&dir.join(".state/canonical-coordinator.json"), 64 * 1024)?
     else {
-        return Ok(Vec::new());
+        return Ok(vec![permission_status(env, dir, runner)?]);
     };
-    let j: Journal = serde_json::from_str(&text)?;
-    let mut lines = Vec::new();
+    let j = read_journal(&text)?;
+    let mut lines = vec![permission_status(env, dir, runner)?];
     if let Some(evidence) = &j.priming_manifest {
         lines.push(format!(
             "coordinator priming manifest: {} version {} (override {})",
@@ -293,6 +312,114 @@ fn fence(dir: &Path, ctx: &Ctx, j: &Journal) -> Result<()> {
     );
     Ok(())
 }
+/// Product-owned Claude settings. Absolute file rules use Claude's `//` syntax:
+/// https://code.claude.com/docs/en/permissions#read-and-edit
+fn permissions(ctx: &Ctx, dir: &Path, slug: &str) -> Result<String> {
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+    use std::io::Write;
+    let parent = dir.join(".state/coordinator");
+    std::fs::DirBuilder::new().mode(0o700).create(&parent).or_else(|e| {
+        if e.kind() == std::io::ErrorKind::AlreadyExists { Ok(()) } else { Err(e) }
+    })?;
+    ensure!(std::fs::symlink_metadata(&parent)?.file_type().is_dir(), "coordinator settings parent must be a real directory");
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700))?;
+    let file = parent.join("claude-settings.json");
+    let mut prefixes = vec![coordinator::current_prefix(&ctx.root)?];
+    let alias = ctx.env.home.join("git/herdr-projects");
+    if alias.canonicalize().ok() == Some(std::env::current_exe()?.canonicalize()?) {
+        prefixes.push(coordinator::command_prefix(&alias, &ctx.root));
+    }
+    ensure!(prefixes.iter().all(|p| !p.contains(['*', '\n', '\r'])),
+        "coordinator command prefix contains permission-rule wildcards or line breaks");
+    let verbs = [
+        "skill".into(), format!("context {slug}"), "inbox list".into(), "inbox done".into(),
+        format!("task {slug} list"), format!("task {slug} show"), format!("task {slug} add"), format!("task {slug} rename"),
+        format!("launch {slug} run"), format!("launch {slug} stop"),
+        format!("result {slug} show"), format!("result {slug} jobs"), format!("result {slug} capture"), format!("result {slug} submit-captured"),
+        format!("scheduler {slug} inspect"), format!("operations {slug} inspect"),
+        format!("runtime {slug} inspect"), "doctor".into(),
+    ];
+    let mut allow = Vec::new();
+    let mut ask = Vec::new();
+    for prefix in &prefixes {
+        for verb in &verbs { allow.push(format!("Bash({prefix} {verb}:*)")); }
+        // Wildcards allow the planning flag in any argument position, never apply.
+        allow.push(format!("Bash({prefix} reconcile {slug} --plan)"));
+        allow.push(format!("Bash({prefix} reconcile {slug} --plan *)"));
+        allow.push(format!("Bash({prefix} reconcile {slug} * --plan*)"));
+        ask.push(format!("Bash({prefix} reconcile {slug} *--apply*)"));
+        ask.push(format!("Bash({prefix} reconcile {slug} *--record*)"));
+        for verb in ["attempts", "usage", "report", "query", "view", "watch", "compare", "recommend", "metrics registry", "workspace show", "workspace digest",
+            "collectors status", "collectors bindings", "collectors sessions", "collectors tools", "collectors capabilities",
+            "accounting status", "accounting entries", "accounting sessions", "accounting rate-cards", "accounting cost", "accounting charges", "accounting fx", "accounting budget-shadow", "accounting quota", "accounting attention", "accounting tools", "accounting fleet",
+            "quality status", "quality flaky", "quality report", "quality groups present", "quality groups report", "quality groups show",
+            "review status", "review present", "review show", "review report", "review findings show",
+            "review fixes show", "review protocols show", "review experiments show", "review seeds show", "review seeds report", "review authority show", "review signer status",
+            "analytics status", "analytics snapshot", "analytics revisions", "analytics plans", "experiments plan", "experiments report",
+            "maintenance classes", "maintenance plan", "maintenance hold list", "backup list", "backup verify",
+            "policies show", "policies simulate", "policies suggest", "policies shadow", "health alerts", "health rules", "health status"] {
+            allow.push(format!("Bash({prefix} telemetry {slug} {verb}:*)"));
+        }
+        for verb in ["list", "show", "ingest", "propose", "reject", "defer", "remind", "record"] {
+            allow.push(format!("Bash({prefix} memory-review {slug} {verb}:*)"));
+        }
+        // Preserve the documented legacy coordinator command surface.
+        for verb in ["list", "overview", "safety show", "safety grant", "safety requests", "routine list", "thread list", "thread show", "thread prompt", "thread ack", "thread restart", "thread stop"] {
+            allow.push(format!("Bash({prefix} {verb}:*)"));
+        }
+        for verb in ["safety approve", "safety reject", "safety revoke", "approval", "delegation", "budget", "routine-store", "migration", "archive", "delete"] {
+            ask.push(format!("Bash({prefix} {verb}:*)"));
+        }
+        for verb in ["state", "rebind", "adopt", "relinquish"] { ask.push(format!("Bash({prefix} runtime * {verb}:*)")); }
+        for verb in ["cancel-attempt", "complete"] { ask.push(format!("Bash({prefix} task * {verb}:*)")); }
+    }
+    let mut deny = vec!["Bash(ssh-keygen:*)".to_string()];
+    for path in ["~/.config/herdr-projects/**".to_string(), "~/.config/herdr-farm/**".into(), "~/.ssh/**".into(),
+        format!("/{}", file.display()), format!("/{}/.claude/**", dir.display())] {
+        for tool in ["Read", "Edit", "Write"] { deny.push(format!("{tool}({path})")); }
+    }
+    // Publish atomically with restrictive permissions from the first byte;
+    // create_new and rename never follow a pre-existing settings symlink.
+    let temp = parent.join(format!(".settings-{}.tmp", std::process::id()));
+    let result = (|| -> Result<()> {
+        let mut output = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temp)?;
+        output.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        output.write_all(&serde_json::to_vec_pretty(&json!({"permissions":{"allow":allow,"ask":ask,"deny":deny}}))?)?;
+        output.sync_all()?;
+        std::fs::rename(&temp, &file)?;
+        std::fs::File::open(&parent)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() { let _ = std::fs::remove_file(&temp); }
+    result?;
+    Ok(file.to_string_lossy().into_owned())
+}
+
+pub fn permission_status(env: &paths::Env, dir: &Path, runner: &dyn crate::runner::Runner) -> Result<String> {
+    let md = paths::read_control_text(&dir.join("PROJECT.md"), 1024 * 1024)?.context("PROJECT.md missing")?;
+    let (settings, _) = project::parse_project_md(&md)?;
+    if settings.coordinator_agent != "claude" {
+        return Ok(format!("Coordinator permissions: none generated for {} (Claude Code only).", settings.coordinator_agent));
+    }
+    let journal: Option<Journal> = paths::read_control_text(&dir.join(".state/canonical-coordinator.json"), 64 * 1024)?
+        .map(|s| read_journal(&s)).transpose()?;
+    let status = match journal {
+        Some(j) if j.permission_file.is_some() => {
+            let h = Herdr::new(env.herdr_bin(), &j.socket, runner);
+            let live = h.agent_list().map(|agents| agents.iter().any(|a|
+                a.pane_id == j.route.pane_id && a.workspace_id == j.route.workspace_id
+                    && a.tab_id == j.route.tab_id && a.cwd == j.route.cwd && a.name == j.name));
+            match live {
+                Ok(true) => format!("generated file {} in effect for running coordinator (supplied at start)", j.permission_file.unwrap()),
+                Ok(false) => "no running coordinator observed; generated settings retained for the previous start".into(),
+                Err(_) => "running coordinator unconfirmed; generated settings were supplied at the recorded start".into(),
+            }
+        }
+        _ => "no generated file recorded for the running coordinator".into(),
+    };
+    Ok(format!("Coordinator permissions: {status}; picked up only when open starts the coordinator agent."))
+}
+
 pub fn open(ctx: &Ctx, slug: &str, options: &OpenOptions) -> Result<()> {
     project::validate_slug(slug)?;
     let dir = ctx.root.join(slug).canonicalize()?;
@@ -319,7 +446,11 @@ pub fn open(ctx: &Ctx, slug: &str, options: &OpenOptions) -> Result<()> {
         paths::read_control_text(&p.project_md(), 1024 * 1024)?.context("PROJECT.md missing")?;
     let (settings, _) = project::parse_project_md(&md)?;
     let safety = p.safety(&ctx.config_dir)?;
-    let args = safety.coordinator_arguments(&settings.coordinator_agent)?;
+    let mut args = safety.coordinator_arguments(&settings.coordinator_agent)?.to_vec();
+    if settings.coordinator_agent == "claude" {
+        ensure!(!args.iter().any(|a| a == "--settings" || a.starts_with("--settings=")),
+            "coordinator_agent_args must not contain --settings; open owns coordinator permissions");
+    }
     let session = paths::resolve_session(&options.session, ctx.env, ctx.runner)?;
     let socket = session.socket.to_string_lossy().into_owned();
     let session_identity = crate::reconcile_live::resource_identity(&session.socket, true)
@@ -331,10 +462,10 @@ pub fn open(ctx: &Ctx, slug: &str, options: &OpenOptions) -> Result<()> {
     );
     let path = dir.join(".state/canonical-coordinator.json");
     let mut journal: Option<Journal> = paths::read_control_text(&path, 64 * 1024)?
-        .map(|s| serde_json::from_str(&s))
+        .map(|s| read_journal(&s))
         .transpose()?;
     if let Some(j) = &journal {
-        ensure!(j.version == 1, "unsupported coordinator journal version");
+        ensure!(j.version == MIGRATIONS.len() as u32, "unsupported coordinator journal version");
         ensure!(
             matches!(
                 j.phase.as_str(),
@@ -441,7 +572,7 @@ pub fn open(ctx: &Ctx, slug: &str, options: &OpenOptions) -> Result<()> {
     }
     if journal.is_none() {
         let mut j = Journal {
-            version: 1,
+            version: MIGRATIONS.len() as u32,
             socket: socket.clone(),
             session_identity,
             route: previous
@@ -457,6 +588,7 @@ pub fn open(ctx: &Ctx, slug: &str, options: &OpenOptions) -> Result<()> {
             deliveries: 0,
             replace_missing: options.reprime,
             priming_manifest: None,
+            permission_file: None,
         };
         if live.is_none() {
             save(&dir, &j)?;
@@ -505,6 +637,9 @@ pub fn open(ctx: &Ctx, slug: &str, options: &OpenOptions) -> Result<()> {
         j.phase = "start-ready".into();
         save(&dir, &j)?;
     }
+    // Owner config edits require fresh adoption, including focus-only opens.
+    j.config_digest = migration::config_reference(&ctx.config_dir.join("config.toml"))?.digest;
+    save(&dir, &j)?;
     if options.reprime {
         ensure!(
             j.kind == settings.coordinator_agent,
@@ -579,7 +714,13 @@ pub fn open(ctx: &Ctx, slug: &str, options: &OpenOptions) -> Result<()> {
         j.phase = "start-pending".into();
         save(&dir, &j)?;
         fence(&dir, ctx, &j)?;
-        h.agent_start(&j.name, &j.kind, &j.route.pane_id, args)?;
+        if j.kind == "claude" {
+            let file = permissions(ctx, &dir, slug)?;
+            args.extend(["--settings".into(), file.clone()]);
+            j.permission_file = Some(file);
+            save(&dir, &j)?;
+        }
+        h.agent_start(&j.name, &j.kind, &j.route.pane_id, &args)?;
     }
     agent(&h, &j, false)?;
     if matches!(j.phase.as_str(), "start-ready" | "start-pending") {
@@ -607,6 +748,16 @@ pub fn open(ctx: &Ctx, slug: &str, options: &OpenOptions) -> Result<()> {
             head,
             &migration::config_reference(&ctx.config_dir.join("config.toml"))?,
         )?;
+    }
+    if runtime::automatically_paused(&runtime::snapshot(&dir)?)
+        && let Err(error) = crate::launch_run::activate_project(ctx, &dir, true)
+    {
+        match runtime::admission(&dir, &ctx.config_dir.join("config.toml")) {
+            Ok(report) if !report.blockers.is_empty() => {
+                for blocker in report.blockers { println!("Activation blocked: {blocker}"); }
+            }
+            _ => println!("Project remains paused: {}", error.to_string().replace(['\n', '\r'], " ")),
+        }
     }
     if options.reprime {
         j.phase = "prime-ready".into();
@@ -700,8 +851,22 @@ pub fn surface(ctx: &Ctx, slug: &str) -> Result<String> {
         slug: slug.into(),
     };
     let safety = p.safety(&ctx.config_dir)?;
+    let snapshot = runtime::snapshot(&p.dir())?;
+    let state = snapshot.control.as_ref().map(|c| format!("{:?}", c.state)).unwrap_or("unknown".into());
+    let automatic = if runtime::automatically_paused(&snapshot) { format!("; run `open {slug}` to re-activate") } else { String::new() };
+    let config = paths::read_control_text(&ctx.config_dir.join("config.toml"), 1024 * 1024)?
+        .map(|s| toml::from_str::<toml::Value>(&s)).transpose()?;
+    let mut store = migration::open_active(&p.dir())?;
+    let mut profiles = Vec::new();
+    if let Some(names) = config.as_ref().and_then(|c| c.get("profiles")).and_then(toml::Value::as_table) {
+        for name in names.keys() {
+            if store.latest_launchable_native_profile(name)?.is_some() { profiles.push(name.clone()); }
+        }
+    }
+    let evidence = if profiles.is_empty() { "none".into() } else { profiles.join(", ") };
+    let readiness = format!("Launchable retained profile evidence: {evidence} (launch revalidates current inputs).\nControl state: {state}{automatic}.\n{}\n", permission_status(ctx.env, &p.dir(), ctx.runner)?);
     Ok(format!(
-        "Safety: start_threads={} resolve_threads={} cleanup_resolved={}\nWith propose, request owner approval before dispatch or integration. With keep, retain artifacts and worktrees; never run destructive cleanup. Signing uses --sign-with OWNER_KEY or [coordinator].signing_key.\n{}",
+        "{readiness}Safety: start_threads={} resolve_threads={} cleanup_resolved={}\nWith propose, request owner approval before dispatch or integration. With keep, retain artifacts and worktrees; never run destructive cleanup. Signing uses --sign-with OWNER_KEY or [coordinator].signing_key.\n{}",
         safety.start_threads,
         safety.resolve_threads,
         safety.cleanup_resolved,

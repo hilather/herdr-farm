@@ -161,3 +161,13 @@ review uses `result PROJECT show` and verification/integration jobs. `thread`
 commands refuse with canonical replacements. If the coordinator pane was closed,
 run `herdr-farm open PROJECT --reprime`. See the [operator runbook](operator-runbook.md#canonical-coordinator-after-migration-w-coord-2)
 for signing configuration, safety semantics and interrupted-effect recovery.
+
+For a migrated canonical project, `open PROJECT` binds and adopts the coordinator,
+then re-activates automatic reconciliation pauses using fresh evidence. Explicit
+owner pauses stay paused; unresolved blockers are printed without failing open.
+Claude Code coordinators receive product-generated permissions through
+`.state/coordinator/claude-settings.json` at agent start, so no manual allow-list
+setup is needed. Owner `.claude` settings stay untouched. Other coordinator kinds
+receive no generated file. `context PROJECT` shows retained launchable profiles,
+control state and settings startup provenance; focus-only open does not reload
+agent settings. See [coordinator permissions](operations.md#the-allow-list-for-your-coordinator).
