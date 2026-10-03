@@ -60,6 +60,13 @@ notes, remain backup-only sources with their original paths and digests. They
 never enter runtime `imported_sources`; backup and restore preserve their exact
 bytes. Imported review obligations keep their links to those legacy files.
 
+Automatic integration services eligible result completions
+under its existing project ownership before confirming the integration job,
+including lost-reply recovery. Confirmation cannot depend on another ticker
+pass to request completion; automation, acceptance, current output checks and
+candidate holds remain enforced by the ordinary completion service. Capacity
+is still retained until worker termination is proven.
+
 Runtime migration keeps memory authority `legacy-markdown`. Use the separate
 signed `memory plan` / `memory cutover` workflow to import recorded Markdown into
 SQLite memory with its provenance. The `memory/candidates` directory is retained

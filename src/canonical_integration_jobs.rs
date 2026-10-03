@@ -85,6 +85,7 @@ fn execute(input:&Input,control:&Control)->Result<()> {
             Some(outcome)=>classify(outcome),
             None=>{let _fence=guard.fence(&fence)?;verification::clear_scratch(&scratch)?;Outcome::Retryable{no_effect_evidence:"no integration operation under the job key; scratch removed; redeliver with the same key".into()}},
         };
+        if matches!(outcome,Outcome::Confirmed{..}) { db.service_result_completions()?; }
         db.observe_operation(&operation.id,input.revision,OWNER,outcome,now())?;return Ok(());
     }
     if let Err(error)=verification::isolation_available() {
@@ -107,6 +108,10 @@ fn execute(input:&Input,control:&Control)->Result<()> {
         let cleanup=verification::clear_scratch(&scratch);
         outcome_of(result.and_then(|outcome|{cleanup.context("integration recorded but scratch cleanup failed")?;Ok(outcome)}))
     };
+    // The result lane can finish between controller passes. Request eligible
+    // completion under the ownership already held here before confirmation
+    // becomes observable, including recovery of a lost integration reply.
+    if matches!(outcome,Outcome::Confirmed{..}) { db.service_result_completions()?; }
     db.finish_operation(&claim,outcome,now()).map_err(|error|unrecorded(error.to_string()))?;
     drop(guard);Ok(())
 }
