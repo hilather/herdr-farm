@@ -1985,13 +1985,13 @@ pub fn run() -> Result<()> {
                 let safety = project.safety(&ctx.config_dir)?;
                 println!("Effective safety settings for `{slug}`:");
                 println!("  start_threads = {:?}", safety.start_threads);
-                println!("  cleanup_resolved = {:?}", safety.cleanup_resolved);
-                println!("  resolve_threads = {:?}", safety.resolve_threads);
                 println!("  coordinator_agent_args = {:?}", safety.coordinator_agent_args);
                 println!("  thread_agent_args = {:?}", safety.thread_agent_args);
                 println!("  coordinator_agent_args_kind = {:?}", safety.coordinator_agent_args_kind);
                 println!("  thread_agent_args_kind = {:?}", safety.thread_agent_args_kind);
                 println!("  routine_commands = {}", safety.routine_commands);
+                println!("  cleanup_resolved = {:?}", safety.cleanup_resolved);
+                println!("  resolve_threads = {:?}", safety.resolve_threads);
                 println!("  thread_network = {}", safety.thread_network);
                 println!("  effective worker arguments: {}", safety.worker_summary());
                 println!();

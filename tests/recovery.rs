@@ -296,7 +296,16 @@ fn remote_merged_finalization_waits_for_the_helper_and_an_explicit_resolve() {
     std::os::unix::fs::symlink(BIN, lab.path("helper")).unwrap();
     lab.ok(&["thread", "resolve", "demo", "t-0001"]);
     assert_eq!((lab.text("demo", "status").as_str(), lab.text("demo", "resolved_reason").as_str()), ("resolved", "manual"));
-    assert!(!lab.text("demo", "artifact_snapshot").is_empty());
+    let snapshot = lab.text("demo", "artifact_snapshot");
+    assert!(!snapshot.is_empty());
+    let retained = project.join(".state/artifacts/t-0001").join(&snapshot);
+    let manifest_bytes = fs::read(retained.join("manifest.json")).unwrap();
+    let manifest: Value = serde_json::from_slice(&manifest_bytes).unwrap();
+    assert_eq!(manifest.as_object().unwrap().keys().map(String::as_str).collect::<std::collections::BTreeSet<_>>(),
+        ["schema", "thread", "generation", "source", "machine", "entries"].into_iter().collect());
+    assert_eq!(manifest["schema"], 1);
+    assert_eq!(manifest["machine"], "box");
+    assert_eq!(fs::read(retained.join("library/item")).unwrap(), b"binary\0\xff");
     assert_eq!(fs::read(project.join("library/t-0001/item")).unwrap(), b"binary\0\xff");
 
     let mut ticker = lab.run_ticker();
@@ -304,6 +313,9 @@ fn remote_merged_finalization_waits_for_the_helper_and_an_explicit_resolve() {
     ticker.stop();
     assert_eq!(lab.text("demo", "status"), "resolved");
     assert!(lab.inbox("demo", "final-").is_empty());
+    assert_eq!(lab.text("demo", "artifact_snapshot"), snapshot);
+    assert_eq!(fs::read(retained.join("manifest.json")).unwrap(), manifest_bytes);
+    assert_eq!(fs::read(retained.join("library/item")).unwrap(), b"binary\0\xff");
 }
 
 /// A toast the session declines to show is retried after a restart, but not

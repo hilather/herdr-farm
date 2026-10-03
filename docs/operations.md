@@ -786,7 +786,13 @@ Explicit acceptance of a partial copy never overrides preservation or writer che
 Generated `brief.md` is retained as `threads/<id>.brief.md` and verified before
 removal too. Manual resolve commits a content-equivalent preservation receipt for
 its new lifecycle generation, so the writer checkpoint can verify it without
-weakening generation checks.
+weakening generation checks. Remote manual resolution retains the verified final-copy
+snapshot and its original capture generation; remote cleanup remains unsupported.
+The retained version-1 `manifest.json` format is unchanged: `schema`, `thread`,
+`generation`, `source`, optional nonempty `machine`, and `entries` (each with
+`path`, `directory`, `bytes`, `sha256`). Resolve adds no cleanup or preservation
+fields to this file. Lifecycle cleanup checkpoints live separately in the journal
+below. Cleanup retains the snapshot directory and its bytes after worktree removal.
 
 The version-1 `.state/resolved-cleanup-<id>.json` journal records lifecycle generation,
 execution fingerprint and a checkpoint before each action. Journal writes sync both

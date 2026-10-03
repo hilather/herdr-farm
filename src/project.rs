@@ -106,6 +106,7 @@ pub struct Settings {
     pub auto_resolve_days: u32,
     pub nudge: bool,
     /// Optional Git ref used by guarded legacy integrated resolution.
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub integration_target: String,
     pub repos: Vec<Repo>,
 }

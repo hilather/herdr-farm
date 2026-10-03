@@ -147,7 +147,7 @@ fn safety_overrides_are_keyed_by_canonical_project_path() {
     let home = Home::new();
     home.ok(&["new", "demo"]);
     home.ok(&["new", "other"]);
-    let defaults = "  start_threads = \"propose\"\n  coordinator_agent_args = []\n  thread_agent_args = []\n";
+    let defaults = "  start_threads = \"propose\"\n  coordinator_agent_args = []\n  thread_agent_args = []\n  coordinator_agent_args_kind = None\n  thread_agent_args_kind = None\n  routine_commands = false\n  cleanup_resolved = \"auto\"\n  resolve_threads = \"propose\"\n";
     assert!(home.ok(&["safety", "show", "demo"]).contains(defaults));
     let shown = home.ok(&["safety", "show", "demo"]);
     assert!(shown.contains("--sandbox") && shown.contains("workspace-write") && shown.contains("on-request") && shown.contains("acceptEdits") && shown.contains("built-in defaults"), "{shown}");
