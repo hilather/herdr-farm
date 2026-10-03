@@ -105,7 +105,12 @@ registers an unverified record only: it does not launch or adopt a pane/worktree
 Existing imported bindings must be rebound instead of duplicated.
 
 Creation fences the head and task revision, refuses retained attempts or duplicate
-pane references, increments the linked task revision, and invalidates admission.
+pane references and increments the linked task revision. Creation invalidates
+admission when the binding references resources or a remote machine, or is a
+coordinator binding. A new local task binding with only a dedicated socket and cwd
+keeps active control and its epoch: there is no pane or worktree to reconcile.
+Launch still records fresh evidence before drafting and reserving against exact
+binding/task revisions; existing resource ownership and effect fences still apply.
 New bindings have null import provenance. Imported bindings retain their original
 source hashes; legacy files are neither invented nor dual-written. The explicit
 schema-v8 upgrade preserves existing binding bytes, observations and foreign keys.

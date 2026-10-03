@@ -41,6 +41,9 @@ completion, and technical capability does not grant new user approval.
 ## Canonical coordinator workflow
 
 This section replaces the legacy thread workflows below for SQLite projects.
+Use `launch PROJECT run` to add tasks while other workers are reserved or running,
+within capacity and with disjoint write scopes. `--prepare-only` is optional.
+An explicit owner pause requires reconciliation and an explicit resume before launch.
 On a SQLite project, `herdr-farm open <slug>` opens and primes a canonical
 coordinator. Run `herdr-farm context <slug>` every turn; it needs no named profile
 for the full state view. It prints task states, attempt states, inbox, recent

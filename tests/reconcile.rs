@@ -341,3 +341,44 @@ fn refreshed_observations_preserve_recovery_waits_and_exact_head_admission() {
     assert_eq!(after.events.iter().filter(|e| e.kind == "runtime.observed").count(), before.events.iter().filter(|e| e.kind == "runtime.observed").count() + 1);
     assert!(after.control.unwrap().reconciliation_required);
 }
+
+/// Public store lifecycle workflow: adding an unused task route preserves
+/// admitted work, but a route naming a pane still fences all effects.
+#[test]
+fn new_task_routes_preserve_active_control_but_resource_routes_require_reconciliation() {
+    use herdr_farm::store::SqliteStore;
+    let root = tempfile::tempdir().unwrap();
+    let mut db = SqliteStore::create(&root.path().join("state.db")).unwrap();
+    let control = db.project_control().unwrap().unwrap();
+    db.set_project_state(db.current_head().unwrap(), control.revision, ProjectState::Active, now(), None).unwrap();
+    let attempt = Attempt { id: AttemptId::new("a-attempt").unwrap(), task: TaskId::new("a").unwrap(), revision: 1,
+        state: AttemptState::Reserved, snapshot: None, reservation: "a-reservation".into(), termination_observed: false };
+    db.commit(Commit { expected_head: db.current_head().unwrap(), mutations: vec![
+        Mutation::Task { expected: None, next: Task { id: attempt.task.clone(), revision: 1, state: TaskState::Running,
+            title: "A".into(), active_attempt: Some(attempt.id.clone()) } },
+        Mutation::Attempt { expected: None, next: attempt },
+        Mutation::Task { expected: None, next: Task { id: TaskId::new("b").unwrap(), revision: 1, state: TaskState::Ready,
+            title: "B".into(), active_attempt: None } },
+        Mutation::Task { expected: None, next: Task { id: TaskId::new("c").unwrap(), revision: 1, state: TaskState::Ready,
+            title: "C".into(), active_attempt: None } },
+    ] }).unwrap();
+    let before = db.read_snapshot(None).unwrap();
+    db.create_runtime(Some(&TaskId::new("b").unwrap()), Some(1), before.head,
+        &RuntimeRoute { socket: "/fixture/b.sock".into(), cwd: root.path().display().to_string(), ..Default::default() }).unwrap();
+    let after = db.read_snapshot(None).unwrap();
+    assert_eq!(after.control, before.control);
+    assert_eq!(after.attempts, before.attempts);
+    db.validate_control_epoch(before.control.unwrap().epoch, None).unwrap();
+    // Preserving active control does not exempt this unused binding from evidence
+    // if the owner later asks for admission again.
+    assert!(db.admission_report(now(), None).unwrap().blockers.iter().any(|r| r.contains("task:b: fresh matching observation required")));
+    db.create_runtime(Some(&TaskId::new("c").unwrap()), Some(1), after.head,
+        &RuntimeRoute { socket: "/fixture/c.sock".into(), cwd: root.path().display().to_string(),
+            workspace_id: "w".into(), tab_id: "t".into(), pane_id: "p".into(), ..Default::default() }).unwrap();
+    let fenced = db.read_snapshot(None).unwrap();
+    assert_eq!(fenced.control.as_ref().unwrap().state, ProjectState::Paused);
+    assert!(fenced.control.as_ref().unwrap().reconciliation_required);
+    assert!(db.validate_control_epoch(after.control.unwrap().epoch, None).is_err());
+    assert!(db.admission_report(now(), None).unwrap().blockers.iter().any(|r| r.contains("task:c: current ownership and fresh resource identity evidence required")));
+    assert_eq!(fenced.attempts, before.attempts);
+}

@@ -224,7 +224,14 @@ impl SqliteStore {
             tx.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES('task.changed',?1,?2,1,?3)",params![task.id.as_str(),integer(task.revision)?,serde_json::to_string(&task).map_err(|e|StoreError::Invalid(e.to_string()))?])?;
             Some(task.revision)
         }else{None};
-        super::control::invalidate(&tx)?;
+        // A new local task route with no resource references adds no ownership
+        // to reconcile. Keep existing workers' control epoch; launch still needs
+        // fresh evidence and exact binding/task fences before any effect.
+        if binding.task.is_none() || !binding.identity.machine.is_empty()
+            || !binding.identity.pane_id.is_empty() || !binding.identity.tab_id.is_empty()
+            || !binding.identity.workspace_id.is_empty() || !binding.identity.worktree_path.is_empty() {
+            super::control::invalidate(&tx)?;
+        }
         let result=RouteChange{head:head(&tx)?,binding,task_revision};tx.commit()?;Ok(result)
     }
 }

@@ -910,9 +910,10 @@ test.
 --plan-output docs/FILE.md --prompt-file FILE [--sign-with KEY]` performs the whole
 operator sequence on a migrated project and stops at the first failing step; a
 rerun skips finished steps and never reserves a second attempt. `--prepare-only`
-stops before the reservation: a new runtime binding pauses the project until no
-attempt is unfinished, so with several workers every task is prepared before any is
-reserved (a binding that would pause a project under a live worker is refused first).
+stops before drafting and reservation. New local task bindings without resource
+references preserve active control, so tasks can be added while other workers are
+reserved or running. Launch records fresh evidence; bindings naming existing
+resources still require reconciliation. Explicit owner pauses block launch.
 See
 [operator-runbook.md](operator-runbook.md).
 
