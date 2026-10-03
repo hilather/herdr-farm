@@ -166,3 +166,43 @@ attempted. The steward must run these workflows outside the sandbox.
 - `unsafe_resolved_threads_are_kept_and_cleanup_keep_opts_out`
 - `used_quiesced_project_migrates_after_final_copy_and_memory_record`
 - `worker_permission_grants_restart_preserving_work_and_revoke_next_start`
+
+## Thread isolation preparation (card 1a)
+
+The real thread-sandbox probe verifies live shared-repository commits while
+restricting Git writes to objects, the thread's own refs/reflogs and its
+linked-worktree admin directory. Private homes, token-fd login and rewritten
+Claude settings prevent a granted test runner or committed script from
+modifying owner configuration or planting restart hooks. Legacy Claude launches
+remain unsandboxed in this card. PERM-1 grants are contained once card 1b connects
+the launch path to this sandbox; command-prefix grants alone provide no such
+boundary.
+
+Validation in the hard sandbox (2026-10-03): the requested nextest invocation
+ran 17 tests. Both `thread_sandbox` tests and `worker_login_share` passed,
+including the real Linux mount/PID sandbox and shared Git commit probe. All 14
+`threads` tests failed solely at `UnixListener::bind` (tests/threads.rs:64)
+with `Operation not permitted`; no workaround was attempted. The steward must
+run these outside the hard sandbox:
+
+- `integrated_resolution_enforces_policy_readiness_and_git_ancestry`
+- `prompt_refuses_a_bare_shell_a_blocked_or_unknown_agent_and_sends_otherwise`
+- `report_review_ack_and_resolve_copy_home`
+- `reprime_updates_only_the_priming_fields_of_the_coordinator_record`
+- `resolved_done_thread_cleans_its_pane_and_worktree_but_keeps_branch_and_report`
+- `restart_follows_what_the_record_reached`
+- `start_restart_and_adopt_write_briefs_branches_and_launch_line`
+- `stop_blocked_worker_preserves_work_and_recovers_crash`
+- `stop_failed_placement_without_artifacts_and_restart`
+- `thread_list_groups_every_record_and_live_state`
+- `thread_start_uses_agent_arguments_only_for_the_kind_they_are_bound_to`
+- `ticker_crash_after_pane_close_resumes_without_repeating_it`
+- `unsafe_resolved_threads_are_kept_and_cleanup_keep_opts_out`
+- `used_quiesced_project_migrates_after_final_copy_and_memory_record`
+
+The required all-targets state-store clippy check completed successfully, with
+no warnings on changed lines; existing warnings elsewhere remain. An offline
+no-default-features build also passed, verifying that the owner isolation/token
+parser is available without state-store. The five existing worker-supervision
+tests also passed, including the canonical baseline environment assertion.
+No schema or table changes were made.

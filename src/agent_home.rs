@@ -253,6 +253,28 @@ fn prepare_claude(home: &Path, pins: &Pins, trusted: &[String], writable: &[Stri
     write_config(&state_path, (serde_json::to_string_pretty(&Value::Object(state))? + "\n").as_bytes())
 }
 
+/// Prepare an execution home for a sandboxed Claude thread. Worker-written
+/// permissions and hooks are discarded on every launch.
+pub fn prepare_claude_thread(home: &Path, cwd: &Path, writable: &[String], network: bool) -> Result<()> {
+    use serde_json::json;
+    private_dir(home)?;
+    private_dir(&home.join(".claude"))?;
+    ensure!(cwd.is_absolute() && writable.iter().all(|p| Path::new(p).is_absolute()), "thread sandbox paths must be absolute");
+    let mut sandbox = json!({
+        "enabled": true, "failIfUnavailable": true,
+        "allowUnsandboxedCommands": false, "autoAllowBashIfSandboxed": false,
+        "filesystem": {"allowWrite": writable}
+    });
+    if !network { sandbox["network"] = json!({"allowedDomains": []}); }
+    let mut permissions = json!({"defaultMode": "acceptEdits", "allow": ["Read", "Edit", "Write", "Glob", "Grep"]});
+    if !network { permissions["deny"] = json!(["WebFetch", "WebSearch"]); }
+    let settings = json!({"permissions": permissions, "sandbox": sandbox, "env": {"DISABLE_AUTOUPDATER": "1"}});
+    write_config(&home.join(".claude/settings.json"), (serde_json::to_string_pretty(&settings)? + "\n").as_bytes())?;
+    let state = json!({"hasCompletedOnboarding": true, "theme": "dark",
+        "projects": {cwd.to_string_lossy().as_ref(): {"hasTrustDialogAccepted": true, "hasCompletedProjectOnboarding": true}}});
+    write_config(&home.join(".claude.json"), (serde_json::to_string_pretty(&state)? + "\n").as_bytes())
+}
+
 /// The model and effort the agent's configuration in `home` pins right now.
 pub fn read_pins(kind: &str, home: &Path) -> Result<Pins> {
     match kind {

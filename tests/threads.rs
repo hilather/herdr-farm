@@ -310,7 +310,7 @@ fn start_restart_and_adopt_write_briefs_branches_and_launch_line() {
     let out = lab.ok_beside_ticker(&["thread", "restart", "demo", "t-0001"]);
     assert!(out.starts_with("t-0001 is back in pane w1:p1"), "{out}");
     let first = lab.record("t-0001");
-    let branch = "hp/demo/t-0001-fix-the-login-bug";
+    let branch = "hp/demo/t-0001/fix-the-login-bug";
     assert_eq!(first["branch"].as_str(), Some(branch));
     assert!(lab.git(&repo, &["branch", "--list", branch]).contains(branch));
     let first_cwd = first["cwd"].as_str().unwrap();
@@ -320,7 +320,7 @@ fn start_restart_and_adopt_write_briefs_branches_and_launch_line() {
 
     let out = lab.ok_beside_ticker(&["thread", "start", "demo", "--title", "???", "--repo", repo_arg, "--task-file", task_arg]);
     let started: Value = serde_json::from_str(&out).unwrap();
-    assert_eq!((started["id"].as_str(), started["branch"].as_str()), (Some("t-0002"), Some("hp/demo/t-0002")));
+    assert_eq!((started["id"].as_str(), started["branch"].as_str()), (Some("t-0002"), Some("hp/demo/t-0002/work")));
     let fresh = fs::read_to_string(Path::new(lab.record("t-0002")["thread_dir"].as_str().unwrap()).join("brief.md")).unwrap();
 
     for brief in [&restarted, &fresh] {

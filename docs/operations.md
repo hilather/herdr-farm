@@ -120,7 +120,8 @@ Explicit `thread_agent_args` replaces the defaults and config extensions togethe
 active project grants are still appended for Claude.
 
 These are command-prefix approvals, not a sandbox or argument policy. Legacy
-Claude workers run with the owner's permissions; prefixes do not restrict paths,
+Claude workers still run with the owner's permissions in card 1a; card 1b will
+connect the thread sandbox so PERM-1 grants are contained. Prefixes do not restrict paths,
 Git hooks or options (including interactive rebase). Don't add prefixes for commands that can run other commands (`find`, `sed`, `rg --pre`, `xargs`, `env`, shells, interpreters).
 Use ordinary local worktree commands; review project extensions carefully before
 adding them. Commands outside these prefixes still need approval unless allowed
@@ -899,3 +900,45 @@ resent and conversation context is lost. Pending launches and copy deliveries
 drain first; adopted, resolved and stopped threads are excluded (a deliberately stopped worker is never revived by a grant). `thread list`
 and `context` show pending and completed permission restarts. Revocation affects
 the next start; it does not interrupt an already running agent.
+
+### Legacy Claude thread sandbox (card 1a)
+
+Card 1a provides and tests the sandbox API. The legacy `agent start --kind
+claude` launch path still runs with owner permissions; card 1b will connect it.
+PERM-1 grants will be contained once that launch integration lands.
+
+The thread sandbox makes the project and owner home read-only and hides owner
+agent directories, SSH secrets, owner config and other projects. Each execution
+home is private under `<project>/homes/<id>` (0700); other thread homes are
+hidden. Tab threads can write only their cwd and home. Worktree threads can
+also write their worktree, linked-worktree admin directory, shared Git objects,
+and their own `hp/<slug>/<id>/` refs and reflogs. Commits reach the shared
+repository immediately. Shared Git config, hooks, info, packed refs, other
+branches, `.git` pointers and admin linkage files stay read-only. New branches
+are `hp/<slug>/<id>/<title-slug>` (or `/work`); old recorded branches are retained,
+but the sandbox refuses them with guidance to restart from a new thread.
+
+Claude settings are rebuilt on every launch, discarding worker-written hooks
+and permissions. Only execution-home user settings are loaded. The nested Claude
+Bash sandbox fails closed and denies command network access by default; the
+outer product sandbox leaves Claude's API network available. `thread_network =
+true` omits the nested network restriction while keeping filesystem isolation.
+No blanket Bash permission is written. Explicit settings, setting-source,
+permission-bypass and additional-directory overrides are refused.
+
+Login requires an owner setup-token file configured as
+`[worker_isolation.login] claude_token_file = "/absolute/private/token"`.
+Use a regular owner-owned 0600 file outside projects and agent directories.
+The token reaches only the agent environment via an inherited descriptor;
+it is never copied into the home or included in argv.
+
+Owner-only `[safety."<canonical project path>"]` settings include
+`thread_sandbox = true` (default; false opts out), `thread_wall_hours = 168`
+(default seven-day supervisor cap; minimum 1), and `thread_env = ["NAME=VALUE"]`.
+These settings are reported by `safety show`; card 1b will apply the sandbox
+switch and wall deadline to launches. Environment names must be uppercase
+identifiers, at most 32 entries; loader, HOME/PATH, Claude/Git and shell-startup
+overrides are refused. PATH starts with the product directory, followed by
+existing absolute owner PATH entries outside hidden paths, projects and the
+execution home, then `/usr/bin:/bin`. Toolchain caches default to the execution
+home; owner toolchain directories are never shared writable.

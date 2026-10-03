@@ -174,7 +174,7 @@ fn thread_start_returns_without_an_agent_and_the_ticker_launches_then_prompts() 
     assert_eq!(world.runner.count("agent start"), 0);
     assert_eq!(started.status, Status::Open);
     assert!(started.prompt_pending);
-    assert_eq!(started.branch, "hp/demo/t-0001-fix-it");
+    assert_eq!(started.branch, "hp/demo/t-0001/fix-it");
     assert_eq!(started.base, "origin/main");
     assert_eq!(started.origin, "git@github.com:Owner/App.git");
     assert_eq!(started.agent_name, "hp-demo-t-0001");

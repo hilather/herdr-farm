@@ -260,9 +260,8 @@ pub(crate) fn frozen_isolation_hides(profile: &crate::domain::FrozenProfile) -> 
 /// `auth.json` (an explicit `codex = "/abs/path"` under `[worker_isolation.login]`
 /// binds another file instead); for Claude Code the setup-token file named by
 /// `claude_token_file = "/abs/path"` there, never a bound credentials file.
-#[cfg(feature = "state-store")]
 #[derive(Default)]
-pub(crate) struct IsolationConfig {
+pub struct IsolationConfig {
     pub hide: Vec<String>,
     pub share_login: Option<bool>,
     pub login: std::collections::BTreeMap<String, std::path::PathBuf>,
@@ -271,7 +270,6 @@ pub(crate) struct IsolationConfig {
     pub claude_token_file: Option<std::path::PathBuf>,
 }
 
-#[cfg(feature = "state-store")]
 impl IsolationConfig {
     /// The login file override for `kind`, or `None` for the owner's default.
     pub fn login_override(&self, kind: &str) -> Option<std::path::PathBuf> {
@@ -284,7 +282,7 @@ impl IsolationConfig {
 
 #[cfg(feature = "state-store")]
 pub(crate) fn frozen_isolation(profile: &crate::domain::FrozenProfile) -> anyhow::Result<IsolationConfig> {
-    use anyhow::{Context, ensure};
+    use anyhow::ensure;
     use sha2::{Digest, Sha256};
     use std::path::Path;
     let bytes = crate::migration::read_plan_file(Path::new(&profile.config.path))?;
@@ -298,6 +296,12 @@ pub(crate) fn frozen_isolation(profile: &crate::domain::FrozenProfile) -> anyhow
         std::str::from_utf8(&bytes).map_err(|_| anyhow::anyhow!("invalid worker configuration"))?,
     )
     .map_err(|_| anyhow::anyhow!("invalid worker configuration (contents withheld)"))?;
+    parse_isolation(&config)
+}
+
+/// Parse owner isolation configuration without a state-store dependency.
+pub fn parse_isolation(config: &toml::Value) -> anyhow::Result<IsolationConfig> {
+    use anyhow::{Context, ensure};
     let Some(table) = config.get("worker_isolation") else { return Ok(IsolationConfig::default()) };
     let table = table.as_table().context("invalid worker_isolation table")?;
     ensure!(table.keys().all(|k| matches!(k.as_str(), "hide" | "share_login" | "login")), "unknown worker_isolation setting");
@@ -358,8 +362,7 @@ pub(crate) fn share_login(
 
 /// The Claude setup-token file of a profile whose worker login is shared, or the
 /// refusal that stops a launch which could only fail with "login expired".
-#[cfg(feature = "state-store")]
-fn claude_token_file(config: &IsolationConfig) -> anyhow::Result<std::path::PathBuf> {
+pub fn claude_token_file(config: &IsolationConfig) -> anyhow::Result<std::path::PathBuf> {
     config.claude_token_file.clone().ok_or_else(|| anyhow::anyhow!(
         "no Claude worker login is configured: create a long-lived token with `claude setup-token`, save it in a 0600 file outside the project and the agent directories, set `claude_token_file = \"/abs/path\"` under [worker_isolation.login] in the owner configuration, then prepare and verify the profile again"))
 }

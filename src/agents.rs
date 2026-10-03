@@ -42,3 +42,9 @@ pub fn blocked_hint(kind: &str) -> &'static str {
         "possible trust or permission prompt"
     }
 }
+
+/// Reject overrides that escape the execution home's Claude settings.
+#[allow(dead_code)] // Used by the sandboxed launch API prepared for card 1b.
+pub fn validate_sandboxed_claude_arguments(args: &[String]) -> Result<()> {
+    herdr_farm::worker_supervision::validate_thread_arguments(args)
+}

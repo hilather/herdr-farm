@@ -1,7 +1,7 @@
 //! Linux worker command construction for a persistent Herdr terminal. A dedicated
 //! PID namespace keeps detached descendants inside the worker's lifetime.
 //! Submission/observation/approval belong to the canonical launch service.
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use std::path::Path;
 
 #[cfg(target_os = "linux")]
@@ -180,7 +180,7 @@ pub fn gated_command(
 
 /// Filesystem view of an isolated agent: what the sandbox hides and, when the
 /// projects root is covered, which paths under it stay visible. Built only by
-/// [`Isolation::for_agent`] so every launch path derives it the same way; it is
+/// the launch/thread constructors so every launch derives its view consistently; it is
 /// part of the literal supervisor argv, not of any approval digest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Isolation {
@@ -215,6 +215,8 @@ pub struct Isolation {
     /// read-only in the sandbox, see [`Isolation::add_executable`]). `None`
     /// when the binary is unknown or its directory cannot be a `PATH` entry.
     product: Option<String>,
+    thread_path: Option<String>,
+    thread_env: Vec<String>,
 }
 
 /// Names the agent's submission spool directory in its baseline environment.
@@ -624,6 +626,16 @@ impl Isolation {
         extra: &[String],
         launch: &[String],
     ) -> Result<Self> {
+        Self::build(project, home, cwd, agent, repositories, worktrees, config, socket, extra, launch, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        project: &Path, home: &Path, cwd: &Path, agent: &Path,
+        repositories: &[&Path], worktrees: &[(&Path, &Path, &Path)],
+        config: Option<&Path>, socket: Option<&Path>, extra: &[String],
+        launch: &[String], thread_refs: Option<&str>,
+    ) -> Result<Self> {
         let project = normal(&project.canonicalize()?)?;
         let root = normal(Path::new(&project).parent().ok_or_else(|| anyhow::anyhow!("project has no root"))?)?;
         let home = normal(home)?;
@@ -689,8 +701,8 @@ impl Isolation {
             let (worktree, directory, common) = (normal(worktree)?, normal(directory)?, normal(common)?);
             ensure!(
                 Path::new(&directory).parent() == Some(Path::new(&common).join("worktrees").as_path())
-                    && Path::new(&worktree).starts_with(Path::new(&project).join(".state/worktrees"))
-                    && Path::new(&worktree) != Path::new(&project).join(".state/worktrees"),
+                    && (thread_refs.is_some() || (Path::new(&worktree).starts_with(Path::new(&project).join(".state/worktrees"))
+                    && Path::new(&worktree) != Path::new(&project).join(".state/worktrees"))),
                 "worktree {worktree} or its Git directory {directory} is outside its project or common directory {common}"
             );
             git.push((worktree, directory, common));
@@ -747,7 +759,26 @@ impl Isolation {
         // written only by the ticker, which ingests the submission spool.
         plan.push((project.clone(), false));
         let mut quarantines = Vec::new();
-        for (worktree, _, common) in &git {
+        if thread_refs.is_some() { plan.push((cwd.clone(), true)); }
+        for (worktree, directory, common) in &git {
+            if let Some(refs) = thread_refs {
+                plan.extend([
+                    (common.clone(), false),
+                    (format!("{common}/objects"), true),
+                    (format!("{common}/objects/info"), false),
+                    (format!("{common}/refs/heads/{refs}"), true),
+                    (format!("{common}/logs/refs/heads/{refs}"), true),
+                    (directory.clone(), true),
+                    (format!("{directory}/gitdir"), false),
+                    (format!("{directory}/commondir"), false),
+                    (worktree.clone(), true),
+                    (format!("{worktree}/.git"), false),
+                ]);
+                if Path::new(directory).join("config.worktree").exists() {
+                    plan.push((format!("{directory}/config.worktree"), false));
+                }
+                continue;
+            }
             // The overlay on the common directory is bound writable on top of
             // any read-only anchor that contains it; its worktree's `.git`
             // pointer stays read-only.
@@ -797,7 +828,7 @@ impl Isolation {
             ensure!(keep.len() <= 7, "too many agent paths directly under {dir}");
             private.push(((*dir).to_owned(), keep));
         }
-        let mut isolation = Self { root, expose, private, git: quarantines, plan, hide, login: Vec::new(), token: None, project, spool: None, product: None };
+        let mut isolation = Self { root, expose, private, git: quarantines, plan, hide, login: Vec::new(), token: None, project, spool: None, product: None, thread_path: None, thread_env: Vec::new() };
         // Every executable the worker runs: the agent, and the product binary
         // it invokes for `result submit` and the review worker channel (the
         // controller deriving this sandbox is that binary).
@@ -808,6 +839,145 @@ impl Isolation {
                 .filter(|dir| !dir.contains(':') && dir != "/usr/bin" && dir != "/bin");
         }
         Ok(isolation)
+    }
+
+    /// Build the legacy thread sandbox without quarantining its shared Git writes.
+    /// The ref directory is exactly `hp/<project slug>/<thread id>`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn for_thread(
+        project: &Path, home: &Path, cwd: &Path, agent: &Path,
+        git: Option<(&Path, &Path, &Path)>, refs: &str, branch: Option<&str>,
+        config: Option<&Path>, socket: Option<&Path>, extra: &[String],
+    ) -> Result<Self> {
+        use std::os::unix::fs::PermissionsExt;
+        use crate::execution_guard::GatedSpawn;
+        let project = project.canonicalize()?;
+        let root = project.parent().context("project has no root")?;
+        let id = home.file_name().context("thread home has no id")?;
+        for path in [project.join("homes"), home.to_path_buf()] {
+            if let Ok(meta) = std::fs::symlink_metadata(&path) {
+                ensure!(meta.is_dir() && !meta.file_type().is_symlink(), "thread home must be a private directory, not a symlink");
+            }
+        }
+        ensure!(home == project.join("homes").join(id), "thread home must be <project>/homes/<id>");
+        let expected = format!("hp/{}/{}", project.file_name().context("project has no slug")?.to_string_lossy(), id.to_string_lossy());
+        ensure!(refs == expected, "thread ref directory must be {expected}");
+        let triples = git.into_iter().collect::<Vec<_>>();
+        let mut worktree_config_enabled = false;
+        if let Some((worktree, admin, common)) = git {
+            ensure!(cwd == worktree, "thread cwd must equal its worktree");
+            ensure!(branch.is_some_and(|b| b.starts_with(&format!("{refs}/")) && b.len() > refs.len() + 1), "thread branch is outside {refs}/; restart from a new thread");
+            ensure!(worktree.is_absolute() && admin.is_absolute() && common.is_absolute(), "thread Git paths must be absolute");
+            ensure!(std::fs::symlink_metadata(worktree.join(".git"))?.is_file(), "worktree .git must be a regular file");
+            let pointer = std::fs::read_to_string(worktree.join(".git"))?;
+            let target = pointer.trim().strip_prefix("gitdir:").context("invalid worktree .git pointer")?.trim();
+            ensure!(worktree.join(target).canonicalize()? == admin.canonicalize()?, "worktree .git points elsewhere");
+            ensure!(admin.parent() == Some(common.join("worktrees").as_path()), "thread admin must be under common/worktrees");
+            for (file, base, expected) in [
+                ("commondir", admin, common.to_path_buf()),
+                ("gitdir", admin, worktree.join(".git")),
+            ] {
+                let value = std::fs::read_to_string(admin.join(file))?;
+                ensure!(base.join(value.trim()).canonicalize()? == expected.canonicalize()?, "thread admin {file} points elsewhere");
+                ensure!(std::fs::symlink_metadata(admin.join(file))?.is_file(), "thread admin {file} must be a regular file");
+            }
+            // Query Git's effective local config, including includes, through the spawn gate.
+            let mut command = std::process::Command::new("git");
+            command.args(["config", "--file"]).arg(common.join("config")).args(["--includes", "--get", "extensions.refStorage"]);
+            let result = command.output_gated()?;
+            ensure!(result.status.success() || result.status.code() == Some(1), "cannot inspect thread Git configuration");
+            ensure!(!String::from_utf8_lossy(&result.stdout).trim().eq_ignore_ascii_case("reftable"), "thread sandbox refuses extensions.refStorage=reftable");
+            let mut command = std::process::Command::new("git");
+            command.args(["config", "--file"]).arg(common.join("config")).args(["--includes", "--bool", "--get", "extensions.worktreeConfig"]);
+            let result = command.output_gated()?;
+            ensure!(result.status.success() || result.status.code() == Some(1), "cannot inspect extensions.worktreeConfig");
+            worktree_config_enabled = String::from_utf8_lossy(&result.stdout).trim() == "true";
+            for path in [worktree, common] {
+                for protected in owner_homes()?.iter().map(Path::new).chain([root, project.as_path()]) {
+                    for path in forms(&normal(path)?) {
+                        for protected in forms(&normal(protected)?) {
+                            ensure!(!protected.starts_with(&path), "thread Git path contains owner home, projects root or project");
+                        }
+                    }
+                }
+            }
+            // Validate everything, including secret overlap, before creating mount points.
+            let preview = Self::build(&project, home, cwd, agent, &[], &triples, config, socket, extra, &[], Some(refs))?;
+            for path in [worktree, common] {
+                for hidden in &preview.hide {
+                    for hidden in forms(hidden) {
+                        for path in forms(&normal(path)?) {
+                            ensure!(!hidden.starts_with(&path) && !path.starts_with(&hidden), "thread Git path overlaps a hidden path");
+                        }
+                    }
+                }
+            }
+            let worktree_config = admin.join("config.worktree");
+            if let Ok(meta) = std::fs::symlink_metadata(&worktree_config) {
+                ensure!(meta.is_file(), "config.worktree must be a regular file");
+            }
+            for relative in [format!("refs/heads/{refs}"), format!("logs/refs/heads/{refs}")] {
+                let path = common.join(relative);
+                // Reject links at every level, including a worker-controlled ancestor.
+                let mut cursor = path.as_path();
+                while cursor != common {
+                    if let Ok(meta) = std::fs::symlink_metadata(cursor) {
+                        ensure!(meta.is_dir() && !meta.file_type().is_symlink(), "thread ref directory must not be a symlink");
+                    }
+                    cursor = cursor.parent().context("invalid thread ref path")?;
+                }
+            }
+        } else {
+            ensure!(cwd == project.join("threads").join(id), "tab thread cwd must be <project>/threads/<id>");
+            for path in [project.join("threads"), cwd.to_path_buf()] {
+                ensure!(std::fs::symlink_metadata(&path)?.is_dir(), "tab thread cwd must be a directory, not a symlink");
+            }
+        }
+        let mut isolation = Self::build(&project, home, cwd, agent, &[], &triples, config, socket, extra, &[], Some(refs))?;
+        isolation.private.push((normal(&project.join("homes"))?, vec![normal(home)?]));
+        let mut path = Vec::new();
+        if let Some(product) = &isolation.product { path.push(product.clone()); }
+        if let Some(owner_path) = std::env::var_os("PATH") {
+            for entry in std::env::split_paths(&owner_path) {
+                if entry.is_absolute() && entry.is_dir() && !forms(&normal(&entry)?).iter().any(|p| p.starts_with(root) || p.starts_with(home)
+                        || isolation.hide.iter().any(|h| forms(h).iter().any(|h| p.starts_with(h))))
+                {
+                    let entry = normal(&entry)?;
+                    if !entry.contains(':') { path.push(entry); }
+                }
+            }
+        }
+        path.extend(["/usr/bin".into(), "/bin".into()]);
+        isolation.thread_path = Some(path.join(":"));
+        if let Some((_, admin, common)) = git {
+            for relative in [format!("refs/heads/{refs}"), format!("logs/refs/heads/{refs}")] {
+                std::fs::create_dir_all(common.join(relative))?;
+            }
+            if worktree_config_enabled {
+                let path = admin.join("config.worktree");
+                if !path.exists() { std::fs::write(&path, "")?; }
+                ensure!(std::fs::symlink_metadata(&path)?.is_file(), "config.worktree must be a regular file");
+                isolation.plan.push((normal(&path)?, false));
+                isolation.plan.sort_by(|a, b| a.0.cmp(&b.0));
+            }
+        }
+        std::fs::create_dir_all(home)?;
+        std::fs::set_permissions(home, std::fs::Permissions::from_mode(0o700))?;
+        Ok(isolation)
+    }
+
+    /// Require setup-token login from owner configuration, including when the
+    /// canonical worker sharing switch is off: threads never copy credentials.
+    pub fn with_thread_login(self, config: &crate::profile_config::IsolationConfig) -> Result<Self> {
+        self.with_login_token_file(&crate::profile_config::claude_token_file(config)?)
+    }
+
+    /// Add validated owner environment overrides to a thread sandbox.
+    pub fn with_thread_env(mut self, env: &[String]) -> Result<Self> {
+        validate_thread_env(env)?;
+        ensure!(self.thread_path.is_some(), "thread environment requires a thread sandbox");
+        self.thread_env = env.to_vec();
+        Ok(self)
     }
 
     /// Authenticate the worker as the owner's already-logged-in CLI: bind the
@@ -1003,6 +1173,13 @@ pub fn isolated_gated_command(
         "invalid execution home"
     );
     command(executable, arguments, wall)?;
+    if isolation.thread_path.is_some() {
+        if isolation.token.is_none() {
+            crate::profile_config::claude_token_file(&crate::profile_config::IsolationConfig::default())?;
+        }
+        let explicit = arguments.strip_suffix(&["--setting-sources".into(), "user".into()]).unwrap_or(arguments);
+        validate_thread_arguments(explicit)?;
+    }
     let mut args = vec![
         "-i".into(),
         "/bin/sh".into(),
@@ -1016,9 +1193,10 @@ pub fn isolated_gated_command(
         "/usr/bin/env".into(),
         "-i".into(),
         format!("HOME={home}"),
-        match &isolation.product {
-            Some(dir) => format!("PATH={dir}:/usr/bin:/bin"),
-            None => "PATH=/usr/bin:/bin".into(),
+        match (&isolation.thread_path, &isolation.product) {
+            (Some(path), _) => format!("PATH={path}"),
+            (None, Some(dir)) => format!("PATH={dir}:/usr/bin:/bin"),
+            (None, None) => "PATH=/usr/bin:/bin".into(),
         },
         "LANG=C.UTF-8".into(),
         "LC_ALL=C.UTF-8".into(),
@@ -1031,6 +1209,10 @@ pub fn isolated_gated_command(
         "GIT_CONFIG_KEY_2=maintenance.auto".into(),
         "GIT_CONFIG_VALUE_2=false".into(),
     ]);
+    if isolation.thread_path.is_some() {
+        args.extend([format!("CARGO_HOME={home}/.cargo"), format!("RUSTUP_HOME={home}/.rustup"), format!("XDG_CACHE_HOME={home}/.cache")]);
+    }
+    args.extend_from_slice(&isolation.thread_env);
     if let Some(spool) = &isolation.spool {
         args.push(format!("{SUBMISSION_SPOOL_ENV}={spool}"));
         args.push(format!("HERDR_PROJECTS_SUBMISSION_SPOOL={spool}"));
@@ -1066,6 +1248,28 @@ pub fn posix_command(argv: &[String]) -> Result<String> {
         .map(|arg| format!("'{}'", arg.replace('\'', "'\\''")))
         .collect::<Vec<_>>()
         .join(" "))
+}
+
+/// Validate owner-only thread environment settings.
+pub fn validate_thread_env(env: &[String]) -> Result<()> {
+    ensure!(env.len() <= 32, "thread_env accepts at most 32 entries");
+    for entry in env {
+        let (name, value) = entry.split_once('=').context("thread_env entries must be NAME=VALUE")?;
+        ensure!(!name.is_empty() && name.bytes().enumerate().all(|(i, c)| c == b'_' || c.is_ascii_uppercase() || i > 0 && c.is_ascii_digit()), "invalid thread_env name");
+        ensure!(!["LD_", "CLAUDE_", "GIT_"].iter().any(|p| name.starts_with(p)) && !["PATH", "HOME", "BASH_ENV", "ENV"].contains(&name), "reserved thread_env name {name}");
+        ensure!(!value.contains('\0'), "thread_env contains NUL");
+    }
+    Ok(())
+}
+
+/// Reject Claude argument overrides that escape the thread sandbox settings.
+pub fn validate_thread_arguments(args: &[String]) -> Result<()> {
+    for (index, arg) in args.iter().enumerate() {
+        let flag = arg.split('=').next().unwrap_or(arg);
+        ensure!(!["--settings", "--setting-sources", "--dangerously-skip-permissions", "--add-dir"].contains(&flag), "sandboxed Claude thread refuses {flag}");
+        ensure!(!(flag == "--permission-mode" && (arg.split_once('=').map(|(_, v)| v).or_else(|| args.get(index + 1).map(String::as_str)) == Some("bypassPermissions"))), "sandboxed Claude thread refuses bypassPermissions");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
