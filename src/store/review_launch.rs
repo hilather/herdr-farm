@@ -113,7 +113,7 @@ where ATTEMPT is the attempt named above, ROOT is {root} and PROJECT is {slug}. 
     {{\"schema\": \"review_receipt.v1\", \"session_id\": \"...\", \"submission_id\": \"...\", \"candidate_oid\": \"...\", \"outcome\": \"completed\", \"findings\": [], \"evidence\": []}}\n\n\
 with the session, submission and candidate that command prints, and submit it:\n\n\
     herdr-farm --root ROOT telemetry PROJECT review submit --input-file FILE\n\n\
-`outcome` is completed, incomplete, failed, timed_out or interrupted. A review that did not complete also names `reason`: budget_exhausted, reviewer_error, scope_unavailable, operator_stopped or unspecified. `findings` are `finding:<token>` references or {{\"ref\": \"finding:<token>\", \"title\": \"<short title>\"}}; `evidence` is `sha256:<hex64>` or `verification_run:<hex64>`. A completed review with no findings is valid. Your receipt is a proposal: you cannot accept, reject or triage a review, and a receipt with any other field is refused.\n"))
+`outcome` is completed, incomplete, failed, timed_out or interrupted. A review that did not complete also names `reason`: budget_exhausted, reviewer_error, scope_unavailable, operator_stopped or unspecified. `findings` are `finding:<token>` references or {{\"ref\": \"finding:<token>\", \"title\": \"<short title>\"}}; `evidence` is `sha256:<hex64>` or `verification_run:<hex64>`. A review with no findings must still submit `findings: []`. Submit this receipt in addition to the ordinary result report; both commands use the submission spool inside your sandbox. Your receipt is a proposal: you cannot accept, reject or triage a review, and a receipt with any other field is refused.\n"))
 }
 
 /// Identities of the reviewed work's author that a brief must never carry:
@@ -261,7 +261,7 @@ impl SqliteStore {
     /// Build the blind brief of an assigned opportunity. `root` and `slug`
     /// name this project for the receipt commands. Read-only.
     pub fn review_brief(&mut self, opportunity: &str, root: &str, slug: &str) -> Result<ReviewBrief> {
-        let tx = self.connection.transaction()?;
+        let tx = super::read_transaction(&mut self.connection)?;
         require(&tx)?;
         if !tx.query_row("SELECT EXISTS(SELECT 1 FROM review_assignments WHERE opportunity_id=?1)", [opportunity], |r| r.get::<_, bool>(0))? {
             return Err(invalid(format!("review opportunity {opportunity} is not assigned: a review launches from an assignment")));
@@ -276,7 +276,7 @@ impl SqliteStore {
 
     /// Bind worker snapshot `snapshot` of review task `task` to the assigned
     /// `opportunity`. Refused unless the snapshot's retained instructions are
-    /// exactly the opportunity's current blind brief, it selected no optional
+    /// the exact blind base (with appended context allowed for operator assignments), it selected no optional
     /// memory under an empty scope, its complete rendering (`rendered`, the
     /// retained knowledge text) names no author identity, and `task` is not the
     /// reviewed task and has run nothing but launched sessions of this
@@ -284,8 +284,10 @@ impl SqliteStore {
     #[allow(clippy::too_many_arguments)]
     pub fn bind_review_brief(&mut self, opportunity: &str, task: &str, snapshot: &str, rendered: &str, root: &str, slug: &str, principal: &str, now: i64) -> Result<ReviewBriefBinding> {
         if principal.is_empty() || principal.len() > 128 { return Err(invalid("invalid principal")); }
-        let brief = self.review_brief(opportunity, root, slug)?;
-        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut brief = self.review_brief(opportunity, root, slug)?;
+        let blind: bool = self.connection.query_row("SELECT blind FROM review_assignments WHERE opportunity_id=?1", [opportunity], |r| r.get(0))?;
+        if !blind { brief.digest = sha(rendered); }
+        let tx = super::mutation_transaction(&mut self.connection)?;
         require(&tx)?;
         let existing: Option<(String, String, String, String, String, i64)> = tx.query_row("SELECT opportunity_id,task_id,brief_digest,prior_disclosure,principal,recorded_unix_ms FROM review_briefs WHERE snapshot_id=?1",
             [snapshot], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))).optional()?;
@@ -300,7 +302,7 @@ impl SqliteStore {
         let assigned: Option<String> = tx.query_row("SELECT json_extract(c.canonical_json,'$.definition_digest') FROM review_assignments a JOIN agent_configurations c ON c.configuration_id=a.reviewer_configuration_id WHERE a.opportunity_id=?1",
             [opportunity], |r| r.get(0)).optional()?.flatten();
         if assigned.as_deref() != Some(definition.as_str()) { return Err(invalid("the review brief snapshot is for another profile than the assigned reviewer's")); }
-        if instructions != brief.text { return Err(invalid("the snapshot's retained instructions are not the opportunity's blind review brief")); }
+        if (blind && instructions != brief.text) || (!blind && !instructions.starts_with(&brief.text)) { return Err(invalid("the snapshot's retained instructions are not the opportunity's blind review brief")); }
         let request: serde_json::Value = serde_json::from_str(&request).map_err(|_| StoreError::Corrupt("invalid snapshot request".into()))?;
         let empty = |k: &str| request[k].as_array().is_none_or(Vec::is_empty);
         let optional: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM snapshot_entries WHERE snapshot_id=?1 AND role='optional')", [snapshot], |r| r.get(0))?;
@@ -323,6 +325,96 @@ impl SqliteStore {
             prior_disclosure: brief.prior_disclosure, principal: principal.into(), recorded_unix_ms: now, replayed: false })
     }
 
+    /// Validate a launch-run review before any launch mutation. Replays resolve
+    /// the candidate through the retained binding, whose id includes its time.
+    #[allow(clippy::too_many_arguments)]
+    pub fn check_review_run(&mut self, task: &str, reviewed: &str, kind: &str, scope: &str, profile: &str, context: &str) -> Result<String> {
+        require(&self.connection)?;
+        if task == reviewed { return Err(invalid("a review runs as its own task, never the reviewed task")); }
+        let bound: Option<(String, String, String, String)> = self.connection.query_row(
+            "SELECT o.submission_id,o.task_id,o.kind,o.scope FROM review_briefs b JOIN review_opportunities o USING(opportunity_id) WHERE b.task_id=?1 LIMIT 1", [task],
+            |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
+        let requested_scope = if scope == "tree" { "candidate_tree" } else { "candidate_diff" };
+        let registered: Option<(String, String)> = if kind == "skeptical" {
+            self.connection.query_row("SELECT kind,scope FROM review_protocols WHERE protocol=?1", [skeptical_protocol(scope)], |r| Ok((r.get(0)?, r.get(1)?))).optional()?
+        } else { None };
+        let (effective_kind, scope) = registered.as_ref().map(|(k,s)| (k.as_str(),s.as_str())).unwrap_or((kind,requested_scope));
+        let submission = if let Some((submission, target, method, bound_scope)) = bound {
+            if target != reviewed || method != effective_kind || bound_scope != scope { return Err(invalid("the review task is already bound to another opportunity")); }
+            let (_, frozen) = super::review_capture::retained_profile(&self.connection, profile)?;
+            let assigned: String = self.connection.query_row("SELECT a.reviewer_configuration_id FROM review_assignments a JOIN review_briefs b USING(opportunity_id) WHERE b.task_id=?1 LIMIT 1", [task], |r| r.get(0))?;
+            if assigned != crate::domain::agent_configuration(&frozen).id { return Err(invalid("the review task launches only with its assigned reviewer configuration")); }
+            submission
+        } else {
+            self.connection.query_row("SELECT s.submission_id FROM result_submissions s WHERE s.task_id=?1 ORDER BY (EXISTS(SELECT 1 FROM acceptance_policies p WHERE p.task_id=s.task_id AND p.contract_revision=s.contract_revision)
+                AND NOT EXISTS(SELECT 1 FROM acceptance_policies p WHERE p.task_id=s.task_id AND p.contract_revision=s.contract_revision
+                    AND NOT EXISTS(SELECT 1 FROM verification_runs v JOIN verified_results r ON r.run_id=v.run_id
+                        JOIN verification_contract_checks k ON k.result_id=r.result_id AND k.version=2
+                        WHERE v.submission_id=s.submission_id AND v.policy_id=p.policy_id AND v.state='accepted'))) DESC,s.created_unix_ms DESC,s.submission_id DESC LIMIT 1", [reviewed], |r| r.get::<_,String>(0)).optional()?
+                .ok_or_else(|| invalid(format!("task {reviewed} has no submission to review")))?
+        };
+        let author: String = self.connection.query_row("SELECT attempt_id FROM result_submissions WHERE submission_id=?1", [&submission], |r| r.get(0))?;
+        let mut identities = vec![author.clone()];
+        let dispatch: Option<(String,String)> = self.connection.query_row("SELECT chosen_configuration_id,eligible FROM dispatch_decisions WHERE attempt_id=?1", [&author], |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
+        if let Some((configuration, eligible)) = dispatch {
+            let pool: serde_json::Value = serde_json::from_str(&eligible).map_err(|_| invalid("invalid dispatch eligible configurations"))?;
+            identities.extend(pool.as_array().into_iter().flatten().filter(|v| v["configuration_id"] == configuration)
+                .filter_map(|v| v["profile_digest"].as_str().map(str::to_owned)));
+            identities.push(configuration);
+        }
+        if identities.iter().any(|id| id.len() >= MIN_SCANNED_IDENTITY && context.contains(id)) {
+            return Err(invalid("the review task's retained knowledge names the author's attempt, configuration or profile"));
+        }
+        Ok(submission)
+    }
+
+    /// Reuse a retained review task binding; otherwise open and operator-assign
+    /// the opportunity using the existing capture and skeptical-pass services.
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_review_run(&mut self, task: &str, reviewed: &str, kind: &str, scope: &str, profile: &str, now: i64) -> Result<String> {
+        let submission = self.check_review_run(task, reviewed, kind, scope, profile, "")?;
+        if let Some(opportunity) = self.connection.query_row("SELECT opportunity_id FROM review_briefs WHERE task_id=?1 LIMIT 1", [task], |r| r.get::<_,String>(0)).optional()? { return Ok(opportunity); }
+        let mut spec = super::ReviewOpportunitySpec { submission_id: submission.clone(), scope: if scope == "tree" { "candidate_tree" } else { "candidate_diff" }.into(),
+            kind: kind.into(), role: "gate".into(), protocol: "review-protocol.v1".into(), prior_findings: vec![], budget_ms: None };
+        if kind == "skeptical" {
+            spec.protocol = skeptical_protocol(scope).into();
+            if !self.connection.query_row("SELECT EXISTS(SELECT 1 FROM review_protocols WHERE protocol=?1)", [&spec.protocol], |r| r.get::<_,bool>(0))? {
+                let definition = serde_json::json!({"schema":"review_protocol.v1","protocol":spec.protocol,"kind":"skeptical","scope":spec.scope,"role":"gate",
+                    "challenges":["unsupported_claims","missed_edge_cases","unsafe_concurrency","missing_acceptance_criteria","evidence_gaps"],
+                    "failure_classes":["logic","boundary","concurrency","security","test_weakening","requirement_omission"],
+                    "permitted_tools":["read","test"],"budget_ms":1800000,"evidence_min":1,"stopping_rule":"checklist_complete","prior_disclosure":"withheld","reviewer_profile":null,
+                    "outcome":{"primary":"new_validated_unique_findings.v1","adjudication":"owner_triage.v1","severity_policy":"finding_severity.v1","min_severity":"low"}});
+                self.register_review_protocol(&serde_json::to_vec(&definition).map_err(|e| invalid(e.to_string()))?, None, "operator:cli", now)?;
+            }
+            let (kind,scope,role,budget) = self.connection.query_row("SELECT kind,scope,role,budget_ms FROM review_protocols WHERE protocol=?1", [&spec.protocol], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,u64>(3)?)))?;
+            spec.kind=kind; spec.scope=scope; spec.role=role; spec.budget_ms=Some(budget);
+        }
+        let priors = self.connection.prepare("SELECT opportunity_id FROM review_opportunities WHERE submission_id=?1 ORDER BY created_unix_ms,opportunity_id")?
+            .query_map([&submission], |r| r.get::<_,String>(0))?.collect::<std::result::Result<Vec<_>,_>>()?;
+        let opportunity = self.open_review_opportunity(&spec, "operator:cli", now)?.opportunity_id;
+        self.assign_review(&opportunity, &super::ReviewAssignmentChoice::Operator { profile: profile.into() }, "operator:cli", now)?;
+        if kind == "skeptical" && !priors.is_empty() { self.bind_review_pass(&opportunity, &priors, None, "operator:cli", now)?; }
+        Ok(opportunity)
+    }
+
+    /// Atomically retain the opportunity, assignment, pass and bound snapshot.
+    /// A refusal or interruption cannot leave an unbound opportunity to replay.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_review_run_snapshot(&mut self, mut plan: crate::domain::SnapshotPlan, project: &std::path::Path, reviewed: &str, kind: &str, scope: &str, root: &str, slug: &str) -> anyhow::Result<crate::domain::MemorySnapshot> {
+        self.check_review_run(&plan.request.task_id, reviewed, kind, scope, &plan.profile_name, &plan.instructions)?;
+        let existing: Option<String> = self.connection.query_row("SELECT b.snapshot_id FROM review_briefs b JOIN memory_snapshots s ON s.id=b.snapshot_id JOIN tasks t ON t.id=b.task_id WHERE b.task_id=?1 AND s.task_revision=t.revision ORDER BY b.recorded_unix_ms DESC LIMIT 1", [&plan.request.task_id], |r| r.get(0)).optional()?;
+        if let Some(snapshot) = existing { return Ok(self.read_memory_snapshot(&snapshot)?); }
+        self.atomic_replay(|store| {
+            let opportunity = store.prepare_review_run(&plan.request.task_id, reviewed, kind, scope, &plan.profile_name, plan.now_unix_ms)?;
+            let base = store.review_brief(&opportunity, root, slug)?.text;
+            plan.instructions = format!("{base}\n## Project context\n\n{}", plan.instructions);
+            let snapshot = store.create_memory_snapshot(plan.clone())?;
+            let rendered = crate::memory::render_knowledge_snapshot_held(project, snapshot.id.as_str(), store)?;
+            store.bind_review_brief(&opportunity, &plan.request.task_id, snapshot.id.as_str(), rendered["text"].as_str().ok_or_else(|| invalid("retained knowledge text missing"))?, root, slug, "operator:cli", plan.now_unix_ms)?;
+            Ok(snapshot)
+        })
+    }
+
     /// The reviewing worker's view of its session: identifiers for its
     /// receipt only, never the author. Read-only.
     pub fn review_session_for_attempt(&mut self, attempt: &str) -> Result<serde_json::Value> {
@@ -336,4 +428,11 @@ impl SqliteStore {
                 "receipt_schema": super::review_capture::RECEIPT_SCHEMA}))).optional()?;
         row.ok_or_else(|| invalid(format!("attempt {attempt} has no review session recorded at launch")))
     }
+}
+
+/// The skeptical protocol `launch run` registers for a review scope: one per
+/// scope, because a registered protocol never changes and §7 refuses a pass
+/// whose opportunity scope differs from its protocol's.
+fn skeptical_protocol(scope: &str) -> &'static str {
+    if scope == "tree" { "skeptical-challenge-tree.v1" } else { "skeptical-challenge.v1" }
 }

@@ -275,8 +275,9 @@ pub fn report(project: &Path) -> Result<Value> {
         sessions.push(row);
     }
     let mut out = Vec::new();
+    let children = child_index(&db)?;
     for attempt in &attempts {
-        let usage = if attempt.supported() || (attempt.grok() && db.query_row("SELECT EXISTS(SELECT 1 FROM rollout_sources WHERE attempt_id=?1 AND originator IN ('otlp:grok','otlp:devin') AND binding='bound')", [&attempt.id], |r| r.get::<_, bool>(0))?) { attempt_usage(&db, &attempt.id)? } else { unavailable("adapter_absent") };
+        let usage = if attempt.supported() || (attempt.grok() && db.query_row("SELECT EXISTS(SELECT 1 FROM rollout_sources WHERE attempt_id=?1 AND originator IN ('otlp:grok','otlp:devin') AND binding='bound')", [&attempt.id], |r| r.get::<_, bool>(0))?) { attempt_usage_with(&db, &attempt.id, &children)? } else { unavailable("adapter_absent") };
         let after_termination = after_termination(&db, &attempt.id, attempt.terminated_unix_ms())?;
         out.push(json!({"attempt_id": attempt.id, "usage": usage, "after_termination": after_termination}));
     }
@@ -387,7 +388,78 @@ pub(crate) fn incomplete_newer(db: &Connection, session: &str, version: &str) ->
         OR EXISTS(SELECT 1 FROM codex_usage WHERE session_id=?1 AND accepted=0)", [session], |r| r.get(0))
 }
 
+const USAGE_KEYS: [&str; 7] = ["records", "input_tokens", "cached_input_tokens", "cache_write_input_tokens", "output_tokens", "reasoning_output_tokens", "total_tokens"];
+
+fn zero_usage() -> Value {
+    json!({"input_tokens": 0, "cached_input_tokens": 0, "cache_write_input_tokens": 0, "output_tokens": 0, "reasoning_output_tokens": 0, "total_tokens": 0, "records": 0})
+}
+
+fn add_usage(total: &mut Value, part: &Value) {
+    for key in USAGE_KEYS {
+        total[key] = match (total[key].as_i64(), part[key].as_i64()) { (Some(a), Some(b)) => json!(a + b), _ => unavailable("incomplete") };
+    }
+}
+
+/// Child usage of every attempt of a project, built once: native membership,
+/// session roles and the delta ledger are each read a single time, so a
+/// report over every attempt does not rebuild the graph per attempt.
+pub(crate) struct ChildIndex {
+    /// attempt -> (primary sessions' ledger usage, included children, excluded children)
+    by_attempt: BTreeMap<String, (Value, Value, Vec<Value>)>,
+    empty: bool,
+}
+
+pub(crate) fn child_index(db: &Connection) -> Result<ChildIndex> {
+    let membership = super::accounting::graph::attempt_membership(db)?;
+    if membership.is_empty() { return Ok(ChildIndex { by_attempt: BTreeMap::new(), empty: true }); }
+    let roles: BTreeMap<String, String> = db.prepare("SELECT session_id, role FROM session_graph_nodes")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+    let ledger = super::accounting::ledger::read(db)?;
+    let mut by_session: BTreeMap<&str, Value> = BTreeMap::new();
+    for entry in ledger["entries"].as_array().into_iter().flatten().filter(|e| e["basis"] == "delta") {
+        if !entry["provenance"].as_array().into_iter().flatten().any(|p| p["disposition"] == "accepted") { continue; }
+        let Some(session) = entry["session_id"].as_str() else { continue };
+        let usage = by_session.entry(session).or_insert_with(zero_usage);
+        for (key, native) in [("input_tokens", "input_tokens"), ("cached_input_tokens", "cache_read_tokens"),
+            ("cache_write_input_tokens", "cache_write_tokens"), ("output_tokens", "output_tokens"),
+            ("reasoning_output_tokens", "reasoning_tokens"), ("total_tokens", "total_tokens")] {
+            usage[key] = match (usage[key].as_i64(), entry["normalized"][native].as_i64()) { (Some(a), Some(b)) => json!(a + b), _ => unavailable("incomplete") };
+        }
+        usage["records"] = json!(usage["records"].as_i64().unwrap_or(0) + 1);
+    }
+    let mut by_attempt: BTreeMap<String, (Value, Value, Vec<Value>)> = BTreeMap::new();
+    for (session, (owner, reason)) in membership {
+        let Some(owner) = owner else { continue };
+        let slot = by_attempt.entry(owner).or_insert_with(|| (zero_usage(), zero_usage(), Vec::new()));
+        let role = roles.get(&session).cloned().unwrap_or_default();
+        if let Some(reason) = reason { slot.2.push(json!({"session_id": session, "role": role, "reason": reason})); continue; }
+        let usage = by_session.get(session.as_str()).cloned().unwrap_or_else(zero_usage);
+        if role == "primary" { add_usage(&mut slot.0, &usage); } else { add_usage(&mut slot.1, &usage); }
+    }
+    Ok(ChildIndex { by_attempt, empty: false })
+}
+
 pub(super) fn attempt_usage(db: &Connection, attempt: &str) -> Result<Value> {
+    attempt_usage_with(db, attempt, &child_index(db)?)
+}
+
+/// [`attempt_usage`] with a [`ChildIndex`] built once for the project.
+pub(crate) fn attempt_usage_with(db: &Connection, attempt: &str, index: &ChildIndex) -> Result<Value> {
+    let mut primary = primary_attempt_usage(db, attempt)?;
+    // An unavailable usage (e.g. `schema_unrecognized`) stays exactly as it is.
+    if index.empty || primary["status"] == "unavailable" { return Ok(primary); }
+    // Attempts without child sessions keep exactly the primary-only shape.
+    let Some((own, children, excluded)) = index.by_attempt.get(attempt).cloned() else { return Ok(primary) };
+    if children["records"] == 0 && excluded.is_empty() { return Ok(primary); }
+    let mut total = own;
+    add_usage(&mut total, &children);
+    primary["children"] = children;
+    primary["including_children"] = total;
+    primary["excluded_children"] = json!(excluded);
+    Ok(primary)
+}
+
+fn primary_attempt_usage(db: &Connection, attempt: &str) -> Result<Value> {
     // Records collected before their version was certified keep NULL counters
     // until a collect re-reads their rollout, so the session stays uncertified
     // rather than summing to 0; `detail` says when that rollout is gone.

@@ -163,6 +163,10 @@ enum LaunchCommand {
         #[arg(long)] title: Option<String>,
         /// Planning task: the one deliverable, a Markdown file under docs/
         #[arg(long, conflicts_with_all=["contract_file", "write", "output"])] plan_output: Option<String>,
+        /// Review the current submission of this task, recording review telemetry
+        #[arg(long)] review_of: Option<String>,
+        #[arg(long, requires="review_of", default_value="code", value_parser=["code", "skeptical", "test", "security", "architecture"])] review_kind: String,
+        #[arg(long, requires="review_of", default_value="diff", value_parser=["diff", "tree"])] review_scope: String,
         /// Task instructions, appended to PROJECT.md in the retained brief
         #[arg(long)] prompt_file: Option<PathBuf>,
         /// Repo-relative files or directory prefixes the code task may change
@@ -1327,8 +1331,8 @@ pub fn run() -> Result<()> {
             let value=match command {
                 LaunchCommand::Draft { selection, expected_head, validity_seconds } =>
                     serde_json::to_value(herdr_farm::launch_preparation::draft(&project,&load(&selection)?,expected_head,std::time::Duration::from_secs(validity_seconds),deadline,Default::default())?)?,
-                LaunchCommand::Run { task, profile, repository, sign_with, validity_seconds, title, plan_output, write, output, accept, deliverable, prompt_file, contract_file, integration_ref, base, max_active_workers, herdr_socket, prepare_only } =>
-                    crate::launch_run::run(&ctx, &slug, crate::launch_run::Args { task, profile, repository, sign_with, validity_seconds, title, plan_output, write, output, accept, deliverable, prompt_file, contract_file, integration_ref, base, max_active_workers, herdr_socket, prepare_only })?,
+                LaunchCommand::Run { task, profile, repository, sign_with, validity_seconds, title, plan_output, review_of, review_kind, review_scope, write, output, accept, deliverable, prompt_file, contract_file, integration_ref, base, max_active_workers, herdr_socket, prepare_only } =>
+                    crate::launch_run::run(&ctx, &slug, crate::launch_run::Args { task, profile, repository, sign_with, validity_seconds, title, plan_output, review_of, review_kind, review_scope, write, output, accept, deliverable, prompt_file, contract_file, integration_ref, base, max_active_workers, herdr_socket, prepare_only })?,
                 LaunchCommand::View { task } => crate::launch_run::view(&ctx, &slug, &task)?,
                 LaunchCommand::Stop { task, force } => crate::launch_run::stop(&ctx, &slug, &task, force)?,
                 LaunchCommand::Reserve { selection, approval_digest, expected_head } => {

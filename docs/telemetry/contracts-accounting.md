@@ -144,7 +144,20 @@ Links come only from native evidence:
   `token_usage_record.session_id`): a guardian reports its parent's id there,
   and nodes and usage are keyed by the rollout's own `session_meta.id`
   (contracts.md §5).
-- A linked child is **never** added to its parent's total. The parent lists
+- **Spawn named as a fork (Codex 0.159).** A `thread_spawn` subagent whose
+  `forked_from_id` equals its `subagent_parent_thread_id` and whose A8 row has
+  no `history_base` is the spawn shape, linked by `parent_thread_id` with
+  inclusion `separate`, not a `fork_replay_not_certified` fork. Live evidence
+  (tactics-dev, Codex 0.159.x, 2026-10-04): 33 such children, 647 usage
+  records, none sharing a response id or payload digest with its parent; each
+  starts at a fresh-session input size. Migration `0022_spawn_not_fork.sql`
+  invalidates the stored graph once so the next sync rebuilds it.
+- A linked child is **never** added to its parent's session total.
+  Attempt totals include primary sessions plus native-linked descendants only
+  when each link's inclusion is `separate`. Usage keeps the existing fields
+  unchanged (historically bound-session counters) and adds `children` and `including_children` subtotals.
+  Excluded children retain their reason. A project rollup's unavailable fork
+  subtotal does not affect unrelated attempts. The parent lists
   it under `children {sessions: [{session_id, role, link_basis, certified,
   total_tokens, inclusion}], total_tokens}`: `inclusion` is `separate` for a
   spawned subagent and a guardian (the live parent's thread total 29760
@@ -336,17 +349,23 @@ nothing; anything else (a record time, a provider check, a session now
 before the first reprice) shows the latest revision or revision N, byte-
 identical to when it was appended (a delta revision is replayed onto the
 full copy below it, §12). Per session and per attempt (bound
-attempt of the storing rollout; every non-`primary` session, guardian,
-subagent or fork, linked or not, summed apart under the key
-`unlinked_children`, §3; the key predates A4 linking and is kept for
-compatibility): `estimate` is `complete {currency, amount}` when
+attempt of the primary session; native parent links assign separate children
+to that attempt): `estimate` includes `primary` plus `children` (included
+by role). `excluded_children` lists uncertified forks and truly unlinked
+children with their reasons; these are never added. Spawned subagents and
+guardians have `separate` usage: their tokens are absent from the parent's
+total, so adding their own entries cannot double count. `estimate` is `complete {currency, amount}` when
 every entry is priced in one currency; `partial {currency, priced_amount}`
 (labeled, never the total) when some are not; `unavailable mixed_currency
 {priced_by_currency}` when priced in several currencies (never added, no
 conversion); `unavailable no_priced_entries` when none is. `coverage` counts
 entries, priced, and unpriced by reason; sessions list `rate_cards` used.
 JSON amounts are exact; the text view is the only rounding (half-up, 6
-places).
+places). The attempt line shows the total `(primary X + subagents Y)`;
+excluded children keep their own line and reason. `subagents` in this compact
+text subtotal includes guardians and certified separate forks; JSON splits
+these roles. Revision entry values remain pinned; attempt membership uses the
+currently collected native graph evidence.
 
 Test `repricing_uses_rate_effective_at_usage_time`: version 1 (before the
 boundary; input 2, output 4 per 10^6, no cache-read rate) prices doc 10's
@@ -1465,7 +1484,9 @@ as integers, money as exact decimal strings with `currency`).
 **M04 `cost_per_accepted_task`** (`M04.cost-v1`, report hook): contracts §6
 `T`/`A` (the central `task_evidence`, same window rule). The numerator is the
 estimate over every valued entry of every attempt of the tasks in `T`, which
-includes failed and cancelled attempts and child sessions. The denominator is
+includes failed and cancelled attempts and native-linked child sessions whose
+inclusion is `separate`, using the same attempt membership as `cost`.
+Uncertified forks and truly unlinked children are excluded with their reasons. The denominator is
 `count(A)`. `value` is `"<amount>/<count(A)>"` with `currency` only when every
 such attempt has usage and all its entries are priced in one currency.
 Otherwise it is `unavailable lifecycle_cost_incomplete`, with the numerator
@@ -1527,7 +1548,11 @@ nothing new is stored, and `accounting sync` output is unchanged.
 - **Session graph** (§3): spawned-subagent (`parent_thread_id`) and fork
   (`forked_from_id`) links are certified `live`. A live-shape fork (A8
   `rollout_forks.base_thread_id`) is `separate` with its reconciliation
-  states; a fork's reported totals are never added.
+  states; a fork's reported totals are never added. Attempt cost and usage
+  include its own delta entries only for `separate` children, including spawned
+  subagents and guardians; uncertified or unlinked children remain excluded.
+  M04 uses these attempt totals. M12 still counts every valued project entry:
+  attempt totals + excluded children + unbound sessions reconcile to M12.
 - **Quota** (§5): `resets_at` within 60 s of the window's, before its reset
   elapsed, is the same window (live: +5 s); `plan_type: null` is not another
   window.

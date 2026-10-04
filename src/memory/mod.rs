@@ -98,7 +98,7 @@ mod delivery;
 mod worker_brief;
 pub use worker_brief::{WorkerBrief, render_attempt_brief, enqueue_attempt_brief};
 pub(crate) use worker_brief::preview_worker_brief;
-pub(crate) use import::{render_attempt_knowledge_budgeted, render_knowledge_snapshot_budgeted};
+pub(crate) use import::{render_knowledge_snapshot_held, render_attempt_knowledge_budgeted, render_knowledge_snapshot_budgeted};
 pub(crate) use worker_brief::compose_knowledge;
 pub(crate) use worker_brief::{WORKER_BRIEF_ESTIMATOR, framing_chars as worker_brief_framing_chars};
 pub use delivery::*;

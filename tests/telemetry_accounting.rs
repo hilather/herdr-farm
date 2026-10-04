@@ -539,8 +539,8 @@ fn repricing_uses_rate_effective_at_usage_time() {
     assert_eq!(session(&cost, STRADDLE)["estimate"], unavailable("no_priced_entries"));
     assert_eq!(valuation(&cost, CACHE, 1), unavailable("cache_read_rate_missing"), "40 cached tokens and version 1 has no cache-read rate");
     let unpriced = json!({"cache_read_rate_missing": 1, "cache_write_convention_unknown": 1, "no_rate_card": 1, "rate_change_within_usage_interval": 1});
-    assert_eq!(cost["attempts"], json!([{"attempt_id": f.attempt, "estimate": {"status": "partial", "reason": "unpriced_entries", "currency": "USD", "priced_amount": "0.0081"},
-        "coverage": {"entries": 6, "priced": 2, "unpriced": unpriced}, "unlinked_children": null}]));
+    assert_eq!(json!(cost["attempts"].as_array().unwrap().iter().map(|a| json!({"attempt_id": a["attempt_id"], "estimate": a["estimate"], "coverage": a["coverage"]})).collect::<Vec<_>>()), json!([{"attempt_id": f.attempt, "estimate": {"status": "partial", "reason": "unpriced_entries", "currency": "USD", "priced_amount": "0.0081"},
+        "coverage": {"entries": 6, "priced": 2, "unpriced": unpriced}}]));
 
     // Text rounds only at presentation: 6 decimal places.
     let out = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", f.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
@@ -551,7 +551,7 @@ fn repricing_uses_rate_effective_at_usage_time() {
         cache_write_convention_unknown 1, no_rate_card 1, rate_change_within_usage_interval 1)", f.attempt),
         format!("  session {BEFORE} primary: USD 0.004000 (1 of 1 entries priced) cards synthetic-codex@1"),
         format!("  session {STRADDLE} primary: unavailable (no_priced_entries) (0 of 1 entries priced; unpriced: rate_change_within_usage_interval 1)")] {
-        assert!(text.lines().any(|l| l == line), "{line:?} in\n{text}");
+        assert!(text.lines().any(|l| if line.starts_with("attempt ") { l.starts_with(&line) && l.contains("(primary ") } else { l == line }), "{line:?} in\n{text}");
     }
 
     // M12/M14 through the report (§12): the same partial estimate, never the total; 2 of 6 entries priced.
@@ -748,7 +748,7 @@ fn window_reset_starts_new_window_not_negative() {
     let text = f.text(&["accounting", "quota"]);
     for line in [format!("M40 {} codex primary remaining 40% age_ms=60000 fresh", f.attempt), format!("M40 {} codex secondary n/a (not_reported)", f.attempt),
         "M38 throttled_time_share n/a (throttling_not_certified)".to_owned()] {
-        assert!(text.lines().any(|l| l == line), "{line:?} in\n{text}");
+        assert!(text.lines().any(|l| if line.starts_with("attempt ") { l.starts_with(&line) && l.contains("(primary ") } else { l == line }), "{line:?} in\n{text}");
     }
 
     // M38/M39 reach the report through the lane hook: unknown, never 0.
@@ -854,8 +854,8 @@ fn record_times_narrow_rate_card_interval() {
     // 100 × 2 + 20 × 8 per 10^6 = 0.00036, no provider to check.
     let e = entry(&cost, UNVERIFIED, 1);
     assert_eq!((&e["valuation"], &e["provider_check"]), (&priced(2, "0.00036", json!({"input": "0.0002", "output": "0.00016"})), &json!("provider_unverified")));
-    assert_eq!(cost["attempts"], json!([{"attempt_id": f.attempt, "estimate": {"status": "partial", "reason": "unpriced_entries", "currency": "USD", "priced_amount": "0.00846"},
-        "coverage": {"entries": 5, "priced": 3, "unpriced": {"provider_mismatch": 1, "rate_change_within_usage_interval": 1}}, "unlinked_children": null}]));
+    assert_eq!(json!(cost["attempts"].as_array().unwrap().iter().map(|a| json!({"attempt_id": a["attempt_id"], "estimate": a["estimate"], "coverage": a["coverage"]})).collect::<Vec<_>>()), json!([{"attempt_id": f.attempt, "estimate": {"status": "partial", "reason": "unpriced_entries", "currency": "USD", "priced_amount": "0.00846"},
+        "coverage": {"entries": 5, "priced": 3, "unpriced": {"provider_mismatch": 1, "rate_change_within_usage_interval": 1}}}]));
 
     // Version 3 (output 6 from the boundary): 800 × 2 + 200 × 0.5 + 300 × 6 = 0.0035; 100 × 2 + 20 × 6 = 0.00032.
     f.cli_args(&["accounting", "import-rate-card", &rate_card(&f, "rates-v3.json", boundary)]);
@@ -1003,7 +1003,7 @@ fn shared_window_across_homes_is_flagged_not_summed() {
     assert_eq!(f.report()["metrics"]["M40"]["decisions"], json!([expected]));
     let text = f.text(&["accounting", "quota"]);
     let line = format!("shared window candidate codex primary reset {}: accounts {}, {} (execution homes; not merged, never summed)", r1 * 1000, accounts[0], accounts[1]);
-    assert!(text.lines().any(|l| l == line), "{line:?} in\n{text}");
+    assert!(text.lines().any(|l| if line.starts_with("attempt ") { l.starts_with(&line) && l.contains("(primary ") } else { l == line }), "{line:?} in\n{text}");
     assert!(text.lines().any(|l| l == format!("M40 {} codex primary remaining 62.5% age_ms=60000 fresh", f.attempt)), "{text}");
 
     // Replay leaves everything byte-identical.
@@ -1147,7 +1147,7 @@ fn attention_intervals_union_and_censor() {
         (serde_json::from_str(&text).unwrap_or(serde_json::Value::Null), text)
     };
     cli(&["collect"]);
-    assert_eq!(cli(&["accounting", "status"]).0, json!({"stream": "accounting", "version": 21}));
+    assert_eq!(cli(&["accounting", "status"]).0, json!({"stream": "accounting", "version": 22}));
     // Stream 8 dropped the superseded projections (v2, v4, v6); their replacements stay.
     let tables: Vec<String> = rusqlite::Connection::open(project.join(".state/telemetry.db")).unwrap()
         .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('session_graph','quota_observations','session_nodes','session_graph_nodes','quota_window_observations') ORDER BY name").unwrap()
@@ -2038,7 +2038,7 @@ fn provider_charges_reconcile_allocate_and_convert() {
     let current = f.cli_args(&["accounting", "charges"]).1;
     f.sidecar().execute("UPDATE telemetry_streams SET version=9 WHERE stream='accounting'", []).unwrap();
     assert_eq!(f.cli_args(&["accounting", "import-charges", &part("charges-2.json")]).0["charges"][0]["imported"], false);
-    assert_eq!((f.cli_args(&["accounting", "status"]).0["version"].clone(), f.cli_args(&["accounting", "charges"]).1), (json!(21), current));
+    assert_eq!((f.cli_args(&["accounting", "status"]).0["version"].clone(), f.cli_args(&["accounting", "charges"]).1), (json!(22), current));
 
     // Invoice allocation by a named, versioned rule: 12 × 2980/3480 and 12 × 500/3480 in units
     // of 10^-12; the one remaining unit goes to the larger remainder; the sum is exactly 12.
@@ -3028,4 +3028,97 @@ fn foreground_collect_waits_and_commits_each_record_once() {
     db.execute("DELETE FROM usage_ledger", []).unwrap();
     f.cli_args(&["accounting", "sync"]);
     assert_eq!(f.cli_args(&["accounting", "entries"]).1, entries);
+}
+
+#[test]
+fn attempt_totals_include_only_native_separate_children() {
+    let mut f = Fixture::new();
+    let first = f.attempt.clone();
+    let plant = |f: &Fixture, name: &str, tokens: i64| {
+        let path = f.rollout(&f.home, name, &[&format!("{ACCOUNTING}/{name}.jsonl")], &f.worktree(), f.decided + 1000, "0.154.0");
+        let text = fs::read_to_string(&path).unwrap();
+        let lines: Vec<String> = text.lines().map(|line| {
+            let mut v: serde_json::Value = serde_json::from_str(line).unwrap();
+            if v["type"] == "token_usage_record" {
+                v["payload"]["usage"] = json!({"input_tokens": tokens, "cached_input_tokens": 0,
+                    "cache_write_input_tokens": 0, "output_tokens": 0, "reasoning_output_tokens": 0, "total_tokens": tokens});
+            }
+            v.to_string()
+        }).collect();
+        fs::write(path, lines.join("\n") + "\n").unwrap();
+    };
+    plant(&f, "parent", 100);
+    plant(&f, "spawned", 40);
+    // Guardian fixture uses its A5 thread lineage, just as the live B12 shape.
+    f.rollout(&f.home, "guardian", &[GUARDIAN], &f.worktree(), f.decided + 1000, "0.154.0");
+    let guardian = f.home.join(".codex/sessions/2026/09/28/rollout-2026-09-28T00-00-00-guardian.jsonl");
+    let text: Vec<String> = fs::read_to_string(&guardian).unwrap().lines().filter_map(|line| {
+        let mut v: serde_json::Value = serde_json::from_str(line).unwrap();
+        if v["type"] == "token_usage_record" {
+            if v["payload"]["response_id"] != "resp-g3" { return None; }
+            v["payload"]["usage"] = json!({"input_tokens": 10, "cached_input_tokens": 0, "cache_write_input_tokens": 0,
+                "output_tokens": 0, "reasoning_output_tokens": 0, "total_tokens": 10});
+        }
+        Some(v.to_string())
+    }).collect();
+    fs::write(guardian, text.join("\n") + "\n").unwrap();
+    plant(&f, "forked", 20);
+    plant(&f, "orphan-child", 30);
+    f.readmit("codex");
+    (f.attempt, f.decided) = rusqlite::Connection::open(f.project.join(".state/state.db")).unwrap()
+        .query_row("SELECT a.id,d.decided_unix_ms FROM attempts a JOIN dispatch_decisions d ON d.attempt_id=a.id WHERE a.state='reserved'", [], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
+    f.bind();
+    let path = f.rollout(&f.home, "another", &[&format!("{ACCOUNTING}/parent.jsonl")], &f.worktree(), f.decided + 1000, "0.154.0");
+    fs::write(&path, fs::read_to_string(&path).unwrap().replace(PARENT, "00000000-0000-4000-8000-0000000b7099")).unwrap();
+    let path = f.rollout(&f.home, "unbound", &[&format!("{ACCOUNTING}/parent.jsonl")], f.project.to_str().unwrap(), f.decided + 1000, "0.154.0");
+    fs::write(&path, fs::read_to_string(&path).unwrap().replace(PARENT, "00000000-0000-4000-8000-0000000b7098")).unwrap();
+    f.cli("collect"); f.cli_args(&["accounting", "sync"]);
+    let mut card: serde_json::Value = serde_json::from_str(include_str!("fixtures/telemetry/accounting/rates-budget.json")).unwrap();
+    card["provider"] = json!("openai");
+    card["rates"] = json!([{"category": "input", "rate": "1"}, {"category": "output", "rate": "1"}]);
+    let path = f.tmp.path().join("cost-card.json"); fs::write(&path, card.to_string()).unwrap();
+    f.cli_args(&["accounting", "import-rate-card", path.to_str().unwrap()]); f.cli_args(&["accounting", "reprice"]);
+    let cost = f.cli_args(&["accounting", "cost", "--json"]).0;
+    let attempts = cost["attempts"].as_array().unwrap();
+    let a = attempts.iter().find(|a| a["attempt_id"] == first).unwrap();
+    assert_eq!(a["estimate"]["amount"], "150", "{cost}");
+    assert_eq!(a["primary"]["estimate"]["amount"], "100");
+    assert_eq!(a["children"]["by_role"]["subagent"]["estimate"]["amount"], "40");
+    assert_eq!(a["children"]["by_role"]["guardian"]["estimate"]["amount"], "10");
+    let reasons: Vec<&str> = a["excluded_children"].as_array().unwrap().iter().filter_map(|c| c["reason"].as_str()).collect();
+    assert!(reasons.contains(&"fork_replay_not_certified")); assert!(reasons.contains(&"parent_not_collected"));
+    assert_eq!(attempts.iter().find(|a| a["attempt_id"] == f.attempt).unwrap()["estimate"]["amount"], "100");
+    let usage = f.cli_args(&["usage", "--json"]).0;
+    let a = usage["attempts"].as_array().unwrap().iter().find(|a| a["attempt_id"] == first).unwrap();
+    assert_eq!(a["usage"]["including_children"]["total_tokens"], 150, "{usage}");
+    assert_eq!(a["usage"]["children"]["total_tokens"], 50);
+    assert_eq!(a["usage"]["total_tokens"], 200, "existing bound-session fields remain unchanged");
+    let attempt_usage = f.cli_args(&["attempts", "--json"]).0;
+    let a = attempt_usage["attempts"].as_array().unwrap().iter().find(|a| a["attempt_id"] == first).unwrap();
+    assert_eq!(a["usage"]["including_children"]["total_tokens"], 150);
+    let report = f.report();
+    assert_eq!(report["metrics"]["M12"]["value"], "400");
+    let amount = |v: &serde_json::Value| v["estimate"]["amount"].as_str().unwrap_or("0").parse::<i64>().unwrap();
+    let bound_total: i64 = attempts.iter().filter(|a| !a["attempt_id"].is_null()).map(amount).sum();
+    let excluded: i64 = attempts.iter().flat_map(|a| a["excluded_children"].as_array().unwrap()).map(amount).sum();
+    let unbound: i64 = attempts.iter().filter(|a| a["attempt_id"].is_null()).map(amount).sum();
+    assert_eq!((bound_total, excluded, unbound), (250, 50, 100));
+    assert_eq!(bound_total + excluded + unbound, 400);
+    let text = f.text(&["accounting", "cost"]);
+    assert!(text.lines().any(|line| line.starts_with(&format!("attempt {first}: USD 150.000000")) && line.contains("(primary USD 100.000000") && line.contains("+ subagents USD 50.000000")));
+    assert!(text.contains("excluded child") && text.contains("fork_replay_not_certified") && text.contains("parent_not_collected"));
+    assert_eq!(f.cli_args(&["accounting", "sessions"]).0["rollup"]["linked_children"]["reason"], "fork_replay_not_certified");
+    let db = rusqlite::Connection::open(f.project.join(".state/state.db")).unwrap();
+    db.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+    let hex = |c: char| c.to_string().repeat(64);
+    db.execute("INSERT INTO task_contracts(task_id,contract_revision,plan_revision,project_store,expected_head,repository,base_oid,object_format,memory_snapshot_id,route,raw_bytes,raw_digest,installed_seq)
+        VALUES('work',1,NULL,'store',0,'/repo',?1,'sha1',NULL,'verify_only',x'61',?2,(SELECT max(sequence) FROM events))", rusqlite::params!["b".repeat(40), hex('c')]).unwrap();
+    db.execute("INSERT INTO result_submissions(submission_id,project_store,idempotency_key,payload_digest,payload,task_id,contract_revision,contract_digest,attempt_id,repository,base_oid,candidate_oid,object_format,artifact_manifest,claimed_checks,created_unix_ms)
+        VALUES(?1,'store',?1,?2,'{}','work',1,?2,?3,'/repo',?4,?4,'sha1','[]','[]',1000)", rusqlite::params![hex('1'), hex('d'), f.attempt, "b".repeat(40)]).unwrap();
+    db.execute("INSERT INTO verified_results(result_id,run_id,submission_id,commit_oid,tree_oid,object_format,policy_digest,receipt_digest,isolation,memory_fence,created_unix_ms)
+        VALUES(?1,?1,?2,?3,?3,'sha1',?4,?4,'linux-unshare-user-pid-mount-v1',0,2000)", rusqlite::params![hex('2'), hex('1'), "b".repeat(40), hex('7')]).unwrap();
+    drop(db);
+    let report = f.report();
+    assert_eq!(report["metrics"]["M04"]["value"], "250/1", "legacy M04 counted every bound child: 300/1; attempt totals are 250/1");
+    assert_eq!(report["metrics"]["M12"]["value"], "400");
 }

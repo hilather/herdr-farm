@@ -354,11 +354,12 @@ pub fn metrics(project: &Path, since: Option<i64>) -> Result<BTreeMap<String, Va
     }
     let Some(sidecar) = crate::telemetry::sidecar::read(project)? else { return Ok(body(json!({"value": super::unavailable("collection_not_run")}))); };
     let Some(((revision, basis, ..), stored)) = charges::valuations(&sidecar, None)? else { return Ok(body(json!({"value": super::unavailable("not_priced")}))); };
+    let membership = super::graph::attempt_membership(&sidecar)?;
     let cohort: Vec<&Attempt> = attempts.iter().filter(|a| terminal.contains(a.task.as_str())).collect();
     let mut values = Vec::new();
     let mut unobserved = BTreeMap::<&str, usize>::new();
     for a in &cohort {
-        let rows: Vec<&Stored> = stored.values().filter(|s| s.attempt_id.as_deref() == Some(a.id.as_str())).collect();
+        let rows: Vec<&Stored> = stored.values().filter(|s| membership.get(&s.session_id).is_some_and(|(owner, reason)| owner.as_deref() == Some(a.id.as_str()) && reason.is_none())).collect();
         if rows.is_empty() && !a.never_running {
             *unobserved.entry(if a.kind.as_deref().is_some_and(|k| k != "codex") { "adapter_absent" } else { "no_usage_observed" }).or_default() += 1;
         }

@@ -122,7 +122,13 @@ pub(crate) fn store_scoped(tx: &Connection, entries: &[Entry], full: bool) -> Re
         // `session_id` field: a guardian reports its parent's there.
         let meta = metadata.get(root.0.as_str());
         let other = |id: &Option<String>| id.clone().filter(|id| id != session);
-        let forked = meta.and_then(|m| other(&m.forked_from));
+        // Codex 0.159 also names a `thread_spawn` subagent's spawning parent as
+        // its fork origin, with no `history_base`. That is the spawn shape, not a
+        // history-replaying fork: 33 such children in tactics-dev (647 records)
+        // shared no response id or payload with their parents (§3).
+        let spawned = meta.is_some_and(|m| m.subagent_kind.as_deref() == Some("thread_spawn")
+            && m.parent_thread.is_some() && m.parent_thread == m.forked_from);
+        let forked = meta.and_then(|m| other(&m.forked_from)).filter(|_| !spawned);
         let link = meta.and_then(|m| other(&m.parent_thread)).map(|id| (id, "parent_thread_id"))
             .or_else(|| meta.and_then(|m| other(&m.thread_parent)).map(|id| (id, "thread_parent_thread_id")))
             .or_else(|| forked.clone().map(|id| (id, "forked_from_id")));
@@ -272,4 +278,42 @@ pub fn read(db: &Connection) -> Result<Value> {
     let sum = |value: i64| if incomplete > 0 { super::unavailable("incomplete_sessions") } else { json!(value) };
     let linked = match linked_unknown { Some(reason) if incomplete == 0 => reason, _ => sum(linked) };
     Ok(json!({"sessions": out, "rollup": {"sessions": sum(rooted), "linked_children": linked, "unlinked_children": sum(children), "incomplete_sessions": incomplete}}))
+}
+
+/// Attempt ownership follows native parent links, never a child's cwd binding.
+/// Exclusions keep their observed binding for diagnostic grouping only.
+pub(crate) type AttemptMembership = BTreeMap<String, (Option<String>, Option<String>)>;
+
+pub(crate) fn attempt_membership(db: &Connection) -> Result<AttemptMembership> {
+    let graph = read(db)?;
+    let sessions: BTreeMap<&str, &Value> = graph["sessions"].as_array().into_iter().flatten()
+        .filter_map(|s| s["session_id"].as_str().map(|id| (id, s))).collect();
+    let mut result = BTreeMap::new();
+    for (id, session) in &sessions {
+        let binding = |s: &Value| s["rollouts"].as_array().into_iter().flatten()
+            .filter(|r| r["linkage"] != "included").find_map(|r| r["attempt_id"].as_str().map(str::to_owned));
+        let mut current = *session;
+        let mut seen = BTreeSet::new();
+        let mut reason = None;
+        while current["linkage"] != "root" {
+            if !seen.insert(current["session_id"].as_str().unwrap_or_default()) {
+                reason = Some("parent_cycle".to_owned()); break;
+            }
+            if current["linkage"] != "linked_child" {
+                reason = Some(current["parent"]["reason"].as_str().unwrap_or("inclusion_unknown").to_owned()); break;
+            }
+            let parent = current["parent"]["session_id"].as_str().unwrap_or_default();
+            let inclusion = sessions.get(parent).and_then(|s| s["children"]["sessions"].as_array())
+                .and_then(|children| children.iter().find(|c| c["session_id"] == current["session_id"]))
+                .map(|c| &c["inclusion"]);
+            if inclusion.is_none_or(|i| i != "separate") {
+                reason = Some(inclusion.and_then(|i| i["reason"].as_str()).unwrap_or("inclusion_unknown").to_owned()); break;
+            }
+            let Some(next) = sessions.get(parent) else { reason = Some("parent_not_collected".to_owned()); break; };
+            current = next;
+        }
+        let attempt = if reason.is_none() { binding(current) } else { binding(session) };
+        result.insert((*id).to_owned(), (attempt, reason));
+    }
+    Ok(result)
 }

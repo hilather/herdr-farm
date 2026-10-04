@@ -1337,3 +1337,77 @@ fn owner_rejection_and_expiry_preserve_repository_and_capacity() {
     assert!(!store.owner_cap_exemption("expired",&"b".repeat(64),now).unwrap());
     assert_eq!(fs::read(lab.project.join("PROJECT.md")).unwrap(),before);
 }
+
+/// CLI review launches keep normal report contracts and automatically capture
+/// code reviews and skeptical passes on the author's exact submission.
+#[test]
+fn launch_run_records_reviews_and_skeptical_yield_and_refuses_without_writes() {
+    let lab = Lab::with_herdr(STATIC_HERDR);
+    lab.plant_launchable("codex-sol", "codex", "gpt-6.1-sol");
+    let prompt = lab.home.join("review-instructions.txt");
+    fs::write(&prompt, "Inspect edge cases and explain the evidence.").unwrap();
+    let socket = lab.socket_inode_once("reviews.sock");
+    let author_args = ["launch", "demo", "run", "--task", "author", "--profile", "codex-sol", "--repository", lab.repo.to_str().unwrap(),
+        "--write", "src/", "--output", "src/lib.rs", "--sign-with", lab.key.to_str().unwrap(), "--herdr-socket", socket.to_str().unwrap()];
+    let author = lab.ok(&author_args);
+    let delivered = lab.follow_brief(author["attempt"].as_str().unwrap(), "src/lib.rs", "author-result");
+    assert!(delivered.status.success(), "{}", String::from_utf8_lossy(&delivered.stderr));
+    let submission: Value = serde_json::from_slice(&delivered.stdout).unwrap();
+    lab.plant_launchable("claude-sonnet", "claude", "claude-sonnet-5-5");
+    let launch = |task: &str, target: &str, kind: &str, profile: &str| -> Vec<String> {
+        ["launch", "demo", "run", "--task", task, "--profile", profile, "--repository", lab.repo.to_str().unwrap(), "--review-of", target,
+            "--review-kind", kind, "--prompt-file", prompt.to_str().unwrap(), "--sign-with", lab.key.to_str().unwrap(), "--herdr-socket", socket.to_str().unwrap()]
+            .iter().map(|s| (*s).to_owned()).collect()
+    };
+    let mut code = launch("review", "author", "code", "claude-sonnet");
+    code.extend(["--output".into(), "docs/reviews/R.md".into(), "--deliverable".into(), "Evidence report".into()]);
+    let state = herdr_farm::runtime::snapshot(&lab.project).unwrap();
+    for args in [launch("missing-review", "absent", "code", "claude-sonnet"), launch("author", "author", "code", "claude-sonnet")] {
+        let error = lab.fail(&args.iter().map(String::as_str).collect::<Vec<_>>());
+        assert!(error.contains("no submission") || error.contains("own task"), "{error}");
+        assert_eq!(herdr_farm::runtime::snapshot(&lab.project).unwrap(), state);
+    }
+    fs::write(&prompt, format!("Inspect author {}", author["attempt"].as_str().unwrap())).unwrap();
+    let error = lab.fail(&code.iter().map(String::as_str).collect::<Vec<_>>());
+    assert!(error.contains("names the author's"), "{error}");
+    assert_eq!(herdr_farm::runtime::snapshot(&lab.project).unwrap(), state);
+    assert_eq!(lab.ok(&["telemetry", "demo", "review", "show"])["opportunities"], serde_json::json!([]));
+    fs::write(&prompt, "Inspect edge cases and explain the evidence.").unwrap();
+    for (args, refs) in [(code, vec!["finding:first", "finding:second"]), (launch("skeptic", "author", "skeptical", "codex-sol"), vec!["finding:new"])] {
+        let argv = args.iter().map(String::as_str).collect::<Vec<_>>();
+        let report = lab.ok(&argv);
+        let attempt = report["attempt"].as_str().unwrap();
+        let before = lab.ok(&["telemetry", "demo", "review", "show"]);
+        assert_eq!(lab.ok(&argv)["attempt"], report["attempt"]);
+        assert_eq!(lab.ok(&["telemetry", "demo", "review", "show"]), before);
+        let brief = lab.ok(&["memory", "demo", "attempt-brief", "--attempt", attempt]);
+        let text = brief["text"].as_str().unwrap();
+        for expected in ["Shadow trial project", "Review instructions", "Inspect edge cases", "review session --attempt", "review submit --input-file", "findings: []", "result demo submit"] {
+            assert!(text.contains(expected), "{expected}: {text}");
+        }
+        let session = lab.ok(&["telemetry", "demo", "review", "session", "--attempt", attempt])["session"].clone();
+        assert_eq!(session["submission_id"], submission["submission_id"]);
+        let receipt = lab.home.join("review-receipt.json");
+        fs::write(&receipt, serde_json::json!({"schema":"review_receipt.v1","session_id":session["session_id"],"submission_id":session["submission_id"],
+            "candidate_oid":session["candidate_oid"],"outcome":"completed","findings":refs.iter().map(|r|serde_json::json!({"ref":r,"title":"Edge case"})).collect::<Vec<_>>(),"evidence":[format!("sha256:{}", "b".repeat(64))]}).to_string()).unwrap();
+        lab.ok(&["telemetry", "demo", "review", "submit", "--input-file", receipt.to_str().unwrap()]);
+        let task = report["task"].as_str().unwrap();
+        let output = if task == "review" { "docs/reviews/R.md" } else { "docs/reviews/skeptic.md" };
+        let delivered = lab.follow_brief(attempt, output, &format!("{task}-report"));
+        assert!(delivered.status.success(), "{}", String::from_utf8_lossy(&delivered.stderr));
+        assert_eq!(lab.ok(&argv)["attempt"], report["attempt"]);
+    }
+    let report = lab.ok(&["telemetry", "demo", "review", "report"]);
+    assert_eq!(report["metrics"]["M20"]["value"], "2/2");
+    assert_eq!(report["metrics"]["M28"]["excluded"]["pending_triage"], 1);
+    let findings = lab.ok(&["telemetry", "demo", "review", "findings", "show"]);
+    let claim = findings["findings"]["submissions"].as_array().unwrap().iter().find(|s| s["finding_ref"] == "finding:new").unwrap()["claims"][0]["claim_id"].as_i64().unwrap().to_string();
+    lab.ok(&["telemetry", "demo", "review", "findings", "validate", &claim, "--new", "--severity", "high", "--evidence", &format!("sha256:{}", "a".repeat(64))]);
+    let report = lab.ok(&["telemetry", "demo", "review", "report"]);
+    assert_eq!(report["metrics"]["M28"]["denominator"], 1);
+    assert_eq!(report["metrics"]["M28"]["value"], "1/1");
+    let changed = launch("review", "absent", "code", "claude-sonnet");
+    let before = herdr_farm::runtime::snapshot(&lab.project).unwrap();
+    assert!(lab.fail(&changed.iter().map(String::as_str).collect::<Vec<_>>()).contains("already bound"));
+    assert_eq!(herdr_farm::runtime::snapshot(&lab.project).unwrap(), before);
+}

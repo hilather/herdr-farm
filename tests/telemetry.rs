@@ -782,6 +782,7 @@ fn newer_codex_usage_provenance_coverage_and_recollection() {
     assert_eq!(attempt_usage(&f.cli_args(&["usage", "--json"]).0), usage);
     f.as_if_collected_uncertified();
     f.cli_args(&["accounting", "sync"]);
+    // Without child sessions the synced usage keeps exactly the primary-only shape.
     assert_eq!(attempt_usage(&f.cli_args(&["usage", "--json"]).0), usage);
     plant_aggregate_termination(&f);
     assert_eq!(f.report()["metrics"]["M13"]["value"], "1/1");

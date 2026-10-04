@@ -102,8 +102,8 @@ are known, else `null`; it is a covariate, and same-family reviews are
 excluded from blind comparisons unless an analysis names them. `blind` is
 `true`; `review present <opportunity>` is the blind view (exact candidate,
 repository, base, scope, kind, protocol, prior findings, budget; no author
-attempt or configuration). Since 0062 a launched reviewer's brief is built
-from this view only (§11). `--reviewer P` records an operator
+attempt or configuration). Since 0062 a blindly assigned reviewer's brief is built
+from this view only (§11); operator gate launches retain project context (§13). `--reviewer P` records an operator
 assignment (`policy = operator`, `blind = false`, reason
 `operator_selected`), with the same covariates.
 
@@ -438,8 +438,8 @@ append-only. Every row is `operator:cli` with `operator_owner.v1` (CHECKs);
 `SqliteStore` refuses workers (`worker:*` or any attempt's identity), imports
 and any other principal before writing, as §5.
 
-**No routing.** Nothing here opens, assigns, starts or launches a review, or
-changes a budget. An experiment arm is a label on an opportunity the owner
+**No routing.** The protocol commands themselves do not open, assign, start or launch a review, or
+change a budget; `launch run --review-kind skeptical` composes them (§13). An experiment arm is a label on an opportunity the owner
 opened; the owner still opens and runs any second review with the D1
 commands. No metric here is read by dispatch, and none claims a causal effect
 unless it comes from a preregistered comparison (below).
@@ -834,7 +834,7 @@ keeps refusing every worker principal. The aggregate `telemetry <slug>
 report` is not guarded.
 
 Not built (needs routing, launch or scheduler changes, or new authority):
-binding repair attempts or skeptical passes at launch; a scheduled review
+binding repair attempts at launch (skeptical launch passes are §13); a scheduled review
 (a review task still needs its own queueing; launch-time sessions and the
 blind brief are §11); delegated triage (§10); conflict records
 and third-party review imports (§5); finding occurrences beyond reopenings
@@ -1060,7 +1060,10 @@ Binding is refused, writing nothing, unless all hold:
   a worker snapshot (`char-count-worker-brief-v2`) of R made for the assigned
   reviewer's profile (its definition digest is the assignment's
   configuration's);
-- its retained instructions are byte-for-byte O's current brief;
+- for a blind assignment, its retained instructions are byte-for-byte O's
+  current blind brief; for an operator assignment they start with that exact
+  base and may append project context, review instructions and the ordinary
+  result submission instructions (§13);
 - it selects no task memory: an empty scope (no domains, paths or pinned
   keys) and no optional entries. Mandatory project constraints stay: they are
   the owner's rules for every worker;
@@ -1076,7 +1079,7 @@ The same binding replays. A later snapshot of R (a restart needs one: a
 snapshot binds the task revision) is another row for the same R and O.
 
 **The blind brief** (`review_brief.v1`, the `Project instructions` of the
-worker prompt, digest `brief_digest`) is built only from the §3 blind view:
+worker prompt) is built only from the §3 blind view:
 opportunity, reviewed task and contract revision, repository, base and
 candidate commits, object format, scope, kind, protocol and budget, as JSON
 data; plus, when the protocol is registered (§7), its method fields
@@ -1088,7 +1091,11 @@ they are withheld and the binding records `withheld`. The brief never names
 the author attempt, configuration or profile, prior reviewers or sessions,
 seed state (§8) or the submission id, and the builder refuses a brief that
 would contain an author identity. It ends with the receipt instructions
-(below) and states that the receipt is a proposal.
+(below) and states that the receipt is a proposal. A blind binding's
+`brief_digest` hashes these instruction bytes; an operator binding's digest
+hashes the complete retained rendering (project context, review view,
+review instructions, title and mandatory memory). Every part is scanned for
+§11 author identities. Both remain covered by the launch knowledge digest.
 
 **Session at launch.** Two version-gated calls in `admit_prepared`
 (`src/store/reservations.rs`), for every launch path (operator, delegated,
@@ -1229,8 +1236,9 @@ snapshot of the review task is refused at `launch draft`.
 `acceptance_decision_replays_in_the_ledger_as_of` (start 1, completion 2,
 finding 3, decision 4, owner triage 5; draft bytes compared literally).
 
-Not built: a planner or scheduler that opens, assigns and queues review
-tasks by itself (the owner still adds and queues R); worktrees checked out at
+Built by REVIEW-AUTO-1a (§13): the coordinator opens, assigns and queues
+review tasks through `launch run --review-of`. Not built: independent review
+scheduling; worktrees checked out at
 the candidate (R's worktree is its ordinary base; the candidate commit is in
 the shared object store and named in the brief); session start at the
 worker's actual start rather than its reservation; a guard on raw SQL
@@ -1408,3 +1416,80 @@ key).
 
 Not built: a ticker hook (by owner decision the owner runs or schedules the
 CLI); hardware-backed signer keys (§11 option 4); isolating the coordinator.
+
+
+## 13. Review launch through launch run (REVIEW-AUTO-1a)
+
+The coordinator's ordinary `launch PROJECT run` records reviews automatically:
+
+```sh
+herdr-farm launch PROJECT run --task REVIEW --profile PROFILE --repository REPO --review-of TASK --output docs/reviews/R.md --deliverable "Review report" --prompt-file BRIEF
+herdr-farm launch PROJECT run --task SKEPTIC --profile PROFILE --repository REPO --review-of TASK --review-kind skeptical --review-scope tree --prompt-file BRIEF
+```
+
+`--review-kind` accepts `code` (default), `skeptical`, `test`, `security` or
+`architecture`; `--review-scope` accepts `diff` (default, `candidate_diff`)
+or `tree` (`candidate_tree`, a whole-gate challenge). The current submission
+is the accepted submission if there is one, otherwise the latest submission
+(with submission id breaking timestamp ties). Before launch mutations, a
+request refuses when TASK has no submission, REVIEW is TASK, REVIEW is bound
+to another opportunity, or the project instructions, prompt or title name
+an author attempt, dispatch configuration or profile digest (§11's minimum
+identity length still applies).
+
+Non-skeptical opportunities use role `gate`, protocol `review-protocol.v1`.
+The reviewer is the operator's `--profile` (`blind = false`). Opening,
+assignment, any skeptical pass, worker snapshot and binding are committed
+atomically. Replays find the opportunity through REVIEW's `review_briefs`
+binding and the assignment through that opportunity; they never recompute
+an opportunity id, which includes `created_unix_ms`. A retained snapshot of
+the same task revision is reused; ordinary admission records the session
+in its reservation transaction (§11).
+
+The blind brief stays the base. These operator reviews retain PROJECT.md
+as project context, the review view, the coordinator's `--prompt-file` text
+in a separate **Review instructions** section, and ordinary result submission
+instructions. The complete rendering, including the task title and mandatory
+memory, is scanned for author identities and hashed as `brief_digest`.
+Blind cross-provider assignments keep their exact base-only instruction rule.
+
+A review keeps an ordinary result contract. `--output` and `--deliverable`
+name its report; without `--write`, output files become the exact write
+scopes. Without explicit outputs or a contract, its single Markdown report
+is `docs/reviews/REVIEW.md`, using the planning-document contract. Acceptance
+and verification of that report use the normal result flow.
+
+The receipt is additional to the report. From inside either a Codex or Claude
+sandbox, run `telemetry PROJECT review session --attempt A`, copy its
+session/submission/candidate identifiers into a `review_receipt.v1` JSON file,
+then run `telemetry PROJECT review submit --input-file F`. Finding entries
+are `{ref: "finding:<token>", title: "short title"}`. A review with no
+findings still submits `findings: []`. These commands use the existing
+submission spool; no worker permission or owner prompt is added.
+
+A completed receipt means the declared review completed; its findings stay
+proposals pending owner triage. A submitted report means a normal result is
+available for verification; it does not imply a review receipt exists. An
+attempt with a receipt but no result produces
+`attempt.review_receipt_without_result`: the receipt outcome and missing
+report are stated separately, and the receipt remains in `review show` and
+metrics. A worker with neither produces `attempt.ended_without_submission`.
+Neither result acceptance nor receipt submission triages or accepts findings.
+
+For skeptical launches, one protocol per scope is registered once if absent
+with §7's example method, role `gate` and `prior_disclosure: withheld`:
+`skeptical-challenge.v1` (scope `candidate_diff`, `--review-scope diff`) and
+`skeptical-challenge-tree.v1` (scope `candidate_tree`, `--review-scope tree`).
+Protocols are immutable, so a scope never inherits another's; the registered
+protocol's `kind`, `scope`, `role` and `budget_ms` govern the opportunity.
+If that exact submission already has review opportunities, they are frozen
+as priors using `protocols bind` before admission; without priors it is an
+ordinary skeptical opportunity. M28 excludes a completed pass with pending
+claims as `pending_triage`; owner CLI triage makes new validated unique
+findings eligible under §7. Changed scopes and incomplete prior reviews
+retain their existing exclusions. No automatic duplicate decision is made.
+
+Not built: `--fixes`/`--fixes-review`, repair attempt launch binding, fix
+proposal/verify/integrate linking, re-review prior findings, automated triage,
+reviewer-grant acceptance and blind cross-provider selection through
+`launch run` (REVIEW-AUTO-1b and later cards).

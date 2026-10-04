@@ -302,8 +302,9 @@ fn identity(configuration: &str, canonical: Option<&Value>) -> Value {
 fn cost(sidecar: Option<&rusqlite::Connection>, units: &[&Unit]) -> Result<Value> {
     let attempts: Vec<&str> = units.iter().flat_map(|u| u.task.attempts.iter().map(|a| a.id.as_str())).collect();
     let (mut known, mut total, mut reasons) = (0usize, 0i64, BTreeMap::<String, usize>::new());
+    let children = sidecar.map(crate::telemetry::sidecar::child_index).transpose()?;
     for attempt in &attempts {
-        let usage = match sidecar { Some(db) => crate::telemetry::sidecar::attempt_usage(db, attempt)?, None => unavailable("collection_not_run") };
+        let usage = match (sidecar, &children) { (Some(db), Some(index)) => crate::telemetry::sidecar::attempt_usage_with(db, attempt, index)?, _ => unavailable("collection_not_run") };
         match usage["total_tokens"].as_i64() {
             Some(tokens) => { known += 1; total += tokens; }
             None => *reasons.entry(usage["reason"].as_str().unwrap_or("unknown").to_owned()).or_default() += 1,

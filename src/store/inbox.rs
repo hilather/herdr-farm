@@ -198,6 +198,14 @@ pub(super) fn ended_notice(db: &Connection, attempt: &Attempt) -> Result<()> {
     let schema: u32 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if schema < 26 { return Ok(()); }
     let submitted: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM result_submissions WHERE attempt_id=?1)", [attempt.id.as_str()], |r| r.get(0))?;
-    if !submitted { result_notice(db, "attempt.ended_without_submission", attempt.id.as_str(), attempt.task.as_str(), attempt.id.as_str(), "none", attempt.state.as_str())?; }
+    if !submitted {
+        let receipt: Option<(String,String)> = if schema >= 62 {
+            db.query_row("SELECT c.session_id,c.outcome FROM review_session_launches l JOIN review_completions c USING(session_id) WHERE l.attempt_id=?1", [attempt.id.as_str()], |r| Ok((r.get(0)?,r.get(1)?))).optional()?
+        } else { None };
+        if let Some((session, outcome)) = receipt {
+            result_notice(db, "attempt.review_receipt_without_result", attempt.id.as_str(), attempt.task.as_str(), attempt.id.as_str(), &session,
+                &format!("review receipt recorded ({outcome}); report result not submitted; receipt and findings remain visible in telemetry review show/report"))?;
+        } else { result_notice(db, "attempt.ended_without_submission", attempt.id.as_str(), attempt.task.as_str(), attempt.id.as_str(), "none", attempt.state.as_str())?; }
+    }
     Ok(())
 }

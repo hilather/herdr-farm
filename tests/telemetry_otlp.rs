@@ -1803,7 +1803,7 @@ fn accounting_upgrade_backfills_existing_grok_records_and_preserves_native_ledge
     drop(db);
     assert_eq!(f.cli_args(&["accounting", "entries"]).0, native);
     f.cli_args(&["accounting", "sync"]);
-    assert_eq!(f.cli_args(&["accounting", "status"]).0["version"], 21);
+    assert_eq!(f.cli_args(&["accounting", "status"]).0["version"], 22);
     let upgraded = f.cli_args(&["accounting", "entries"]).0;
     assert_eq!(accepted_delta_entries(&upgraded).len(), 2);
     assert!(upgraded["entries"].as_array().unwrap().contains(&native["entries"][0]));
@@ -1839,7 +1839,7 @@ fn newer_live_otlp_versions_retain_complete_usage_and_provenance() {
         f.cli_args(&["accounting", "sync"]);
         assert!(!accepted_delta_entries(&f.cli_args(&["accounting", "entries"]).0).is_empty());
         assert_eq!(f.count("otlp_records"), stored_records);
-        assert_eq!(f.cli_args(&["accounting", "status"]).0["version"], 21);
+        assert_eq!(f.cli_args(&["accounting", "status"]).0["version"], 22);
         let mut malformed: Value = serde_json::from_str(&body).unwrap();
         let mut changed = false;
         for resource in malformed["resourceLogs"].as_array_mut().unwrap() {

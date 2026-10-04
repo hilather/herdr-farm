@@ -31,6 +31,9 @@ pub struct Args {
     pub title: Option<String>,
     /// Planning task: its single deliverable, a Markdown document under `docs/`.
     pub plan_output: Option<String>,
+    pub review_of: Option<String>,
+    pub review_kind: String,
+    pub review_scope: String,
     pub write: Vec<String>,
     pub output: Vec<String>,
     pub accept: Vec<String>,
@@ -190,7 +193,7 @@ fn planning_contract(args: &Args, repository: &Path, head: u64, kind: &str, proj
     let mut bytes = serde_json::to_vec_pretty(&json!({
         "version":3,"outputs":[{"path":output,"kind":"git_file"}],"scope":{"paths":[{"path":output,"access":"write"}]},
         "project_store":store,"expected_head":head,"task_id":args.task,"contract_revision":1,
-        "deliverable":format!("The planning document {output}, written in the working tree."),
+        "deliverable":if args.review_of.is_some() { args.deliverable.clone().unwrap_or_else(|| format!("The review report {output}, written in the working tree.")) } else { format!("The planning document {output}, written in the working tree.") },
         "non_goals":"No code, test or configuration change; no file other than the deliverable.",
         "acceptance_policies":[{"id":"document-present","text":policy}],
         "repository":repository,"base_oid":base,"object_format":format,"dependencies":[],"capability_flags":[],
@@ -521,6 +524,18 @@ fn profile_plan(ctx: &Ctx, project: &Path, args: &Args, observe: bool) -> Result
 
 pub fn run(ctx: &Ctx, slug: &str, mut args: Args) -> Result<Value> {
     let project = ctx.root.join(slug).canonicalize().with_context(|| format!("project {slug} not found"))?;
+    if args.review_of.is_some() {
+        if args.output.is_empty() && args.write.is_empty() && args.plan_output.is_none() && args.contract_file.is_none() {
+            args.plan_output = Some(format!("docs/reviews/{}.md", args.task));
+        } else if args.write.is_empty() && !args.output.is_empty() {
+            args.write = args.output.clone();
+        }
+        let mut context = String::from_utf8(migration::read_plan_file(&project.join("PROJECT.md"))?)?;
+        if let Some(path) = &args.prompt_file { context.push_str(&String::from_utf8(migration::read_plan_file(path)?)?); }
+        context.push_str(args.title.as_deref().unwrap_or(&args.task));
+        if let Some(task) = runtime::snapshot(&project)?.tasks.iter().find(|t| t.id.as_str() == args.task) { context.push_str(&task.title); }
+        migration::open_active(&project)?.check_review_run(&args.task, args.review_of.as_deref().unwrap(), &args.review_kind, &args.review_scope, &args.profile, &context)?;
+    }
     eprintln!("launch run: preflight");
     let pinned = migration::status(&project)?.plan.config.context("migration has no pinned config")?;
     let config: toml::Value = toml::from_str(&String::from_utf8(migration::read_plan_file(Path::new(&pinned.path))?)?)?;
@@ -819,11 +834,12 @@ fn steps(run: &mut Run, args: &Args, plan: ProfilePlan) -> Result<Value> {
     let mut instructions = String::from_utf8(migration::read_plan_file(&project.join("PROJECT.md"))?).map_err(|_| anyhow::anyhow!("project instructions are not UTF-8"))?;
     if let Some(path) = &args.prompt_file {
         let text = String::from_utf8(migration::read_plan_file(path)?).map_err(|_| anyhow::anyhow!("--prompt-file is not UTF-8"))?;
-        instructions.push_str(&format!("\n\n---\n\n# Task {}\n\n{text}\n", args.task));
+        if args.review_of.is_some() { instructions.push_str(&format!("\n\n## Review instructions\n\n{text}\n")); }
+        else { instructions.push_str(&format!("\n\n---\n\n# Task {}\n\n{text}\n", args.task)); }
     }
     if let Some(output) = &args.plan_output {
         instructions.push_str(&format!(
-            "\n## Deliverable\n\nWrite the document `{output}` in the current directory (a disposable git worktree), with the plan as its content. Do not change any other file, do not push and do not use the network.\n"));
+            "\n## Deliverable\n\nWrite the document `{output}` in the current directory (a disposable git worktree), with the {} as its content. Do not change any other file, do not push and do not use the network.\n", if args.review_of.is_some() { "review report" } else { "plan" }));
     }
     let contract = migration::open_active(&project)?.task_contract_document(task_id.as_str())?.context("the task has no installed contract document")?;
     let reference = runtime::task_contract(&project, &task_id)?.context("the task has no installed contract")?;
@@ -834,8 +850,17 @@ fn steps(run: &mut Run, args: &Args, plan: ProfilePlan) -> Result<Value> {
         let resolved = crate::agents::resolve::resolve(&args.profile, &ctx.config_dir.join("config.toml"), None)?;
         let request: herdr_farm::domain::SnapshotRequest = serde_json::from_value(json!({
             "schema_version":1,"task_id":args.task,"profile":args.profile,"domains":[],"paths":[],"pinned_keys":[],"sensitivity":"default"}))?;
-        let mut memory = herdr_farm::memory::MemoryStore::from_sqlite(migration::open_active(&project)?, project.join(".state/objects"));
-        let created = memory.create_worker_snapshot(request, &resolved.name, &resolved.definition_digest, Some(&resolved.config_digest), resolved.budget.soft_input_chars, &instructions, jiff::Timestamp::now().as_millisecond(), None)?;
+        let now = jiff::Timestamp::now().as_millisecond();
+        let created = if let Some(reviewed) = &args.review_of {
+            migration::open_active(&project)?.create_review_run_snapshot(herdr_farm::domain::SnapshotPlan {
+                coordinator: false, session_id: None, request, profile_name: resolved.name.clone(), profile_digest: resolved.definition_digest.clone(),
+                config_digest: Some(resolved.config_digest.clone()), budget_chars: resolved.budget.soft_input_chars,
+                estimator: "char-count-worker-brief-v2".into(), instructions: instructions.clone(), now_unix_ms: now, expected_heads_digest: None,
+            }, &project, reviewed, &args.review_kind, &args.review_scope, &ctx.root.display().to_string(), &run.slug)?
+        } else {
+            let mut memory = herdr_farm::memory::MemoryStore::from_sqlite(migration::open_active(&project)?, project.join(".state/objects"));
+            memory.create_worker_snapshot(request, &resolved.name, &resolved.definition_digest, Some(&resolved.config_digest), resolved.budget.soft_input_chars, &instructions, now, None)?
+        };
         Ok(serde_json::to_value(&created)?)
     })?;
     let selection = LaunchSelection {
