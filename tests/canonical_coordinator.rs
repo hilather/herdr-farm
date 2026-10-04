@@ -231,7 +231,7 @@ fn socket_open_primes_owned_coordinator_retries_swallowed_prompt_and_recreates_c
     let prefix = format!("{} --root {}", BIN, l.root.display());
     for verb in ["skill", "context demo", "inbox list", "inbox done", "inbox demo wait", "task demo list", "task demo show", "task demo add", "task demo rename",
         "launch demo run", "launch demo stop", "result demo show", "result demo jobs", "result demo capture", "result demo submit-captured",
-        "scheduler demo inspect", "operations demo inspect", "runtime demo inspect", "telemetry demo usage", "memory-review demo propose", "doctor",
+        "scheduler demo inspect", "operations demo inspect", "runtime demo inspect", "telemetry demo usage", "memory-review demo propose", "memory demo record", "doctor",
         "thread prompt", "safety requests", "telemetry demo review show", "telemetry demo review findings show",
         "telemetry demo review findings validate", "telemetry demo review findings reject", "telemetry demo review findings duplicate"] {
         assert!(permissions["permissions"]["allow"].as_array().unwrap().contains(&json!(format!("Bash({prefix} {verb}:*)"))), "missing allow {verb}");

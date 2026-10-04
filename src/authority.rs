@@ -739,6 +739,50 @@ pub fn adopt_memory(project: &Path, expected: &crate::memory::AdoptPlan, mut sig
     crate::memory::cutover_held(project, &current.plan, &crate::domain::PreparedMemoryPolicy { policy: document })
 }
 
+/// Verify the exact owner decision before publishing an active constraint revision.
+pub fn record_memory(project: &Path, title: &str, key: &str, body: &str, provenance: &str, mut sign: impl FnMut(&[u8]) -> Result<Vec<u8>>) -> Result<serde_json::Value> {
+    use crate::domain::{Applicability, ControlContext, MemoryKind, MemoryRecordId, NewRevision};
+    let _guard = migration::runtime_mutation(project)?;
+    ensure!(migration::read_format(project)?.memory == "sqlite-v1", "legacy-markdown memory: use `memory-review PROJECT record`");
+    let mut db = migration::open_active(project)?;
+    let existing = db.memory_record_by_key(key)?;
+    let head = existing.as_ref().map(|record| db.memory_head(record.id.as_str())).transpose()?.flatten();
+    if let Some(record) = &existing {
+        ensure!(record.kind == MemoryKind::Constraint && record.scope_id == "project", "record key belongs to a different memory kind or scope");
+        let head = head.as_ref().context("memory head missing")?;
+        let revision = db.memory_revision(record.id.as_str(), head.revision)?.context("memory revision missing")?;
+        let previous: serde_json::Value = serde_json::from_slice(&crate::memory::read_object(&project.join(".state/objects"), &revision.provenance_hash)?)?;
+        if head.status == "active" && revision.body_hash.as_str() == format!("{:x}", Sha256::digest(body.as_bytes()))
+            && previous["title"] == title && previous["provenance"] == provenance && previous["source"] == "user" {
+            return Ok(serde_json::json!({"record_key":key,"revision":head.revision,"reused":true}));
+        }
+    }
+    let (owner, config) = policy(project)?;
+    let now = jiff::Timestamp::now().as_millisecond();
+    let document = serde_json::json!({"version":1,"project_store":project.join(".state/state.db").canonicalize()?,
+        "record_key":key,"title":title,"body":body,"source":"user","provenance":provenance,"time_unix_ms":now,
+        "expected_revision":head.as_ref().map(|h|h.revision),"authority":owner.reference()?});
+    let bytes = serde_json::to_vec(&document)?;
+    let signature = sign(&bytes)?;
+    verify_signature(&owner, &bytes, &signature, MEMORY_SIGNATURE_NAMESPACE, &RealRunner)?;
+    ensure!(migration::config_reference(Path::new(&config.path))? == config, "owner configuration changed during recording");
+    let mut memory = crate::memory::MemoryStore::from_sqlite(db, project.join(".state/objects"));
+    let body_hash = memory.ingest_object(body.as_bytes())?;
+    let mut retained = document;
+    retained["signature"] = serde_json::json!(String::from_utf8(signature)?);
+    let provenance_hash = memory.ingest_object(serde_json::to_vec(&retained)?.as_slice())?;
+    let id = match existing {
+        Some(record) => record.id,
+        None => MemoryRecordId::new(format!("owner-memory:{:x}", Sha256::digest(key.as_bytes()))).map_err(anyhow::Error::msg)?,
+    };
+    let next = memory.insert_revision(&ControlContext { now_unix_ms: now }, NewRevision {
+        id, record_key:key.into(), scope_id:"project".into(), kind:MemoryKind::Constraint,
+        body_hash, provenance_hash, applicability:Applicability { domains:vec![], paths:vec![] }, dependencies:vec![],
+        expected:head.map(|h|h.revision), expiry_unix_ms:None, validity_state:"valid".into(), validity_reason:"owner_recorded".into(),
+    })?;
+    Ok(serde_json::json!({"record_key":key,"revision":next.revision,"reused":false}))
+}
+
 fn recover_memory_adopt_held(project: &Path) -> Result<Option<crate::memory::MemoryJournal>> {
     let path = project.join(".state/migration/memory-journal.json");
     if !path.exists() { return Ok(None); }

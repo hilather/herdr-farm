@@ -57,6 +57,23 @@ step names optional keys omitted for budget; mandatory overflow refuses launch.
 Doctor and canonical context warn about approved legacy memory until adoption.
 See [authority](authority.md#owner-approved-markdown-adoption).
 
+## Record owner decisions after adoption
+
+After adoption, record explicit owner decisions with:
+
+```sh
+herdr-farm memory PROJECT record --title "Decision title" --provenance "Reference to the owner's instruction" --body-file decision.md
+```
+
+This uses the same automatic owner signer as `adopt`, signs and verifies the
+exact decision in `memory@herdr-projects`, and stores an active project Constraint
+with `source=user`, the instruction provenance, time, and retained signature.
+Identical input is a no-op; a changed decision under the same title appends a
+revision to the stable `memory/<title-slug>.md` key. New worker snapshots include
+these constraints. Before adoption, use `memory-review PROJECT record` instead.
+The coordinator can use canonical `memory PROJECT record` after adoption without
+handling a private key or preparing an import document.
+
 ## Manual edits
 
 Initial `memory PROJECT import` creates unverified shadow revisions from the

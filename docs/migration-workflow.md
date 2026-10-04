@@ -106,6 +106,21 @@ evidence, excluded from authoritative memory import; candidates never become
 facts automatically. Previously linked proposed candidates remain readable after
 memory cutover, with their original pinned digest checked on every read.
 
+After adoption, record explicit owner decisions with:
+
+```sh
+herdr-farm memory PROJECT record --title "Decision title" --provenance "Reference to the owner's instruction" --body-file decision.md
+```
+
+This uses the same automatic owner signer as `adopt`, signs and verifies the
+exact decision in `memory@herdr-projects`, and stores an active project Constraint
+with `source=user`, the instruction provenance, time, and retained signature.
+Identical input is a no-op; a changed decision under the same title appends a
+revision to the stable `memory/<title-slug>.md` key. New worker snapshots include
+these constraints. Before adoption, use `memory-review PROJECT record` instead.
+The coordinator can use canonical `memory PROJECT record` after adoption without
+handling a private key or preparing an import document.
+
 This importer still blocks removal receipts and unsupported ticker state. Supported pending
 inbox/finalization/notification obligations now convert into ambiguous durable
 intents; see [delivery semantics](operation-delivery.md). Do not erase blocked

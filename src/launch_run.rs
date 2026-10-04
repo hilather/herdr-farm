@@ -1060,6 +1060,17 @@ pub fn adopt_memory(ctx: &Ctx, project: &Path, dry_run: bool, explicit: Option<P
     let plan = herdr_farm::memory::adopt_plan(project)?;
     if dry_run { return Ok(serde_json::to_value(plan)?); }
     ensure!(plan.blockers.is_empty(), "adopt refused: {}", serde_json::to_string(&plan)?);
+    let key = memory_signer(ctx, project, explicit)?;
+    let temp = ProbeDirectory(herdr_farm::short_socket::fresh()?);
+    let document = temp.0.join("memory.json");
+    let result = authority::adopt_memory(project, &plan, |bytes| {
+        fs::write(&document, bytes)?;
+        fs::read(sign(&key, authority::MEMORY_SIGNATURE_NAMESPACE, &document)?).map_err(Into::into)
+    })?;
+    Ok(json!({"journal":result,"outcomes":plan.outcomes}))
+}
+
+fn memory_signer(ctx: &Ctx, project: &Path, explicit: Option<PathBuf>) -> Result<PathBuf> {
     let config = migration::status(project)?.plan.config.context("pinned owner config missing")?;
     let path = Path::new(&config.path);
     let value: toml::Value = toml::from_str(&String::from_utf8(migration::read_plan_file(path)?)?)?;
@@ -1069,12 +1080,17 @@ pub fn adopt_memory(ctx: &Ctx, project: &Path, dry_run: bool, explicit: Option<P
             ensure!(Path::new(key).is_absolute(), "coordinator.signing_key must be an absolute path");
             Some(PathBuf::from(key))
         } else { None };
-    let key = resolve_signer(selected, &[path.parent().context("config parent missing")?.to_owned(), ctx.config_dir.clone()], value["authority"]["approval_public_key"].as_str().context("owner approval key missing")?)?;
+    resolve_signer(selected, &[path.parent().context("config parent missing")?.to_owned(), ctx.config_dir.clone()], value["authority"]["approval_public_key"].as_str().context("owner approval key missing")?)
+}
+
+pub fn record_memory(ctx: &Ctx, project: &Path, title: &str, provenance: &str, body_file: &Path) -> Result<Value> {
+    ensure!(migration::read_format(project)?.memory == "sqlite-v1", "legacy-markdown memory: use `memory-review PROJECT record` to record owner decisions");
+    let (title, body, provenance, name) = crate::memory_review::owner_decision_inputs(title, body_file, provenance)?;
+    let key = memory_signer(ctx, project, None)?;
     let temp = ProbeDirectory(herdr_farm::short_socket::fresh()?);
     let document = temp.0.join("memory.json");
-    let result = authority::adopt_memory(project, &plan, |bytes| {
+    authority::record_memory(project, &title, &format!("memory/{name}"), &body, &provenance, |bytes| {
         fs::write(&document, bytes)?;
         fs::read(sign(&key, authority::MEMORY_SIGNATURE_NAMESPACE, &document)?).map_err(Into::into)
-    })?;
-    Ok(json!({"journal":result,"outcomes":plan.outcomes}))
+    })
 }

@@ -212,6 +212,8 @@ enum BudgetCommand {
 #[derive(Subcommand)]
 enum MemoryCommand {
     Inspect,
+    /// Record an explicit owner decision using the automatic owner signer
+    Record { #[arg(long)] title:String, #[arg(long)] provenance:String, #[arg(long)] body_file:PathBuf },
     /// Import owner-approved Markdown decisions and switch memory authority
     Adopt { #[arg(long)] dry_run:bool, #[arg(long)] sign_with:Option<PathBuf> },
     Import {
@@ -587,7 +589,7 @@ enum MemoryReviewCommand {
     /// Example:
     ///   herdr-farm memory-review demo record --title "Use Postgres" --file /tmp/decision.md --provenance "user chat 2026-09-25: remember our DB choice"
     ///
-    /// Refused on SQLite-memory projects (use signed `memory import` instead).
+    /// Refused on SQLite-memory projects (use `memory PROJECT record` instead).
     Record {
         #[arg(long)]
         title: String,
@@ -1175,9 +1177,11 @@ pub fn run() -> Result<()> {
         Command::Memory{slug,command}=>{
             project::validate_slug(&slug)?;let dir=ctx.root.join(&slug);
             if project::ensure_legacy(&dir).is_ok() {
+                if matches!(&command, MemoryCommand::Record { .. }) { bail!("legacy-markdown memory: use `memory-review {slug} record` to record owner decisions"); }
                 bail!("project `{slug}` uses legacy-markdown memory; `memory` requires a migrated SQLite store. Use `memory-review {slug} list/show/ingest/propose/reject/defer` for Remember candidates, or `migration {slug} plan/apply` for an explicit migration");
             }
             let value=match command {
+                MemoryCommand::Record{title,provenance,body_file}=>crate::launch_run::record_memory(&ctx,&dir,&title,&provenance,&body_file)?,
                 MemoryCommand::Adopt{dry_run,sign_with}=>crate::launch_run::adopt_memory(&ctx,&dir,dry_run,sign_with)?,
                 MemoryCommand::Inspect=>{
                     let s=herdr_farm::runtime::snapshot(&dir)?;

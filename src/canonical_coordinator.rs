@@ -376,6 +376,7 @@ fn permissions(ctx: &Ctx, dir: &Path, slug: &str) -> Result<String> {
         for verb in ["list", "show", "ingest", "propose", "reject", "defer", "remind", "record"] {
             allow.push(format!("Bash({prefix} memory-review {slug} {verb}:*)"));
         }
+        allow.push(format!("Bash({prefix} memory {slug} record:*)"));
         // Preserve the documented legacy coordinator command surface.
         for verb in ["list", "overview", "safety show", "safety grant", "safety requests", "routine list", "thread list", "thread show", "thread prompt", "thread ack", "thread restart", "thread stop"] {
             allow.push(format!("Bash({prefix} {verb}:*)"));
@@ -839,6 +840,7 @@ pub fn commands(root: &Path, slug: &str) -> Result<String> {
     Ok(format!(
         "\nCanonical commands (replace uppercase values with retained IDs/paths):\n\
 {p} context {slug}\n\
+Record explicit owner decisions after adoption: {p} memory {slug} record --title TITLE --provenance USER_INSTRUCTION --body-file FILE\n\
 {p} task {slug} list\n\
 {p} task {slug} show TASK\n\
 {p} task {slug} add TASK --title TITLE --expected-head HEAD\n\

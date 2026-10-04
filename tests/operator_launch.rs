@@ -427,6 +427,9 @@ fn launch_run_reserves_a_planning_task_for_each_kind_and_reruns_safely() {
     fs::write(&config,text).unwrap();
     plant_owner_memory(&lab);
     lab.ok(&["memory", "demo", "adopt"]);
+    let decision = lab.home.join("decision.txt");
+    fs::write(&decision, "Keep owner decisions in every worker brief.").unwrap();
+    lab.ok(&["memory", "demo", "record", "--title", "Brief policy", "--provenance", "owner instruction launch-1", "--body-file", decision.to_str().unwrap()]);
     let prompt = lab.home.join("prompt.txt");
     fs::write(&prompt, "Plan the next milestone of the tactics game.").unwrap();
     let jobs = [("plan-codex", "codex-sol", "codex", "gpt-6.1-sol"), ("plan-claude", "claude-sonnet", "claude", "claude-sonnet-5-5")];
@@ -485,6 +488,7 @@ fn launch_run_reserves_a_planning_task_for_each_kind_and_reruns_safely() {
         let brief = lab.ok(&["memory", "demo", "attempt-brief", "--attempt", &attempt]).to_string();
         assert!(brief.contains("Shadow trial project") && brief.contains("Plan the next milestone") && brief.contains(&output), "{brief}");
         for n in 1..=3 { assert!(brief.contains(&format!("Owner decision {n}")), "{brief}"); }
+        assert!(brief.contains("Keep owner decisions in every worker brief."), "{brief}");
         // The brief ends with the exact submission the worker must make; following
         // it records one submission bound to this attempt's contract.
         let brief_text = lab.ok(&["memory", "demo", "attempt-brief", "--attempt", &attempt])["text"].as_str().unwrap().to_owned();
@@ -1507,4 +1511,53 @@ fn approve_optional_memory(lab: &Lab) {
     assert!(signed.status.success(), "{}", String::from_utf8_lossy(&signed.stderr));
     let signature = PathBuf::from(format!("{}.sig", path.display()));
     lab.ok(&["memory", "demo", "review-import", path.to_str().unwrap(), signature.to_str().unwrap(), "--expected-head", &state.head.to_string()]);
+}
+
+#[test]
+fn canonical_owner_record_is_signed_idempotent_and_revises_the_same_key() {
+    let lab = Lab::with_herdr(STATIC_HERDR);
+    let body = lab.home.join("decision.txt");
+    fs::write(&body, "First owner decision.").unwrap();
+    let args = ["memory", "demo", "record", "--title", "Owner policy", "--provenance", "owner instruction 42", "--body-file", body.to_str().unwrap()];
+    assert!(lab.fail(&args).contains("memory-review PROJECT record"));
+    lab.ok(&["new", "legacy"]);
+    let mut legacy = args;
+    legacy[1] = "legacy";
+    assert!(lab.fail(&legacy).contains("memory-review legacy record"));
+    plant_owner_memory(&lab);
+    lab.ok(&["memory", "demo", "adopt"]);
+    let first = lab.ok(&args);
+    assert_eq!(first["revision"], 1);
+    assert_eq!(first["reused"], false);
+    let mut db = herdr_farm::migration::open_active(&lab.project).unwrap();
+    let fact = db.active_facts(jiff::Timestamp::now().as_millisecond()).unwrap().into_iter().find(|f| f.record.record_key == "memory/owner-policy.md").unwrap();
+    assert_eq!(fact.record.kind, MemoryKind::Constraint);
+    assert_eq!(db.memory_head(fact.record.id.as_str()).unwrap().unwrap().status, "active");
+    let hash = fact.revision.provenance_hash.as_str();
+    let retained: Value = serde_json::from_slice(&fs::read(lab.project.join(".state/objects/sha256").join(&hash[..2]).join(hash)).unwrap()).unwrap();
+    assert_eq!(retained["source"], "user");
+    assert_eq!(retained["provenance"], "owner instruction 42");
+    assert!(retained["time_unix_ms"].as_i64().unwrap() > 0);
+    assert!(retained["signature"].as_str().unwrap().contains("SSH SIGNATURE"));
+    let before = herdr_farm::runtime::snapshot(&lab.project).unwrap();
+    assert_eq!(lab.ok(&args)["reused"], true);
+    assert_eq!(herdr_farm::runtime::snapshot(&lab.project).unwrap(), before);
+    fs::write(&body, "Second owner decision.").unwrap();
+    assert_eq!(lab.ok(&args)["revision"], 2);
+    let record = db.memory_record_by_key("memory/owner-policy.md").unwrap().unwrap();
+    assert_eq!(record.id, fact.record.id);
+    assert!(db.memory_revision(record.id.as_str(), 1).unwrap().is_some());
+    assert_eq!(db.memory_head(record.id.as_str()).unwrap().unwrap().revision, 2);
+    assert!(lab.fail(&["memory-review", "demo", "record", "--title", "Owner policy", "--provenance", "owner instruction 42", "--file", body.to_str().unwrap()]).contains("memory PROJECT record"));
+    let long_title = "a".repeat(120);
+    let mut long = args;
+    long[4] = &long_title;
+    assert_eq!(lab.ok(&long)["revision"], 1);
+    for (index, invalid) in [(4, "bad\n title"), (6, ""), (6, "bad\n provenance")] {
+        let mut bad = args;
+        bad[index] = invalid;
+        assert!(!lab.cli(&bad).status.success());
+    }
+    fs::write(&body, "  ").unwrap();
+    assert!(lab.fail(&args).contains("empty"));
 }
