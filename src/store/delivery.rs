@@ -8,7 +8,7 @@ fn text(value:&str)->Result<()> {
     Ok(())
 }
 pub(super) fn now_check(now:i64)->Result<()> {
-    if now<0 || now>i64::MAX-600_000 { return Err(StoreError::Invalid("clock outside supported range".into())); } Ok(())
+    if !(0..=i64::MAX-22_000_000).contains(&now) { return Err(StoreError::Invalid("clock outside supported range".into())); } Ok(())
 }
 pub(super) fn delivery(db:&Connection,id:&OperationId)->Result<Delivery> {delivery_with_budget(db,id,None)}
 pub(super) fn delivery_with_budget(db:&Connection,id:&OperationId,budget:Option<&read_budget::ReadBudget>)->Result<Delivery> {
@@ -115,8 +115,10 @@ impl SqliteStore {
     pub(super) fn claim_with_creation_budget(&mut self,id:&OperationId,expected:u64,owner:&str,now:i64,lease_ms:i64,creation:Option<LaunchPreparation<'_>>,budget:Option<&read_budget::ReadBudget>)->Result<Claim> {
         if let Some(budget)=budget {budget.check()?;}
         text(owner)?;now_check(now)?;
-        if !(1..=300_000).contains(&lease_ms) { return Err(StoreError::Invalid("lease must be 1..300000 ms".into())); }
         let tx=self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;check_schema(&tx)?;
+        let operation_kind: String = tx.query_row("SELECT kind FROM operations WHERE id=?1", [id.as_str()], |r| r.get(0))?;
+        let max_lease = if operation_kind == "verification.run" { 3_720_000 } else { 300_000 };
+        if !(1..=max_lease).contains(&lease_ms) { return Err(StoreError::Invalid("lease exceeds operation budget".into())); }
         let old=delivery_with_budget(&tx,id,budget)?;
         if old.revision!=expected || old.state!=DeliveryState::Pending || old.next_due_ms>now || old.attempts>=32 { return Err(StoreError::Conflict); }
         read_operation_with_budget(&tx,id,budget)?;

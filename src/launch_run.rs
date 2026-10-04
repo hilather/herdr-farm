@@ -33,6 +33,7 @@ pub struct Args {
     pub plan_output: Option<String>,
     pub write: Vec<String>,
     pub output: Vec<String>,
+    pub accept: Vec<String>,
     pub deliverable: Option<String>,
     /// The task's instructions (appended to PROJECT.md in the retained brief).
     pub prompt_file: Option<PathBuf>,
@@ -146,9 +147,15 @@ fn contract_document(args: &Args, repository: &Path, head: u64, kind: &str, proj
         serde_json::from_slice(&planning_contract(args, repository, head, kind, project)?)?
     } else {
         let (writes, outputs) = code_paths(args)?;
-        let policies = outputs.iter().enumerate().map(|(i, output)| {
+        let mut policies = outputs.iter().enumerate().map(|(i, output)| {
             json!({"id":format!("output-{}", i + 1),"text":serde_json::to_string(&json!({"version":1,"checks":["/usr/bin/git","grep","--quiet","--no-index","-e",".","--",output]})).expect("JSON policy")})
         }).collect::<Vec<_>>();
+        for (index, acceptance) in args.accept.iter().enumerate() {
+            let (name, command) = acceptance.split_once(':').context("--accept must be TOOLCHAIN:COMMAND [ARGS]")?;
+            let checks = split_command(command)?;
+            let text = herdr_farm::verification::toolchains::policy(project, name, checks)?;
+            policies.push(json!({"id":format!("accept-{}", index + 1),"text":text}));
+        }
         json!({"version":3,"task_id":args.task,"profile_kind":kind,
             "scope":{"paths":writes.iter().map(|p| json!({"path":p,"access":"write"})).collect::<Vec<_>>()},
             "outputs":outputs.iter().map(|p| json!({"path":p,"kind":"git_file"})).collect::<Vec<_>>(),
@@ -980,4 +987,24 @@ pub fn sweep_servers(ctx: &Ctx, slug: &str) -> Vec<String> {
         }
     }
     lines
+}
+
+fn split_command(raw: &str) -> Result<Vec<String>> {
+    let mut args = Vec::new();
+    let mut word = String::new();
+    let mut quote = None;
+    let mut escape = false;
+    let mut started = false;
+    for c in raw.chars() {
+        if escape { word.push(c); escape = false; started = true; continue; }
+        if c == '\\' && quote != Some('\'') { escape = true; started = true; continue; }
+        if let Some(q) = quote { if c == q { quote = None; } else { word.push(c); } }
+        else if c == '\'' || c == '"' { quote = Some(c); started = true; }
+        else if c.is_whitespace() { if started { args.push(std::mem::take(&mut word)); started = false; } }
+        else { word.push(c); started = true; }
+    }
+    ensure!(quote.is_none() && !escape, "unclosed quote or escape in --accept");
+    if started { args.push(word); }
+    ensure!(!args.is_empty(), "empty --accept command");
+    Ok(args)
 }

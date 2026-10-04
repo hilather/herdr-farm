@@ -15,7 +15,7 @@ use herdr_farm::{migration,execution_guard::{ProjectGuard,Resource},domain::{Ope
 pub const JOB:&str="\0herdr-projects-canonical-integration";
 /// Merge, candidate checks (each policy within `integration::POLICY_TIMEOUT`, at most
 /// `integration::MAX_POLICIES`) and publication; the claim lease is the store's 300 s maximum.
-const BUDGET:Duration=Duration::from_secs(240);
+const BUDGET:Duration=Duration::from_secs(21_780);
 const LEASE_MS:i64=300_000;
 const OWNER:&str="ticker.integration";
 #[derive(Serialize,Deserialize)]

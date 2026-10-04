@@ -841,12 +841,16 @@ fn code_launch_validates_scopes_and_outputs_before_writing() {
 #[test]
 fn code_launch_reserves_under_concurrent_writes_and_submits_all_scoped_changes() {
     let lab = Lab::with_herdr(STATIC_HERDR);
+    let config_path = lab.home.join(".config/herdr-farm/config.toml");
+    let mut config = fs::read_to_string(&config_path).unwrap();
+    config.push_str("\n[verification.toolchains.shell]\npaths=['/bin/sh']\nenv=['TEST_MODE=acceptance']\n");
+    fs::write(&config_path, config).unwrap();
     lab.plant_launchable("codex-sol", "codex", "gpt-6.1-sol");
     let prompt = lab.home.join("code.txt");
     fs::write(&prompt, "Implement the code and its tests.").unwrap();
     let socket = lab.socket_inode_once("code.sock");
     let args = ["launch", "demo", "run", "--task", "code", "--profile", "codex-sol", "--repository", lab.repo.to_str().unwrap(),
-        "--write", "./src//", "--write", "tests/", "--output", "src/lib.rs", "--prompt-file", prompt.to_str().unwrap(),
+        "--accept", "shell:./tools/run-tests.sh --headless 'quoted argument'", "--accept", "shell:/bin/sh ./tools/other-tests.sh", "--write", "./src//", "--write", "tests/", "--output", "src/lib.rs", "--prompt-file", prompt.to_str().unwrap(),
         "--sign-with", lab.key.to_str().unwrap(), "--herdr-socket", socket.to_str().unwrap()];
     let report = std::thread::scope(|scope| {
         let writer = scope.spawn(|| {
@@ -870,8 +874,14 @@ fn code_launch_reserves_under_concurrent_writes_and_submits_all_scoped_changes()
     let contract = &shown["contract"];
     assert_eq!(contract["scope"]["paths"], serde_json::json!([{"path":"src/","access":"write"},{"path":"tests/","access":"write"}]));
     assert_eq!(contract["outputs"], serde_json::json!([{"path":"src/lib.rs","kind":"git_file"}]));
-    assert_eq!(contract["acceptance_policies"].as_array().unwrap().len(), 1);
+    assert_eq!(contract["acceptance_policies"].as_array().unwrap().len(), 3);
     assert_eq!(contract["acceptance_policies"][0]["id"], "output-1");
+    let policy: Value = serde_json::from_str(contract["acceptance_policies"][1]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(policy["toolchain"], "shell");
+    assert_eq!(policy["checks"], serde_json::json!(["./tools/run-tests.sh", "--headless", "quoted argument"]));
+    assert_eq!(policy["toolchain_digest"].as_str().unwrap().len(), 64);
+    let prepared = lab.ok(&["result", "demo", "toolchain-policy", "shell", "--", "./tools/run-tests.sh", "--headless", "quoted argument"]);
+    assert_eq!(policy, prepared);
     let brief = lab.ok(&["memory", "demo", "attempt-brief", "--attempt", attempt]);
     let script = brief["text"].as_str().unwrap().split("```sh\n").nth(1).unwrap().split("```").next().unwrap();
     let worktree = lab.home.join("code-worktree");

@@ -2229,7 +2229,10 @@ struct MemoryProject {
 }
 
 #[cfg(target_os = "linux")]
-fn memory_project() -> MemoryProject {
+fn memory_project() -> MemoryProject { memory_project_with_config("") }
+
+#[cfg(target_os = "linux")]
+fn memory_project_with_config(extra: &str) -> MemoryProject {
     let tmp = tempfile::tempdir().unwrap();
     let key = tmp.path().join("owner");
     assert!(
@@ -2249,7 +2252,7 @@ fn memory_project() -> MemoryProject {
     let config = tmp.path().join("config.toml");
     fs::write(
         &config,
-        format!("[authority]\nversion=1\nrevision=1\napproval_public_key={public:?}\n"),
+        format!("[authority]\nversion=1\nrevision=1\napproval_public_key={public:?}\n{extra}"),
     )
     .unwrap();
     let project = tmp.path().join("project");
@@ -4429,5 +4432,137 @@ fn result_verification_refuses_wrong_hash_and_unstaged_candidate_blob() {
         };
         assert!(format!("{error:#}").contains("candidate object hash mismatch or missing referenced object"), "{error:#}");
         assert_eq!(sql_count(&db_path, "SELECT count(*) FROM verified_results"), 0);
+    }
+}
+
+/// Signed owner policy -> public result ingress -> real namespace verifier.
+#[cfg(target_os = "linux")]
+#[test]
+fn owner_toolchain_acceptance_runs_tests_and_preserves_the_boundary() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = tempfile::tempdir().unwrap();
+    let (repo, integration_base) = build_repo(fixture.path(), SEED);
+    let tools = repo.join(".tools");
+    fs::create_dir(&tools).unwrap();
+    fs::write(tools.join("seal"), "owner tool data").unwrap();
+    let secret = fixture.path().join("owner-secret");
+    fs::write(&secret, "OWNER PRIVATE SECRET").unwrap();
+    let source = fixture.path().join("probe.rs");
+    fs::write(&source, r#"
+use std::fs;
+fn main() {
+    std::panic::set_hook(Box::new(|info| println!("probe failure: {info}")));
+    let args: Vec<_> = std::env::args().collect();
+    assert!(fs::read(&args[2]).is_err(), "owner secret visible");
+    assert!(fs::write("/escape", b"escape").is_err(), "root writable");
+    assert!(fs::write(&args[2], b"escape").is_err(), "owner path writable");
+    assert!(fs::write(".tools/seal", b"escape").is_err(), "owner tool writable");
+    assert_ne!(fs::read_link("/proc/self/ns/net").unwrap().to_string_lossy(), std::env::var("FIXTURE_HOST_NET").unwrap(), "host network namespace inherited");
+    assert!(fs::read_to_string("/proc/net/route").unwrap().lines().count() <= 1, "network route available");
+    unsafe extern "C" { fn mount(source: *const i8, target: *const i8, kind: *const i8, flags: u64, data: *const i8) -> i32; }
+    assert_ne!(unsafe { mount(std::ptr::null(), c"/tmp".as_ptr(), std::ptr::null(), 32 | 1, std::ptr::null()) }, 0, "mount capability retained");
+    fs::write("/tmp/private-test", b"temporary").unwrap();
+    fs::write(".godot/cache", b"ignored").unwrap();
+    fs::write(".tools/cache", b"ignored").unwrap();
+    match args[1].as_str() {
+        "pass" | "timeout" => std::thread::sleep(std::time::Duration::from_secs(2)),
+        "fail" => std::process::exit(1),
+        "tracked" => fs::write("README", b"changed tracked input").unwrap(),
+        "unignored" => fs::write("unexpected", b"unignored output").unwrap(),
+        _ => (),
+    }
+    println!("test boundary ... ok");
+}
+"#).unwrap();
+    let built = Command::new("rustc").args(["--edition=2024", "-C", "target-feature=+crt-static", "-o"])
+        .arg(tools.join("probe")).arg(&source).output().unwrap();
+    assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+    fs::create_dir(repo.join("tools")).unwrap();
+    fs::create_dir(repo.join(".godot")).unwrap();
+    fs::write(repo.join(".godot/.keep"), "keep the fixture directory").unwrap();
+    fs::write(repo.join(".gitignore"), ".godot/\n.tools/\n").unwrap();
+    fs::write(repo.join("tools/run-tests.sh"), "#!/bin/sh\nset -eu\n[ \"$FIXTURE_VALUE\" = pinned ]\n[ -z \"${HP_VERIFY_COMMIT+x}\" ]\n./.tools/probe \"$1\" \"$2\"\n").unwrap();
+    fs::set_permissions(repo.join("tools/run-tests.sh"), fs::Permissions::from_mode(0o755)).unwrap();
+    git(&repo, &["add", "tools/run-tests.sh", ".gitignore"]);
+    git(&repo, &["add", "-f", ".godot/.keep"]);
+    git(&repo, &["commit", "-qm", "test command"]);
+    let oid = git(&repo, &["rev-parse", "HEAD"]).trim().to_owned();
+    let host_net = format!("FIXTURE_HOST_NET={}", fs::read_link("/proc/self/ns/net").unwrap().display());
+    let config = format!("[verification.toolchains.fixture]\npaths=[\"/bin/sh\",\"/usr/bin/env\",{:?}]\nenv=[\"FIXTURE_VALUE=pinned\",{host_net:?}]\ntimeout_seconds=10\n", tools.to_str().unwrap());
+    for case in ["undeclared", "changed-before-install", "changed", "pass", "fail", "tracked", "unignored", "timeout"] {
+        let lab = memory_project_with_config(&if case == "timeout" { config.replace("timeout_seconds=10", "timeout_seconds=1") } else { config.clone() });
+        let db_path = state_db(&lab.project);
+        let mut store = SqliteStore::open(&db_path).unwrap();
+        let task = TaskId::new("tests").unwrap();
+        let attempt = AttemptId::new("test-attempt").unwrap();
+        store.commit(Commit { expected_head: store.current_head().unwrap(), mutations: vec![
+            Mutation::Task { expected: None, next: Task { id: task.clone(), revision: 1, state: TaskState::Running, title: "tests".into(), active_attempt: Some(attempt.clone()) } },
+            Mutation::Attempt { expected: None, next: Attempt { id: attempt.clone(), task, revision: 1, state: AttemptState::Running, snapshot: None, reservation: "fixture".into(), termination_observed: false } },
+        ] }).unwrap();
+        let body = if case == "undeclared" {
+            serde_json::json!({"version":2,"toolchain":"missing","checks":["./tools/run-tests.sh","pass",secret]}).to_string()
+        } else {
+            herdr_farm::verification::toolchains::policy(&lab.project, "fixture", vec!["./tools/run-tests.sh".into(), case.into(), secret.display().to_string()]).unwrap()
+        };
+        let document = lab.tmp.path().join("contract.json");
+        let raw = serde_json::to_vec(&serde_json::json!({
+            "version":1,"project_store":db_path.canonicalize().unwrap(),"expected_head":store.current_head().unwrap(),
+            "task_id":"tests","contract_revision":1,"deliverable":"run the real tests","non_goals":"no provider calls",
+            "repository":repo,"base_oid":oid,"object_format":"sha1","acceptance_policies":[{"id":"builds","text":body}],
+            "dependencies":[],"capability_flags":[],"profile_kind":"codex","retry_class":"none","result_schema_id":"result-v1","route":if case == "pass" { "verify_then_integrate" } else { "verify_only" },
+            "authority":herdr_farm::authority::policy_reference(&lab.project).unwrap()
+        })).unwrap();
+        fs::write(&document, raw).unwrap();
+        assert!(Command::new("/usr/bin/ssh-keygen").args(["-Y","sign","-n",herdr_farm::authority::CONTRACT_SIGNATURE_NAMESPACE,"-f"])
+            .arg(&lab.key).arg(&document).output().unwrap().status.success());
+        let signature = PathBuf::from(format!("{}.sig", document.display()));
+        if case == "changed-before-install" { fs::write(tools.join("seal"), "changed before install").unwrap(); }
+        let installed = herdr_farm::authority::import_contract(&lab.project, &document, &signature);
+        if case == "undeclared" || case == "changed-before-install" {
+            let error = installed.unwrap_err().to_string();
+            assert!(error.contains(if case == "undeclared" {"undeclared verification toolchain"} else {"identity changed"}), "{error}");
+            assert_eq!(sql_count(&db_path, "SELECT count(*) FROM task_contracts"), 0);
+            continue;
+        }
+        let installed = installed.unwrap();
+        if case == "pass" {
+            git(&repo, &["update-ref", "refs/heads/acceptance", &integration_base]);
+            herdr_farm::integration::configure_project(&lab.project, &repo, "refs/heads/acceptance").unwrap();
+        }
+        let object_list = git(&repo, &["rev-list","--objects","--no-object-names","HEAD"]);
+        let objects: Vec<_> = object_list.lines().map(|oid| serde_json::json!({"oid":oid,"relative_path":format!("{}/{}", &oid[..2], &oid[2..])})).collect();
+        let submitted = store.submit_result(&serde_json::to_vec(&serde_json::json!({"idempotency_key":"submit","task_id":"tests","contract_revision":1,"contract_digest":installed.digest,
+            "attempt_id":attempt,"repository":repo,"base_oid":oid,"candidate_oid":oid,"object_format":"sha1","artifact_manifest":[],"claimed_checks":[],"objects":objects})).unwrap()).unwrap();
+        if case == "changed" { fs::write(tools.join("seal"), "changed after signing").unwrap(); }
+        let policy_path = lab.tmp.path().join("policy.json"); fs::write(&policy_path, &body).unwrap();
+        // Exercise an actual /tmp checkout as well: installing private /tmp
+        // must preserve copies and tool aliases beneath that path.
+        let scratch_parent = tempfile::Builder::new().prefix("herdr-acceptance-").tempdir_in("/tmp").unwrap();
+        let work = scratch_parent.path().join("work"); fs::create_dir(&work).unwrap();
+        let request = herdr_farm::verification::VerifyRequest::new(submitted.submission_id,"builds",policy_path,"verify",Duration::from_secs(1),work);
+        let outcome = herdr_farm::verification::verify(&mut store, &request).unwrap();
+        if case == "pass" {
+            assert_eq!(outcome.state, "accepted", "{:?}: {}", outcome.reason, outcome.stdout);
+            let result_id = outcome.receipt.as_ref().unwrap().result_id().to_owned();
+            let integrated = herdr_farm::integration::integrate_project(&lab.project, &herdr_farm::integration::IntegrateRequest {
+                result_id, idempotency_key: "integration".into(), repository: repo.clone(), work_dir: scratch_parent.path().join("integration"), fault: Default::default(),
+            }).unwrap();
+            assert_eq!(integrated.state, "integrated", "{:?}", integrated.reason);
+            let raw = rusqlite::Connection::open(&db_path).unwrap();
+            let metadata: String = raw.query_row("SELECT metadata FROM verification_runs WHERE run_id=?1", [&outcome.run_id], |r| r.get(0)).unwrap();
+            let metadata: serde_json::Value = serde_json::from_str(&metadata).unwrap();
+            assert_eq!(metadata["toolchain"]["name"], "fixture");
+            assert!(metadata["toolchain"]["paths"].as_array().unwrap().iter().any(|p| p["path"] == tools.join("seal").display().to_string() && p["sha256"].as_str().is_some_and(|s| s.len() == 64)));
+            assert_eq!(metadata["toolchain"]["timeout_seconds"], 10);
+        } else {
+            assert_eq!(outcome.state, "rejected", "{case}");
+            assert!(outcome.receipt.is_none());
+            assert_eq!(outcome.reason.as_deref(), Some(match case { "changed" => "toolchain_identity_mismatch", "timeout" => "timeout", "tracked" | "unignored" => "tampered_tree", _ => "checks_failed" }), "{case}: {:?}", outcome.reason);
+        }
+        assert_eq!(fs::read_to_string(&secret).unwrap(), "OWNER PRIVATE SECRET");
+        assert_eq!(git(&repo, &["status", "--porcelain"]), "");
+        assert!(!repo.join(".godot/cache").exists());
+        assert!(!repo.join(".tools/cache").exists());
+        if case == "changed" { fs::write(tools.join("seal"), "owner tool data").unwrap(); }
     }
 }

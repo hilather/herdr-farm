@@ -169,6 +169,8 @@ enum LaunchCommand {
         #[arg(long, conflicts_with="contract_file")] write: Vec<String>,
         /// Exact files the result must contain
         #[arg(long, conflicts_with="contract_file")] output: Vec<String>,
+        /// Owner-declared toolchain and test command; repeat for multiple checks
+        #[arg(long, requires="write", conflicts_with_all=["contract_file", "plan_output"])] accept: Vec<String>,
         #[arg(long)] deliverable: Option<String>,
         /// Advanced unsigned contract decisions (product fills store fences)
         #[arg(long)] contract_file: Option<PathBuf>,
@@ -855,6 +857,9 @@ enum ResultCommand {
     /// Reconcile a previously started integration without building a new candidate.
     #[cfg(target_os="linux")]
     ReconcileIntegration { #[arg(long)] repository: PathBuf, #[arg(long)] idempotency_key: String },
+    /// Print a toolchain policy with current identities, ready to embed before signing
+    #[cfg(target_os="linux")]
+    ToolchainPolicy { toolchain: String, #[arg(required=true, trailing_var_arg=true, allow_hyphen_values=true)] checks: Vec<String> },
     /// Run the exact signed acceptance policy against retained Git objects.
     #[cfg(target_os="linux")]
     Verify {
@@ -864,7 +869,7 @@ enum ResultCommand {
         #[arg(long)] idempotency_key: String,
         /// New absolute scratch directory; must not already exist.
         #[arg(long)] work_dir: PathBuf,
-        #[arg(long, default_value_t=60, value_parser=clap::value_parser!(u64).range(1..=300))]
+        #[arg(long, default_value_t=60, value_parser=clap::value_parser!(u64).range(1..=3600))]
         timeout_seconds: u64,
     },
     /// Commit a sandboxed worker's uncommitted edits on its attempt branch with a fixed identity; prints the candidate OID. Not evidence.
@@ -1322,8 +1327,8 @@ pub fn run() -> Result<()> {
             let value=match command {
                 LaunchCommand::Draft { selection, expected_head, validity_seconds } =>
                     serde_json::to_value(herdr_farm::launch_preparation::draft(&project,&load(&selection)?,expected_head,std::time::Duration::from_secs(validity_seconds),deadline,Default::default())?)?,
-                LaunchCommand::Run { task, profile, repository, sign_with, validity_seconds, title, plan_output, write, output, deliverable, prompt_file, contract_file, integration_ref, base, max_active_workers, herdr_socket, prepare_only } =>
-                    crate::launch_run::run(&ctx, &slug, crate::launch_run::Args { task, profile, repository, sign_with, validity_seconds, title, plan_output, write, output, deliverable, prompt_file, contract_file, integration_ref, base, max_active_workers, herdr_socket, prepare_only })?,
+                LaunchCommand::Run { task, profile, repository, sign_with, validity_seconds, title, plan_output, write, output, accept, deliverable, prompt_file, contract_file, integration_ref, base, max_active_workers, herdr_socket, prepare_only } =>
+                    crate::launch_run::run(&ctx, &slug, crate::launch_run::Args { task, profile, repository, sign_with, validity_seconds, title, plan_output, write, output, accept, deliverable, prompt_file, contract_file, integration_ref, base, max_active_workers, herdr_socket, prepare_only })?,
                 LaunchCommand::View { task } => crate::launch_run::view(&ctx, &slug, &task)?,
                 LaunchCommand::Stop { task, force } => crate::launch_run::stop(&ctx, &slug, &task, force)?,
                 LaunchCommand::Reserve { selection, approval_digest, expected_head } => {
@@ -1572,6 +1577,8 @@ pub fn run() -> Result<()> {
             project::validate_slug(&slug)?;
             let dir=ctx.root.join(&slug);
             match command {
+                #[cfg(target_os="linux")]
+                ResultCommand::ToolchainPolicy{toolchain,checks}=>println!("{}",herdr_farm::verification::toolchains::policy(&dir,&toolchain,checks)?),
                 #[cfg(target_os="linux")]
                 ResultCommand::Capture{attempt,message}=>println!("{}",serde_json::to_string_pretty(&herdr_farm::result_capture::capture_project(&dir,&attempt,message.as_deref())?)?),
                 #[cfg(target_os="linux")]

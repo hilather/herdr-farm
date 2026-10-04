@@ -53,6 +53,7 @@ pub(crate) fn valid_ref_name(name: &str) -> bool {
 #[derive(Clone, PartialEq)]
 pub(crate) struct VerifiedIntegration {
     pub result_id: String,
+    pub project_store: String,
     pub commit_oid: String,
     pub object_format: String,
     pub repository: String,
@@ -327,6 +328,7 @@ impl SqliteStore {
             .collect::<rusqlite::Result<Vec<(String, String)>>>()?;
         tx.commit()?;
         Ok(VerifiedIntegration {
+            project_store: project,
             result_id,
             commit_oid,
             object_format,
@@ -549,8 +551,8 @@ impl SqliteStore {
     /// only grows, stays within the store's maximum, and keeps the claim's
     /// revision and epoch; the new expiry is recorded as an event.
     pub(crate) fn extend_integration_lease(&mut self, claim: &Claim, lease_ms: i64, now: i64) -> Result<Claim> {
-        if !(1..=300_000).contains(&lease_ms) {
-            return Err(invalid("lease must be 1..300000 ms"));
+        if !(1..=21_690_000).contains(&lease_ms) {
+            return Err(invalid("integration lease must be 1..21690000 ms"));
         }
         let tx = self
             .connection

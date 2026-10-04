@@ -21,6 +21,8 @@ pub struct Spec {
     pub policy_digest: String,
     /// Hidden check inputs, bound read-only at the same paths (replay suite).
     pub hidden: Vec<PathBuf>,
+    pub toolchain: Option<super::toolchains::Resolved>,
+    pub repository: Option<PathBuf>,
 }
 
 pub struct Launch {
@@ -70,6 +72,17 @@ pub fn launch(spec: &Spec) -> Result<Launch> {
     for hidden in &spec.hidden {
         args.extend(["--hidden".into(), hidden.display().to_string()]);
     }
+    if !spec.toolchain.as_ref().is_some_and(|r| r.toolchain.network) {
+        args.insert(0, "--net".into());
+    }
+    if let Some(resolved) = &spec.toolchain {
+        let manifest = spec.scratch.with_extension("toolchain.json");
+        fs::write(&manifest, serde_json::to_vec(resolved)?)?;
+        args.extend(["--toolchain".into(), manifest.display().to_string()]);
+    }
+    if let Some(repository) = &spec.repository {
+        args.extend(["--repository".into(), repository.display().to_string()]);
+    }
     args.push("--".into());
     args.extend(spec.checks.iter().cloned());
     let mut argv = vec![spec.unshare_program.display().to_string()];
@@ -96,6 +109,8 @@ pub fn launch(spec: &Spec) -> Result<Launch> {
             spec.scratch.display().to_string(),
         ),
     ];
+    cmd.env.push(("HP_VERIFY_CHECK_ENV".into(), serde_json::to_string(&spec.toolchain.as_ref().map(|r| &r.toolchain.env).cloned().unwrap_or_default())?));
+    cmd.env.push(("HP_VERIFY_DEADLINE_MONOTONIC_MS".into(), (super::repetitions::monotonic_ms().saturating_add(spec.timeout.as_millis() as u64)).to_string()));
     cmd.cwd = Some(spec.checkout.clone());
     let _ = Path::new(&cmd.program);
     Ok(Launch { cmd, argv })

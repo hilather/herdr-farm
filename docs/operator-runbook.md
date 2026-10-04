@@ -433,3 +433,15 @@ available. Existing coordinators pick up regenerated settings when `open` next s
 the coordinator agent. Ask rules cover normal command forms, not hostile owner processes;
 see operations.md for wrapper rules and limits. Retain owner-request history in
 whole-project canonical backups; do not replay approved authority from telemetry.
+
+For real project tests, declare `[verification.toolchains.NAME]` once in the
+owner's external `config.toml`, with absolute `paths`, validated `env`, optional
+`network` (default false) and `timeout_seconds` (default 600, maximum 3600).
+A code launch can then add repeatable
+`--accept 'NAME:./tools/run-tests.sh --headless'` alongside `--write` and `--output`.
+The generated signed policy pins the toolchain and its dependencies. Tests run
+in the private checkout with read-only tools, private `/tmp` and no network by
+default. Ignored caches are allowed; tracked or unignored changes fail acceptance.
+After an intended toolchain update, sign a new contract revision. See
+[acceptance toolchains](factory/verified-results.md#owner-declared-acceptance-toolchains)
+for manual policy preparation, evidence and timeout details.

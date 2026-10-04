@@ -15,7 +15,7 @@ herdr-projects --root /path/to/projects result demo verify SUBMISSION_ID \
 The policy file must match the acceptance policy text in the installed signed
 contract byte-for-byte, including whitespace. The command cannot substitute a
 worker's claimed checks for that policy. Policy input must be a regular,
-non-symlink file of at most 4,000 bytes. The check subprocess timeout is 1–300
+non-symlink file of at most 4,000 bytes. The check subprocess timeout is 1–3600
 seconds; retained-object preparation has its existing separate bounds.
 
 The scratch path must be absolute, must not exist, and must have an existing
@@ -208,3 +208,70 @@ are explicitly unavailable, never partial passing suites. Check stderr is
 drained without forwarding supervisor protocol lines. Quality collection
 projects completed flake observations, and a failure followed by a passing
 rerun counts as a flip on the same tree and policy without accepting work.
+
+## Owner-declared acceptance toolchains
+
+Declare a toolchain once in the external owner `config.toml` (the path pinned
+by project migration), then select it in a version-2 acceptance policy:
+
+```toml
+[verification.toolchains.godot]
+paths = ["/bin/sh", "/usr/bin/env", "/absolute/game/.tools"]
+env = ["GODOT_SILENCE_ROOT_WARNING=1"]
+network = false
+timeout_seconds = 600
+```
+
+Paths must be absolute files or directories. The verifier resolves ELF loaders,
+shared libraries and declared script interpreters using the worker dependency
+resolver. File contents and path metadata, including recursively enumerated
+directory entries and dependency identities, are pinned. Files are exposed
+read-only at the same paths; paths inside the contract repository are also
+exposed relative to the private checkout, so ignored `.tools/` executables work.
+Directory contents are snapshotted as individual read-only file mounts. Empty
+original directories are present read-only. Interpreters such as `/bin/sh` and
+`/usr/bin/env` must be declared; they are not supplied by default.
+
+`env` follows `thread_env` validation: at most 32 `NAME=VALUE` entries, uppercase
+names, no NUL values, and no loader, Git, shell startup, `PATH` or `HOME`
+overrides. Checks receive a cleared environment, fixed sandbox defaults and
+these entries. Verifier control variables are not passed to the test command.
+Network access is disabled by default using a separate network namespace; only
+an owner toolchain with `network = true` may inherit network access.
+
+For generated code contracts, use repeatable
+`launch PROJECT run --write … --output … --accept 'godot:./tools/run-tests.sh --headless'`.
+This creates a policy with `version`, `toolchain`, `checks` and
+`toolchain_digest` before the contract is signed. Arguments support single and
+double quotes and backslash escaping; no shell expansion takes place.
+For hand-authored contracts, obtain the exact policy text before signing:
+
+```sh
+herdr-farm result PROJECT toolchain-policy godot -- ./tools/run-tests.sh --headless
+```
+
+Embed that JSON as the acceptance policy's `text`. The signed digest is required
+for a toolchain policy; a bare name cannot attest what tools existed at signing.
+Only the owner config supplies mounts, environment, network permissions and
+budgets. Undeclared toolchains and changed identities are refused at contract
+install; changes after install reject verification with
+`toolchain_identity_mismatch`. Re-sign a new contract revision after an intended
+toolchain update. Run metadata records the toolchain name, digest, timeout,
+network setting and every path's identity; environment values are not recorded.
+No new storage table is needed: this uses the existing signed policy and bounded
+verification metadata evidence.
+
+Commands beginning with `./` resolve within the copied checkout and may not
+traverse outside it. Checks can write only inside that disposable copy and a
+private `/tmp`; the rest of the root and owner tools are read-only. Mount
+capabilities are dropped and privilege escalation is disabled before checks.
+Gitignored output is allowed; tracked changes, index/HEAD changes and unignored
+output reject with `tampered_tree`. Nothing is written into the live repository.
+
+Toolchain checks have one timeout for all repetitions: default 600 seconds,
+maximum 3600. This overrides the caller's legacy verification timeout. Integration
+rechecks each policy with its own toolchain timeout (ordinary policies retain
+30 seconds), at most six policies, with a lease covering the sum plus margin.
+Automatic verification reserves a 3720-second lease; integration's extended
+lease covers up to six maximum-length policies. Exact-key replay remains a
+historical result and does not rerun or certify the current toolchain.

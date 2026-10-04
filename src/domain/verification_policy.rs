@@ -6,6 +6,8 @@ use std::{collections::BTreeMap, path::Path};
 #[derive(Deserialize)]
 pub(crate) struct ExecutionPolicy {
     pub version: u32,
+    pub toolchain: Option<String>,
+    pub toolchain_digest: Option<String>,
     pub checks: Vec<String>,
     #[serde(default)]
     pub rerun_on_failure: u8,
@@ -24,7 +26,7 @@ pub(crate) struct Stress {
 fn argv(args: &[String]) -> bool {
     !args.is_empty()
         && args.len() <= 32
-        && Path::new(&args[0]).is_absolute()
+        && (Path::new(&args[0]).is_absolute() || args[0].starts_with("./") && Path::new(&args[0][2..]).components().all(|c| matches!(c, std::path::Component::Normal(_))))
         && args
             .iter()
             .all(|s| !s.is_empty() && s.len() <= 4096 && !s.contains('\0'))
@@ -37,6 +39,8 @@ impl ExecutionPolicy {
         let policy: Self = serde_json::from_slice(bytes)?;
         let raw: serde_json::Value = serde_json::from_slice(bytes)?;
         if !matches!(policy.version, 1 | 2)
+            || policy.toolchain.as_ref().is_some_and(|name| policy.version != 2 || name.is_empty() || name.len() > 64 || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b)))
+            || policy.toolchain.is_none() && (policy.toolchain_digest.is_some() || policy.commands().any(|args| args.first().is_some_and(|p| p.starts_with("./"))))
             || !argv(&policy.checks)
             || policy.rerun_on_failure > 2
             || policy.named_checks.len() > 6

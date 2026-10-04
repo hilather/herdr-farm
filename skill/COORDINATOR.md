@@ -300,3 +300,15 @@ Never retry a refused launch with different arguments to get around policy.
 Do not wrap owner commands in env, a shell, or another command wrapper.
 Requests expire after 24 hours. A cap approval applies to one reservation of the
 named task and exact contract decisions; it does not change the worker cap.
+
+For a code task, add the project's real acceptance command with repeatable
+`launch PROJECT run --write … --output … --accept 'godot:./tools/run-tests.sh --headless'`.
+The owner declares `[verification.toolchains.godot]` once in their external
+`config.toml`, including `/bin/sh`, `/usr/bin/env` when used, and the absolute
+`.tools/` directory or other required tools. The coordinator and worker select
+only the toolchain name and checkout-relative command; they cannot grant mounts,
+environment, network access or timeouts. Launch pins tool identities into the
+signed contract. Checks run against the private checkout, with ignored caches
+allowed and tracked/unignored changes rejected. Tool changes require a newly
+signed contract revision. See `docs/factory/verified-results.md` for the config
+format and manually prepared policies.
