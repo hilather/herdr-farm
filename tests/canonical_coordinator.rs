@@ -237,8 +237,8 @@ fn socket_open_primes_owned_coordinator_retries_swallowed_prompt_and_recreates_c
         assert!(permissions["permissions"]["allow"].as_array().unwrap().contains(&json!(format!("Bash({prefix} {verb}:*)"))), "missing allow {verb}");
     }
     let memory_rules=permissions["permissions"]["allow"].as_array().unwrap().iter().filter_map(Value::as_str).filter(|rule|rule.starts_with(&format!("Bash({prefix} memory demo "))).collect::<Vec<_>>();
-    assert_eq!(memory_rules.len(),4);
-    for verb in ["list","show","approve","reject"] {
+    assert_eq!(memory_rules.len(),5);
+    for verb in ["list","show","approve","reject","record"] {
         assert!(memory_rules.contains(&format!("Bash({prefix} memory demo {verb}:*)").as_str()));
     }
     for verb in ["merge", "unmerge", "split", "restore", "reset"] {
