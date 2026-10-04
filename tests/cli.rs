@@ -5633,7 +5633,7 @@ fn legacy_manual_resolution_preserves_artifacts_for_the_resolved_generation() {
 fn long_lived_store_snapshot_above_fifty_mib_remains_readable_from_cli() {
     use herdr_farm::{domain::TaskId,migration,runtime};
     let home=tempfile::tempdir().unwrap();let root=home.path().join("root");let r=root.to_str().unwrap();
-    assert!(hp(home.path(),&["--root",r,"new","--legacy","demo"]).status.success());
+    assert!(hp(home.path(),&["--root",r,"new","demo"]).status.success());
     assert!(hp(home.path(),&["--root",r,"pause","demo"]).status.success());
     let project=root.join("demo");migration::apply(&project,&migration::inspect(&project).unwrap(),true).unwrap();
     runtime::add_task(&project,TaskId::new("work").unwrap(),"Retained task".into(),runtime::snapshot(&project).unwrap().head).unwrap();
