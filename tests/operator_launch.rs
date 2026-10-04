@@ -1468,7 +1468,13 @@ fn memory_adopt_imports_only_owner_decisions_and_clears_diagnostics() {
     lab.ok(&["memory", "demo", "adopt"]);
     assert_eq!(herdr_farm::runtime::snapshot(&lab.project).unwrap(), after);
     let doctor = lab.cli(&["doctor"]);
-    assert!(!String::from_utf8_lossy(&doctor.stdout).contains("memory demo adopt"));
+    let text = String::from_utf8_lossy(&doctor.stdout).into_owned();
+    assert!(!text.contains("memory demo adopt"), "{text}");
+    // The retained human index is recognised, not reported as a stale projection.
+    assert!(text.contains("retained at memory adoption (unchanged)") && !text.contains("is not a SQLite projection"), "{text}");
+    fs::write(lab.project.join("MEMORY.md"), "# Memory\n- edited after adoption\n").unwrap();
+    let text = String::from_utf8_lossy(&lab.cli(&["doctor"]).stdout).into_owned();
+    assert!(text.contains("MEMORY.md changed after memory adoption") && text.contains("memory demo record"), "{text}");
     assert!(lab.project.join("memory/candidates/candidate-1.md").exists());
 }
 

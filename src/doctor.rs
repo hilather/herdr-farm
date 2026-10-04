@@ -336,8 +336,12 @@ fn report(
                         check(&mut out, None, &label, "capability mismatch: instructions say to edit MEMORY.md as authority but memory owner is SQLite (projections); use `memory PROJECT import/preview` with signed review; see `skill`".into());
                     }
                     let mem = std::fs::read_to_string(dir.join("MEMORY.md")).unwrap_or_default();
-                    if !mem.contains("herdr-projects memory projection") {
-                        check(&mut out, None, &label, "MEMORY.md is not a SQLite projection; run `migration export` for the current view; do not edit as authority".into());
+                    match herdr_farm::memory::adopted_index_unchanged(&dir) {
+                        Some(true) => check(&mut out, Some(true), &label, "MEMORY.md is the owner's index retained at memory adoption (unchanged); memory itself is SQLite".into()),
+                        Some(false) => check(&mut out, None, &label, format!("MEMORY.md changed after memory adoption; it is not authority. Record owner decisions with `memory {slug} record`")),
+                        None if !mem.contains("herdr-projects memory projection") =>
+                            check(&mut out, None, &label, "MEMORY.md is not a SQLite projection; run `migration export` for the current view; do not edit as authority".into()),
+                        None => {}
                     }
                 }
                 match crate::memory_review::load(&dir) {

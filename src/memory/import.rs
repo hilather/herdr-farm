@@ -696,6 +696,17 @@ pub fn adopt_plan(project: &Path) -> Result<AdoptPlan> {
     Ok(AdoptPlan { plan, outcomes, blockers })
 }
 
+/// After `memory adopt`, MEMORY.md stays the owner's human index rather than a
+/// projection. `Some(true)` while it is byte-identical to the adopted index,
+/// `Some(false)` once edited afterwards, `None` when no adoption kept it.
+pub fn adopted_index_unchanged(project: &Path) -> Option<bool> {
+    let journal = load_journal(project).ok()?;
+    if journal.plan.version != 2 { return None; }
+    let adopted = journal.plan.sources.iter().find(|s| s.path == "MEMORY.md")?;
+    let current = read(&project.join("MEMORY.md")).ok()?;
+    Some(hash(&current) == adopted.digest)
+}
+
 pub fn legacy_owner_memory_warning(project: &Path) -> Option<String> {
     if migration::read_format(project).ok()?.memory != MEMORY_LEGACY { return None; }
     let dir = project.join("memory");
