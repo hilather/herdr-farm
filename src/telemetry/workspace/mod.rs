@@ -86,6 +86,10 @@ fn labels(project: &Path) -> Result<std::collections::BTreeMap<String, String>> 
     if !exists { return Ok(Default::default()); }
     let rows = db.prepare("SELECT configuration_id,coalesce(json_extract(canonical_json,'$.kind'),'unknown')||' '||coalesce(json_extract(canonical_json,'$.agent_version'),'unknown') FROM agent_configurations")?
         .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?.collect::<rusqlite::Result<_>>()?;
+    let mut rows: std::collections::BTreeMap<String, String> = rows;
+    for row in super::configuration_names::read(project)? {
+        if let (Some(id), Some(label)) = (row["configuration_id"].as_str(), row["label"].as_str()) { rows.insert(id.into(), label.into()); }
+    }
     Ok(rows)
 }
 
@@ -188,11 +192,18 @@ fn snapshot_for(project: &Path, slug: &str, digest: bool) -> Value {
         "M40": m40.map(metric_fields), "quota_at_last_dispatch": quota});
 
     // Configuration comparison (TM4.4): M02 per task class, suppression and intervals as computed there.
-    let configurations = match super::analytics::store::workspace_comparison(project, digest) {
+    let mut configurations = match super::analytics::store::workspace_comparison(project, digest) {
         Ok(Some(report)) => report,
         Ok(None) => unavailable("no_revision_as_of"),
         Err(_) => unavailable("comparison_unavailable"),
     };
+
+    let configuration_names = if digest { Vec::new() } else { super::configuration_names::read(project).unwrap_or_default() };
+    for cell in configurations.get_mut("cells").and_then(Value::as_array_mut).into_iter().flatten() {
+        for arm in cell["arms"].as_array_mut().into_iter().flatten() {
+            if let Some(name) = configuration_names.iter().find(|name| name["configuration_id"] == arm["configuration_id"]) { arm["label"] = name["label"].clone(); }
+        }
+    }
 
     // TM4.5 health alerts as recorded (`telemetry <slug> health alerts`): the
     // inbox notices are that lane's own `health notify`.
@@ -225,6 +236,7 @@ fn snapshot_for(project: &Path, slug: &str, digest: bool) -> Value {
         "needs_you": needs, "active": {"count": active.len(), "attempts": active}, "services": services,
         "configurations": configurations, "candidate_groups": groups,
         "replay": result(&answer, "M49").map(metric_fields), "alerts": alerts});
+    if !digest { out["configuration_names"] = json!(configuration_names); }
     if digest { out["digest_counts"] = json!({"pending": pending_count, "alerts": open_count}); }
     out
 }

@@ -773,3 +773,22 @@ from 100000 to at most 1000000. Field limits remain 16 MiB. This changes no sche
 or retention/backup classification. Automatic relaunch control is audited as
 `project.launch_run_paused`; explicit owner control remains
 `project.control_changed`.
+
+### Compatible newer CLI usage
+
+The [adapter version acceptance contract](contracts-collection.md#adapter-version-acceptance-usage-newer-1)
+accepts versions at or above a live-certified adapter's lowest certified version.
+Usage, sessions and observation measurements distinguish `newer_than_certified`
+with `nearest_certified_version`. M13 and M15 count these sources as covered and
+expose their count in `coverage.newer_than_certified`; views display it beside
+coverage. Required usage schema drift is `schema_unrecognized`, never a partial
+complete total. Fixture-only adapters still require exact versions.
+
+Sidecar codex stream **v5**, `migrations/telemetry/0005_usage_schema_unrecognized.sql`,
+adds `schema_unrecognized` to the usage reason constraint with a row-preserving
+rebuild. Existing capture triggers/indexes, session retention and full backup
+classification remain in force; canonical schema is unchanged.
+
+Accounting stream **v21**, `migrations/telemetry/accounting/0021_newer_cli_usage.sql`,
+updates the OTLP projection view and backfills accepted newer-version records;
+existing source/session retention and backup classifications are unchanged.

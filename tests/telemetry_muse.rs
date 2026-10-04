@@ -283,13 +283,15 @@ fn native_muse_partial_append_revocation_and_version_gate() {
         0
     );
     no_secrets(&f);
-    let f = muse_version("9.9.9");
-    plant(&f, &f.worktree(), f.decided + 1000);
-    f.cli("collect");
-    f.cli_args(&["accounting", "sync"]);
-    let entries = f.cli_args(&["accounting", "entries"]).0;
-    assert!(accepted_delta_entries(&entries).is_empty());
-    no_secrets(&f);
+    for version in ["1.4.0-R4160.9", "1.4.0-1"] {
+        let f = muse_version(version);
+        plant(&f, &f.worktree(), f.decided + 1000);
+        f.cli("collect");
+        f.cli_args(&["accounting", "sync"]);
+        let entries = f.cli_args(&["accounting", "entries"]).0;
+        assert!(accepted_delta_entries(&entries).is_empty());
+        no_secrets(&f);
+    }
 }
 
 #[test]
@@ -406,4 +408,46 @@ fn muse_usage_is_priced_by_a_muse_card() {
     assert_eq!(cost["attempts"][0]["estimate"]["amount"], "47662", "{cost}");
     assert_eq!(cost["attempts"][0]["coverage"], json!({"entries": 4, "priced": 4, "unpriced": {}}));
     assert_eq!(f.cli_args(&["accounting", "reprice"]).0["appended"], false);
+}
+
+#[test]
+fn newer_muse_build_sequence_is_collected_with_provenance() {
+    for version in ["1.4.0-R4161.2", "1.4.0-R4162.1", "1.5.0-R1.1"] {
+        let f = muse_version(version);
+        plant(&f, &f.worktree(), f.decided + 1000);
+        f.cli("collect");
+        f.cli_args(&["accounting", "sync"]);
+        let ledger = f.cli_args(&["accounting", "entries"]).0;
+        let entries = accepted_delta_entries(&ledger);
+        assert!(!entries.is_empty(), "newer Muse {version}");
+        assert!(entries.iter().all(|e| e["provenance"].as_array().unwrap().iter().any(|p|
+            p["certification"] == "newer_than_certified" && p["nearest_certified_version"] == "1.4.0-R4161.1")));
+        no_secrets(&f);
+    }
+}
+
+#[test]
+fn newer_muse_missing_event_identity_is_schema_unrecognized() {
+    let f = muse_version("1.4.0-R4162.1");
+    let paths = plant(&f, &f.worktree(), f.decided + 1000);
+    let mut changed = false;
+    let lines: Vec<String> = fs::read_to_string(&paths[0]).unwrap().lines().map(|line| {
+        let mut value: Value = serde_json::from_str(line).unwrap();
+        if !changed && value["payload"]["event"]["kind"] == "model_completed" {
+            changed = true;
+            value.as_object_mut().unwrap().remove("id");
+        }
+        value.to_string()
+    }).collect();
+    assert!(changed);
+    fs::write(&paths[0], format!("{}\n", lines.join("\n"))).unwrap();
+    f.cli("collect");
+    let usage = f.cli_args(&["usage", "--json"]).0["attempts"].as_array().unwrap().iter()
+        .find(|a| a["attempt_id"] == f.attempt).unwrap()["usage"].clone();
+    assert_eq!(usage["reason"], "schema_unrecognized");
+    assert_eq!(usage["cli_version"], "muse/1.4.0-R4162.1");
+    assert!(usage.get("total_tokens").is_none());
+    f.cli_args(&["accounting", "sync"]);
+    assert!(f.sidecar().query_row("SELECT EXISTS(SELECT 1 FROM codex_usage WHERE reason='schema_unrecognized' AND total_tokens IS NULL)", [], |r| r.get::<_, bool>(0)).unwrap());
+    no_secrets(&f);
 }

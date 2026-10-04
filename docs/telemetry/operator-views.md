@@ -230,3 +230,16 @@ prints `bucket denominator rows 3-3 of 3` and `task t4 failed`.
   ([workspace.md](workspace.md)).
 
 Compatibility: legacy environment variables and existing data/config locations remain supported; see [renaming](../renaming.md).
+
+Configuration display names come from the attempt's frozen profile and its
+immutable retained native verification report, never the current profile file.
+`telemetry PROJECT attempts --json` includes `profile`, `agent_kind`, `model`,
+and `reasoning_effort` alongside the unchanged `configuration_id`. Missing
+historical profile or pin evidence is JSON `null` and displays as `unknown`.
+Models and project views (including the fleet pane), comparison, fleet accounting,
+and cost accounting show a configuration key as
+`<profile> (<kind> <model> <effort>) <short hash>` with its first and last dispatch
+use in Unix milliseconds. Edited profiles retain separate labelled hashes and
+use ranges. These labels are display evidence only: configuration identity,
+comparison grouping, and metric populations remain unchanged. Model and effort
+are the verified requested pins, not claims about effective runtime routing.

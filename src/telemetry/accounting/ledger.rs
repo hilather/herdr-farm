@@ -261,7 +261,7 @@ fn sync_with_wait(db: &mut Connection, wait: &mut crate::telemetry::writer::Writ
         SELECT s.path_digest,s.session_id,
         EXISTS(SELECT 1 FROM codex_usage u WHERE u.path_digest=s.path_digest AND u.reason='cli_version_uncertified'),
         EXISTS(SELECT 1 FROM codex_quarantine q WHERE q.session_id=s.session_id),
-        EXISTS(SELECT 1 FROM codex_usage u WHERE u.session_id=s.session_id AND u.reason='invariant_violation'),
+        EXISTS(SELECT 1 FROM codex_usage u WHERE u.session_id=s.session_id AND u.reason IN ('invariant_violation','schema_unrecognized')),
         (SELECT count(*) FROM codex_usage u WHERE u.path_digest=s.path_digest AND u.accepted=1)
         FROM rollout_sources s WHERE s.session_id IN (SELECT session_id FROM accounting_selected);")?;
     super::otlp::store_native_totals(&tx)?;
@@ -339,11 +339,17 @@ pub fn open_dispositions(db: &Connection) -> Result<Option<Vec<OpenDisposition>>
 /// The synced ledger as JSON, read-only; `ledger_not_synced` before the first sync.
 pub fn read(db: &Connection) -> Result<Value> {
     if !synced(db)? { return Ok(super::unavailable("ledger_not_synced")); }
+    let versions: BTreeMap<String, String> = db.prepare("SELECT path_digest,cli_version FROM rollout_sources")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
     let mut provenance = BTreeMap::<String, Vec<Value>>::new();
     let mut stmt = db.prepare("SELECT entry_id,path_digest,disposition,reason FROM usage_dispositions ORDER BY entry_id,path_digest")?;
     for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, Option<String>>(3)?)))? {
         let (entry, path, disposition, reason) = row?;
-        provenance.entry(entry).or_default().push(json!({"path_digest": path, "disposition": disposition, "reason": reason}));
+        let mut item = json!({"path_digest": path, "disposition": disposition, "reason": reason});
+        if let Some(version) = versions.get(&path).filter(|v| crate::telemetry::version::nearest(v).is_some()) {
+            for (k, v) in crate::telemetry::version::provenance(version).as_object().unwrap() { item[k] = v.clone(); }
+        }
+        provenance.entry(entry).or_default().push(item);
     }
     let mut stmt = db.prepare("SELECT entry_id,session_id,basis,scope,normalization_version,precedence,position,response_id,model,native,
         input_tokens,cache_read_tokens,new_input_tokens,cache_write_tokens,output_tokens,reasoning_tokens,total_tokens FROM usage_entries ORDER BY entry_id")?;

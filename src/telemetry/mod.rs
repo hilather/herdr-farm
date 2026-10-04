@@ -11,6 +11,7 @@ pub mod ingest;
 pub mod maintenance;
 pub mod metrics;
 pub mod outcome;
+pub(crate) mod configuration_names;
 pub mod operating;
 pub mod otlp;
 mod gemini;
@@ -23,6 +24,7 @@ pub mod review;
 pub mod sanitize;
 pub mod sidecar;
 mod writer;
+mod version;
 
 /// One phase-2 lane's hooks (docs/telemetry/phase2-lanes.md), each defined in
 /// the lane's own module and registered only here: its sidecar stream and

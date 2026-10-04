@@ -3333,6 +3333,7 @@ fn outcome_success_path() {
     assert_eq!(report,serde_json::json!({"attempts":[{
         "accepted":true,
         "active_ms":marks[3].2-marks[2].2,
+        "agent_kind":"claude","model":null,"profile":"worker","reasoning_effort":null,
         "attempt_id":attempt,
         "attention":{"basis":"fixture","censored_intervals":0,"gaps":{},"intervals":0,"interventions":0,"observed_ms":observed,
             "reason_type":"blocked_untyped","source":"herdr-agent-list-v1","uncertain_starts":0,"waiting_ms":0},

@@ -2754,3 +2754,50 @@ See the worker report for suite results; socket-bind tests fail here only with
 `Operation not permitted` and are rerun by the steward.
 
 The `state-store` feature is enabled by default; build recipes above use that default.
+
+## Adapter version acceptance (USAGE-NEWER-1)
+
+Owner decision 2026-10-04: adapters with live certification accept parseable
+versions at or above their lowest live-certified version. Codex's floor is
+`0.154.0`, Claude Code's `2.1.286`, Muse's `1.4.0-R4161.1`, Grok's `1.0.46`,
+and Devin's `3000.11.3`. The rule applies to native and mapped OTLP surfaces.
+Gemini CLI and OpenCode remain fixture-only and require exact fixture versions;
+other fixture-only OTLP mappings retain their existing field allowlists.
+
+The shared comparator compares dotted numeric components numerically (trailing
+zero components are equivalent), then suffix components with numeric runs
+compared numerically, including Muse's `R4161.1` build sequence. A release sorts
+above its prerelease; semver `+` build metadata does not affect precedence.
+Unparseable versions and versions below the live floor
+remain `cli_version_uncertified`; historical Claude `2.1.3` fixtures remain
+format evidence but are below the live acceptance floor.
+
+Accepted versions absent from the live list carry `certification:
+"newer_than_certified"` and `nearest_certified_version` (the greatest certified
+version not exceeding the observed version) in usage, session records and
+observation measurements. This is compatibility acceptance, not a claim of a
+new live reconciliation. Coverage counts them as covered; M13 reports the
+number of complete attempts with such a source, and M08/M09/M15 report the
+number of such covered sessions as `coverage.newer_than_certified`. Operator
+view coverage text exposes this count.
+
+Missing required usage counters and changed counter types on accepted newer
+versions produce `schema_unrecognized`, with the source version retained.
+Rejected records have NULL counters, and attempt usage is unavailable for the
+whole attempt rather than a partial sum. OTLP malformed mapped usage remains
+explicit evidence without usage authority. Existing invariant checks continue
+to reject inconsistent arithmetic. Typed-ingestion quarantine on a newer
+source also blocks complete attempt usage and excludes the source from coverage;
+a missing Muse completion identity is a schema-unrecognized usage record. A newer source with no usage records is
+`no_usage_records` with its version, excluded from coverage rather than silently
+reporting a zero total.
+
+On `telemetry PROJECT collect` and `accounting sync`, previously refused
+`cli_version_uncertified` sessions whose versions now pass the rule are read
+again from byte zero through the existing source invalidation/rebuild path.
+Record identities and history are preserved. Missing source files remain
+unavailable with `rollout_unavailable`; reads do not invent counters. Sidecar codex stream v5 (`0005_usage_schema_unrecognized.sql`) expands the
+usage reason constraint through a row-preserving rebuild. Capture triggers and
+indexes are preserved; `codex_usage` retains its existing session retention and
+full-backup classification. No new table survives the migration and no canonical
+schema changes.

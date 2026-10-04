@@ -13,7 +13,8 @@ use std::path::{Path, PathBuf};
 const STREAMS_TABLE: &str = "CREATE TABLE IF NOT EXISTS telemetry_streams (stream TEXT PRIMARY KEY, version INTEGER NOT NULL CHECK (version >= 0)) STRICT;";
 const CODEX: &[&str] = &[include_str!("../../migrations/telemetry/0001_codex_usage.sql"), include_str!("../../migrations/telemetry/0002_reevaluation.sql"),
     include_str!("../../migrations/telemetry/0003_read_indexes.sql"),
-    include_str!("../../migrations/telemetry/0004_compact_native.sql")];
+    include_str!("../../migrations/telemetry/0004_compact_native.sql"),
+    include_str!("../../migrations/telemetry/0005_usage_schema_unrecognized.sql")];
 
 // Compaction in older binaries could silently remove 0012's capture triggers.
 // Check the actual schema even when every migration version is current.
@@ -179,7 +180,7 @@ pub(crate) fn migrate(db: &mut Connection) -> Result<()> {
                 // Rebuilding native tables drops their triggers. Preserve the
                 // original accounting/frontier SQL, then reinstall it on the
                 // replacement tables in this same migration transaction.
-                let triggers: Vec<(String, String)> = if matches!((stream, index + 1), ("codex", 4) | ("ingest", 12) | ("accounting", 17)) {
+                let triggers: Vec<(String, String)> = if matches!((stream, index + 1), ("codex", 4 | 5) | ("ingest", 12) | ("accounting", 17)) {
                     tx.prepare("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND sql IS NOT NULL")?
                         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?
                 } else { Vec::new() };
@@ -267,6 +268,9 @@ pub fn report(project: &Path) -> Result<Value> {
         if originator.as_deref() == Some("claude-code") {
             row["adapter"] = json!("claude-code");
             row["certification"] = json!(if super::codex::accepted_version(&version) { "fixture" } else { "none" });
+        }
+        if super::version::nearest(&version).is_some() {
+            for (k, v) in super::version::provenance(&version).as_object().unwrap() { row[k] = v.clone(); }
         }
         sessions.push(row);
     }
@@ -366,6 +370,23 @@ pub(crate) fn after_termination_summary(project: &Path) -> Result<Value> {
     Ok(json!({"records": records, "attempts": affected, "missing_reason": missing}))
 }
 
+/// A newer schema that failed typed ingestion cannot yield a complete sum.
+pub(crate) fn malformed_newer(db: &Connection, session: &str, version: &str) -> rusqlite::Result<bool> {
+    if super::version::nearest(version).is_none() { return Ok(false); }
+    let present: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='ingest_quarantine')", [], |r| r.get(0))?;
+    if !present { return Ok(false); }
+    db.query_row("SELECT EXISTS(SELECT 1 FROM ingest_quarantine q JOIN rollout_sources s ON s.path_digest=q.source
+        WHERE s.session_id=?1 AND q.reason IN ('line_malformed','record_malformed'))", [session], |r| r.get(0))
+}
+
+/// All usage records of a compatible newer source must be recognized.
+pub(crate) fn incomplete_newer(db: &Connection, session: &str, version: &str) -> rusqlite::Result<bool> {
+    if super::version::nearest(version).is_none() { return Ok(false); }
+    if malformed_newer(db, session, version)? { return Ok(true); }
+    db.query_row("SELECT NOT EXISTS(SELECT 1 FROM codex_usage WHERE session_id=?1)
+        OR EXISTS(SELECT 1 FROM codex_usage WHERE session_id=?1 AND accepted=0)", [session], |r| r.get(0))
+}
+
 pub(super) fn attempt_usage(db: &Connection, attempt: &str) -> Result<Value> {
     // Records collected before their version was certified keep NULL counters
     // until a collect re-reads their rollout, so the session stays uncertified
@@ -378,6 +399,14 @@ pub(super) fn attempt_usage(db: &Connection, attempt: &str) -> Result<Value> {
     if bound.is_empty() {
         return Ok(unavailable("not_bound"));
     }
+    for (session, version, ..) in &bound {
+        if malformed_newer(db, session, version)? {
+            let mut usage = unavailable("schema_unrecognized");
+            usage["cli_version"] = json!(version);
+            for (k, v) in super::version::provenance(version).as_object().unwrap() { usage[k] = v.clone(); }
+            return Ok(usage);
+        }
+    }
     if bound.iter().any(|s| s.2) {
         return Ok(unavailable("quarantined"));
     }
@@ -386,11 +415,28 @@ pub(super) fn attempt_usage(db: &Connection, attempt: &str) -> Result<Value> {
         if let Some(detail) = bound.iter().filter(|s| !super::codex::accepted_version(&s.1)).find_map(|s| s.3.clone()) { usage["detail"] = json!(detail); }
         return Ok(usage);
     }
+    for (session, version, ..) in bound.iter().filter(|s| super::version::nearest(&s.1).is_some()) {
+        let has_usage: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM codex_usage WHERE session_id=?1)", [session], |r| r.get(0))?;
+        if !has_usage {
+            let mut usage = unavailable("no_usage_records");
+            usage["cli_version"] = json!(version);
+            for (k, v) in super::version::provenance(version).as_object().unwrap() { usage[k] = v.clone(); }
+            return Ok(usage);
+        }
+    }
     // A record that failed validation keeps no counters: summing the rest
     // would present an unknown total as known (contracts §0).
     let rejected: bool = db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM codex_usage WHERE accepted=0 AND session_id IN ({}))",
         vec!["?"; bound.len()].join(",")), rusqlite::params_from_iter(bound.iter().map(|s| &s.0)), |r| r.get(0))?;
     if rejected {
+        for (session, version, ..) in &bound {
+            if db.query_row("SELECT EXISTS(SELECT 1 FROM codex_usage WHERE session_id=?1 AND reason='schema_unrecognized')", [session], |r| r.get::<_, bool>(0))? {
+                let mut value = unavailable("schema_unrecognized");
+                value["cli_version"] = json!(version);
+                for (k, v) in super::version::provenance(version).as_object().unwrap() { value[k] = v.clone(); }
+                return Ok(value);
+            }
+        }
         return Ok(unavailable("records_not_accepted"));
     }
     let losing = if bound.iter().any(|s| s.0.starts_with("otlp:")) {
@@ -409,8 +455,12 @@ pub(super) fn attempt_usage(db: &Connection, attempt: &str) -> Result<Value> {
         }
     }
     let reasoning = if bound.iter().any(|s| s.0.starts_with("claude-code:") || s.0.starts_with("otlp:claude-code:")) { unavailable("reasoning_tokens_not_reported") } else { json!(sums[4]) };
-    Ok(json!({"input_tokens": sums[0], "cached_input_tokens": sums[1], "cache_write_input_tokens": sums[2],
-        "output_tokens": sums[3], "reasoning_output_tokens": reasoning, "total_tokens": sums[5], "records": records}))
+    let mut usage = json!({"input_tokens": sums[0], "cached_input_tokens": sums[1], "cache_write_input_tokens": sums[2],
+        "output_tokens": sums[3], "reasoning_output_tokens": reasoning, "total_tokens": sums[5], "records": records});
+    if let Some((_, version, ..)) = bound.iter().find(|s| super::version::nearest(&s.1).is_some()) {
+        for (k, v) in super::version::provenance(version).as_object().unwrap() { usage[k] = v.clone(); }
+    }
+    Ok(usage)
 }
 
 fn unavailable(reason: &str) -> Value {

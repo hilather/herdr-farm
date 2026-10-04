@@ -49,7 +49,7 @@ fn cache_read_share_mixed_adapters_and_configuration_comparison() {
     drop(store);
     configurations.insert("codex", rusqlite::Connection::open(&canonical).unwrap().query_row(
         "SELECT chosen_configuration_id FROM dispatch_decisions WHERE attempt_id=?1", [&f.attempt], |r| r.get::<_, String>(0)).unwrap());
-    for (kind, version) in [("claude", "2.1.3"), ("opencode", "1.18.34"), ("gemini", "0.62.0")] {
+    for (kind, version) in [("claude", "2.1.286"), ("opencode", "1.18.34"), ("gemini", "0.62.0")] {
         let home = f.tmp.path().join(format!("synthetic-{kind}-home"));
         let mut profile = codex_profile(&f.config, kind, kind, Some(&home));
         profile.agent.version = version.into();
@@ -1147,7 +1147,7 @@ fn attention_intervals_union_and_censor() {
         (serde_json::from_str(&text).unwrap_or(serde_json::Value::Null), text)
     };
     cli(&["collect"]);
-    assert_eq!(cli(&["accounting", "status"]).0, json!({"stream": "accounting", "version": 20}));
+    assert_eq!(cli(&["accounting", "status"]).0, json!({"stream": "accounting", "version": 21}));
     // Stream 8 dropped the superseded projections (v2, v4, v6); their replacements stay.
     let tables: Vec<String> = rusqlite::Connection::open(project.join(".state/telemetry.db")).unwrap()
         .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('session_graph','quota_observations','session_nodes','session_graph_nodes','quota_window_observations') ORDER BY name").unwrap()
@@ -1920,8 +1920,8 @@ fn fan_out_buckets_and_integration_conflicts() {
     let split = &fleet["fleet"]["by_configuration"]["configurations"][x.as_str()];
     assert_eq!((&split["attempts"], &split["windows"]), (&json!(6), &json!({"bucketed": 2, "excluded": {"incomplete": 0, "concurrency_unknown": 0, "outside_window": 0}})));
     let text = cli_in("configs", &["accounting", "fleet"]);
-    assert!(text.lines().any(|l| l == format!("M35 configuration {x} (codex 0.154.0) 3/4 (comparable)")), "{text}");
-    assert!(text.lines().any(|l| l == format!("M35 configuration {y} (claude 2.1.0) n/a (no_accepted_throughput) (comparable)")), "{text}");
+    assert!(text.lines().any(|l| l == format!("M35 configuration codex 0.154.0 {} 3/4 (comparable)", &x[..19])), "{text}");
+    assert!(text.lines().any(|l| l == format!("M35 configuration claude 2.1.0 {} n/a (no_accepted_throughput) (comparable)", &y[..19])), "{text}");
 
     // Mismatched task mix: the 8-agent hour worked on docs tasks. Same numbers, labelled descriptive.
     plant_fleet(&root.join("mixed"), &|a, code, docs| Some(if a.starts_with('b') { docs } else { code }.to_owned()), &|_| "cfg".to_owned());
@@ -2038,7 +2038,7 @@ fn provider_charges_reconcile_allocate_and_convert() {
     let current = f.cli_args(&["accounting", "charges"]).1;
     f.sidecar().execute("UPDATE telemetry_streams SET version=9 WHERE stream='accounting'", []).unwrap();
     assert_eq!(f.cli_args(&["accounting", "import-charges", &part("charges-2.json")]).0["charges"][0]["imported"], false);
-    assert_eq!((f.cli_args(&["accounting", "status"]).0["version"].clone(), f.cli_args(&["accounting", "charges"]).1), (json!(20), current));
+    assert_eq!((f.cli_args(&["accounting", "status"]).0["version"].clone(), f.cli_args(&["accounting", "charges"]).1), (json!(21), current));
 
     // Invoice allocation by a named, versioned rule: 12 × 2980/3480 and 12 × 500/3480 in units
     // of 10^-12; the one remaining unit goes to the larger remainder; the sum is exactly 12.

@@ -281,7 +281,7 @@ captures.
   ! alert #1 warn waiting_on_you [attention] waiting_on_you
   ! attempt-3f5c6a8e task work waiting on you 6m00s so far
 ─ ACTIVE (1)
-  attempt-3f5c6a8e task work running config codex 0.154.0 [acc318d1] · elapsed 0s · waiting 6m00s so far (waiting now) · usage ○ (not_bound)
+  attempt-3f5c6a8e task work running config codex (codex unknown unknown) [acc318d1] · elapsed 0s · waiting 6m00s so far (waiting now) · usage ○ (not_bound)
 ─ SERVICES
   M38 throttled time share: n/a (throttling_not_certified)
   M39 provider error rate: n/a (provider_errors_not_certified)
@@ -291,7 +291,7 @@ captures.
     claude 1.0 [c1a0de10]  20/20 (1.0000) [20/20–20/20] n=20 pooled 1
     gemini 2.0 [9e3141a2]  insufficient data n=3 (min 20)
 ─ CANDIDATE GROUPS (1)
-  race#1 task work open: arm 1 codex 0.154.0 [acc318d1] not_launched · arm 2 codex 0.154.0 [5b0e7c44] not_launched
+  race#1 task work open: arm 1 codex (codex unknown unknown) [acc318d1] not_launched · arm 2 codex 0.154.0 [5b0e7c44] not_launched
 ─ REPLAY
   M49 replay suite pass rate: n/a (no_replay_suite)
 ─ ALERTS (1 open; `health notify` leaves inbox notices)
@@ -324,7 +324,7 @@ views (as `telemetry demo view <name>`; live, all time)
 ─ NEEDS YOU (2)
   ! attempt-3f5c6a8e task work waiting on you 6m00s so far
     claude 1.0 [c1a0de10]  20/20 (1.0000) [20/20–20/20] n=20 pooled 1
-  race#1 task work open: arm 1 codex 0.154.0 [acc318d1] not_launched · arm 2 codex 0.154.0 [5b0e7c44] not_launched
+  race#1 task work open: arm 1 codex (codex unknown unknown) [acc318d1] not_launched · arm 2 codex 0.154.0 [5b0e7c44] not_launched
 ```
 
 The following outputs are asserted verbatim by

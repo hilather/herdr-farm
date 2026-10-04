@@ -111,7 +111,7 @@ fn evaluate(project: &Path, db: &Connection, since: Option<i64>, aggregates: boo
         "SELECT s.session_id,s.binding,s.attempt_id,
         CASE WHEN EXISTS(SELECT 1 FROM codex_usage u WHERE u.path_digest=s.path_digest AND u.reason='cli_version_uncertified') THEN '' ELSE s.cli_version END,
         EXISTS(SELECT 1 FROM codex_quarantine q WHERE q.session_id=s.session_id),s.session_unix_ms,
-        EXISTS(SELECT 1 FROM codex_usage u WHERE u.session_id=s.session_id AND u.reason='invariant_violation') FROM rollout_sources s ORDER BY s.path_digest"
+        EXISTS(SELECT 1 FROM codex_usage u WHERE u.session_id=s.session_id AND u.reason IN ('invariant_violation','schema_unrecognized')) FROM rollout_sources s ORDER BY s.path_digest"
     };
     let mut overall = Tally::default();
     let mut arms = BTreeMap::<String, Tally>::new();
@@ -128,7 +128,7 @@ fn evaluate(project: &Path, db: &Connection, since: Option<i64>, aggregates: boo
         let version: String = row.get(3)?;
         let quarantined: bool = row.get(4)?;
         let at: Option<i64> = row.get(5)?;
-        let rejected: bool = row.get(6)?;
+        let rejected = row.get::<_, bool>(6)? || crate::telemetry::sidecar::incomplete_newer(db, &session, &version)?;
         if since.is_some_and(|s| at.is_none_or(|at| at < s)) { continue; }
         let arm = attempt.as_ref().and_then(|a| known.get(a)).cloned().flatten();
         let total = totals.get(&session).copied().unwrap_or_default();

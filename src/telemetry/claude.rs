@@ -43,7 +43,7 @@ pub fn capabilities() -> Value {
         ["message.text", "message.thinking", "tool_use.input", "tool_result.content", "toolUseResult", "summary", "user_prompt"].map(|field|
             json!({"kind": "line", "field": field, "available": false, "basis": "unavailable", "certified": "none", "reason": "content_forbidden"})));
     json!({"adapter": "claude-code", "interface": "session_jsonl", "certified_versions": LIVE_VERSIONS, "fixture_versions": FIXTURE_VERSIONS,
-        "accepted_versions": FIXTURE_VERSIONS, "certification": "live", "uncertified_version": "cli_version_uncertified",
+        "accepted_versions": LIVE_VERSIONS, "version_rule":"at_or_above_lowest_live_certified", "certification": "live", "uncertified_version": "cli_version_uncertified",
         "fields": fields.collect::<Vec<_>>(), "profiles": [], "live_certification": "separate_owner_gated_step"})
 }
 
@@ -111,7 +111,7 @@ pub(super) fn record_line(tx: &Transaction, ledger: &ingest::Ledger, at: u64, li
         payload[counter] = field(usage, counter, sanitize::Class::Number);
     }
     cursor.model = payload["model"].as_str().map(str::to_owned);
-    if kind == "assistant" && usage.is_object() {
+    if kind == "assistant" && (usage.is_object() || super::super::version::nearest(&version).is_some()) {
         let reported_id = id(message, "id");
         let message_id = reported_id.clone().unwrap_or_else(|| format!("unmapped:{key}:{at}"));
         let ordinal: Option<i64> = tx.query_row("SELECT ordinal FROM claude_messages WHERE session_id=?1 AND message_id=?2",

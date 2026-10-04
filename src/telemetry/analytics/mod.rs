@@ -95,8 +95,9 @@ pub fn run_query(project: &Path, config_dir: &Path, args: &query::Args) -> Resul
 
 /// TM4.4 `telemetry <slug> compare` (contracts-evaluation.md). Read-only.
 pub fn run_compare(project: &Path, args: &compare::Args) -> Result<String> {
-    let report = compare::run(project, args)?;
-    Ok(if args.json { serde_json::to_string_pretty(&report)? + "\n" } else { compare::text(&report) })
+    let mut report = compare::run(project, args)?;
+    report["configuration_names"] = serde_json::json!(super::configuration_names::read(project)?);
+    Ok(if args.json { serde_json::to_string_pretty(&report)? + "\n" } else { compare::text(&report) + &super::configuration_names::project_text(project)? })
 }
 
 /// TM4.4 `telemetry <slug> experiments plan|report` (contracts-evaluation.md). Read-only.

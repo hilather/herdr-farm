@@ -176,7 +176,7 @@ fn ask(project: &Path, args: &query::Args) -> Result<Value> { query::run(project
 /// The query outputs a set of views needs: one request for every row metric,
 /// one for the per-agent cells. The pane asks for all five views at once, so
 /// it makes the same two requests a single CLI view makes.
-pub struct Answers { main: Value, by_agent: Option<Value> }
+pub struct Answers { main: Value, by_agent: Option<Value>, configurations: Vec<Value> }
 
 pub fn answer(project: &Path, views: &[View], window: Window) -> Result<Answers> {
     let mut metrics: Vec<String> = Vec::new();
@@ -187,7 +187,7 @@ pub fn answer(project: &Path, views: &[View], window: Window) -> Result<Answers>
     }
     let main = ask(project, &query_args(metrics, window, None))?;
     let by_agent = if agents.is_empty() { None } else { Some(ask(project, &query_args(agents, window, Some("agent_kind")))?) };
-    Ok(Answers { main, by_agent })
+    Ok(Answers { main, by_agent, configurations: super::configuration_names::read(project)? })
 }
 
 fn result<'a>(out: &'a Value, metric: &str) -> Option<&'a Value> {
@@ -201,6 +201,7 @@ pub fn body(view: View, slug: &str, answers: &Answers, window: Window) -> Value 
         "window": {"from_unix_ms": window.from, "to_unix_ms": window.to}, "as_of_unix_ms": window.as_of,
         "query": {"contract": answers.main["contract"], "request": answers.main["request"], "query_unix_ms": answers.main["query_unix_ms"]},
         "rows": rows});
+    if matches!(view, View::Models | View::Project) { out["configurations"] = json!(answers.configurations); }
     match view {
         View::Models => {
             let cells: Vec<Value> = answers.by_agent.iter().flat_map(|out| view.by_agent().iter().filter_map(move |id| result(out, id)))
@@ -220,7 +221,7 @@ pub fn body(view: View, slug: &str, answers: &Answers, window: Window) -> Value 
 }
 
 /// The text rows of one view (also the pane's section for it).
-pub fn rows_text(body: &Value) -> String { render::rows_text(body) }
+pub fn rows_text(body: &Value) -> String { render::rows_text(body) + &super::configuration_names::text(body["configurations"].as_array().map_or(&[], Vec::as_slice)) }
 
 /// One drill-down page through the query service for `metric` of `view`.
 pub fn drill(project: &Path, view: View, metric: &str, bucket: Option<&str>, page_size: u32, cursor: Option<&str>, window: Window) -> Result<Value> {
@@ -250,7 +251,7 @@ pub fn run(root: &Path, slug: &str, config_dir: &Path, args: &Args) -> Result<St
     }
     let answers = answer(&scope.dir, &[args.view], window)?;
     let body = body(args.view, &scope.slug, &answers, window);
-    Ok(if args.json { serde_json::to_string_pretty(&body)? + "\n" } else { render::header(&body) + &render::rows_text(&body) })
+    Ok(if args.json { serde_json::to_string_pretty(&body)? + "\n" } else { render::header(&body) + &rows_text(&body) })
 }
 
 /// The fleet pane's view sections for one project: every view, through the
@@ -261,7 +262,7 @@ pub fn pane(project: &Path, slug: &str) -> Result<String> {
     for view in View::ALL {
         let body = body(view, slug, &answers, Window::default());
         out += &format!(" {}\n", view.as_str());
-        out += &render::rows_text(&body);
+        out += &rows_text(&body);
     }
     Ok(out)
 }

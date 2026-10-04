@@ -560,7 +560,7 @@ fn grok_1046_metrics_are_versioned_bound_and_content_free() {
     let mut v: Value = serde_json::from_slice(&bytes).unwrap();
     v["resourceMetrics"][0]["resource"]["attributes"].as_array_mut().unwrap().retain(|a| a["key"] != "herdr.attempt_id");
     otlp::ingest(&f.project, "/v1/metrics", &serde_json::to_vec(&v).unwrap()).unwrap();
-    v["resourceMetrics"][0]["resource"]["attributes"][1]["value"]["stringValue"] = json!("1.0.47");
+    v["resourceMetrics"][0]["resource"]["attributes"][1]["value"]["stringValue"] = json!("1.0.45");
     otlp::ingest(&f.project, "/v1/metrics", &serde_json::to_vec(&v).unwrap()).unwrap();
     let all = otlp::records(&f.project).unwrap();
     assert_eq!(all.as_array().unwrap().iter().filter(|r| r["binding"] == "unbound").count(), 20);
@@ -672,7 +672,7 @@ fn devin_3000_11_3_contract_is_version_gated_bound_and_content_free() {
     let prefixed = String::from_utf8(logs.clone()).unwrap().replace("\"api_request\"", "\"devin.api_request\"");
     otlp::ingest(&f.project, "/v1/logs", prefixed.as_bytes()).unwrap();
     assert_eq!(otlp::records(&f.project).unwrap().as_array().unwrap().iter().filter(|r| r["native_name"] == "api_request").count(), 1);
-    let future = String::from_utf8(logs.clone()).unwrap().replace("3000.11.3", "3000.12.0");
+    let future = String::from_utf8(logs.clone()).unwrap().replace("3000.11.3", "3000.11.2");
     assert_eq!(otlp::ingest(&f.project, "/v1/logs", future.as_bytes()).unwrap(), 5);
     let unbound = String::from_utf8(logs.clone()).unwrap().replace(&f.attempt, "not-an-attempt");
     assert_eq!(otlp::ingest(&f.project, "/v1/logs", unbound.as_bytes()).unwrap(), 5);
@@ -1659,12 +1659,12 @@ fn grok_build_version_fallback_and_request_identity_are_fail_closed() {
     otlp::ingest_attempt(&f.project, "/v1/logs", &pb_request(&root, false), "application/x-protobuf", token).unwrap();
     assert_eq!(otlp::records(&f.project).unwrap().as_array().unwrap().iter().filter(|r| r["kind"] == "usage").count(), 1);
     for attr in root["resourceLogs"][0]["resource"]["attributes"].as_array_mut().unwrap() {
-        if attr["key"] == "service.version" { attr["value"]["stringValue"] = json!("1.0.47 (2765805b9442)"); }
+        if attr["key"] == "service.version" { attr["value"]["stringValue"] = json!("1.0.45 (2765805b9442)"); }
     }
     otlp::ingest_attempt(&f.project, "/v1/logs", &pb_request(&root, false), "application/x-protobuf", token).unwrap();
     root = original.clone();
     for attr in root["resourceLogs"][0]["resource"]["attributes"].as_array_mut().unwrap() {
-        if attr["key"] == "client.version" { attr["value"]["stringValue"] = json!("1.0.47"); }
+        if attr["key"] == "client.version" { attr["value"]["stringValue"] = json!("1.0.45"); }
     }
     otlp::ingest_attempt(&f.project, "/v1/logs", &pb_request(&root, false), "application/x-protobuf", token).unwrap();
     root = original;
@@ -1762,7 +1762,7 @@ fn uncertified_unbound_and_metric_only_grok_never_enter_accounting() {
         if excluded == "unbound" { attrs.retain(|a| a["key"] != "herdr.attempt_id"); }
         if excluded == "uncertified" {
             attrs.retain(|a| a["key"] != "client.version");
-            attrs.push(json!({"key":"client.version","value":{"stringValue":"1.0.99"}}));
+            attrs.push(json!({"key":"client.version","value":{"stringValue":"1.0.45"}}));
         }
         if excluded == "codex" {
             attrs.retain(|a| a["key"] != "service.name");
@@ -1803,7 +1803,7 @@ fn accounting_upgrade_backfills_existing_grok_records_and_preserves_native_ledge
     drop(db);
     assert_eq!(f.cli_args(&["accounting", "entries"]).0, native);
     f.cli_args(&["accounting", "sync"]);
-    assert_eq!(f.cli_args(&["accounting", "status"]).0["version"], 20);
+    assert_eq!(f.cli_args(&["accounting", "status"]).0["version"], 21);
     let upgraded = f.cli_args(&["accounting", "entries"]).0;
     assert_eq!(accepted_delta_entries(&upgraded).len(), 2);
     assert!(upgraded["entries"].as_array().unwrap().contains(&native["entries"][0]));
@@ -1813,4 +1813,55 @@ fn accounting_upgrade_backfills_existing_grok_records_and_preserves_native_ledge
     f.cli_args(&["accounting", "sync"]);
     assert_eq!(f.cli_args(&["accounting", "entries"]).0, upgraded);
     privacy_scan(&f, &["lc4-planted-secret@example.invalid"]);
+}
+
+#[test]
+fn newer_live_otlp_versions_retain_complete_usage_and_provenance() {
+    for (fixture, old, newer) in [("grok-logs", "1.0.46", "1.0.48"), ("devin-logs", "3000.11.3", "3000.12.0")] {
+        let f = Fixture::reserved();
+        let body = if fixture == "grok-logs" {
+            String::from_utf8(include_bytes!("fixtures/telemetry/grok-1.0.46/turn-1-logs.json").to_vec()).unwrap()
+        } else { String::from_utf8(payload(&f, fixture)).unwrap() }.replace(old, newer);
+        let minted = otlp::mint_attempt_token(&f.project, &f.attempt, 600).unwrap();
+        otlp::ingest_attempt(&f.project, "/v1/logs", body.as_bytes(), "application/json", minted["token"].as_str().unwrap()).unwrap();
+        let records = otlp::records(&f.project).unwrap();
+        let usage = records.as_array().unwrap().iter().find(|r| r["kind"] == "usage").unwrap();
+        assert_eq!(usage["certification"], "newer_than_certified");
+        assert_eq!(usage["nearest_certified_version"], old);
+        assert_eq!(usage["cli_version"], newer);
+        assert!(usage["attributes"]["total_tokens"].as_u64().unwrap() > 0);
+        let stored_records = f.count("otlp_records");
+        // Historical v20 projection did not materialize these newer exports.
+        f.sidecar().execute_batch("DELETE FROM codex_usage_times WHERE session_id LIKE 'otlp:%';
+            DELETE FROM codex_usage WHERE session_id LIKE 'otlp:%';
+            DELETE FROM rollout_sources WHERE originator LIKE 'otlp:%';
+            UPDATE telemetry_streams SET version=20 WHERE stream='accounting';").unwrap();
+        f.cli_args(&["accounting", "sync"]);
+        assert!(!accepted_delta_entries(&f.cli_args(&["accounting", "entries"]).0).is_empty());
+        assert_eq!(f.count("otlp_records"), stored_records);
+        assert_eq!(f.cli_args(&["accounting", "status"]).0["version"], 21);
+        let mut malformed: Value = serde_json::from_str(&body).unwrap();
+        let mut changed = false;
+        for resource in malformed["resourceLogs"].as_array_mut().unwrap() {
+            for scope in resource["scopeLogs"].as_array_mut().unwrap() {
+                for record in scope["logRecords"].as_array_mut().unwrap() {
+                    for attr in record["attributes"].as_array_mut().unwrap() {
+                        if attr["key"] == "output_tokens" {
+                            attr["value"] = json!({"stringValue":"changed"});
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(changed);
+        otlp::ingest_attempt(&f.project, "/v1/logs", &serde_json::to_vec(&malformed).unwrap(), "application/json", minted["token"].as_str().unwrap()).unwrap();
+        let records = otlp::records(&f.project).unwrap();
+        assert!(records.as_array().unwrap().iter().any(|r| r["reason"] == "schema_unrecognized" && r["cli_version"] == newer));
+        f.cli_args(&["accounting", "sync"]);
+        let queried = f.cli_args(&["usage", "--json"]).0;
+        let attempt = queried["attempts"].as_array().unwrap().iter().find(|a| a["attempt_id"] == f.attempt).unwrap();
+        assert_eq!(attempt["usage"]["reason"], "schema_unrecognized", "{queried}");
+        assert!(attempt["usage"]["total_tokens"].is_null());
+    }
 }

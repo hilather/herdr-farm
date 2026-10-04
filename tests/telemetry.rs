@@ -94,12 +94,12 @@ fn rewritten_record_is_quarantined() {
 #[test]
 fn uncertified_version_keeps_no_counters() {
     let f = Fixture::new();
-    f.rollout(&f.home, SID, &["head.jsonl", "tail.jsonl"], &f.worktree(), f.decided + 1_000, "0.999.0");
+    f.rollout(&f.home, SID, &["head.jsonl", "tail.jsonl"], &f.worktree(), f.decided + 1_000, "0.153.0");
     let (report, _) = f.cli("collect");
     assert_eq!(f.usage(), [(1, DIGEST_1.into(), 0, Some("cli_version_uncertified".into()), None, None, None, None, None),
         (2, DIGEST_2.into(), 0, Some("cli_version_uncertified".into()), None, None, None, None, None)]);
     let source = f.sidecar().query_row("SELECT cli_version,records FROM rollout_sources", [], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))).unwrap();
-    assert_eq!(source, ("0.999.0".to_owned(), 2));
+    assert_eq!(source, ("0.153.0".to_owned(), 2));
     assert_eq!(f.count("codex_discrepancy"), 0);
     assert_eq!(attempt_usage(&report), unavailable("cli_version_uncertified"));
     assert_eq!(report["sessions"][0]["certified"], false);
@@ -439,7 +439,7 @@ fn attempts_show_bound_usage_or_its_reason() {
     assert_eq!(outcome_usage(&f), unavailable("not_bound"));
 
     let f = Fixture::new();
-    f.rollout(&f.home, SID, &["head.jsonl", "tail.jsonl"], &f.worktree(), f.decided + 1_000, "0.999.0");
+    f.rollout(&f.home, SID, &["head.jsonl", "tail.jsonl"], &f.worktree(), f.decided + 1_000, "0.153.0");
     f.cli("collect");
     assert_eq!(outcome_usage(&f), unavailable("cli_version_uncertified"));
 
@@ -549,12 +549,12 @@ fn sidecar_streams_upgrade_v2_store() {
     let expected = |extra: (&str, i64)| {
         let mut streams: std::collections::BTreeMap<String, i64> = herdr_farm::telemetry::LANES.iter().filter(|l| !l.migrations.is_empty())
             .map(|l| (l.stream.to_owned(), l.migrations.len() as i64)).collect();
-        streams.insert("codex".to_owned(), 4);
+        streams.insert("codex".to_owned(), 5);
         streams.insert(extra.0.to_owned(), extra.1);
         streams.into_iter().collect::<Vec<_>>()
     };
-    assert_eq!(streams(&f), expected(("codex", 4)));
-    assert_eq!(user_version(&f), 4);
+    assert_eq!(streams(&f), expected(("codex", 5)));
+    assert_eq!(user_version(&f), 5);
     let before = tree(&state);
     assert_eq!(f.cli_args(&["usage", "--json"]).1, v2, "usage is byte-identical after the upgrade");
     assert_eq!(metric(&f.report(), "M08")["value"], 1000);
@@ -760,4 +760,93 @@ fn attempts_show_attention_summary() {
     let text = cli(&["attempts"]);
     let line = text.lines().find(|l| l.starts_with(attempt.as_str())).unwrap();
     assert!(line.contains(" attention=waits=2 waiting_ms=60000 censored=1 gaps=2 usage="), "{line}");
+}
+
+#[test]
+fn newer_codex_usage_provenance_coverage_and_recollection() {
+    let f = Fixture::new();
+    f.rollout(&f.home, SID, &["head.jsonl", "tail.jsonl"], &f.worktree(), f.decided + 1000, "0.160.0");
+    f.cli("collect");
+    let usage = attempt_usage(&f.cli_args(&["usage", "--json"]).0);
+    assert_eq!(usage["total_tokens"], 1680);
+    assert_eq!(usage["certification"], "newer_than_certified");
+    assert_eq!(usage["nearest_certified_version"], "0.159.2");
+    let measurement: String = f.sidecar().query_row("SELECT measurement FROM source_observations WHERE event_kind='codex.token_usage_record.v1' LIMIT 1", [], |r| r.get(0)).unwrap();
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&measurement).unwrap()["certification"], "newer_than_certified");
+    // Historical fixture: persisted as the previous collector would refuse it.
+    f.as_if_collected_uncertified();
+    f.sidecar().execute_batch("UPDATE telemetry_streams SET version=4 WHERE stream='codex'; PRAGMA user_version=4;").unwrap();
+    assert_eq!(attempt_usage(&f.cli_args(&["usage", "--json"]).0)["reason"], "cli_version_uncertified");
+    assert_eq!(f.cli("collect").0["collected"]["reevaluated"], 2);
+    assert_eq!(f.sidecar().query_row("SELECT version FROM telemetry_streams WHERE stream='codex'", [], |r| r.get::<_, i64>(0)).unwrap(), 5);
+    assert_eq!(attempt_usage(&f.cli_args(&["usage", "--json"]).0), usage);
+    f.as_if_collected_uncertified();
+    f.cli_args(&["accounting", "sync"]);
+    assert_eq!(attempt_usage(&f.cli_args(&["usage", "--json"]).0), usage);
+    plant_aggregate_termination(&f);
+    assert_eq!(f.report()["metrics"]["M13"]["value"], "1/1");
+    assert_eq!(f.report()["metrics"]["M13"]["coverage"]["newer_than_certified"], 1);
+    assert_eq!(f.report()["metrics"]["M15"]["coverage"]["newer_than_certified"], 1);
+    assert_eq!(f.report()["metrics"]["M08"]["coverage"]["newer_than_certified"], 1);
+    let view = f.text(&["view", "models"]);
+    assert!(view.lines().find(|line| line.contains("M13")).unwrap().contains("newer_than_certified=1"));
+    assert!(view.lines().find(|line| line.contains("M15")).unwrap().contains("newer_than_certified=1"));
+}
+
+#[test]
+fn newer_codex_schema_drift_refuses_the_entire_attempt() {
+    for drift in ["type", "missing", "payload"] {
+        let f = Fixture::new();
+        let path = f.rollout(&f.home, SID, &["head.jsonl", "tail.jsonl"], &f.worktree(), f.decided + 1000, "0.160.0");
+        let lines: Vec<String> = fs::read_to_string(&path).unwrap().lines().map(|line| {
+            let mut value: serde_json::Value = serde_json::from_str(line).unwrap();
+            if value["type"] == "token_usage_record" && value["payload"]["response_id"] == "resp-2" {
+                if drift == "payload" { value["payload"] = serde_json::json!([]); }
+                else if drift == "missing" { value["payload"]["usage"].as_object_mut().unwrap().remove("output_tokens"); }
+                else { value["payload"]["usage"]["output_tokens"] = serde_json::json!("changed"); }
+            }
+            value.to_string()
+        }).collect();
+        fs::write(path, format!("{}\n", lines.join("\n"))).unwrap();
+        let usage = attempt_usage(&f.cli("collect").0);
+        assert_eq!(usage["reason"], "schema_unrecognized");
+        assert_eq!(usage["cli_version"], "0.160.0");
+        assert!(usage.get("total_tokens").is_none());
+        if drift == "payload" { assert_eq!(f.count("ingest_quarantine"), 1); }
+        else { assert!(f.usage().iter().any(|r| r.3.as_deref() == Some("schema_unrecognized") && r.8.is_none())); }
+        f.cli_args(&["accounting", "sync"]);
+        assert_eq!(attempt_usage(&f.cli_args(&["usage", "--json"]).0), usage);
+        plant_aggregate_termination(&f);
+        assert_eq!(f.report()["metrics"]["M13"]["value"], "0/1");
+        assert_eq!(f.report()["metrics"]["M08"]["value"]["reason"], "no_certified_source", "{drift}: {}", f.report()["metrics"]["M08"]);
+    }
+}
+
+#[test]
+fn unparseable_codex_versions_stay_refused() {
+    for version in ["unknown", "0.160.x", "0.160.0-", "0..160.0", "0.160.0-.", "0.160.0+"] {
+        let f = Fixture::new();
+        f.rollout(&f.home, SID, &["head.jsonl"], &f.worktree(), f.decided + 1000, version);
+        assert_eq!(attempt_usage(&f.cli("collect").0)["reason"], "cli_version_uncertified", "{version}");
+        assert!(f.usage().iter().all(|r| r.2 == 0 && r.8.is_none()));
+    }
+}
+
+#[test]
+fn newer_codex_without_usage_is_unavailable() {
+    let f = Fixture::new();
+    let path = f.rollout(&f.home, SID, &["head.jsonl"], &f.worktree(), f.decided + 1000, "0.160.0");
+    let text = fs::read_to_string(&path).unwrap().lines().filter(|line|
+        serde_json::from_str::<serde_json::Value>(line).unwrap()["type"] != "token_usage_record")
+        .map(str::to_owned).collect::<Vec<_>>().join("\n");
+    fs::write(path, format!("{text}\n")).unwrap();
+    let sibling = f.rollout(&f.home, "sibling", &["head.jsonl"], &f.worktree(), f.decided + 1000, "0.160.0");
+    fs::write(&sibling, fs::read_to_string(&sibling).unwrap().replace(SID, "00000000-0000-4000-8000-00000000bbcc")).unwrap();
+    let usage = attempt_usage(&f.cli("collect").0);
+    assert_eq!(usage["reason"], "no_usage_records");
+    assert_eq!(usage["cli_version"], "0.160.0");
+    assert!(usage.get("total_tokens").is_none());
+    plant_aggregate_termination(&f);
+    assert_eq!(f.report()["metrics"]["M13"]["value"], "0/1");
+    assert!(f.report()["metrics"]["M13"]["coverage"]["newer_than_certified"].is_null());
 }

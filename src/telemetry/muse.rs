@@ -97,7 +97,7 @@ pub fn capabilities() -> Value {
         // field, including subagent sessions linked by path.
         .map(|field| json!({"kind":"model_completed", "field":field, "available":true, "basis":"reported", "certified":"live", "live_versions":LIVE_VERSIONS}));
     json!({"adapter":"muse", "interface":"session_jsonl", "certified_versions":LIVE_VERSIONS, "fixture_versions":FIXTURE_VERSIONS,
-        "accepted_versions":FIXTURE_VERSIONS, "certification":"live", "uncertified_version":"cli_version_uncertified",
+        "accepted_versions":FIXTURE_VERSIONS, "version_rule":"at_or_above_lowest_live_certified", "certification":"live", "uncertified_version":"cli_version_uncertified",
         "fields":fields, "profiles":[], "live_certification":"separate_owner_gated_step"})
 }
 
@@ -160,11 +160,11 @@ pub(super) fn record_line(
     {
         return Ok(true);
     }
-    let Some(event) = sanitize::field(&raw, "id", sanitize::Class::Id)
-        .as_str()
-        .map(str::to_owned)
-    else {
-        return Ok(false);
+    let (event, identity_valid) = match sanitize::field(&raw, "id", sanitize::Class::Id).as_str() {
+        Some(event) => (event.to_owned(), true),
+        None if super::super::version::nearest(&source.version).is_some() =>
+            (format!("schema:{key}:{at}"), false),
+        None => return Ok(false),
     };
     let old: Option<(i64,String,i64)> = tx.query_row("SELECT ordinal,path_digest,byte_offset FROM muse_events WHERE session_id=?1 AND event_id=?2",
         params![source.session,event], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
@@ -192,7 +192,7 @@ pub(super) fn record_line(
         }
     };
     let usage = &raw["payload"]["event"]["usage"];
-    let number = |name| sanitize::field(usage, name, sanitize::Class::Number).as_i64();
+    let number = |name| identity_valid.then(|| sanitize::field(usage, name, sanitize::Class::Number).as_i64()).flatten();
     let input = number("input_tokens");
     let output = number("output_tokens");
     cursor.model = sanitize::field(&raw["payload"]["event"], "model", sanitize::Class::Text)

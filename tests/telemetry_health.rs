@@ -765,9 +765,9 @@ fn recommendation_carries_evidence_and_goes_stale_after_a_configuration_change()
         "comparison": "analytics-comparison.v2", "freshness": "M50.recommendation-v1"}));
     assert_eq!(rec["evidence_window"], json!({"cohort": "terminal_cohort", "from_unix_ms": null, "to_unix_ms": null, "semantics": "half_open", "time_basis": "task_terminal_time"}));
     assert_eq!(rec["recommendation"]["configuration_id"], json!(codex));
-    assert_eq!((&rec["recommendation"]["label"], &rec["recommendation"]["value"], &rec["recommendation"]["tasks"]), (&json!("codex 0.154.0"), &json!("20/20"), &json!(20)));
+    assert_eq!((&rec["recommendation"]["label"], &rec["recommendation"]["value"], &rec["recommendation"]["tasks"]), (&json!("coder (codex unknown unknown)"), &json!("20/20"), &json!(20)));
     assert_eq!((&rec["uncertainty"]["recommended"]["interval"]["lower"], &rec["uncertainty"]["recommended"]["interval"]["upper"]), (&json!("20/20"), &json!("20/20")));
-    assert_eq!((&rec["uncertainty"]["runner_up"]["configuration_id"], &rec["uncertainty"]["runner_up"]["label"]), (&json!(claude), &json!("claude 1.0.0")));
+    assert_eq!((&rec["uncertainty"]["runner_up"]["configuration_id"], &rec["uncertainty"]["runner_up"]["label"]), (&json!(claude), &json!("reviewer (claude unknown unknown)")));
     assert_eq!((&rec["uncertainty"]["runner_up"]["interval"]["lower"], &rec["uncertainty"]["runner_up"]["interval"]["upper"]), (&json!("0/20"), &json!("0/20")));
     assert_eq!((&rec["uncertainty"]["estimator"]["method"], &rec["uncertainty"]["estimator"]["iterations"]), (&json!("percentile_bootstrap.v1"), &json!(1000)));
     let fresh = &rec["freshness"];
@@ -775,7 +775,7 @@ fn recommendation_carries_evidence_and_goes_stale_after_a_configuration_change()
         (&json!("M50"), &json!("M50.recommendation-v1"), &json!("20/20"), &json!("1.0000"), &json!("fresh"), &json!("1/2")));
     assert_eq!(fresh["lineage"], json!({"basis": "profile", "keys": ["coder"]}));
     assert_eq!(fresh["current_configuration_id"], json!(codex));
-    assert_eq!(rec["reasons"], json!([{"code": "intervals_separated", "order": ["codex 0.154.0", "claude 1.0.0"]}]));
+    assert_eq!(rec["reasons"], json!([{"code": "intervals_separated", "order": ["coder (codex unknown unknown)", "reviewer (claude unknown unknown)"]}]));
     let query_m50 = &p.json(&["query", "--json", "--metric", "M50"])["results"][0];
     assert_eq!((&query_m50["definition"], &query_m50["reason"]), (&json!("M50.recommendation-v1"), &json!("per_recommendation")));
     let registry = p.json(&["metrics", "registry", "--json"]);
@@ -788,11 +788,11 @@ fn recommendation_carries_evidence_and_goes_stale_after_a_configuration_change()
     let before = p.state_files();
     let rec = p.json(&["recommend", "--role", "code", "--json"]);
     assert_eq!(p.state_files(), before);
-    assert_eq!((&rec["status"], &rec["recommendation"]["label"]), (&json!("stale"), &json!("codex 0.154.0")), "{rec}");
+    assert_eq!((&rec["status"], &rec["recommendation"]["label"]), (&json!("stale"), &json!("coder (codex unknown unknown)")), "{rec}");
     assert_eq!((&rec["freshness"]["value"], &rec["freshness"]["state"], &rec["freshness"]["current_label"], &rec["freshness"]["current_configuration_id"]),
         (&json!("0/20"), &json!("stale"), &json!("codex 0.155.0"), &json!(newer)));
     assert_eq!(rec["reasons"][1]["code"], "configuration_changed");
-    assert_eq!((&rec["reasons"][1]["from"], &rec["reasons"][1]["to"]), (&json!("codex 0.154.0"), &json!("codex 0.155.0")));
+    assert_eq!((&rec["reasons"][1]["from"], &rec["reasons"][1]["to"]), (&json!("coder (codex unknown unknown)"), &json!("codex 0.155.0")));
     let text = String::from_utf8(p.raw(&["recommend", "--role", "code"])).unwrap();
     assert!(text.starts_with("role code · stale · M02 M02.cohort-v1 · advisory\n"), "{text}");
     assert!(text.contains("  freshness M50 0/20 (stale; stale below 1/2)\n"), "{text}");
@@ -803,7 +803,7 @@ fn recommendation_carries_evidence_and_goes_stale_after_a_configuration_change()
     assert_eq!(p.canonical_bytes(), canonical, "health evaluate writes only the sidecar");
     let s = out["states"].as_array().unwrap().iter().find(|s| s["rule"] == "recommendation_stale").unwrap();
     assert_eq!((&s["state"], &s["labels"]), (&json!("warn"), &json!({"project": "demo", "family": "recommendation", "rule": "recommendation_stale", "role": "code"})));
-    assert_eq!((&s["evidence"]["recommended"], &s["evidence"]["current"], &s["evidence"]["freshness"]["value"]), (&json!("codex 0.154.0"), &json!("codex 0.155.0"), &json!("0/20")));
+    assert_eq!((&s["evidence"]["recommended"], &s["evidence"]["current"], &s["evidence"]["freshness"]["value"]), (&json!("coder (codex unknown unknown)"), &json!("codex 0.155.0"), &json!("0/20")));
     assert_eq!(s["metric"]["definition"], "M50.recommendation-v1");
     assert!(!s["labels"].to_string().contains("sha256:"), "no configuration identity in a label");
 }

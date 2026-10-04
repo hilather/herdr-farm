@@ -136,7 +136,7 @@ fn usage_metrics(sidecar: Option<&Connection>, attempts: &[Attempt], since: Opti
         return Ok(());
     };
     // (session, binding, attempt, certified, quarantined, records, accepted records, session start)
-    type Source = (String, String, Option<String>, bool, bool, i64, i64, Option<i64>);
+    type Source = (String, String, Option<String>, bool, bool, i64, i64, Option<i64>, bool);
     // Records collected before their version was certified keep NULL counters:
     // such a source stays uncertified (see `sidecar::attempt_usage`).
     let sql = if aggregates && super::accounting::ledger::aggregates_current(db)? {
@@ -149,23 +149,40 @@ fn usage_metrics(sidecar: Option<&Connection>, attempts: &[Attempt], since: Opti
         s.records,(SELECT count(*) FROM codex_usage u WHERE u.path_digest=s.path_digest AND u.accepted=1),s.session_unix_ms FROM rollout_sources s ORDER BY s.path_digest"
     };
     let sources: Vec<Source> = db.prepare(sql)?
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, super::codex::accepted_version(&r.get::<_, String>(3)?), r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)))?
+        .query_map([], |r| {
+            let session: String = r.get(0)?;
+            let version: String = r.get(3)?;
+            let quarantined = r.get::<_, bool>(4)? || super::sidecar::malformed_newer(db, &session, &version)?;
+            let incomplete = super::sidecar::incomplete_newer(db, &session, &version)?;
+            Ok((session, r.get(1)?, r.get(2)?, super::codex::accepted_version(&version), quarantined, r.get(5)?, r.get(6)?, r.get(7)?, incomplete))
+        })?
         .collect::<rusqlite::Result<_>>()?;
     let known: BTreeSet<&str> = attempts.iter().map(|a| a.id.as_str()).collect();
     let losing = if sources.iter().any(|s| s.0.starts_with("otlp:")) { super::accounting::otlp::losing_sessions(db)? } else { BTreeSet::new() };
+    let version_rows: Vec<(String, String)> = db.prepare("SELECT DISTINCT session_id,cli_version FROM rollout_sources")?
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let newer_versions: BTreeSet<String> = version_rows.iter().filter(|(_, v)| super::version::nearest(v).is_some()).map(|(s, _)| s.clone()).collect();
+    let incomplete_sessions: BTreeSet<&str> = sources.iter().filter(|s| s.8).map(|s| s.0.as_str()).collect();
     let (mut certified, mut excluded) = (BTreeSet::new(), BTreeMap::<&str, usize>::new());
     for s in sources.iter().filter(|s| since.is_none_or(|since| s.7.is_some_and(|at| at >= since))) {
-        let reason = match s {
-            (_, binding, ..) if binding != "bound" => binding.as_str(),
-            (_, _, attempt, ..) if !attempt.as_deref().is_some_and(|a| known.contains(a)) => "orphan",
-            (session, ..) if losing.contains(session) => "native_surface_precedence",
-            (.., true, _, _, _) => "quarantined",
-            (_, _, _, false, ..) => "cli_version_uncertified",
-            _ => { certified.insert(s.0.as_str()); continue; }
-        };
+        let reason = if s.1 != "bound" { s.1.as_str() }
+            else if !s.2.as_deref().is_some_and(|a| known.contains(a)) { "orphan" }
+            else if losing.contains(&s.0) { "native_surface_precedence" }
+            else if s.4 { "quarantined" }
+            else if !s.3 { "cli_version_uncertified" }
+            else if incomplete_sessions.contains(s.0.as_str()) { "records_not_accepted" }
+            else { certified.insert(s.0.as_str()); continue; };
         *excluded.entry(reason).or_default() += 1;
     }
-    let coverage = json!({"certified_sessions": certified.len(), "excluded": excluded});
+    let newer_sessions: BTreeSet<String> = newer_versions.iter().filter(|s| certified.contains(s.as_str())).cloned().collect();
+    let mut coverage = json!({"certified_sessions": certified.len(), "excluded": excluded});
+    let newer_provenance: BTreeMap<&str, Value> = version_rows.iter().filter(|(s, _)| newer_sessions.contains(s))
+        .map(|(_, v)| (v.as_str(), super::version::provenance(v))).collect();
+    if !newer_sessions.is_empty() {
+        coverage["newer_than_certified"] = json!(newer_sessions.len());
+        coverage["versions"] = json!(newer_provenance);
+    }
     if certified.is_empty() {
         for id in ["M08", "M09", "M15"] { metrics.insert(id, metric(id, json!({"value": unavailable("no_certified_source"), "coverage": coverage}))); }
     } else {
@@ -196,11 +213,15 @@ fn usage_metrics(sidecar: Option<&Connection>, attempts: &[Attempt], since: Opti
     for a in &codex {
         let bound = by_attempt.get(a.id.as_str()).map(Vec::as_slice).unwrap_or_default();
         let reason = if bound.is_empty() { "not_bound" } else if bound.iter().any(|s| s.4) { "quarantined" }
-            else if bound.iter().any(|s| !s.3) { "cli_version_uncertified" } else if bound.iter().any(|s| s.5 != s.6) { "records_not_accepted" } else { continue };
+            else if bound.iter().any(|s| !s.3) { "cli_version_uncertified" } else if bound.iter().any(|s| s.5 != s.6 || s.8) { "records_not_accepted" } else { continue };
         *incomplete.entry(reason).or_default() += 1;
     }
     let complete = codex.len() - incomplete.values().sum::<usize>();
-    metrics.insert("M13", ratio("M13", complete, codex.len(), json!({"adapter_absent": adapter_absent, "incomplete": incomplete})));
+    let mut detail = json!({"adapter_absent": adapter_absent, "incomplete": incomplete});
+    let newer_attempts = codex.iter().filter(|a| by_attempt.get(a.id.as_str()).is_some_and(|sources|
+        sources.iter().any(|s| newer_sessions.contains(&s.0)) && sources.iter().all(|s| s.3 && !s.4 && s.5 == s.6 && !s.8))).count();
+    if newer_attempts > 0 { detail["coverage"] = json!({"newer_than_certified": newer_attempts, "versions":newer_provenance}); }
+    metrics.insert("M13", ratio("M13", complete, codex.len(), detail));
     Ok(())
 }
 

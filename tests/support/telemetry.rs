@@ -188,13 +188,20 @@ pub fn codex_profile(config: &herdr_farm::migration::ConfigReference, kind: &str
 }
 
 pub fn plant_profile(db_path: &Path, profile: FrozenProfile) {
+    plant_profile_with_pins(db_path, profile, None, None);
+}
+
+pub fn plant_profile_with_pins(db_path: &Path, profile: FrozenProfile, model: Option<&str>, effort: Option<&str>) {
     use std::os::unix::fs::MetadataExt;
     profile.validate_for_launch().unwrap();
     let reference = profile.reference().unwrap();
     let canonical = fs::canonicalize(db_path).unwrap();
     let metadata = fs::metadata(&canonical).unwrap();
-    let report = serde_json::json!({"preparation": {"profile": profile, "reference": reference, "launchable": true, "protocol_capable": false, "certified": false},
+    let mut report = serde_json::json!({"preparation": {"profile": profile, "reference": reference, "launchable": true, "protocol_capable": false, "certified": false},
         "source_store": [canonical, metadata.dev(), metadata.ino()]});
+    if model.is_some() || effort.is_some() {
+        report["evidence"] = serde_json::json!({"interaction": {"pinned": {"model": model, "reasoning_effort": effort}}});
+    }
     let text = serde_json::to_string(&report).unwrap();
     let conn = rusqlite::Connection::open(db_path).unwrap();
     conn.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES('profile.native_retained',?1,1,1,?2)",
@@ -207,7 +214,7 @@ pub fn plant_profile(db_path: &Path, profile: FrozenProfile) {
 pub fn worker_snapshots(project: &Path, only: Option<&str>) {
     let db_path = project.join(".state/state.db");
     let conn = rusqlite::Connection::open(&db_path).unwrap();
-    let profiles = conn.prepare("SELECT report FROM native_profiles").unwrap()
+    let profiles = conn.prepare("SELECT report FROM native_profiles ORDER BY sequence DESC").unwrap()
         .query_map([], |row| row.get::<_, String>(0)).unwrap()
         .map(|report| serde_json::from_value::<FrozenProfile>(serde_json::from_str::<serde_json::Value>(&report.unwrap()).unwrap()["preparation"]["profile"].clone()).unwrap())
         .collect::<Vec<_>>();

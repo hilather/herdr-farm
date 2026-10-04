@@ -105,7 +105,11 @@ fn display(r: &Value) -> String {
 
 fn coverage_text(c: &Value) -> String {
     let state = c["state"].as_str().unwrap_or("unknown");
-    if let (Some(known), Some(expected)) = (c["known"].as_u64(), c["expected"].as_u64()) { return format!("{state} {known}/{expected}"); }
+    if let (Some(known), Some(expected)) = (c["known"].as_u64(), c["expected"].as_u64()) {
+        let newer = c["lane"]["newer_than_certified"].as_u64()
+            .map(|n| format!(" (newer_than_certified={n})")).unwrap_or_default();
+        return format!("{state} {known}/{expected}{newer}");
+    }
     let counts: Vec<String> = c["lane"].as_object().into_iter().flatten().filter_map(|(k, v)| v.as_u64().map(|n| format!("{k}={n}"))).collect();
     if counts.is_empty() { state.into() } else { format!("{state} ({})", counts.join(" ")) }
 }

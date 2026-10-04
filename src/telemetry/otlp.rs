@@ -171,12 +171,14 @@ pub fn capabilities() -> Vec<Value> {
         if harness == "muse" {
             let cap = out.last_mut().unwrap();
             cap["fixture_versions"] = json!(["1.4.0-R4161.1"]);
+            cap["version_rule"] = json!("at_or_above_lowest_live_certified");
             cap["accepted_versions"] = json!(["1.4.0-R4161.1"]);
             cap["native_source"] = json!({"certified":"none", "reason":"local_usage_schema_not_established"});
         }
         if harness == "devin" {
             let cap = out.last_mut().unwrap();
             cap["fixture_versions"] = json!([DEVIN_VERSION]);
+            cap["version_rule"] = json!("at_or_above_lowest_live_certified");
             cap["certified_versions"] = json!([DEVIN_VERSION]);
             cap["accepted_versions"] = json!([DEVIN_VERSION]);
             cap["native_source"] = json!({"certified":"none", "reason":"local_usage_schema_not_established"});
@@ -184,6 +186,7 @@ pub fn capabilities() -> Vec<Value> {
         if harness == "grok" {
             let cap = out.last_mut().unwrap();
             cap["fixture_versions"] = json!(["1.0.46"]);
+            cap["version_rule"] = json!("at_or_above_lowest_live_certified");
             cap["certified_versions"] = json!(["1.0.46"]);
             cap["accepted_versions"] = json!(["1.0.46"]);
             cap["native_source"] = json!({"certified":"none", "reason":"local_usage_schema_not_established"});
@@ -335,6 +338,8 @@ fn ingest_root(project: &Path, endpoint: &str, root: Value, token_attempt: Optio
             // Live 3000.11.3 reports the bare version; anything else is uncertified.
             service_version
         } else { service_version };
+        let accepted_cli = cli_version.is_some_and(|v| super::codex::accepted_version(&format!("{harness}/{v}")));
+        let newer_cli = cli_version.is_some_and(|v| super::version::nearest(&format!("{harness}/{v}")).is_some());
         let known = matches!(service, "claude-code" | "gemini-cli" | "grok-cli" | "tbh" | DEVIN_SERVICE);
         let adapter = if known {
             format!("otlp:{harness}")
@@ -390,9 +395,9 @@ fn ingest_root(project: &Path, endpoint: &str, root: Value, token_attempt: Optio
                 let mapping = MAPPINGS
                     .iter()
                     .find(|m| !unsupported && known && m.0 == harness && m.1 == name && metrics == (name.ends_with(".usage") || name.ends_with("token_usage") || (m.0 == "grok" && m.1 != "grok_code.api_request"))
-                        && (harness != "grok" || cli_version == Some("1.0.46"))
-                        && (harness != "muse" || cli_version == Some("1.4.0-R4161.1"))
-                        && (harness != "devin" || cli_version == Some(DEVIN_VERSION)));
+                        && (harness != "grok" || accepted_cli)
+                        && (harness != "muse" || accepted_cli)
+                        && (harness != "devin" || accepted_cli));
                 let points = if unsupported {
                     // One keys-only diagnostic per instrument; never inspect unsupported points.
                     vec![json!({})]
@@ -432,21 +437,21 @@ fn ingest_root(project: &Path, endpoint: &str, root: Value, token_attempt: Optio
                         }
                     }
                     if harness == "muse" {
-                        payload["cli_version"] = if cli_version == Some("1.4.0-R4161.1") { json!("1.4.0-R4161.1") } else { Value::Null };
-                        if cli_version != Some("1.4.0-R4161.1") {
+                        payload["cli_version"] = if accepted_cli { json!(cli_version) } else { Value::Null };
+                        if !accepted_cli {
                             payload["mapping_certified"] = json!("none");
                             payload["reason"] = json!("cli_version_uncertified");
                         }
                     }
                     if harness == "devin" {
-                        payload["cli_version"] = if cli_version == Some(DEVIN_VERSION) { json!(DEVIN_VERSION) } else { Value::Null };
-                        if cli_version != Some(DEVIN_VERSION) {
+                        payload["cli_version"] = if accepted_cli { json!(cli_version) } else { Value::Null };
+                        if !accepted_cli {
                             payload["mapping_certified"] = json!("none");
                             payload["reason"] = json!("cli_version_uncertified");
                         }
                     }
                     if harness == "grok" {
-                        if cli_version == Some("1.0.46") {
+                        if accepted_cli {
                             // Only the reviewed build-string shape may leave the exporter.
                             if let Some(build) = service_version.filter(|v| {
                                 v.starts_with("1.0.46 (") && v.ends_with(')')
@@ -454,8 +459,8 @@ fn ingest_root(project: &Path, endpoint: &str, root: Value, token_attempt: Optio
                                     && v.len() <= 80
                             }) { payload["service_build"] = json!(build); }
                         }
-                        payload["cli_version"] = if cli_version == Some("1.0.46") { json!("1.0.46") } else { Value::Null };
-                        if cli_version != Some("1.0.46") {
+                        payload["cli_version"] = if accepted_cli { json!(cli_version) } else { Value::Null };
+                        if !accepted_cli {
                             payload["mapping_certified"] = json!("none");
                             payload["reason"] = json!("cli_version_uncertified");
                         }
@@ -465,6 +470,10 @@ fn ingest_root(project: &Path, endpoint: &str, root: Value, token_attempt: Optio
                         if let Some(name) = identifier(&json!(name)) {
                             payload["native_name"] = name;
                         }
+                    }
+                    if newer_cli {
+                        payload["cli_version"] = json!(cli_version);
+                        for (k, v) in super::version::provenance(&format!("{harness}/{}", cli_version.unwrap())).as_object().unwrap() { payload[k] = v.clone(); }
                     }
                     let mut allowed = BTreeMap::new();
                     let mut invalid_usage = false;
@@ -504,7 +513,7 @@ fn ingest_root(project: &Path, endpoint: &str, root: Value, token_attempt: Optio
                                         .map(|b| json!(b)),
                                     _ => number(raw),
                                 };
-                                if safe.is_none() && harness == "grok" && !metrics && *native == "grok_code.api_request" {
+                                if safe.is_none() && (newer_cli || harness == "grok" && !metrics && *native == "grok_code.api_request") {
                                     invalid_usage = true;
                                     continue;
                                 }
@@ -663,6 +672,10 @@ fn ingest_root(project: &Path, endpoint: &str, root: Value, token_attempt: Optio
                     payload["unmapped_attribute_keys"] = json!(keys);
                     payload["unmapped_resource_keys"] = json!(resource_keys);
                     if conflict { payload["reason"] = json!("cross_attempt_quarantined"); }
+                    if newer_cli && invalid_usage {
+                        payload["kind"] = json!("unmapped");
+                        payload["reason"] = json!("schema_unrecognized");
+                    }
                     records.push(payload);
                 }
             }

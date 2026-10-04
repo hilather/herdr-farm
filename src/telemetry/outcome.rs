@@ -93,6 +93,7 @@ fn attention(report: &Value, records: &mut [Value]) -> anyhow::Result<()> {
 }
 
 fn record(db: &Connection, version: u32, attempt: &str, task: &str, state: &str, kind: Option<&str>, home: Option<&str>) -> rusqlite::Result<Value> {
+    let identity = db.query_row("SELECT json_extract(i.payload,'$.inputs.effective_profile.name'), json_extract(i.payload,'$.inputs.effective_profile.kind'), json_extract(n.report,'$.evidence.interaction.pinned.model'), json_extract(n.report,'$.evidence.interaction.pinned.reasoning_effort') FROM attempt_inputs i LEFT JOIN native_profiles n ON n.profile_digest=json_extract(i.payload,'$.inputs.profile.digest') WHERE i.attempt_id=?1", [attempt], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, Option<String>>(3)?))).optional()?.unwrap_or_default();
     let predates_decision = status("unavailable", "predates_dispatch_log");
     let decision = if version >= 50 {
         db.prepare_cached("SELECT d.chosen_configuration_id,d.classification_id,c.class,c.band,d.contract_revision FROM dispatch_decisions d
@@ -165,6 +166,7 @@ fn record(db: &Connection, version: u32, attempt: &str, task: &str, state: &str,
     let usage = status("unavailable", if matches!(kind, Some("codex" | "claude" | "opencode")) { "collection_not_run" } else { "adapter_absent" });
     Ok(json!({
         "accepted": accepted, "active_ms": active, "attempt_id": attempt,
+        "profile": identity.0, "agent_kind": identity.1, "model": identity.2, "reasoning_effort": identity.3,
         "attention": status("unavailable", "attention_not_collected"),
         "classification": classification, "configuration_id": configuration, "integration": integration,
         "launching_unix_ms": at(launching, true), "queue_to_launch_ms": queue, "reserved_unix_ms": at(reserved, true),

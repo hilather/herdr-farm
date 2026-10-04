@@ -1377,6 +1377,7 @@ fn cancelled_before_launch_is_censored_not_zero() {
     assert_eq!(report, serde_json::json!({"attempts": [{
         "accepted": false,
         "active_ms": {"reason": "not_running", "status": "unavailable"},
+        "agent_kind": "codex", "model": null, "profile": "sim", "reasoning_effort": null,
         "attempt_id": attempt,
         "attention": {"reason": "attention_not_collected", "status": "unavailable"},
         "classification": {"band": "small", "class": "code", "classification_id": classification},

@@ -1642,3 +1642,23 @@ all four observed cache-write counters are zero. This is fixture certification
 for Muse 1.4.0-R4161.1, pending steward live reconciliation. Source identities
 and projections follow native-session retention/backup and tombstones. See
 [DG4i collection](contracts-collection.md#dg4i--muse-native-sessions-fixture-certification).
+
+### Compatible newer adapter provenance
+
+The shared [version rule](contracts-collection.md#adapter-version-acceptance-usage-newer-1)
+also applies to ledger collection during `accounting sync`. Entry provenance
+for sources accepted beyond a live-certified version includes
+`certification: "newer_than_certified"` and `nearest_certified_version`.
+Rejected historical sessions are re-read through normal invalidation and replay;
+no history is deleted. Schema-unrecognized records remain unresolved and carry
+no normalized counters.
+
+Accounting stream **v21**, `0021_newer_cli_usage.sql`, replaces the OTLP source
+view's exact-version gate with acceptance of the collector-created
+`newer_than_certified` marker. Version comparison stays in the shared Rust
+helper. Mapping identities and complete normalized-counter constraints remain
+mandatory. Existing sanitized newer records are backfilled into the normal
+session projection, and the ledger is invalidated for replay. No retained table
+is added; existing OTLP/session retention and full-backup classifications apply.
+
+Accounting migration 21 also mirrors newer-version `schema_unrecognized` OTLP diagnostics as rejected usage with null counters. A valid sibling request cannot make that attempt appear completely covered.
