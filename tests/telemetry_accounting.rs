@@ -1920,8 +1920,8 @@ fn fan_out_buckets_and_integration_conflicts() {
     let split = &fleet["fleet"]["by_configuration"]["configurations"][x.as_str()];
     assert_eq!((&split["attempts"], &split["windows"]), (&json!(6), &json!({"bucketed": 2, "excluded": {"incomplete": 0, "concurrency_unknown": 0, "outside_window": 0}})));
     let text = cli_in("configs", &["accounting", "fleet"]);
-    assert!(text.lines().any(|l| l == format!("M35 configuration {x} (codex 0.154.0) 3/4 (comparable)")), "{text}");
-    assert!(text.lines().any(|l| l == format!("M35 configuration {y} (claude 2.1.0) n/a (no_accepted_throughput) (comparable)")), "{text}");
+    assert!(text.lines().any(|l| l == format!("M35 configuration codex 0.154.0 {} 3/4 (comparable)", &x[..19])), "{text}");
+    assert!(text.lines().any(|l| l == format!("M35 configuration claude 2.1.0 {} n/a (no_accepted_throughput) (comparable)", &y[..19])), "{text}");
 
     // Mismatched task mix: the 8-agent hour worked on docs tasks. Same numbers, labelled descriptive.
     plant_fleet(&root.join("mixed"), &|a, code, docs| Some(if a.starts_with('b') { docs } else { code }.to_owned()), &|_| "cfg".to_owned());

@@ -363,7 +363,17 @@ pub fn run(project: &Path, args: &Args) -> Result<Value> {
         if let Some(generations) = super::inputs::generations(&db)? {
             let canonical = super::inputs::canonical(project)?;
             let stamp = super::inputs::stamp("comparison", &canonical, &generations);
-            if let Some(body) = super::inputs::cached(&db, "comparison", None, &stamp)? { return Ok(body); }
+            if let Some(mut body) = super::inputs::cached(&db, "comparison", None, &stamp)? {
+                let names = super::super::configuration_names::read(project)?;
+                for entry in body["configurations"].as_array_mut().into_iter().flatten() {
+                    if let Some(name) = names.iter().find(|name| name["configuration_id"] == entry["configuration_id"]) {
+                        entry["label"] = name["label"].clone();
+                        entry["first_use_unix_ms"] = name["first_use_unix_ms"].clone();
+                        entry["last_use_unix_ms"] = name["last_use_unix_ms"].clone();
+                    }
+                }
+                return Ok(body);
+            }
         }
     }
     run_report(project, args, false)
@@ -411,6 +421,7 @@ fn run_report(project: &Path, args: &Args, workspace: bool) -> Result<Value> {
     let source = &r.seed_source;
 
     // Per-arm description: identity, assignments and failures, coverage.
+    let display_names = super::super::configuration_names::read(project)?;
     let mut configurations = Vec::new();
     let mut review = Vec::new();
     let mut notes: Vec<Value> = Vec::new();
@@ -436,6 +447,11 @@ fn run_report(project: &Path, args: &Args, workspace: bool) -> Result<Value> {
         };
         entry["model_allocation"] = if workspace { Value::Null } else { model_allocation(sidecar.as_deref(), members)? };
         if entry["model_allocation"]["mixed_model_allocation"] == true { mixed_model.push(json!({"configuration_id": configuration, "tasks": entry["model_allocation"]["mixed_model_tasks"]})); }
+        if let Some(name) = display_names.iter().find(|name| name["configuration_id"] == entry["configuration_id"]) {
+            entry["label"] = name["label"].clone();
+            entry["first_use_unix_ms"] = name["first_use_unix_ms"].clone();
+            entry["last_use_unix_ms"] = name["last_use_unix_ms"].clone();
+        }
         configurations.push(entry);
     }
 
@@ -518,7 +534,9 @@ pub fn text(report: &Value) -> String {
         let cache_value = |v: &Value| v["reason"].as_str().map_or_else(|| value(v), |reason| format!("n/a ({reason})"));
         out += &format!("M10 cache_read_share {}\n", cache_value(&report["metric"]["value"]));
         for (arm, body) in report["configurations"].as_object().into_iter().flatten() {
-            out += &format!("  configuration {arm} value={} numerator={} denominator={} cache_write_tokens={}\n",
+            out += &format!("  configuration {} value={} numerator={} denominator={} cache_write_tokens={}\n",
+                report["configuration_names"].as_array().into_iter().flatten().find(|c| c["configuration_id"].as_str() == Some(arm.as_str()))
+                    .and_then(|c| c["label"].as_str()).map_or_else(|| arm.clone(), |label| format!("{label} {}", arm.get(..19).unwrap_or(arm))),
                 cache_value(&body["value"]), body["numerator"], body["denominator"], body["cache_write_tokens"]);
         }
         out += &format!("  configuration_unknown {}\n", cache_value(&report["configuration_unknown"]["value"]));
@@ -528,7 +546,8 @@ pub fn text(report: &Value) -> String {
         for c in result["cells"].as_array().into_iter().flatten() {
             out += &format!("  task_class={} ranking={}\n", c["task_class"].as_str().unwrap_or(""), c["ranking"]["status"].as_str().unwrap_or(""));
             for a in c["arms"].as_array().into_iter().flatten() {
-                out += &format!("    {} tasks={} value={} interval=[{}, {}] pooled={} {}\n", short(&a["configuration_id"]), a["tasks"], value(&a["value"]),
+                out += &format!("    {} tasks={} value={} interval=[{}, {}] pooled={} {}\n", report["configurations"].as_array().into_iter().flatten().find(|c| c["configuration_id"] == a["configuration_id"])
+                        .and_then(|c| c["label"].as_str()).map_or_else(|| short(&a["configuration_id"]), |label| format!("{label} {}", short(&a["configuration_id"]))), a["tasks"], value(&a["value"]),
                     a["interval"]["lower"].as_str().unwrap_or("-"), a["interval"]["upper"].as_str().unwrap_or("-"), value(&a["pooled"]["value"]), a["status"].as_str().unwrap_or(""));
             }
         }

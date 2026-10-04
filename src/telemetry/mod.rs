@@ -11,6 +11,7 @@ pub mod ingest;
 pub mod maintenance;
 pub mod metrics;
 pub mod outcome;
+pub(crate) mod configuration_names;
 pub mod operating;
 pub mod otlp;
 mod gemini;

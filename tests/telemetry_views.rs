@@ -587,3 +587,40 @@ fn operator_doc_examples_are_real_outputs() {
     assert!(checked >= 4, "the doc carries its examples ({checked})");
 }
 
+
+#[test]
+fn frozen_configuration_names_survive_profile_edits() {
+    let f = Fixture::reserved();
+    let db_path = f.project.join(".state/state.db");
+    let mut sol = codex_profile(&f.config, "codex", "codex-sol", Some(&f.home));
+    plant_profile_with_pins(&db_path, sol.clone(), Some("gpt-6.1-sol"), Some("high"));
+    f.readmit("codex-sol");
+    sol.definition_digest = "e".repeat(64);
+    sol.arguments_digest = "f".repeat(64);
+    plant_profile_with_pins(&db_path, sol, Some("gpt-6.1-sol"), Some("low"));
+    f.readmit("codex-sol");
+    let mut db = SqliteStore::open(&db_path).unwrap();
+    let snapshot = db.read_snapshot(None).unwrap();
+    db.set_scheduler_policy(snapshot.head, snapshot.scheduler.unwrap().policy.revision, 1, 4).unwrap();
+    drop(db);
+    let sonnet = codex_profile(&f.config, "claude", "claude-sonnet", Some(&f.home));
+    plant_profile_with_pins(&db_path, sonnet, Some("sonnet"), Some("medium"));
+    f.readmit("claude-sonnet");
+    let attempts = f.cli_args(&["attempts", "--json"]).0;
+    let claude = attempts["attempts"].as_array().unwrap().iter().find(|a| a["profile"] == "claude-sonnet").unwrap();
+    assert_eq!((&claude["agent_kind"], &claude["model"], &claude["reasoning_effort"]), (&json!("claude"), &json!("sonnet"), &json!("medium")));
+    let named: Vec<_> = attempts["attempts"].as_array().unwrap().iter().filter(|a| a["profile"] == "codex-sol").collect();
+    assert_eq!(named.len(), 2);
+    assert!(named.iter().all(|a| a["agent_kind"] == "codex" && a["model"] == "gpt-6.1-sol"));
+    assert_eq!(named[0]["reasoning_effort"], "high");
+    assert_eq!(named[1]["reasoning_effort"], "low");
+    assert_ne!(named[0]["configuration_id"], named[1]["configuration_id"]);
+    let models = f.text(&["view", "models"]);
+    for a in named {
+        let label = format!("codex-sol (codex gpt-6.1-sol {}) {}", a["reasoning_effort"].as_str().unwrap(), &a["configuration_id"].as_str().unwrap()[..19]);
+        let line = models.lines().find(|line| line.contains(&label)).unwrap_or_else(|| panic!("missing {label}: {models}"));
+        assert!(line.contains("first_use=") && line.contains("last_use="));
+    }
+    assert!(models.contains("codex (codex unknown unknown)"));
+    assert!(models.contains("claude-sonnet (claude sonnet medium)"));
+}

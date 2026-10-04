@@ -175,11 +175,14 @@ fn load(db: &Connection, horizon: i64) -> Result<std::result::Result<Fleet, &'st
     drop(stmt);
     let accepted = first.into_values().map(|(at, attempt)| (at, configs.get(&attempt).cloned().flatten())).collect();
     // `<kind> <agent_version>` (contracts §2): derived for display, never an identity.
-    let labels = if decisions && table(db, "agent_configurations")? {
+    let mut labels = if decisions && table(db, "agent_configurations")? {
         db.prepare("SELECT configuration_id,json_extract(canonical_json,'$.kind')||' '||json_extract(canonical_json,'$.agent_version') FROM agent_configurations
             WHERE json_valid(canonical_json)")?.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)))?
             .filter_map(|r| r.map(|(id, label)| label.map(|l| (id, l))).transpose()).collect::<rusqlite::Result<_>>()?
     } else { BTreeMap::new() };
+    for row in super::super::configuration_names::read_db(db)? {
+        if let (Some(id), Some(label)) = (row["configuration_id"].as_str(), row["label"].as_str()) { labels.insert(id.into(), label.into()); }
+    }
     let mut operations: BTreeMap<String, Vec<Op>> = BTreeMap::new();
     let mut stmt = db.prepare("SELECT s.attempt_id,o.ref_name,o.state,o.reason,o.created_unix_ms,
         o.state='integrated' OR EXISTS(SELECT 1 FROM integrated_commits k WHERE k.operation_id=o.operation_id)
@@ -871,8 +874,9 @@ pub fn text(value: &Value) -> String {
         let label = m["label"].as_str().map(|l| format!(" ({l})")).unwrap_or_default();
         out += &format!("{id} {} {shown}{label}\n", m["name"].as_str().unwrap_or(""));
         for (config, c) in m["by_configuration"]["configurations"].as_object().into_iter().flatten() {
-            let name = c["display_label"].as_str().map(|l| format!(" ({l})")).unwrap_or_default();
-            out += &format!("{id} configuration {config}{name} {} ({})\n", show(&c["value"]), c["label"].as_str().unwrap_or(""));
+            let name = c["display_label"].as_str().unwrap_or("unknown");
+            let short = config.get(..19).unwrap_or(config);
+            out += &format!("{id} configuration {name} {short} {} ({})\n", show(&c["value"]), c["label"].as_str().unwrap_or(""));
         }
     }
     out

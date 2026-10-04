@@ -120,6 +120,8 @@ pub fn text(s: &Value) -> String {
     let _ = writeln!(out, "{slug} · fleet · query {at} · usage coverage {} · advisory, read-only", s["coverage"].as_object().map_or("n/a".into(), |_| value(&s["coverage"])));
 
     let _ = writeln!(out, "{}", history(s));
+    let names: Vec<Value> = s["configuration_names"].as_array().into_iter().flatten().take(PANE_ROWS).cloned().collect();
+    out += &super::super::configuration_names::text(&names);
 
     let needs = s["needs_you"].as_array().cloned().unwrap_or_default();
     let _ = writeln!(out, "─ NEEDS YOU ({})", needs.len());

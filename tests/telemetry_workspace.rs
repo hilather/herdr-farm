@@ -197,7 +197,7 @@ fn every_surface_shows_the_same_values_as_the_query_service() {
     assert_eq!((&active["attempt_id"], &active["task_id"], &active["state"], &active["usage"], &active["reserved_unix_ms"]),
         (&json!(f.attempt), &json!("work"), &json!("running"), &record["usage"], &record["reserved_unix_ms"]));
     assert_eq!(active["configuration_id"], record["configuration_id"]);
-    assert_eq!(active["configuration_label"], "codex 0.154.0");
+    assert_eq!(active["configuration_label"], "codex (codex unknown unknown)");
     // The wait is still open: the projection counts no closed wait and one
     // censored interval; the lane's interval opened at −370 s and was last
     // observed at −10 s, so 360 s have been observed so far (never extrapolated).
@@ -255,12 +255,12 @@ fn every_surface_shows_the_same_values_as_the_query_service() {
         "  code".to_owned(),
         format!("    claude 1.0 [{}]  20/20 (1.0000) [20/20–20/20] n=20 pooled 1", &a[7..15]),
         format!("    gemini 2.0 [{}]  insufficient data n=3 (min 20)", &b[7..15]),
-        format!("  race#1 task work open: arm 1 codex 0.154.0 [{}] not_launched · arm 2 codex 0.154.0 [{}] not_launched",
+        format!("  race#1 task work open: arm 1 codex (codex unknown unknown) [{}] not_launched · arm 2 codex 0.154.0 [{}] not_launched",
             &group["arms"][0]["configuration_id"].as_str().unwrap()[7..15], &group["arms"][1]["configuration_id"].as_str().unwrap()[7..15]),
         "  M49 replay suite pass rate: n/a (no_replay_suite)".to_owned(),
     ];
     for line in &lines { assert!(show.lines().any(|l| l == line), "{line:?} in\n{show}"); }
-    let active_line = show.lines().find(|l| l.starts_with(&format!("  {} task work running config codex 0.154.0 [", &f.attempt[..16]))).unwrap_or_else(|| panic!("{show}"));
+    let active_line = show.lines().find(|l| l.starts_with(&format!("  {} task work running config codex (codex unknown unknown) [", &f.attempt[..16]))).unwrap_or_else(|| panic!("{show}"));
     assert!(active_line.ends_with(&format!(" · waiting 6m00s so far (waiting now) · usage {}", if coverage == "complete" { "●".to_owned() } else { format!("○ ({})", record["usage"]["reason"].as_str().unwrap()) })), "{active_line}");
 
     fs::write(f.project.join("PROJECT.md"), "# demo\n").unwrap();
