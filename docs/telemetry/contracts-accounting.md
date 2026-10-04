@@ -144,6 +144,14 @@ Links come only from native evidence:
   `token_usage_record.session_id`): a guardian reports its parent's id there,
   and nodes and usage are keyed by the rollout's own `session_meta.id`
   (contracts.md §5).
+- **Spawn named as a fork (Codex 0.159).** A `thread_spawn` subagent whose
+  `forked_from_id` equals its `subagent_parent_thread_id` and whose A8 row has
+  no `history_base` is the spawn shape, linked by `parent_thread_id` with
+  inclusion `separate`, not a `fork_replay_not_certified` fork. Live evidence
+  (tactics-dev, Codex 0.159.x, 2026-10-04): 33 such children, 647 usage
+  records, none sharing a response id or payload digest with its parent; each
+  starts at a fresh-session input size. Migration `0022_spawn_not_fork.sql`
+  invalidates the stored graph once so the next sync rebuilds it.
 - A linked child is **never** added to its parent's session total.
   Attempt totals include primary sessions plus native-linked descendants only
   when each link's inclusion is `separate`. Usage keeps the existing fields

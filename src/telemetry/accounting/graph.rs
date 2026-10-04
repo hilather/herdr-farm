@@ -122,7 +122,13 @@ pub(crate) fn store_scoped(tx: &Connection, entries: &[Entry], full: bool) -> Re
         // `session_id` field: a guardian reports its parent's there.
         let meta = metadata.get(root.0.as_str());
         let other = |id: &Option<String>| id.clone().filter(|id| id != session);
-        let forked = meta.and_then(|m| other(&m.forked_from));
+        // Codex 0.159 also names a `thread_spawn` subagent's spawning parent as
+        // its fork origin, with no `history_base`. That is the spawn shape, not a
+        // history-replaying fork: 33 such children in tactics-dev (647 records)
+        // shared no response id or payload with their parents (§3).
+        let spawned = meta.is_some_and(|m| m.subagent_kind.as_deref() == Some("thread_spawn")
+            && m.parent_thread.is_some() && m.parent_thread == m.forked_from);
+        let forked = meta.and_then(|m| other(&m.forked_from)).filter(|_| !spawned);
         let link = meta.and_then(|m| other(&m.parent_thread)).map(|id| (id, "parent_thread_id"))
             .or_else(|| meta.and_then(|m| other(&m.thread_parent)).map(|id| (id, "thread_parent_thread_id")))
             .or_else(|| forked.clone().map(|id| (id, "forked_from_id")));

@@ -782,7 +782,12 @@ fn newer_codex_usage_provenance_coverage_and_recollection() {
     assert_eq!(attempt_usage(&f.cli_args(&["usage", "--json"]).0), usage);
     f.as_if_collected_uncertified();
     f.cli_args(&["accounting", "sync"]);
-    assert_eq!(attempt_usage(&f.cli_args(&["usage", "--json"]).0), usage);
+    // After sync the accounting graph adds child subtotals beside the unchanged fields.
+    let mut synced = attempt_usage(&f.cli_args(&["usage", "--json"]).0);
+    assert_eq!(synced["including_children"]["total_tokens"], usage["total_tokens"]);
+    assert_eq!(synced["children"]["total_tokens"], 0);
+    for key in ["children", "including_children", "excluded_children"] { synced.as_object_mut().unwrap().remove(key); }
+    assert_eq!(synced, usage);
     plant_aggregate_termination(&f);
     assert_eq!(f.report()["metrics"]["M13"]["value"], "1/1");
     assert_eq!(f.report()["metrics"]["M13"]["coverage"]["newer_than_certified"], 1);
