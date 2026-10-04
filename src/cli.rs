@@ -282,6 +282,8 @@ enum NotificationCommand {
 
 #[derive(Subcommand)]
 enum Command {
+    #[cfg(feature="state-store")]
+    Owner { slug:String, #[command(subcommand)] command:OwnerCommand },
     /// Inspect or explicitly reconcile uncertain legacy inbox delivery
     Notification {slug:String,#[command(subcommand)] command:NotificationCommand},
     /// Inspect owner signing policy and manage signed launch approvals
@@ -700,6 +702,13 @@ enum RoutineCommand {
     Approve { slug: String, name: String },
     /// List routines with their approval status
     List { slug: String },
+}
+
+#[cfg(feature="state-store")]
+#[derive(Subcommand)]
+enum OwnerCommand {
+    Approve { request:String, #[arg(long)] summary:String },
+    Reject { request:String, #[arg(long)] summary:String },
 }
 
 #[derive(Subcommand)]
@@ -1134,6 +1143,11 @@ pub fn run() -> Result<()> {
     };
 
     match cli.command {
+        #[cfg(feature="state-store")]
+        Command::Owner { slug, command } => match command {
+            OwnerCommand::Approve { request, summary } => crate::owner_requests::decide(&ctx,&slug,&request,&summary,true),
+            OwnerCommand::Reject { request, summary } => crate::owner_requests::decide(&ctx,&slug,&request,&summary,false),
+        },
         Command::Notification{slug,command}=>{
             let p=project::Project::load(&ctx.root,&slug)?;
             match command {

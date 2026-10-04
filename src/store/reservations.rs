@@ -135,7 +135,8 @@ impl SqliteStore {
         let policy=super::scheduler::read_policy(&tx,budget)?;let control=super::control::read_with_budget(&tx,budget)?;
         if control.state!=ProjectState::Active||control.reconciliation_required{return Err(invalid("project is not admitted"));}
         let retained:u64=tx.query_row("SELECT count(*) FROM (SELECT id FROM attempts WHERE termination_observed=0 LIMIT 1025)",[],|r|r.get(0))?;
-        if retained>=u64::from(policy.max_active_workers){return Err(invalid("project worker capacity is full"));}
+        let cap_exemption=if version>=69 && prepared.len()==1 {super::owner_requests::cap_for_inputs(&tx,&prepared[0].inputs,now)?} else {None};
+        if retained>=u64::from(policy.max_active_workers) && cap_exemption.is_none(){return Err(invalid("project worker capacity is full"));}
         let attempts=read_retained_attempts_with_budget(&tx,budget)?;
         let mut queues=Vec::new();let mut task_ids=BTreeSet::new();let mut bindings=Vec::new();let mut ownership=Vec::new();
         for preparation in prepared {
@@ -186,6 +187,10 @@ impl SqliteStore {
             return Err(invalid(&format!("resource_conflict: {overlap}")));
         }
         if draft {return Ok(None);}
+        if let Some(id)=cap_exemption {
+            tx.execute("UPDATE owner_requests SET status='consumed' WHERE id=?1 AND status='approved'",[&id])?;
+            tx.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES('owner.consumed',?1,3,1,?2)",params![id,serde_json::json!({"task":inputs.task,"consumed":now}).to_string()])?;
+        }
         if version>=43 {tx.execute("DELETE FROM admission_scan_cursor",[])?;}
         let(attempt_id,operation_id)=record_ids(&inputs)?;
         let task_revision=inputs.task_revision.checked_add(1).ok_or_else(||invalid("task revision exhausted"))?;

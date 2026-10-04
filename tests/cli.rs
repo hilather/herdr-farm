@@ -5739,3 +5739,25 @@ fn canonical_new_bootstraps_owner_and_stays_inert_until_complete() {
     run(&["new", "configured"]);
     assert_eq!(fs::read(&config).unwrap(), existing);
 }
+
+
+#[cfg(feature="state-store")]
+#[test]
+fn legacy_permission_requests_accept_exact_owner_ask_decisions_and_keep_terminal_guard() {
+    let home=tempfile::tempdir().unwrap();let root=home.path().join("root");let r=root.to_str().unwrap();
+    assert!(hp(home.path(),&["--root",r,"new","demo"]).status.success());
+    let config=home.path().join(".config/herdr-farm");std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(config.join("config.toml"),format!("[safety.\"{}\"]\nworker_permissions='owner'\n",root.join("demo").canonicalize().unwrap().display())).unwrap();
+    let out=hp(home.path(),&["--root",r,"safety","grant","demo","--allow","cargo test:*","--reason","Run the checks"]);
+    assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stderr));
+    let id=String::from_utf8(out.stdout).unwrap().split_whitespace().last().unwrap().to_string();
+    let summary="Owner permission requested: cargo test:* (Run the checks)";
+    let terminal=hp(home.path(),&["--root",r,"safety","approve","demo",&id]);assert!(!terminal.status.success());
+    assert!(String::from_utf8_lossy(&terminal.stderr).contains("requires the owner at a terminal"));
+    let wrong=hp(home.path(),&["--root",r,"owner","demo","approve",&id,"--summary","wrong"]);assert!(!wrong.status.success());
+    let approved=hp(home.path(),&["--root",r,"owner","demo","approve",&id,"--summary",summary]);
+    assert!(approved.status.success(),"{}",String::from_utf8_lossy(&approved.stderr));
+    let state:serde_json::Value=serde_json::from_slice(&std::fs::read(root.join("demo/.state/worker-permissions.json")).unwrap()).unwrap();
+    let record=state["records"].as_array().unwrap().iter().find(|v|v["id"]==id).unwrap();
+    assert_eq!(record["status"],"granted");assert_eq!(record["decision_by"],"owner:claude-code-ask");assert!(record["decided"].as_str().is_some_and(|v|!v.is_empty()));
+}

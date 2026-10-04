@@ -398,6 +398,9 @@ pub fn grant(ctx: &Ctx, slug: &str, prefix: &str, reason: &str) -> Result<()> {
     println!("{status} {id}");
     Ok(())
 }
+fn request_summary(request:&Record)->String {
+    format!("Owner permission requested: {} ({})",request.prefix,request.reason).chars().map(|c|if c.is_control() {' '} else {c}).collect()
+}
 pub fn deliver_requests(project: &Project) -> Result<()> {
     for r in load(project)?
         .records
@@ -409,7 +412,7 @@ pub fn deliver_requests(project: &Project) -> Result<()> {
             &r.id,
             "permission-request",
             &r.id,
-            &format!("Owner permission requested: {} ({})", r.prefix, r.reason),
+            &request_summary(r),
             &format!(
                 "Exact prefix: {}\nReason: {}\nOwner: safety approve {} {} or safety reject {} {} --reason …",
                 r.prefix, r.reason, project.slug, r.id, project.slug, r.id
@@ -431,6 +434,12 @@ fn owner_confirm(action: &str, exact: &str) -> Result<()> {
     Ok(())
 }
 pub fn decide(ctx: &Ctx, slug: &str, id: &str, approve: bool, reason: &str) -> Result<()> {
+    decide_inner(ctx,slug,id,approve,reason,None)
+}
+pub fn decide_ask(ctx:&Ctx,slug:&str,id:&str,summary:&str,approve:bool)->Result<()> {
+    decide_inner(ctx,slug,id,approve,"",Some(summary))
+}
+fn decide_inner(ctx:&Ctx,slug:&str,id:&str,approve:bool,reason:&str,summary:Option<&str>)->Result<()> {
     let project = Project::load(&ctx.root, slug)?;
     let state = load(&project)?;
     let request = state
@@ -450,7 +459,10 @@ pub fn decide(ctx: &Ctx, slug: &str, id: &str, approve: bool, reason: &str) -> R
         "{}: {}\nReason: {}",
         request.id, request.prefix, request.reason
     );
-    owner_confirm(if approve { "approve" } else { "reject" }, id)?;
+    let attribution=if let Some(summary)=summary {
+        ensure!(summary==request_summary(request),"--summary must be byte-identical to the stored summary");
+        "owner:claude-code-ask"
+    } else {owner_confirm(if approve { "approve" } else { "reject" }, id)?; "owner:terminal"};
     let _lock = project.lock()?;
     let mut state = load(&project)?;
     let r = state
@@ -460,10 +472,10 @@ pub fn decide(ctx: &Ctx, slug: &str, id: &str, approve: bool, reason: &str) -> R
         .context("request changed")?;
     ensure!(r == request, "request changed during owner confirmation");
     if approve {
-        r.principal = "owner:terminal".into();
+        r.principal = attribution.into();
     }
     r.status = if approve { "granted" } else { "rejected" }.into();
-    r.decision_by = "owner:terminal".into();
+    r.decision_by = attribution.into();
     r.decided = project::now();
     r.decision_reason = reason.into();
     r.rule = if approve {

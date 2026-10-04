@@ -236,7 +236,7 @@ fn socket_open_primes_owned_coordinator_retries_swallowed_prompt_and_recreates_c
         assert!(permissions["permissions"]["allow"].as_array().unwrap().contains(&json!(format!("Bash({prefix} {verb}:*)"))), "missing allow {verb}");
     }
     assert!(permissions["permissions"]["allow"].as_array().unwrap().contains(&json!(format!("Bash({prefix} reconcile demo --plan)"))));
-    for verb in ["safety approve", "safety reject", "safety revoke", "approval", "delegation", "budget", "routine-store", "migration", "archive", "delete",
+    for verb in ["owner demo approve", "owner demo reject", "safety approve", "safety reject", "safety revoke", "approval", "delegation", "budget", "routine-store", "migration", "archive", "delete",
         "runtime * state", "runtime * rebind", "runtime * adopt", "runtime * relinquish", "task * cancel-attempt", "task * complete"] {
         assert!(permissions["permissions"]["ask"].as_array().unwrap().contains(&json!(format!("Bash({prefix} {verb}:*)"))), "missing ask {verb}");
     }
@@ -246,7 +246,9 @@ fn socket_open_primes_owned_coordinator_retries_swallowed_prompt_and_recreates_c
             assert!(permissions["permissions"]["deny"].as_array().unwrap().contains(&json!(format!("{tool}({path})"))));
         }
     }
-    assert!(permissions["permissions"]["deny"].as_array().unwrap().contains(&json!("Bash(ssh-keygen:*)")));
+    for rule in ["Bash(ssh-keygen:*)", "Bash(env *)", "Bash(sh -c *)", "Bash(bash -c *)", "Bash(bash -lc *)", "Bash(zsh -c *)", "Bash(eval *)", "Bash(command *)", "Bash(exec *)", "Bash(xargs *)", "Bash(direnv exec *)", "Bash(devbox run *)", "Bash(mise exec *)", "Bash(npx *)", "Bash(docker exec *)", "Bash(nocorrect *)", "Bash(watch *)", "Bash(setsid *)", "Bash(ionice *)", "Bash(flock *)"] {
+        assert!(permissions["permissions"]["deny"].as_array().unwrap().contains(&json!(rule)));
+    }
     assert_eq!(serde_json::from_str::<Value>(&l.ok(&["runtime", "demo", "inspect"])).unwrap()["control"]["state"], "active");
     let context = l.ok(&["context", "demo", "--peek"]);
     assert!(context.contains("Launchable retained profile evidence: none"));

@@ -530,11 +530,15 @@ pub fn run(ctx: &Ctx, slug: &str, mut args: Args) -> Result<Value> {
     }
     let held = snapshot.attempts.iter().filter(|a| a.retains_capacity()).count();
     let existing = snapshot.tasks.iter().any(|t|t.id.as_str()==args.task && t.active_attempt.is_some());
-    if held + usize::from(!existing) > cap as usize { problems.push(format!("owner cap: unfinished attempts plus this launch exceed launch.max_workers ({cap})")); }
+    let cap_refusal=format!("owner cap: unfinished attempts plus this launch exceed launch.max_workers ({cap})");
+    let above_cap=held + usize::from(!existing) > cap as usize;
+    if above_cap { problems.push(cap_refusal.clone()); }
     let repository = args.repository.canonicalize()?;
+    let mut unlisted_repository=false;
     match crate::project::parse_project_md(&String::from_utf8(migration::read_plan_file(&project.join("PROJECT.md"))?)?) {
         Ok((settings, _)) if settings.repos.iter().any(|r|r.machine.is_none() && Path::new(&r.path).canonicalize().is_ok_and(|p|p==repository)) => {},
-        _ => problems.push("project repositories: canonical repository is not a local repository listed in PROJECT.md".into()),
+        Ok(_) => { unlisted_repository=true; problems.push("project repositories: canonical repository is not a local repository listed in PROJECT.md".into()); },
+        Err(error) => problems.push(format!("PROJECT.md: {error:#}")),
     }
     if let Some(path)=&args.contract_file {
         let document:Value=serde_json::from_slice(&migration::read_plan_file(path)?)?;
@@ -578,6 +582,18 @@ pub fn run(ctx: &Ctx, slug: &str, mut args: Args) -> Result<Value> {
         if let Err(error)=herdr_farm::profile_config::check_worker_login(&frozen, &project) {problems.push(format!("profile evidence: {error:#}"));}
         if report["preparation"]["profile"]["execution_home"].as_str().is_none() { problems.push("sandboxed workers: profile has no execution home".into()); }
     }
+    let kind=config.get("profiles").and_then(|p|p.get(&args.profile)).and_then(|p|p.get("kind")).and_then(|v|v.as_str());
+    let request_digest=(|| -> Result<String> {
+        let document=match store.task_contract_document(&args.task)? {
+            Some(document)=>document,
+            None=>serde_json::from_slice(&contract_document(&args,&repository,snapshot.head,kind.context("profile kind missing")?,&project)?)?,
+        };
+        Ok(herdr_farm::store::owner_requests::contract_digest(document))
+    })();
+    if above_cap && let Ok(digest)=&request_digest
+        && store.owner_cap_exemption(&args.task,digest,jiff::Timestamp::now().as_millisecond())? {
+        problems.retain(|p|p!=&cap_refusal);
+    }
     let needs_activation=snapshot.control.as_ref().is_none_or(|c|c.state!=ProjectState::Active || c.reconciliation_required || c.config_digest.as_deref()!=migration::config_reference(Path::new(&pinned.path)).ok().and_then(|r|r.digest).as_deref());
     if needs_activation {
         for blocker in runtime::admission(&project, Path::new(&pinned.path))?.blockers {
@@ -590,6 +606,17 @@ pub fn run(ctx: &Ctx, slug: &str, mut args: Args) -> Result<Value> {
     let plan=profile_plan(ctx, &project, &args, problems.is_empty());
     if let Err(error)=&plan {problems.push(format!("profile evidence: {error:#}"));}
     problems.dedup();
+    let repository_refusal="project repositories: canonical repository is not a local repository listed in PROJECT.md";
+    if !problems.is_empty() && problems.iter().all(|p|p==&cap_refusal || p==repository_refusal) {
+        let digest=request_digest.context("cannot bind owner request to contract decisions")?;
+        for action in ["cap","repository"] {
+            if (action=="cap" && problems.contains(&cap_refusal)) || (action=="repository" && unlisted_repository) {
+                let request=store.request_owner(action,&args.task,&digest,&repository.display().to_string(),slug,jiff::Timestamp::now().as_millisecond())?;
+                let command=format!("{} owner {slug} approve {} --summary {}",crate::coordinator::current_prefix(&ctx.root)?,request.id,crate::remote::quote(&request.summary));
+                problems.push(format!("owner request {}: {command}",request.id));
+            }
+        }
+    }
     ensure!(problems.is_empty(), "launch run preflight refused:\n{}", problems.join("\n"));
     let mut run = Run { ctx, project: project.clone(), slug: slug.to_owned(), steps: Vec::new() };
     match steps(&mut run, &args, plan.context("profile evidence preflight failed")?) {

@@ -287,3 +287,16 @@ resolution to the owner. Never substitute `thread resolve` or bypass a refusal.
 Resolved threads are cleaned by the ticker with `cleanup_resolved = "auto"`;
 `"keep"` retains their resources. Report cleanup skip reasons to the owner and use
 the displayed inspection command; never stop agents or remove worktrees yourself.
+
+
+## Owner requests in the session
+
+When `launch <slug> run` refuses with an owner request, run exactly the printed
+`owner <slug> approve REQUEST --summary '…'` command, including its fixed binary
+and root prefix and exact summary. Claude Code asks the owner, who approves with
+a keypress. If the owner declines, use `owner <slug> reject REQUEST --summary '…'`
+with the same stored summary. After approval, retry the original launch command.
+Never retry a refused launch with different arguments to get around policy.
+Do not wrap owner commands in env, a shell, or another command wrapper.
+Requests expire after 24 hours. A cap approval applies to one reservation of the
+named task and exact contract decisions; it does not change the worker cap.

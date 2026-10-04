@@ -1080,7 +1080,7 @@ fn canonical_worker_viewers_create_reopen_focus_and_close_only_the_recorded_tab(
 
 /// Discovery and policy refusals use the CLI and leave canonical state intact.
 #[test]
-fn automatic_signer_refusals_and_policy_limits_change_nothing() {
+fn automatic_signer_refusals_change_nothing_and_policy_limits_deliver_owner_requests() {
     for case in ["mismatch", "duplicate", "permissions", "repository", "cap", "passphrase"] {
         let lab = Lab::new();
         let config = lab.home.join(".config/herdr-farm/config.toml");
@@ -1115,7 +1115,15 @@ fn automatic_signer_refusals_and_policy_limits_change_nothing() {
         let error=if case=="cap" {let mut second=args; second[4]="second";lab.fail(&second)} else {lab.fail(&args)};
         assert!(error.contains(expected),"{case}: {error}");
         if case=="passphrase" {assert!(started.elapsed()<std::time::Duration::from_secs(10),"passphrase probe must fail promptly");}
-        assert_eq!(herdr_farm::runtime::snapshot(&lab.project).unwrap(),before,"{case}: refusal mutated state");
+        let mut after=herdr_farm::runtime::snapshot(&lab.project).unwrap();
+        if matches!(case,"cap"|"repository") {
+            assert_eq!(after.inbox.iter().filter(|i|i.content.kind=="owner-request").count(),1);
+            after.head=before.head;
+            after.inbox=before.inbox.clone();
+            assert_eq!(after.events.iter().filter(|e|e.kind=="owner.requested").count(),1);
+            after.events=before.events.clone();
+        }
+        assert_eq!(after,before,"{case}: refusal mutated workflow state");
     }
 }
 
@@ -1251,4 +1259,71 @@ fn an_unresolvable_advanced_contract_base_is_refused_before_reservation() {
         "--herdr-socket", socket.to_str().unwrap()]);
     assert!(error.contains("base") || error.contains("commit"), "{error}");
     assert!(herdr_farm::runtime::snapshot(&lab.project).unwrap().attempts.is_empty());
+}
+
+
+#[test]
+fn owner_cap_approval_is_exact_task_bound_and_consumed_without_changing_policy() {
+    let lab=Lab::new();
+    let config=lab.home.join(".config/herdr-farm/config.toml");
+    let mut text=fs::read_to_string(&config).unwrap();text.push_str("\n[launch]\nmax_workers=1\n");fs::write(config,text).unwrap();
+    lab.plant_launchable("codex-sol","codex","gpt-6.1-sol");
+    let socket=lab.socket_inode_once("owner.socket");
+    let mut args=["launch","demo","run","--task","first","--profile","codex-sol","--repository",lab.repo.to_str().unwrap(),"--plan-output","docs/first.md","--herdr-socket",socket.to_str().unwrap()];
+    assert!(lab.ok(&args)["attempt"].is_string());
+    args[4]="second";args[10]="docs/second.md";
+    let error=lab.fail(&args);assert!(error.contains("owner request"),"{error}");
+    let snapshot=herdr_farm::runtime::snapshot(&lab.project).unwrap();
+    let requests=snapshot.inbox.iter().filter(|i|i.content.kind=="owner-request").collect::<Vec<_>>();assert_eq!(requests.len(),1);
+    let request=requests[0].content.clone();
+    assert!(error.contains(&request.id));
+    lab.fail(&args);
+    assert_eq!(herdr_farm::runtime::snapshot(&lab.project).unwrap().inbox.iter().filter(|i|i.content.kind=="owner-request").count(),1);
+    assert!(lab.fail(&["owner","demo","approve",&request.id,"--summary","wrong"]).contains("byte-identical"));
+    lab.ok(&["owner","demo","approve",&request.id,"--summary",&request.summary]);
+    args[10]="docs/changed-contract.md";assert!(lab.fail(&args).contains("owner cap"));
+    args[4]="other";args[10]="docs/other.md";assert!(lab.fail(&args).contains("owner cap"));
+    args[4]="second";args[10]="docs/second.md";assert!(lab.ok(&args)["attempt"].is_string());
+    let mut store=herdr_farm::migration::open_active(&lab.project).unwrap();
+    let decided=store.owner_request(&request.id).unwrap().unwrap();
+    assert_eq!(decided.status,"consumed");assert_eq!(decided.decision_by.as_deref(),Some("owner:claude-code-ask"));assert!(decided.decided.is_some());
+    assert_eq!(store.read_snapshot(None).unwrap().scheduler.unwrap().policy.max_active_workers,1);
+    args[4]="third";args[10]="docs/third.md";assert!(lab.fail(&args).contains("owner cap"));
+}
+
+#[test]
+fn owner_repository_approval_appends_only_the_stored_repository_then_relaunches() {
+    let lab=Lab::new();lab.plant_launchable("codex-sol","codex","gpt-6.1-sol");
+    fs::write(lab.project.join("PROJECT.md"),"+++\nrepos=[]\ncustom='preserved'\n+++\nOwner instructions\n").unwrap();
+    let socket=lab.socket_inode_once("repository.socket");
+    let args=["launch","demo","run","--task","repo-task","--profile","codex-sol","--repository",lab.repo.to_str().unwrap(),"--plan-output","docs/repo.md","--herdr-socket",socket.to_str().unwrap()];
+    assert!(lab.fail(&args).contains("owner request"));
+    let snapshot=herdr_farm::runtime::snapshot(&lab.project).unwrap();
+    let request=&snapshot.inbox.iter().find(|i|i.content.kind=="owner-request").unwrap().content;
+    lab.ok(&["owner","demo","approve",&request.id,"--summary",&request.summary]);
+    let text=fs::read_to_string(lab.project.join("PROJECT.md")).unwrap();
+    let (front,body)=text.strip_prefix("+++\n").unwrap().split_once("\n+++\n").unwrap();
+    let settings:toml::Value=toml::from_str(front).unwrap();
+    assert_eq!(settings["repos"].as_array().unwrap().len(),1);assert_eq!(settings["repos"][0]["path"].as_str(),lab.repo.to_str());assert_eq!(body,"Owner instructions\n");
+    assert!(text.contains("custom = \"preserved\""));
+    assert!(lab.ok(&args)["attempt"].is_string());
+    assert!(herdr_farm::runtime::snapshot(&lab.project).unwrap().inbox.iter().find(|i|i.content.id==request.id).unwrap().done);
+}
+
+#[test]
+fn owner_rejection_and_expiry_preserve_repository_and_capacity() {
+    let lab=Lab::new();
+    let before=fs::read(lab.project.join("PROJECT.md")).unwrap();
+    let mut store=herdr_farm::migration::open_active(&lab.project).unwrap();
+    let now=jiff::Timestamp::now().as_millisecond();
+    let request=store.request_owner("repository","rejected",&"a".repeat(64),lab.repo.to_str().unwrap(),"demo",now).unwrap();
+    assert!(lab.fail(&["owner","demo","reject",&request.id,"--summary","wrong"]).contains("byte-identical"));
+    lab.ok(&["owner","demo","reject",&request.id,"--summary",&request.summary]);
+    assert_eq!(store.owner_request(&request.id).unwrap().unwrap().status,"rejected");
+    assert!(store.read_snapshot(None).unwrap().inbox.iter().find(|i|i.content.id==request.id).unwrap().done);
+    let expired=store.request_owner("cap","expired",&"b".repeat(64),lab.repo.to_str().unwrap(),"demo",now-86_400_001).unwrap();
+    assert!(lab.fail(&["owner","demo","approve",&expired.id,"--summary",&expired.summary]).contains("expired"));
+    assert_eq!(store.owner_request(&expired.id).unwrap().unwrap().status,"pending");
+    assert!(!store.owner_cap_exemption("expired",&"b".repeat(64),now).unwrap());
+    assert_eq!(fs::read(lab.project.join("PROJECT.md")).unwrap(),before);
 }
