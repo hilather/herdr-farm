@@ -108,6 +108,8 @@ struct UntrustedSubmission {
     artifact_manifest: Vec<UntrustedArtifact>,
     claimed_checks: Vec<String>,
     objects: Vec<UntrustedObject>,
+    #[serde(default)]
+    report: Option<String>,
 }
 
 struct ParsedSubmission {
@@ -124,6 +126,7 @@ struct ParsedSubmission {
     artifact_manifest: String,
     claimed_checks: String,
     objects: Vec<UntrustedObject>,
+    remember: Option<String>,
 }
 
 fn plain(value: &str, max: usize) -> bool {
@@ -202,6 +205,10 @@ fn parse_submission(raw: &[u8]) -> Result<ParsedSubmission> {
             return Err(invalid("invalid claimed check"));
         }
     }
+    let remember = document.report.as_deref().and_then(crate::memory::extract_remember);
+    if remember.as_ref().is_some_and(|text| text.len() > 32_000) {
+        return Err(invalid("Remember section exceeds 32000 bytes"));
+    }
     Ok(ParsedSubmission {
         idempotency_key: document.idempotency_key,
         task_id: document.task_id,
@@ -218,6 +225,7 @@ fn parse_submission(raw: &[u8]) -> Result<ParsedSubmission> {
         claimed_checks: serde_json::to_string(&document.claimed_checks)
             .map_err(|error| invalid(&error.to_string()))?,
         objects: document.objects,
+        remember,
     })
 }
 
@@ -997,6 +1005,16 @@ impl SqliteStore {
 
     /// Copy git objects, then insert one untrusted submission. Same key and bytes replay.
     pub fn submit_result(&mut self, raw: &[u8]) -> Result<ResultReceipt> {
+        let submission=parse_submission(raw)?;
+        let receipt = self.submit_result_inner(raw)?;
+        if let Some(text)=submission.remember.as_deref() {
+            let id=super::result_memory::candidate_id(submission.attempt_id.as_str(),text);
+            self.capture_result_memory_candidate(Some(&id))?;
+        }
+        Ok(receipt)
+    }
+
+    fn submit_result_inner(&mut self, raw: &[u8]) -> Result<ResultReceipt> {
         let submission = parse_submission(raw)?;
         let payload_digest = sha256_hex(raw);
         let path = store_path(&self.connection)?;
@@ -1068,6 +1086,7 @@ impl SqliteStore {
                 params![submission_id, object.oid, submission.object_format.as_str(), object.relative_path, object.byte_sha256, integer(object.size)?],
             )?;
         }
+        super::result_memory::queue(&tx, submission.task_id.as_str(), submission.attempt_id.as_str(), &submission_id, submission.remember.as_deref())?;
         super::fix_launch::submitted(&tx, &submission_id, jiff::Timestamp::now().as_millisecond())?;
         super::inbox::result_notice(&tx, "result.submitted", &submission_id, submission.task_id.as_str(), submission.attempt_id.as_str(), &submission_id, "")?;
         tx.commit()?;

@@ -41,18 +41,31 @@ fn build_from(snapshot:&Rows,task:&TaskId,project_slug:&str,config:ConfigReferen
     let op=Operation{id:OperationId::new(id.clone()).map_err(anyhow::Error::msg)?,task:Some(task.id.clone()),kind:"runtime.notification".into(),target:"coordinator".into(),payload_version:1,payload:serde_json::to_value(&notification)?,expected_revision:task.revision,due_unix_ms:now,idempotency_key:id};
     notification.validate_from(&op,snapshot,&notification.config)?;Ok(op)
 }
+/// The same durable Herdr notification adapter, scoped to one owner decision.
+pub(crate) fn build_memory_decision(rows:&NotificationRows,task:&TaskId,notice:&str,summary:&str,config:ConfigReference,now:i64)->Result<Operation> {
+    let binding=rows.bindings.iter().find(|b|b.id=="coordinator").context("coordinator route missing")?;
+    let task=rows.tasks.iter().find(|t|&t.id==task).context("task missing")?;
+    let ids=vec![notice.to_owned()];
+    let id=identity(&ids);
+    let notification=Notification{authority:"coordinator.memory_decision".into(),binding_revision:binding.revision,control_epoch:rows.control.epoch,config,inbox_ids:ids,title:"herdr-farm: memory decision".into(),body:summary.into()};
+    let op=Operation{id:OperationId::new(id.clone()).map_err(anyhow::Error::msg)?,task:Some(task.id.clone()),kind:"runtime.notification".into(),target:"coordinator".into(),payload_version:1,payload:serde_json::to_value(&notification)?,expected_revision:task.revision,due_unix_ms:now,idempotency_key:id};
+    notification.validate_rows(&op,rows,&notification.config)?;
+    Ok(op)
+}
 impl Notification {
     pub fn decode(operation:&Operation)->Result<Self> {
         ensure!(operation.kind=="runtime.notification"&&operation.payload_version==1&&operation.target=="coordinator","unsupported notification operation");
         serde_json::from_value(operation.payload.clone()).context("invalid notification payload")
     }
     fn validate_payload(&self,operation:&Operation)->Result<()> {
-        ensure!(self.authority=="operator.session_notification","notification lacks explicit operator scope");
+        ensure!(matches!(self.authority.as_str(),"operator.session_notification"|"coordinator.memory_decision"),"notification lacks explicit operator scope");
         ensure!((self.title.starts_with("herdr-farm: ") || self.title.starts_with("herdr-projects: "))&&self.title.len()<=256&&!self.title.chars().any(char::is_control),"invalid notification title");
         ensure!(!self.inbox_ids.is_empty()&&self.inbox_ids.len()<=1000&&self.inbox_ids.iter().all(|id|!id.is_empty())&&self.inbox_ids.windows(2).all(|ids|ids[0]<ids[1]),"invalid notification inbox set");
         for id in &self.inbox_ids{crate::domain::InboxContent{id:id.clone(),..Default::default()}.validate().map_err(anyhow::Error::msg)?;}
         ensure!(self.binding_revision>0&&self.control_epoch>0&&std::path::Path::new(&self.config.path).is_absolute()&&self.config.digest.as_ref().is_none_or(|digest|super::finalization::hash(digest)),"invalid notification authority reference");
-        ensure!(self.body==format!("{} new inbox item(s). The coordinator reads them at its next turn.",self.inbox_ids.len()),"invalid notification body");
+        if self.authority=="operator.session_notification" { ensure!(self.body==format!("{} new inbox item(s). The coordinator reads them at its next turn.",self.inbox_ids.len()),"invalid notification body"); } else {
+            ensure!(self.inbox_ids.len()==1 && self.inbox_ids[0].starts_with("owner-memory-") && self.body.len()<=4096 && !self.body.chars().any(char::is_control),"invalid memory decision notification");
+        }
         let id=identity(&self.inbox_ids);ensure!(operation.id.as_str()==id&&operation.idempotency_key==id,"notification identity mismatch");
         Ok(())
     }
@@ -62,7 +75,13 @@ impl Notification {
     fn validate_from<'a>(&self,operation:&Operation,snapshot:&Rows<'a>,config:&ConfigReference)->Result<&'a RuntimeBinding> {
         self.validate_payload(operation)?;
         ensure!(&self.config==config,"notification config reference changed");
-        ensure!(self.inbox_ids==unseen(snapshot),"notification inbox set changed");
+        if self.authority=="operator.session_notification" {
+            ensure!(self.inbox_ids==unseen(snapshot),"notification inbox set changed");
+        } else {
+            let item=snapshot.inbox.iter().find(|i|i.content.id==self.inbox_ids[0]).context("owner decision notice changed")?;
+            let audit:serde_json::Value=serde_json::from_str(&item.content.body)?;
+            ensure!(item.content.kind=="memory.owner_decision" && item.content.summary==self.body && audit["principal"]=="coordinator" && audit["delegation"]==crate::store::MEMORY_COORDINATOR_DELEGATION && matches!(audit["decision"].as_str(),Some("approve"|"reject")),"invalid owner memory decision evidence");
+        }
         // An altered route, task or configuration cannot launder a possible
         // prior effect into a new overlapping notification batch.
         for delivery in snapshot.deliveries {
@@ -74,7 +93,7 @@ impl Notification {
         }
         let control=snapshot.control.context("upgrade-store required")?;
         ensure!(control.state==ProjectState::Active&&!control.reconciliation_required&&control.epoch==self.control_epoch&&control.config_digest==config.digest,"notification lifecycle admission changed");
-        ensure!(snapshot.tasks.iter().any(|t|Some(&t.id)==operation.task.as_ref()&&t.revision==operation.expected_revision),"notification task changed");
+        ensure!(snapshot.tasks.iter().any(|t|Some(&t.id)==operation.task.as_ref()&&(self.authority=="coordinator.memory_decision"||t.revision==operation.expected_revision)),"notification task changed");
         let binding=snapshot.bindings.iter().find(|b|b.id=="coordinator"&&b.revision==self.binding_revision&&b.task.is_none()).context("notification route changed")?;
         RuntimeRoute::from_identity(&binding.identity).validate().map_err(anyhow::Error::msg)?;
         ensure!(binding.identity.machine.is_empty()&&std::path::Path::new(&binding.identity.socket).is_absolute(),"notification requires an explicit local session socket");

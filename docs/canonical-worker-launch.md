@@ -976,3 +976,12 @@ owner's configured `[coordinator].signing_key`. See the
 and `skill/COORDINATOR.md` for CLI forms and recovery rules.
 
 The `state-store` feature is enabled by default; build recipes above use that default.
+
+
+Workers may end their attempt output `report.md` with `## Remember`, containing
+short durable project lessons as evidence, never instructions. Explicit result
+submissions carry this report in the optional `report` JSON string; operator
+`submit-captured` reads the attempt output report. Both create one candidate per
+attempt/content digest for coordinator review. See [canonical Remember capture
+and delegated decisions](memory-store.md#canonical-remember-capture-and-delegated-decisions)
+for the 2026-10-04 owner delegation and mandatory owner inbox/Herdr notification.

@@ -526,6 +526,9 @@ fn profile_plan(ctx: &Ctx, project: &Path, args: &Args, observe: bool) -> Result
 
 pub fn run(ctx: &Ctx, slug: &str, mut args: Args) -> Result<Value> {
     let project = ctx.root.join(slug).canonicalize().with_context(|| format!("project {slug} not found"))?;
+    // File locks do not alter SQLite bytes and span the entire multi-step launch.
+    let memory_launch_guard = fs::File::open(project.join(".state/state.db"))?;
+    memory_launch_guard.try_lock_shared().context("memory adoption is in progress; retry launch after it finishes")?;
     if args.review_of.is_some() {
         if args.output.is_empty() && args.write.is_empty() && args.plan_output.is_none() && args.contract_file.is_none() {
             args.plan_output = Some(format!("docs/reviews/{}.md", args.task));
@@ -861,13 +864,19 @@ fn steps(run: &mut Run, args: &Args, plan: ProfilePlan) -> Result<Value> {
             migration::open_active(&project)?.create_review_run_snapshot(herdr_farm::domain::SnapshotPlan {
                 coordinator: false, session_id: None, request, profile_name: resolved.name.clone(), profile_digest: resolved.definition_digest.clone(),
                 config_digest: Some(resolved.config_digest.clone()), budget_chars: resolved.budget.soft_input_chars,
-                estimator: "char-count-worker-brief-v2".into(), instructions: instructions.clone(), now_unix_ms: now, expected_heads_digest: None,
+                estimator: "char-count-worker-brief-v3".into(), instructions: instructions.clone(), now_unix_ms: now, expected_heads_digest: None,
             }, &project, reviewed, &args.review_kind, &args.review_scope, &ctx.root.display().to_string(), &run.slug)?
         } else {
             let mut memory = herdr_farm::memory::MemoryStore::from_sqlite(migration::open_active(&project)?, project.join(".state/objects"));
             memory.create_worker_snapshot(request, &resolved.name, &resolved.definition_digest, Some(&resolved.config_digest), resolved.budget.soft_input_chars, &instructions, now, None)?
         };
-        Ok(serde_json::to_value(&created)?)
+        let selected = created.entries.iter().map(|e| &e.record_id).collect::<Vec<_>>();
+        let omitted = migration::open_active(&project)?.active_facts(now)?.into_iter()
+            .filter(|f| f.record.scope_id == "project" && f.record.kind != herdr_farm::domain::MemoryKind::TaskLocal && !selected.contains(&&f.record.id))
+            .map(|f| f.record.record_key).collect::<Vec<_>>();
+        let mut value = serde_json::to_value(&created)?;
+        value["omitted_for_budget"] = json!(omitted);
+        Ok(value)
     })?;
     let selection = LaunchSelection {
         task: task_id.clone(),
@@ -878,7 +887,7 @@ fn steps(run: &mut Run, args: &Args, plan: ProfilePlan) -> Result<Value> {
         reason: None,
         note: None,
     };
-    run.done("knowledge_snapshot", json!({"snapshot":selection.knowledge}));
+    run.done("knowledge_snapshot", json!({"snapshot":selection.knowledge,"omitted_for_budget":knowledge["omitted_for_budget"]}));
     let deadline = Instant::now() + herdr_farm::profile_preparation::BUDGET;
     eprintln!("launch run: draft");
     let drafted = retry(|| launch_preparation::draft(&project, &selection, run.head()?, Duration::from_secs(args.validity_seconds), deadline, Default::default()))?;
@@ -1038,4 +1047,50 @@ fn split_command(raw: &str) -> Result<Vec<String>> {
     if started { args.push(word); }
     ensure!(!args.is_empty(), "empty --accept command");
     Ok(args)
+}
+
+/// Owner convenience command shares launch's signer discovery and spawn gate.
+pub fn adopt_memory(ctx: &Ctx, project: &Path, dry_run: bool, explicit: Option<PathBuf>) -> Result<Value> {
+    let marker = migration::read_format(project).context("memory adopt requires a canonical project")?;
+    migration::open_active(project).context("memory adopt requires an active canonical store")?;
+    if marker.memory == "sqlite-v1" {
+        if !dry_run { authority::recover_memory_adopt(project)?; }
+        return Ok(json!({"outcome":"already_adopted"}));
+    }
+    let plan = herdr_farm::memory::adopt_plan(project)?;
+    if dry_run { return Ok(serde_json::to_value(plan)?); }
+    ensure!(plan.blockers.is_empty(), "adopt refused: {}", serde_json::to_string(&plan)?);
+    let key = memory_signer(ctx, project, explicit)?;
+    let temp = ProbeDirectory(herdr_farm::short_socket::fresh()?);
+    let document = temp.0.join("memory.json");
+    let result = authority::adopt_memory(project, &plan, |bytes| {
+        fs::write(&document, bytes)?;
+        fs::read(sign(&key, authority::MEMORY_SIGNATURE_NAMESPACE, &document)?).map_err(Into::into)
+    })?;
+    Ok(json!({"journal":result,"outcomes":plan.outcomes}))
+}
+
+fn memory_signer(ctx: &Ctx, project: &Path, explicit: Option<PathBuf>) -> Result<PathBuf> {
+    let config = migration::status(project)?.plan.config.context("pinned owner config missing")?;
+    let path = Path::new(&config.path);
+    let value: toml::Value = toml::from_str(&String::from_utf8(migration::read_plan_file(path)?)?)?;
+    let selected = if let Some(key) = explicit { Some(key) }
+        else if let Some(configured) = value.get("coordinator").and_then(|v|v.get("signing_key")) {
+            let key = configured.as_str().context("coordinator.signing_key must be an absolute path")?;
+            ensure!(Path::new(key).is_absolute(), "coordinator.signing_key must be an absolute path");
+            Some(PathBuf::from(key))
+        } else { None };
+    resolve_signer(selected, &[path.parent().context("config parent missing")?.to_owned(), ctx.config_dir.clone()], value["authority"]["approval_public_key"].as_str().context("owner approval key missing")?)
+}
+
+pub fn record_memory(ctx: &Ctx, project: &Path, title: &str, provenance: &str, body_file: &Path) -> Result<Value> {
+    ensure!(migration::read_format(project)?.memory == "sqlite-v1", "legacy-markdown memory: use `memory-review PROJECT record` to record owner decisions");
+    let (title, body, provenance, name) = crate::memory_review::owner_decision_inputs(title, body_file, provenance)?;
+    let key = memory_signer(ctx, project, None)?;
+    let temp = ProbeDirectory(herdr_farm::short_socket::fresh()?);
+    let document = temp.0.join("memory.json");
+    authority::record_memory(project, &title, &format!("memory/{name}"), &body, &provenance, |bytes| {
+        fs::write(&document, bytes)?;
+        fs::read(sign(&key, authority::MEMORY_SIGNATURE_NAMESPACE, &document)?).map_err(Into::into)
+    })
 }

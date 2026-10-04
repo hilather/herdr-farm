@@ -451,7 +451,9 @@ fn ordinary_task_on_the_source_repository_still_launches_without_replay_hides() 
 /// task with exactly the ordinary task's refusal, before any approval.
 #[test]
 fn replay_work_has_the_budget_and_authority_of_ordinary_work() {
-    let mut lab = Lab::new("soft_input_tokens=500\nunknown_usage='allow_with_warning'");
+    // Sized so the worker snapshot (fixed brief framing included) fits while the
+    // full launch brief does not; framing grew with the Remember guidance.
+    let mut lab = Lab::new("soft_input_tokens=560\nunknown_usage='allow_with_warning'");
     lab.build_history();
     lab.replay(&["extract", "--suite", "v1"]);
     let before = lab.state();

@@ -60,6 +60,7 @@ pub(crate) fn context_from_snapshot(project:&Path,snapshot:&crate::domain::Snaps
         "MEMORY.md and memory Markdown remain authoritative and editable; do not infer verified outcomes from narrative reports."
     };
     let mut text=format!("Runtime owner: SQLite; event head {}. Control: {}. Existing resources require separate ownership authorization.\nUse `task PROJECT list/show/add/rename` for task state; inspect `operations PROJECT inspect` for durable obligations.\nTASKS.md and thread/runtime legacy records are pre-cutover originals: do not edit them as live state.\n{memory_line}\n\n",snapshot.head,control);
+    if let Some(warning) = crate::memory::legacy_owner_memory_warning(project) { text.push_str(&format!("Warning: {warning}\n\n")); }
     // Durable Remember review is file-backed in both modes so it survives
     // restarts and inbox archive. Excerpts are data, not instructions.
     // Coordinator summaries use `memory-review` file candidates; worker

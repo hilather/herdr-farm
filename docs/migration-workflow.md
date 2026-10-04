@@ -86,11 +86,40 @@ candidate holds remain enforced by the ordinary completion service. Capacity
 is still retained until worker termination is proven.
 
 Runtime migration keeps memory authority `legacy-markdown`. Use the separate
-signed `memory plan` / `memory cutover` workflow to import recorded Markdown into
-SQLite memory with its provenance. The `memory/candidates` directory is retained
+`memory PROJECT adopt --dry-run` / `memory PROJECT adopt` command to import
+owner-approved decisions into SQLite and perform signed cutover in one command.
+Adopt uses launch's configured/discovered owner key (or `--sign-with KEY`), signs
+in `memory@herdr-projects`, and holds the maintenance barrier. It reports each
+file outcome and refuses noncanonical projects, unfinished workers, missing or
+unapproved files and conflicting records before importing. Only top-level
+`memory/*.md` linked in `MEMORY.md` with `source=user` headers and provenance
+become valid project constraints. The index is retained and backed up; decisions
+retain original bytes, digests and owner provenance. Reruns reuse imported rows
+and recover committed cutover. The separate signed `memory plan` / `memory
+cutover` workflow still imports unverified shadow observations, which require
+signed acknowledgement/review before selection. Canonical `launch run` briefs
+include mandatory decisions and all active project memory that fits the brief
+budget; its report lists omitted optional keys. Other tasks' task-local memory
+stays excluded. Doctor and canonical context warn with the adopt command while
+approved Markdown still has legacy authority. The `memory/candidates` directory is retained
 evidence, excluded from authoritative memory import; candidates never become
 facts automatically. Previously linked proposed candidates remain readable after
 memory cutover, with their original pinned digest checked on every read.
+
+After adoption, record explicit owner decisions with:
+
+```sh
+herdr-farm memory PROJECT record --title "Decision title" --provenance "Reference to the owner's instruction" --body-file decision.md
+```
+
+This uses the same automatic owner signer as `adopt`, signs and verifies the
+exact decision in `memory@herdr-projects`, and stores an active project Constraint
+with `source=user`, the instruction provenance, time, and retained signature.
+Identical input is a no-op; a changed decision under the same title appends a
+revision to the stable `memory/<title-slug>.md` key. New worker snapshots include
+these constraints. Before adoption, use `memory-review PROJECT record` instead.
+The coordinator can use canonical `memory PROJECT record` after adoption without
+handling a private key or preparing an import document.
 
 This importer still blocks removal receipts and unsupported ticker state. Supported pending
 inbox/finalization/notification obligations now convert into ambiguous durable

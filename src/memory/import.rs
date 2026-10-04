@@ -183,7 +183,7 @@ fn objects_dir(project: &Path) -> std::path::PathBuf { project.join(".state/obje
 
 use super::read_object;
 
-fn import_bytes(memory: &mut MemoryStore, rel: &str, bytes: &[u8], migration_id: &str, expected: Option<u64>) -> Result<ImportResult, MemoryError> {
+fn import_bytes(memory: &mut MemoryStore, rel: &str, bytes: &[u8], migration_id: &str, expected: Option<u64>, approved: bool) -> Result<ImportResult, MemoryError> {
     if rel != "MEMORY.md" && !rel.starts_with("memory/") {
         return Err(MemoryError::Invalid("import path must be MEMORY.md or memory/*.md".into()));
     }
@@ -200,7 +200,8 @@ fn import_bytes(memory: &mut MemoryStore, rel: &str, bytes: &[u8], migration_id:
             return Err(MemoryError::Invalid("approved memory requires a staged import and signed review".into()));
         }
     }
-    let provenance = serde_json::json!({"path": rel, "digest": digest, "span": [0, bytes.len()], "memory_migration_id": migration_id});
+    let mut provenance = serde_json::json!({"path": rel, "digest": digest, "span": [0, bytes.len()], "memory_migration_id": migration_id});
+    if approved { provenance["owner_provenance"] = serde_json::json!(owner_header(std::str::from_utf8(bytes).unwrap_or_default())); }
     let body = memory.ingest_object(bytes)?;
     let prov = memory.ingest_object(provenance.to_string().as_bytes())?;
     memory.pin(&body)?;
@@ -228,11 +229,11 @@ fn import_bytes(memory: &mut MemoryStore, rel: &str, bytes: &[u8], migration_id:
             .and_then(|existing| memory.store.memory_head(existing.id.as_str()).ok().flatten().map(|h| h.revision)),
     };
     let head = memory.insert_revision(&ControlContext { now_unix_ms: jiff::Timestamp::now().as_millisecond() }, NewRevision {
-        id: id.clone(), record_key: rel.into(), scope_id: "project".into(), kind: MemoryKind::Observation,
+        id: id.clone(), record_key: rel.into(), scope_id: "project".into(), kind: if approved { MemoryKind::Constraint } else { MemoryKind::Observation },
         body_hash: body.clone(), provenance_hash: prov,
         applicability: Applicability { domains: vec![], paths: vec![rel.into()] },
         dependencies: vec![], expected, expiry_unix_ms: None,
-        validity_state: "stale".into(), validity_reason: "unverified_import".into(),
+        validity_state: if approved { "valid" } else { "stale" }.into(), validity_reason: if approved { "owner_adopted" } else { "unverified_import" }.into(),
     })?;
     Ok(ImportResult { record_id: id.as_str().into(), record_key: rel.into(), revision: head.revision, body_hash: body.as_str().into(), reused: false })
 }
@@ -286,18 +287,19 @@ pub fn import_candidate_preview(project: &Path, id: &str) -> Result<serde_json::
     Ok(serde_json::json!({"candidate":candidate,"original":original,"proposed":proposed}))
 }
 
-fn import_plan_held(project: &Path, plan: &MemoryPlan) -> Result<Vec<ImportResult>> {
+pub(crate) fn import_plan_held(project: &Path, plan: &MemoryPlan) -> Result<Vec<ImportResult>> {
     ensure!(Path::new(&plan.project) == project, "memory plan project mismatch");
-    let current = crate::memory::plan(project)?;
+    let current = if plan.version == 2 { adopt_plan(project)?.plan } else { crate::memory::plan(project)? };
     ensure!(serde_json::to_value(&current)? == serde_json::to_value(plan)?, "memory plan does not match the current inventory; regenerate the plan");
     let mut journal = MemoryJournal { version: 1, phase: Phase::Prepared, plan: plan.clone() };
     save_journal(project, &journal)?;
     let mut memory = MemoryStore::from_sqlite(migration::open_active(project)?, objects_dir(project));
     let mut results = Vec::new();
     for source in &plan.sources {
+        if plan.version == 2 && source.path == "MEMORY.md" { continue; }
         let bytes = read_memory_file(&project.join(&source.path))?;
         ensure!(hash(&bytes) == source.digest, "memory source changed during import: {}", source.path);
-        results.push(import_bytes(&mut memory, &source.path, &bytes, &plan.digest, None)?);
+        results.push(import_bytes(&mut memory, &source.path, &bytes, &plan.digest, None, plan.version == 2)?);
     }
     journal.phase = Phase::Imported;
     save_journal(project, &journal)?;
@@ -305,6 +307,7 @@ fn import_plan_held(project: &Path, plan: &MemoryPlan) -> Result<Vec<ImportResul
 }
 
 pub fn import_plan(project: &Path, plan: &MemoryPlan) -> Result<Vec<ImportResult>> {
+    ensure!(plan.version == 1, "owner adoption requires signed adopt authorization");
     let project = checked_project(project)?;
     let _guard = migration::runtime_mutation(&project)?;
     import_plan_held(&project, plan)
@@ -391,6 +394,7 @@ fn publish_projection(path: &Path, bytes: &[u8], original: Option<&[u8]>) -> Res
 fn render_projections(project: &Path, plan: &MemoryPlan, sequence: u64) -> Result<()> {
     let mut memory = MemoryStore::from_sqlite(migration::open_active(project)?, objects_dir(project));
     for source in &plan.sources {
+        if plan.version == 2 && source.path == "MEMORY.md" { continue; }
         let rec = memory.store.memory_record_by_key(&source.path)?.context("imported memory record missing")?;
         let head = memory.store.memory_head(rec.id.as_str())?.context("imported memory head missing")?;
         let rev = memory.store.memory_revision(rec.id.as_str(), head.revision)?.context("imported memory revision missing")?;
@@ -408,15 +412,19 @@ pub fn cutover(project: &Path, plan: &MemoryPlan, policy: &PreparedMemoryPolicy,
     ensure!(writers_stopped, "confirm known writers are stopped with --writers-stopped");
     let project = checked_project(project)?;
     let _maintenance = migration::maintenance(&project)?;
+    cutover_held(&project, plan, policy)
+}
+
+pub(crate) fn cutover_held(project: &Path, plan: &MemoryPlan, policy: &PreparedMemoryPolicy) -> Result<MemoryJournal> {
     ensure!(policy.policy.op == MemoryPolicyOp::Cutover, "cutover requires a signed cutover document");
     ensure!(policy.policy.memory_plan_digest.as_deref() == Some(plan.digest.as_str()), "cutover memory_plan_digest does not match the plan");
     ensure!(policy.policy.expected_memory_owner.as_deref() == Some(MEMORY_LEGACY), "cutover expected_memory_owner must be legacy-markdown");
-    let marker = migration::read_format(&project)?;
+    let marker = migration::read_format(project)?;
     ensure!(marker.migration == plan.runtime_migration, "W03 migration digest changed; regenerate the memory plan");
-    ensure!(exists(&memory_journal_path(&project)), "import memory before cutover");
-    let mut journal = load_journal(&project)?;
+    ensure!(exists(&memory_journal_path(project)), "import memory before cutover");
+    let mut journal = load_journal(project)?;
     ensure!(journal.plan == *plan, "memory journal plan mismatch");
-    let snapshot=migration::open_active(&project)?.read_snapshot(None)?;
+    let snapshot=migration::open_active(project)?.read_snapshot(None)?;
     let installed=snapshot.memory_policies.iter().find(|p|p.revision==policy.policy.revision);
     if let Some(installed)=installed {ensure!(installed==&policy.policy,"cutover authorization does not match committed policy");}
     if journal.phase==Phase::Active {
@@ -426,9 +434,9 @@ pub fn cutover(project: &Path, plan: &MemoryPlan, policy: &PreparedMemoryPolicy,
     ensure!(matches!(journal.phase, Phase::Imported | Phase::Verified | Phase::CutoverPending), "memory journal is not ready for cutover");
     if installed.is_none() {
         ensure!(marker.memory == MEMORY_LEGACY, "memory authority changed without the signed cutover receipt");
-        let current = crate::memory::plan(&project)?;
+        let current = if plan.version == 2 { adopt_plan(project)?.plan } else { crate::memory::plan(project)? };
         ensure!(current == *plan, "memory plan does not match current inventory; regenerate the plan");
-        backup_memory(&project, plan)?;
+        backup_memory(project, plan)?;
     } else {
         ensure!(journal.phase==Phase::CutoverPending,"committed cutover has no pending recovery journal");
     }
@@ -437,16 +445,17 @@ pub fn cutover(project: &Path, plan: &MemoryPlan, policy: &PreparedMemoryPolicy,
         ensure!(hash(&bytes) == source.digest, "memory backup changed: {}", source.path);
     }
     // Verify the complete imported inventory before changing either policy or owner.
-    let mut verification = migration::open_active(&project)?;
+    let mut verification = migration::open_active(project)?;
     for source in &plan.sources {
+        if plan.version == 2 && source.path == "MEMORY.md" { continue; }
         let record = verification.memory_record_by_key(&source.path)?.context("imported record missing")?;
         let head = verification.memory_head(record.id.as_str())?.context("imported head missing")?;
         ensure!(head.status == "active", "imported head is not active");
         let revision = verification.memory_revision(record.id.as_str(), head.revision)?.context("imported revision missing")?;
-        let body = read_object(&objects_dir(&project), &revision.body_hash)?;
+        let body = read_object(&objects_dir(project), &revision.body_hash)?;
         ensure!(hash(&body) == source.digest, "imported body differs from planned source");
         std::str::from_utf8(&body).context("imported body is not UTF-8")?;
-        let provenance = read_object(&objects_dir(&project), &revision.provenance_hash)?;
+        let provenance = read_object(&objects_dir(project), &revision.provenance_hash)?;
         let provenance: serde_json::Value = serde_json::from_slice(&provenance)?;
         ensure!(provenance["path"].as_str() == Some(source.path.as_str())
             && provenance["digest"].as_str() == Some(source.digest.as_str())
@@ -455,28 +464,28 @@ pub fn cutover(project: &Path, plan: &MemoryPlan, policy: &PreparedMemoryPolicy,
     drop(verification);
     if journal.phase == Phase::Imported {
         journal.phase = Phase::Verified;
-        save_journal(&project, &journal)?;
+        save_journal(project, &journal)?;
     }
     if journal.phase == Phase::Verified {
         journal.phase = Phase::CutoverPending;
-        save_journal(&project, &journal)?;
+        save_journal(project, &journal)?;
     }
-    let mut db = migration::open_active(&project)?;
+    let mut db = migration::open_active(project)?;
     let snapshot = db.read_snapshot(None)?;
     ensure!(snapshot.schema_version >= 18, "memory cutover requires schema 18 or newer");
     if installed.is_none() {db.install_memory_policy(policy, snapshot.head)?;}
-    if migration::read_format(&project)?.memory==MEMORY_LEGACY {set_memory_owner(&project, MEMORY_SQLITE)?;}
-    let marker = migration::read_format(&project)?;
+    if migration::read_format(project)?.memory==MEMORY_LEGACY {set_memory_owner(project, MEMORY_SQLITE)?;}
+    let marker = migration::read_format(project)?;
     ensure!(marker.memory == MEMORY_SQLITE && marker.runtime == "sqlite-v2" && marker.migration == plan.runtime_migration, "memory owner publication interrupted");
     // The policy event is the stable publication identity across every retry.
     let sequence = policy.policy.expected_head.checked_add(1).context("cutover sequence exhausted")?;
-    render_projections(&project, plan, sequence)?;
-    let db = migration::open_active(&project)?;
-    migration::publish_control_marker(&project, &db)?;
-    ensure!(migration::read_format(&project)?.memory == MEMORY_SQLITE, "publish_control_marker reverted memory owner");
+    render_projections(project, plan, sequence)?;
+    let db = migration::open_active(project)?;
+    migration::publish_control_marker(project, &db)?;
+    ensure!(migration::read_format(project)?.memory == MEMORY_SQLITE, "publish_control_marker reverted memory owner");
     let _ = db;
     journal.phase=Phase::Active;
-    save_journal(&project,&journal)?;
+    save_journal(project,&journal)?;
     Ok(journal)
 }
 
@@ -627,6 +636,87 @@ fn render_snapshot_budgeted(project: &Path, db: &mut crate::store::SqliteStore, 
         return Err(MemoryError::RequiredContentTooLarge { required_bytes: required, budget_bytes: budget_chars });
     }
     Ok((rendered, Vec::new()))
+}
+
+/// An adoption inventory reports every authority file and candidate separately.
+#[derive(Debug, Serialize)]
+pub struct AdoptPlan {
+    pub plan: MemoryPlan,
+    pub outcomes: Vec<serde_json::Value>,
+    pub blockers: Vec<String>,
+}
+
+fn owner_header(text: &str) -> Option<String> {
+    let header = text.lines().next()?.strip_prefix("<!-- herdr-projects user memory;")?.strip_suffix(" -->")?;
+    let fields: Vec<_> = header.split(';').map(str::trim).collect();
+    if fields.iter().filter(|f| f.starts_with("source=")).copied().collect::<Vec<_>>() != ["source=user"] { return None; }
+    let provenance = header.split_once("provenance=")?.1.trim();
+    if provenance.is_empty() { return None; }
+    Some(provenance.to_owned())
+}
+
+pub fn adopt_plan(project: &Path) -> Result<AdoptPlan> {
+    let mut plan = plan(project)?;
+    plan.version = 2;
+    let config = migration::status(project)?.plan.config.context("pinned owner config missing")?;
+    plan.owner_policy_digest = migration::config_reference(Path::new(&config.path))?.digest.context("owner config missing")?;
+    let index = read_memory_file(&project.join("MEMORY.md"))?;
+    let index = std::str::from_utf8(&index)?;
+    // Only list entries (`- [title](memory/...)`) name memory files; prose such as
+    // the template's "One line per memory file: `- [title](memory/file.md)`" does not.
+    let entries: Vec<String> = index.lines().map(str::trim_start)
+        .filter(|line| line.starts_with("- ["))
+        .filter_map(|line| line.split_once("](memory/").and_then(|(_, rest)| rest.split_once(')')).map(|(name, _)| format!("memory/{name}")))
+        .collect();
+    let mut outcomes = vec![serde_json::json!({"path":"MEMORY.md","outcome":"retained_index"})];
+    let mut blockers = Vec::new();
+    for source in &plan.sources {
+        if source.path == "MEMORY.md" { continue; }
+        let bytes = read_memory_file(&project.join(&source.path))?;
+        let provenance = owner_header(std::str::from_utf8(&bytes)?);
+        let listed = entries.iter().any(|entry| entry == &source.path);
+        let approved = listed && provenance.is_some();
+        outcomes.push(serde_json::json!({"path":source.path,"outcome":if approved {"import_constraint"} else {"refused"},"provenance":provenance}));
+        if !approved { blockers.push(format!("{}: requires a source=user header with provenance and a MEMORY.md link", source.path)); }
+    }
+    for path in &entries {
+        if path.starts_with("memory/candidates/") { continue; }
+        if !plan.sources.iter().any(|s| &s.path == path) {
+            blockers.push(format!("{path}: listed memory file missing or unsupported"));
+            outcomes.push(serde_json::json!({"path":path,"outcome":"refused"}));
+        }
+    }
+    let candidates = project.join("memory/candidates");
+    if candidates.exists() {
+        let mut entries = fs::read_dir(candidates)?.collect::<std::io::Result<Vec<_>>>()?;
+        entries.sort_by_key(|e| e.file_name());
+        for entry in entries { outcomes.push(serde_json::json!({"path":format!("memory/candidates/{}",entry.file_name().to_string_lossy()),"outcome":"excluded_candidate"})); }
+    }
+    plan.digest = hash(&serde_json::to_vec(&(2, &plan.sources))?);
+    Ok(AdoptPlan { plan, outcomes, blockers })
+}
+
+/// After `memory adopt`, MEMORY.md stays the owner's human index rather than a
+/// projection. `Some(true)` while it is byte-identical to the adopted index,
+/// `Some(false)` once edited afterwards, `None` when no adoption kept it.
+pub fn adopted_index_unchanged(project: &Path) -> Option<bool> {
+    let journal = load_journal(project).ok()?;
+    if journal.plan.version != 2 { return None; }
+    let adopted = journal.plan.sources.iter().find(|s| s.path == "MEMORY.md")?;
+    let current = read(&project.join("MEMORY.md")).ok()?;
+    Some(hash(&current) == adopted.digest)
+}
+
+pub fn legacy_owner_memory_warning(project: &Path) -> Option<String> {
+    if migration::read_format(project).ok()?.memory != MEMORY_LEGACY { return None; }
+    let dir = project.join("memory");
+    if !fs::symlink_metadata(&dir).ok()?.is_dir() { return None; }
+    let approved = fs::read_dir(dir).ok()?.filter_map(std::result::Result::ok).any(|entry| {
+        entry.path().extension().is_some_and(|ext| ext == "md")
+            && read_memory_file(&entry.path()).ok().is_some_and(|bytes| owner_header(std::str::from_utf8(&bytes).unwrap_or_default()).is_some())
+    });
+    if !approved { return None; }
+    Some(format!("Owner-approved memory is still legacy-markdown; import it into canonical worker briefs with `memory {} adopt`.", project.file_name()?.to_string_lossy()))
 }
 
 #[cfg(test)]

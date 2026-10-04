@@ -777,11 +777,7 @@ pub fn dispose_deferred(project_dir: &Path, obligation_id: &str, reason: &str) -
     Ok(out)
 }
 
-/// Record an explicit user decision directly into legacy Markdown memory with
-/// provenance to that user instruction. Refused on SQLite-memory projects:
-/// projections are not authority and signed control still applies.
-pub fn record_user_memory(project_dir: &Path, title: &str, body_file: &Path, provenance: &str) -> Result<PathBuf> {
-    ensure!(memory_owner(project_dir)? == MemoryOwner::Legacy, "project memory is SQLite-owned; do not edit Markdown projections. Use `memory PROJECT import --file` with owner-signed `memory-import-review@herdr-projects` review instead");
+pub(crate) fn owner_decision_inputs(title: &str, body_file: &Path, provenance: &str) -> Result<(String, String, String, String)> {
     let title = title.trim();
     ensure!(!title.is_empty() && title.chars().count() <= MAX_TITLE_CHARS, "title must contain 1–{MAX_TITLE_CHARS} characters");
     ensure!(!title.chars().any(|c| c.is_control()), "title must not contain control characters");
@@ -796,6 +792,15 @@ pub fn record_user_memory(project_dir: &Path, title: &str, body_file: &Path, pro
     ensure!(!slug.is_empty(), "title has no letters or digits for a file name");
     let name = format!("{slug}.md");
     ensure!(!name.starts_with('.') && name.len() <= 128, "invalid memory file name");
+    Ok((title.to_owned(), body, provenance.to_owned(), name))
+}
+
+/// Record an explicit user decision directly into legacy Markdown memory with
+/// provenance to that user instruction. Refused on SQLite-memory projects:
+/// projections are not authority and signed control still applies.
+pub fn record_user_memory(project_dir: &Path, title: &str, body_file: &Path, provenance: &str) -> Result<PathBuf> {
+    ensure!(memory_owner(project_dir)? == MemoryOwner::Legacy, "project memory is SQLite-owned; do not edit Markdown projections. Use `memory PROJECT record --title TITLE --provenance USER_INSTRUCTION --body-file FILE` instead");
+    let (title, body, provenance, name) = owner_decision_inputs(title, body_file, provenance)?;
     let dir = project_dir.join("memory");
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(&name);

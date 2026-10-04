@@ -170,8 +170,8 @@ impl SqliteStore {
         if plan.expected_heads_digest.as_ref().is_some_and(|expected| expected!=&digest) {return Err(StoreError::Conflict);}
         let facts=load_active_facts(&tx,plan.now_unix_ms)?;
         let required_ids={
-            let mut stmt=tx.prepare("SELECT r.id FROM memory_records r JOIN memory_heads h ON h.record_id=r.id WHERE h.status='active' AND (r.is_hard=1 OR r.kind IN ('constraint','hard_memory')) ORDER BY r.id LIMIT 10001")?;
-            stmt.query_map([],|r|r.get::<_,String>(0))?.collect::<std::result::Result<Vec<_>,_>>()?
+            let mut stmt=tx.prepare("SELECT r.id FROM memory_records r JOIN memory_heads h ON h.record_id=r.id WHERE h.status='active' AND (r.is_hard=1 OR r.kind IN ('constraint','hard_memory')) AND NOT (r.kind='task_local' AND r.scope_id!=?1) ORDER BY r.id LIMIT 10001")?;
+            stmt.query_map([format!("task:{task_id}")],|r|r.get::<_,String>(0))?.collect::<std::result::Result<Vec<_>,_>>()?
         };
         if required_ids.len()>10000 {return Err(StoreError::Limit("mandatory memory inventory exceeds 10000".into()));}
         for id in required_ids {
@@ -188,6 +188,7 @@ impl SqliteStore {
         let mut mandatory=Vec::new();
         let mut seen=std::collections::BTreeSet::new();
         for fact in &facts {
+            if fact.record.kind == crate::domain::MemoryKind::TaskLocal && (plan.coordinator || fact.record.scope_id != format!("task:{task_id}")) { continue; }
             let pinned=plan.request.pinned_keys.iter().any(|k|k==&fact.record.record_key);
             if matches!(fact.record.kind,crate::domain::MemoryKind::Constraint|crate::domain::MemoryKind::HardMemory) || fact.record.is_hard || (!plan.coordinator && pinned) {
                 if seen.insert(fact.record.id.as_str().to_string()) { mandatory.push(fact); }
@@ -219,7 +220,7 @@ impl SqliteStore {
                 if seen.contains(f.record.id.as_str()) || matches!(f.record.kind,crate::domain::MemoryKind::Constraint|crate::domain::MemoryKind::HardMemory) {return false;}
                 let hops=dist.get(f.record.id.as_str()).copied();
                 if f.record.kind == crate::domain::MemoryKind::TaskLocal && f.record.scope_id != format!("task:{}", plan.request.task_id) { return false; }
-                hops.is_some() || crate::domain::scope_matches(&plan.request, &f.revision.applicability)
+                (plan.estimator == crate::memory::WORKER_BRIEF_ESTIMATOR && f.record.scope_id == "project" && f.record.kind != crate::domain::MemoryKind::TaskLocal) || hops.is_some() || crate::domain::scope_matches(&plan.request, &f.revision.applicability)
             }).cloned().collect();
             optional.sort_by(|a,b|{
                 let sa=selection_score(&plan.request,a,dist.get(a.record.id.as_str()).copied());

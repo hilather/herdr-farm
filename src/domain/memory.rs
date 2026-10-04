@@ -137,7 +137,7 @@ pub struct ActiveFact {
 pub(crate) fn parse_kind(value: &str) -> Result<MemoryKind, String> { MemoryKind::parse(value) }
 
 pub const SELECTION_POLICY_ID: &str = "memory-selection";
-pub const SELECTION_POLICY_VERSION: u32 = 1;
+pub const SELECTION_POLICY_VERSION: u32 = 2;
 pub const SELECTION_ESTIMATOR: &str = "char-count-v1";
 
 pub struct SelectionWeights {

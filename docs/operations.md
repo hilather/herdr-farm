@@ -1091,3 +1091,13 @@ approval path, not an independently authenticated identity or dialog receipt.
 Owner requests and decision history live in canonical `state.db` (migration
 0069). Retain them for the project's lifetime and include them in canonical
 backups; telemetry retention and restore never prune or replay their authority.
+
+
+Canonical workers use the [canonical Remember capture and delegated decision
+flow](memory-store.md#canonical-remember-capture-and-delegated-decisions): their
+result's `report` field or attempt output `report.md` supplies optional Remember
+evidence. The coordinator uses `memory PROJECT list/show/approve/reject` under
+the owner's 2026-10-04 delegation. Each delegated decision retains its principal,
+reason and delegation and atomically queues both an owner-facing inbox item and
+a Herdr notification naming the candidate and decision. Existing owner-signed
+memory review commands keep their prior behavior.

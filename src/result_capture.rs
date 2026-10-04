@@ -187,9 +187,15 @@ pub fn submit_captured(project: &Path, attempt: &str, message: Option<&str>) -> 
     objects.sort();
     ensure!(objects.len() <= SUBMISSION_OBJECT_LIMIT,
         "the candidate delta and commit anchors hold {} objects; a submission carries at most {SUBMISSION_OBJECT_LIMIT}", objects.len());
+    let report_path = project.join(".state/worker-output").join(attempt).join("report.md");
+    let report = if report_path.try_exists()? {
+        // Same bounded, no-follow intake used for other controller documents.
+        Some(String::from_utf8(crate::migration::read_plan_file(&report_path)?)?)
+    } else { None };
+    let report_digest = format!("{:x}", Sha256::digest(report.as_deref().unwrap_or_default().as_bytes()));
     // The key binds the staged object set as well as the candidate, so a
     // submission recorded with a different set is not replayed for this one.
-    let key = format!("captured-{}", &format!("{:x}", Sha256::digest(format!("{attempt}\0{}\0{}", capture.candidate_oid, objects.join(",")).as_bytes()))[..32]);
+    let key = format!("captured-{}", &format!("{:x}", Sha256::digest(format!("{attempt}\0{}\0{}\0{report_digest}", capture.candidate_oid, objects.join(",")).as_bytes()))[..32]);
     let mut document = serde_json::to_vec(&serde_json::json!({
         "idempotency_key": key,
         "task_id": capture.task,
@@ -203,6 +209,7 @@ pub fn submit_captured(project: &Path, attempt: &str, message: Option<&str>) -> 
         "memory_snapshot_id": contract.memory_snapshot_id,
         "artifact_manifest": artifacts.iter().map(|(path, oid)| serde_json::json!({"path": path, "oid": oid})).collect::<Vec<_>>(),
         "claimed_checks": Vec::<String>::new(),
+        "report": report,
         "objects": objects.iter().map(|oid| serde_json::json!({"oid": oid, "relative_path": loose(oid)})).collect::<Vec<_>>(),
     }))?;
     document.push(b'\n');

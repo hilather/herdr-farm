@@ -4,7 +4,7 @@ use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
 use std::{fmt, fs::OpenOptions, os::unix::fs::OpenOptionsExt, path::Path, time::Duration};
 
-pub const SCHEMA: u32 = 70;
+pub const SCHEMA: u32 = 71;
 const APPLICATION: u32 = 1_213_222_994;
 pub const MIN_SQLITE: i32 = 3_053_004;
 pub const MIN_SQLITE_VERSION: &str = "3.53.4";
@@ -175,6 +175,7 @@ impl SqliteStore {
             tx.execute_batch(include_str!("../../migrations/0068_verification_metadata.sql"))?;
             tx.execute_batch(include_str!("../../migrations/0069_owner_requests.sql"))?;
             fix_launch::migrate(&tx)?;
+            tx.execute_batch(include_str!("../../migrations/0071_result_memory.sql"))?;
             tx.commit()?;
         }
         // Persist the initial directory entry as well as SQLite's own commit.
@@ -625,3 +626,7 @@ pub(crate) mod integration;
 pub(crate) mod test_schema;
 
 pub use worker_termination::service_project_result_completions;
+
+mod result_memory;
+pub use result_memory::ResultMemoryCandidate;
+pub(crate) use result_memory::DELEGATION as MEMORY_COORDINATOR_DELEGATION;

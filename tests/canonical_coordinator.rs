@@ -231,10 +231,15 @@ fn socket_open_primes_owned_coordinator_retries_swallowed_prompt_and_recreates_c
     let prefix = format!("{} --root {}", BIN, l.root.display());
     for verb in ["skill", "context demo", "inbox list", "inbox done", "inbox demo wait", "task demo list", "task demo show", "task demo add", "task demo rename",
         "launch demo run", "launch demo stop", "result demo show", "result demo jobs", "result demo capture", "result demo submit-captured",
-        "scheduler demo inspect", "operations demo inspect", "runtime demo inspect", "telemetry demo usage", "memory-review demo propose", "doctor",
+        "scheduler demo inspect", "operations demo inspect", "runtime demo inspect", "telemetry demo usage", "memory-review demo propose", "memory demo record", "doctor",
         "thread prompt", "safety requests", "telemetry demo review show", "telemetry demo review findings show",
         "telemetry demo review findings validate", "telemetry demo review findings reject", "telemetry demo review findings duplicate"] {
         assert!(permissions["permissions"]["allow"].as_array().unwrap().contains(&json!(format!("Bash({prefix} {verb}:*)"))), "missing allow {verb}");
+    }
+    let memory_rules=permissions["permissions"]["allow"].as_array().unwrap().iter().filter_map(Value::as_str).filter(|rule|rule.starts_with(&format!("Bash({prefix} memory demo "))).collect::<Vec<_>>();
+    assert_eq!(memory_rules.len(),5);
+    for verb in ["list","show","approve","reject","record"] {
+        assert!(memory_rules.contains(&format!("Bash({prefix} memory demo {verb}:*)").as_str()));
     }
     for verb in ["merge", "unmerge", "split", "restore", "reset"] {
         assert!(!permissions["permissions"]["allow"].as_array().unwrap().contains(&json!(format!("Bash({prefix} telemetry demo review findings {verb}:*)"))));
