@@ -293,6 +293,7 @@ fn report(
                 check(&mut out, Some(true), &label, format!("migrated runtime={runtime} memory={memory}; legacy thread/inbox files are pre-cutover originals"));
                 #[cfg(feature="state-store")]
                 {
+                    if let Some(warning) = herdr_farm::memory::legacy_owner_memory_warning(&dir) { check(&mut out, None, &label, warning); }
                     match crate::canonical_coordinator::doctor_manifest(env, config_dir, &dir, runner) {
                         Ok(lines) => for line in lines { check(&mut out, None, &label, line); },
                         Err(error) => check(&mut out, None, &label, format!("coordinator manifest diagnostics: {error:#}; inspect owner session agent explain")),

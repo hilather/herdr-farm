@@ -697,6 +697,70 @@ pub fn configure_assignment(project:&Path,mode:&str,policies:&[crate::domain::Po
     result
 }
 
+/// Adopt exact owner-approved Markdown under one maintenance barrier. Signatures
+/// are verified before creating objects; cutover retains the ordinary receipt.
+pub fn adopt_memory(project: &Path, expected: &crate::memory::AdoptPlan, mut sign: impl FnMut(&[u8]) -> Result<Vec<u8>>) -> Result<crate::memory::MemoryJournal> {
+    let _guard = migration::maintenance(project)?;
+    let launch_guard = fs::File::open(project.join(".state/state.db"))?;
+    launch_guard.try_lock().context("adopt refused: a worker is mid-launch")?;
+    if let Some(journal) = recover_memory_adopt_held(project)? { return Ok(journal); }
+    let current = crate::memory::adopt_plan(project)?;
+    ensure!(current.plan == expected.plan, "adopt inventory changed; rerun dry-run");
+    ensure!(current.blockers.is_empty(), "adopt refused: {}", current.blockers.join("; "));
+    let mut db = migration::open_active(project)?;
+    let state = db.read_snapshot(None)?;
+    ensure!(!state.attempts.iter().any(|a| a.retains_capacity()), "adopt refused: a worker is mid-launch or retains execution capacity");
+    for source in &current.plan.sources {
+        if source.path == "MEMORY.md" { continue; }
+        if let Some(record) = db.memory_record_by_key(&source.path)? {
+            let head = db.memory_head(record.id.as_str())?.context("existing memory head missing")?;
+            let revision = db.memory_revision(record.id.as_str(), head.revision)?.context("existing memory revision missing")?;
+            ensure!(record.kind == crate::domain::MemoryKind::Constraint && head.status == "active" && revision.body_hash.as_str() == source.digest, "adopt refused: {} would overwrite or misclassify existing memory", source.path);
+            let provenance: serde_json::Value = serde_json::from_slice(&crate::memory::read_object(&project.join(".state/objects"), &revision.provenance_hash)?)?;
+            ensure!(provenance["memory_migration_id"].as_str() == Some(current.plan.digest.as_str()), "adopt refused: {} belongs to a different adoption plan", source.path);
+        }
+    }
+    let (owner, config) = policy(project)?;
+    ensure!(config.digest.as_deref() == Some(current.plan.owner_policy_digest.as_str()), "owner configuration changed since adoption planning");
+    let bytes = serde_json::to_vec(&current.plan)?;
+    verify_signature(&owner, &bytes, &sign(&bytes)?, MEMORY_SIGNATURE_NAMESPACE, &RealRunner)?;
+    ensure!(migration::config_reference(Path::new(&config.path))? == config, "owner configuration changed during adoption signing");
+    crate::memory::import_plan_held(project, &current.plan)?;
+    let state = db.read_snapshot(None)?;
+    let document = crate::domain::MemoryPolicy {
+        version: 1, project_store: project.join(".state/state.db").canonicalize()?.to_string_lossy().into_owned(),
+        revision: state.memory_policies.len() as u64 + 1, authority: owner.reference()?, expected_head: state.head,
+        op: crate::domain::MemoryPolicyOp::Cutover, record_key: None,
+        memory_plan_digest: Some(current.plan.digest.clone()), expected_memory_owner: Some("legacy-markdown".into()),
+    };
+    let bytes = serde_json::to_vec(&document)?;
+    verify_signature(&owner, &bytes, &sign(&bytes)?, MEMORY_SIGNATURE_NAMESPACE, &RealRunner)?;
+    ensure!(migration::config_reference(Path::new(&config.path))? == config, "owner configuration changed during adoption");
+    crate::memory::cutover_held(project, &current.plan, &crate::domain::PreparedMemoryPolicy { policy: document })
+}
+
+fn recover_memory_adopt_held(project: &Path) -> Result<Option<crate::memory::MemoryJournal>> {
+    let path = project.join(".state/migration/memory-journal.json");
+    if !path.exists() { return Ok(None); }
+    let journal: crate::memory::MemoryJournal = serde_json::from_slice(&migration::read_plan_file(&path)?)?;
+    if journal.plan.version != 2 { return Ok(None); }
+    let state = migration::open_active(project)?.read_snapshot(None)?;
+    if let Some(policy) = state.memory_policies.iter().find(|p| p.op == crate::domain::MemoryPolicyOp::Cutover && p.memory_plan_digest.as_deref() == Some(&journal.plan.digest)) {
+        return Ok(Some(crate::memory::cutover_held(project, &journal.plan, &crate::domain::PreparedMemoryPolicy { policy: policy.clone() })?));
+    }
+    Ok(None)
+}
+
+pub fn recover_memory_adopt(project: &Path) -> Result<()> {
+    let _guard = migration::maintenance(project)?;
+    let launch_guard = fs::File::open(project.join(".state/state.db"))?;
+    launch_guard.try_lock().context("adopt refused: a worker is mid-launch")?;
+    let state = migration::open_active(project)?.read_snapshot(None)?;
+    ensure!(!state.attempts.iter().any(|a| a.retains_capacity()), "adopt refused: a worker is mid-launch or retains execution capacity");
+    recover_memory_adopt_held(project)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

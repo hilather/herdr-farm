@@ -99,12 +99,43 @@ between surrounding path fingerprint checks.
 
 Memory policy revisions use `memory@herdr-projects` and schema 17 `memory_policies`.
 `memory PROJECT import document sig --expected-head H` authenticates and stores
-sequential documents (`hard_rule`, `import_ack`, `revoke_head`, `cutover`). This
-slice does **not** apply those ops to memory rows or `format.memory`; that is
-T05.1/T05.3. Snapshot creation does not consume a memory policy or an
+sequential documents (`hard_rule`, `import_ack`, `revoke_head`, `cutover`).
+Non-cutover operations apply to memory rows in the signed policy transaction.
+Signed cutover verifies the imported inventory, retains a recovery journal, and
+publishes `format.memory=sqlite-v1`. Snapshot creation does not consume a memory policy or an
 `ApprovalGrant`. `ApprovalClass` remains launch-only.
 
 Refused mutating `approval` / `budget` / `routine-store` / `memory` commands write
-`authority_denials` with `actor_channel` `cli-owner` (or `unknown-rejected`). Request
+`authority_denials` with `actor_channel` `cli-owner` (or `unknown-rejected`).
+Adopt inventory/classification and launch refusals leave canonical state unchanged
+without recording a denial. Request
 bodies are never stored. `approval PROJECT denials` lists them. An unopened store
 cannot record a row. Production launch dispatch remains disabled.
+
+
+## Owner-approved Markdown adoption
+
+`herdr-farm memory PROJECT adopt --dry-run` reports every planned constraint,
+retained index, excluded candidate and refusal. `memory PROJECT adopt` signs the
+exact adoption plan and cutover document in `memory@herdr-projects`, using the
+same configured/discovered owner signer as `launch PROJECT run` (or `--sign-with
+KEY`). It imports only top-level `memory/*.md` linked from `MEMORY.md` with a
+`herdr-projects user memory` header declaring `source=user` and nonempty
+`provenance`. Decisions become valid project constraints; provenance retains the
+owner reference, original path, digest and plan identity. `MEMORY.md` stays an
+index and is backed up; it is not imported as another decision. Candidates remain
+evidence and are never promoted. Missing links, unsupported or unapproved files,
+conflicting existing records, noncanonical projects and unfinished workers refuse
+adoption. Inventory/classification refusals happen before memory writes.
+
+Adoption holds the maintenance barrier through signature verification, import,
+backup and cutover. Reruns reuse unchanged imported decisions and recover a
+committed cutover; completed adoption changes no rows. Markdown decision files
+become projections after cutover. Existing manual plan/cutover remains available
+for unverified shadow imports, which still need signed acknowledgement or review.
+Worker briefs always include mandatory constraints and hard memory; an oversized
+mandatory set refuses launch. `launch run` also selects all active project memory
+within the profile brief budget, regardless of domain/path applicability, and
+reports omitted optional keys in its `knowledge_snapshot` step. Other tasks'
+task-local memory remains excluded. Doctor and canonical context name the adopt
+command when approved Markdown still has legacy authority.

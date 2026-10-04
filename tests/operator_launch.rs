@@ -425,6 +425,8 @@ fn launch_run_reserves_a_planning_task_for_each_kind_and_reruns_safely() {
     let mut text=fs::read_to_string(&config).unwrap();
     text.push_str(&format!("\n[coordinator]\nsigning_key={:?}\n",lab.key));
     fs::write(&config,text).unwrap();
+    plant_owner_memory(&lab);
+    lab.ok(&["memory", "demo", "adopt"]);
     let prompt = lab.home.join("prompt.txt");
     fs::write(&prompt, "Plan the next milestone of the tactics game.").unwrap();
     let jobs = [("plan-codex", "codex-sol", "codex", "gpt-6.1-sol"), ("plan-claude", "claude-sonnet", "claude", "claude-sonnet-5-5")];
@@ -446,6 +448,7 @@ fn launch_run_reserves_a_planning_task_for_each_kind_and_reruns_safely() {
         let report = lab.ok(&args.iter().map(String::as_str).collect::<Vec<_>>());
         assert!(report["attempt"].is_null(), "{report}");
     }
+    approve_optional_memory(&lab);
     let mut attempts = Vec::new();
     for job @ (task, _, kind, _) in jobs {
         let args = arguments(&lab, job, prompt.to_str().unwrap());
@@ -471,12 +474,17 @@ fn launch_run_reserves_a_planning_task_for_each_kind_and_reruns_safely() {
         for step in ["profile_evidence", "project_control", "task", "contract", "queue", "scheduler_capacity", "integration_target", "herdr_server", "binding", "reconcile_and_activate", "knowledge_snapshot", "draft", "approval_import", "reserve"] {
             assert!(names.contains(&step), "{step} missing from {names:?}");
         }
+        let knowledge = report["steps"].as_array().unwrap().iter().find(|s|s["step"] == "knowledge_snapshot").unwrap();
+        assert_eq!(knowledge["detail"]["omitted_for_budget"], serde_json::json!(["memory/optional.md"]));
         let state = herdr_farm::runtime::snapshot(&lab.project).unwrap();
+        assert!(lab.fail(&["memory", "demo", "adopt"]).contains("mid-launch"));
+        assert_eq!(herdr_farm::runtime::snapshot(&lab.project).unwrap(), state, "refused adoption changed a reserved launch");
         let record = state.tasks.iter().find(|t| t.id.as_str() == task).unwrap();
         assert_eq!(record.active_attempt.as_ref().map(|a| a.as_str()), Some(attempt.as_str()));
         // The retained brief carries the project instructions, the task text and the deliverable.
         let brief = lab.ok(&["memory", "demo", "attempt-brief", "--attempt", &attempt]).to_string();
         assert!(brief.contains("Shadow trial project") && brief.contains("Plan the next milestone") && brief.contains(&output), "{brief}");
+        for n in 1..=3 { assert!(brief.contains(&format!("Owner decision {n}")), "{brief}"); }
         // The brief ends with the exact submission the worker must make; following
         // it records one submission bound to this attempt's contract.
         let brief_text = lab.ok(&["memory", "demo", "attempt-brief", "--attempt", &attempt])["text"].as_str().unwrap().to_owned();
@@ -1413,4 +1421,90 @@ fn launch_run_records_reviews_and_skeptical_yield_and_refuses_without_writes() {
     let before = herdr_farm::runtime::snapshot(&lab.project).unwrap();
     assert!(lab.fail(&changed.iter().map(String::as_str).collect::<Vec<_>>()).contains("already bound"));
     assert_eq!(herdr_farm::runtime::snapshot(&lab.project).unwrap(), before);
+}
+
+fn plant_owner_memory(lab: &Lab) {
+    fs::create_dir_all(lab.project.join("memory/candidates")).unwrap();
+    let mut index = String::from("# Memory\n");
+    for n in 1..=3 {
+        index.push_str(&format!("- [Decision {n}](memory/decision-{n}.md)\n"));
+        fs::write(lab.project.join(format!("memory/decision-{n}.md")), format!("<!-- herdr-projects user memory; source=user; created=2026-10-04; provenance=owner-{n} -->\n\n# Owner decision {n}\n\nKeep decision {n}.\n")).unwrap();
+    }
+    fs::write(lab.project.join("MEMORY.md"), index).unwrap();
+    for n in 1..=2 { fs::write(lab.project.join(format!("memory/candidates/candidate-{n}.md")), "Unapproved evidence").unwrap(); }
+}
+
+#[test]
+fn memory_adopt_imports_only_owner_decisions_and_clears_diagnostics() {
+    let lab = Lab::with_herdr(STATIC_HERDR);
+    plant_owner_memory(&lab);
+    let before = herdr_farm::runtime::snapshot(&lab.project).unwrap();
+    let plan = lab.ok(&["memory", "demo", "adopt", "--dry-run"]);
+    let outcomes = plan["outcomes"].as_array().unwrap();
+    assert_eq!(outcomes.iter().filter(|o|o["outcome"] == "import_constraint").count(), 3);
+    assert_eq!(outcomes.iter().filter(|o|o["outcome"] == "excluded_candidate").count(), 2);
+    assert_eq!(herdr_farm::runtime::snapshot(&lab.project).unwrap(), before);
+    let doctor = lab.cli(&["doctor"]);
+    assert!(String::from_utf8_lossy(&doctor.stdout).contains("memory demo adopt"));
+    let context = lab.cli(&["context", "demo", "--peek"]);
+    assert!(String::from_utf8_lossy(&context.stdout).contains("memory demo adopt"));
+    lab.ok(&["memory", "demo", "adopt"]);
+    let mut db = herdr_farm::migration::open_active(&lab.project).unwrap();
+    let facts = db.active_facts(jiff::Timestamp::now().as_millisecond()).unwrap();
+    assert_eq!(facts.len(), 3);
+    for fact in facts {
+        assert_eq!(fact.record.kind, MemoryKind::Constraint);
+        let digest = fact.revision.provenance_hash.as_str();
+        let object = lab.project.join(".state/objects/sha256").join(&digest[..2]).join(digest);
+        let provenance: Value = serde_json::from_slice(&fs::read(object).unwrap()).unwrap();
+        assert!(provenance["owner_provenance"].as_str().unwrap().starts_with("owner-"));
+    }
+    let after = herdr_farm::runtime::snapshot(&lab.project).unwrap();
+    lab.ok(&["memory", "demo", "adopt"]);
+    assert_eq!(herdr_farm::runtime::snapshot(&lab.project).unwrap(), after);
+    let doctor = lab.cli(&["doctor"]);
+    assert!(!String::from_utf8_lossy(&doctor.stdout).contains("memory demo adopt"));
+    assert!(lab.project.join("memory/candidates/candidate-1.md").exists());
+}
+
+#[test]
+fn memory_adopt_refuses_legacy_and_misclassified_files_without_writes() {
+    let lab = Lab::with_herdr(STATIC_HERDR);
+    lab.ok(&["new", "legacy"]);
+    let path = lab.root.join("legacy");
+    let before = fs::read(path.join("MEMORY.md")).unwrap();
+    assert!(lab.fail(&["memory", "legacy", "adopt"]).contains("SQLite"));
+    assert_eq!(fs::read(path.join("MEMORY.md")).unwrap(), before);
+    assert!(!path.join(".state/state.db").exists());
+    plant_owner_memory(&lab);
+    // Diagnostics still name adoption when an unrelated unsupported file will
+    // require repair before the conservative importer can proceed.
+    fs::write(lab.project.join("memory/unsupported.txt"), "unsupported").unwrap();
+    let doctor = lab.cli(&["doctor"]);
+    assert!(String::from_utf8_lossy(&doctor.stdout).contains("memory demo adopt"));
+    fs::remove_file(lab.project.join("memory/unsupported.txt")).unwrap();
+    fs::write(lab.project.join("memory/unapproved.md"), "unapproved").unwrap();
+    let before = herdr_farm::runtime::snapshot(&lab.project).unwrap();
+    assert!(lab.fail(&["memory", "demo", "adopt"]).contains("memory/unapproved.md"));
+    assert_eq!(herdr_farm::runtime::snapshot(&lab.project).unwrap(), before);
+    assert!(!lab.project.join(".state/migration/memory-journal.json").exists());
+}
+
+fn approve_optional_memory(lab: &Lab) {
+    let file = lab.project.join("memory/optional.md");
+    fs::write(&file, "Optional background detail. ".repeat(1800)).unwrap();
+    let candidate = lab.ok(&["memory", "demo", "import", "--file", file.to_str().unwrap()]);
+    let state = herdr_farm::runtime::snapshot(&lab.project).unwrap();
+    let document = serde_json::json!({
+        "version":1,"project_store":lab.project.join(".state/state.db").canonicalize().unwrap(),
+        "authority":herdr_farm::authority::policy_reference(&lab.project).unwrap(),
+        "expected_head":state.head,"candidate_id":candidate["id"],"body_hash":candidate["body_hash"],
+        "expected_revision":null,"decision":"approve"
+    });
+    let path = lab.home.join("optional-review.json");
+    fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
+    let signed = Command::new("/usr/bin/ssh-keygen").args(["-Y", "sign", "-n", herdr_farm::authority::MEMORY_IMPORT_REVIEW_NAMESPACE, "-f"]).arg(&lab.key).arg(&path).output().unwrap();
+    assert!(signed.status.success(), "{}", String::from_utf8_lossy(&signed.stderr));
+    let signature = PathBuf::from(format!("{}.sig", path.display()));
+    lab.ok(&["memory", "demo", "review-import", path.to_str().unwrap(), signature.to_str().unwrap(), "--expected-head", &state.head.to_string()]);
 }

@@ -31,6 +31,32 @@ Markdown remains authoritative until signed cutover changes `format.memory` to
 `memory PROJECT inspect` reports records and ownership. Hard-rule, import-ack and
 revocation policy still use owner-signed `memory@herdr-projects` documents.
 
+## Adopt existing owner decisions
+
+```sh
+herdr-farm memory PROJECT adopt --dry-run
+herdr-farm memory PROJECT adopt
+```
+
+Adopt imports linked `memory/*.md` files bearing `source=user` user-memory headers
+and provenance as valid project constraints. `MEMORY.md` is a retained index;
+`memory/candidates/` remains excluded evidence. Every file outcome appears in the
+plan. Unapproved, unlisted, missing or conflicting files refuse adoption rather
+than being silently dropped. Only canonical projects with no unfinished worker
+can adopt. The exact plan and cutover document use the owner signer configured or
+discovered by `launch run`, with namespace `memory@herdr-projects`; `--sign-with
+KEY` overrides discovery. Reruns are idempotent and recover committed cutover.
+Backups and immutable provenance retain original bytes and the owner reference.
+
+Selection policy v2 keeps new worker selections separate from cached v1
+snapshots; retained v1 snapshots remain readable. Canonical `launch run` briefs
+include mandatory memory plus all active project
+memory that fits the profile budget, even with an empty task scope. Other tasks'
+task-local memory remains excluded. The launch report's `knowledge_snapshot`
+step names optional keys omitted for budget; mandatory overflow refuses launch.
+Doctor and canonical context warn about approved legacy memory until adoption.
+See [authority](authority.md#owner-approved-markdown-adoption).
+
 ## Manual edits
 
 Initial `memory PROJECT import` creates unverified shadow revisions from the

@@ -212,6 +212,8 @@ enum BudgetCommand {
 #[derive(Subcommand)]
 enum MemoryCommand {
     Inspect,
+    /// Import owner-approved Markdown decisions and switch memory authority
+    Adopt { #[arg(long)] dry_run:bool, #[arg(long)] sign_with:Option<PathBuf> },
     Import {
         document:Option<PathBuf>,
         signature:Option<PathBuf>,
@@ -1176,6 +1178,7 @@ pub fn run() -> Result<()> {
                 bail!("project `{slug}` uses legacy-markdown memory; `memory` requires a migrated SQLite store. Use `memory-review {slug} list/show/ingest/propose/reject/defer` for Remember candidates, or `migration {slug} plan/apply` for an explicit migration");
             }
             let value=match command {
+                MemoryCommand::Adopt{dry_run,sign_with}=>crate::launch_run::adopt_memory(&ctx,&dir,dry_run,sign_with)?,
                 MemoryCommand::Inspect=>{
                     let s=herdr_farm::runtime::snapshot(&dir)?;
                     let mut db=herdr_farm::migration::open_active(&dir)?;

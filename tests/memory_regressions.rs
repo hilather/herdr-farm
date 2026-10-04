@@ -295,6 +295,28 @@ fn repeated_snapshot_reuses_its_manifest_and_selects_by_scope_or_pin() {
     let keys = p.entry_keys(&first);
     assert!(keys.contains(&"ui.note".into()) && keys.contains(&"api.contract".into()), "{keys:?}");
     assert!(!keys.contains(&"infra.note".into()), "unrelated domain selected: {keys:?}");
+    // Canonical worker briefs include project facts across domains but never
+    // borrow another task's local findings. A tight brief omits optional facts.
+    p.remember("writer", &snapshot, "writer.private", b"private finding", json!({"kind":"task_local"}));
+    let scope = p.path("worker-scope.json");
+    fs::write(&scope, json!({"schema_version":1,"task_id":"ui-task","profile":"planner","domains":[],"paths":[],"pinned_keys":[],"sensitivity":"default"}).to_string()).unwrap();
+    let broad = p.ok(&["memory", "demo", "snapshot", "--task", "ui-task", "--profile", "planner", "--input-file", scope.to_str().unwrap(), "--worker"]);
+    let keys = p.entry_keys(&broad);
+    for key in ["ui.note", "infra.note", "api.contract"] { assert!(keys.contains(&key.into()), "{keys:?}"); }
+    assert!(!keys.contains(&"writer.private".into()), "{keys:?}");
+    p.policy("hard_rule", "writer.private");
+    let hard_local = p.ok(&["memory", "demo", "snapshot", "--task", "ui-task", "--profile", "planner", "--input-file", scope.to_str().unwrap(), "--worker"]);
+    assert!(!p.entry_keys(&hard_local).contains(&"writer.private".into()));
+    let rendered = p.ok(&["memory", "demo", "snapshot-input", "--id", broad["id"].as_str().unwrap()]);
+    assert!(rendered["text"].as_str().unwrap().contains("infra body"));
+    let config = p.home.path().join(".config/herdr-farm/config.toml");
+    let original = fs::read_to_string(&config).unwrap();
+    let tokens = broad["required_bytes"].as_u64().unwrap().div_ceil(4);
+    fs::write(&config, format!("{original}\n[profiles.planner.budget]\nsoft_input_tokens={tokens}\nunknown_usage='allow_with_warning'\n")).unwrap();
+    let tight = p.ok(&["memory", "demo", "snapshot", "--task", "ui-task", "--profile", "planner", "--input-file", scope.to_str().unwrap(), "--worker"]);
+    assert!(p.entry_keys(&tight).is_empty(), "{tight}");
+    assert_eq!(tight["omitted_optional_count"], 3);
+    fs::write(&config, original).unwrap();
     // A later record makes a new snapshot at a later sequence.
     p.remember("writer", &snapshot, "ui.later", b"later body", json!({"scope":{"domains":["ui"],"paths":[]}}));
     let later = p.snapshot_ok("ui-task", &["ui"], &["api.contract"]);
