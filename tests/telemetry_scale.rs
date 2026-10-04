@@ -823,7 +823,11 @@ fn ticker_batched_telemetry_resumes_after_kill() {
         .stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
     let log = || fs::read_to_string(d.root.join(".ticker.log")).unwrap_or_default();
     let mut killed = start();
-    let deadline = Instant::now() + Duration::from_secs(15);
+    // The telemetry pass runs at idle CPU and I/O priority (asserted below), so
+    // under a loaded test run it may be starved for long stretches: wait in
+    // wall time generously; the assertions, not the deadline, are the gate.
+    let idle_wait = Duration::from_secs(60);
+    let deadline = Instant::now() + idle_wait;
     let mut observed_priority = false;
     loop {
         for entry in fs::read_dir(format!("/proc/{}/task", killed.0.id())).unwrap().flatten() {
@@ -852,7 +856,7 @@ fn ticker_batched_telemetry_resumes_after_kill() {
     let persisted: (u64, u64) = rusqlite::Connection::open(d.sidecar()).unwrap().query_row("SELECT o.byte_offset,c.byte_offset FROM collect_offsets o JOIN source_cursors c ON c.source=o.path_digest WHERE o.path_digest=?1", [&key], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
     assert_eq!(persisted, (prefix, prefix), "input and envelope cursors commit together");
     let mut resumed = start();
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + idle_wait;
     loop {
         let records: i64 = rusqlite::Connection::open(d.sidecar()).unwrap().query_row("SELECT count(*) FROM usage_entries WHERE basis='delta'", [], |r| r.get(0)).unwrap();
         if offset() == end && records == d.totals.records { break; }

@@ -621,8 +621,11 @@ fn launch_run_retries_after_termination_but_refuses_an_unobserved_live_worker() 
         .env("XDG_RUNTIME_DIR", lab.runtime.path())
         .args(["--root", lab.root.to_str().unwrap(), "ticker", "run"])
         .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap());
+    // Each stage is a real launch or observation through the ticker; under a
+    // loaded test run it can take well over 15 s. The deadline is a ceiling,
+    // not the property under test.
     let wait = |stage: &str, done: &dyn Fn() -> bool| {
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(60);
         while !done() {
             assert!(std::time::Instant::now() < until,
                 "timed out waiting for {stage}\nattempt states: {:?}\nticker log:\n{}",
