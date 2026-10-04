@@ -388,6 +388,52 @@ pub(crate) fn incomplete_newer(db: &Connection, session: &str, version: &str) ->
 }
 
 pub(super) fn attempt_usage(db: &Connection, attempt: &str) -> Result<Value> {
+    let mut primary = primary_attempt_usage(db, attempt)?;
+    let membership = super::accounting::graph::attempt_membership(db)?;
+    if membership.is_empty() { return Ok(primary); }
+    let mut children = json!({"input_tokens": 0, "cached_input_tokens": 0, "cache_write_input_tokens": 0,
+        "output_tokens": 0, "reasoning_output_tokens": 0, "total_tokens": 0, "records": 0});
+    let mut total = children.clone();
+    let ledger = super::accounting::ledger::read(db)?;
+    let mut excluded = Vec::new();
+    for (session, (owner, reason)) in membership {
+        if owner.as_deref() != Some(attempt) { continue; }
+        let role: String = db.query_row("SELECT role FROM session_graph_nodes WHERE session_id=?1 LIMIT 1", [&session], |r| r.get(0))?;
+        if let Some(reason) = reason { excluded.push(json!({"session_id": session, "role": role, "reason": reason})); continue; }
+        let mut subtotal = children.clone();
+        if role == "primary" { subtotal = json!({"input_tokens": 0, "cached_input_tokens": 0, "cache_write_input_tokens": 0, "output_tokens": 0, "reasoning_output_tokens": 0, "total_tokens": 0, "records": 0}); }
+        for entry in ledger["entries"].as_array().into_iter().flatten().filter(|e| e["session_id"] == session && e["basis"] == "delta") {
+            let accepted = entry["provenance"].as_array().into_iter().flatten().any(|p| p["disposition"] == "accepted");
+            if !accepted { continue; }
+            for (key, native) in [("input_tokens", "input_tokens"), ("cached_input_tokens", "cache_read_tokens"),
+                ("cache_write_input_tokens", "cache_write_tokens"), ("output_tokens", "output_tokens"),
+                ("reasoning_output_tokens", "reasoning_tokens"), ("total_tokens", "total_tokens")] {
+                subtotal[key] = match (subtotal[key].as_i64(), entry["normalized"][native].as_i64()) {
+                    (Some(a), Some(b)) => json!(a + b), _ => unavailable("incomplete"),
+                };
+            }
+            subtotal["records"] = json!(subtotal["records"].as_i64().unwrap_or(0) + 1);
+        }
+        if role == "primary" {
+            for key in ["records", "input_tokens", "cached_input_tokens", "cache_write_input_tokens", "output_tokens", "reasoning_output_tokens", "total_tokens"] {
+                total[key] = match (total[key].as_i64(), subtotal[key].as_i64()) {
+                    (Some(a), Some(b)) => json!(a + b), _ => unavailable("incomplete"),
+                };
+            }
+        } else { children = subtotal; }
+    }
+    for key in ["records", "input_tokens", "cached_input_tokens", "cache_write_input_tokens", "output_tokens", "reasoning_output_tokens", "total_tokens"] {
+        total[key] = match (total[key].as_i64(), children[key].as_i64()) {
+            (Some(a), Some(b)) => json!(a + b), _ => unavailable("incomplete"),
+        };
+    }
+    primary["children"] = children;
+    primary["including_children"] = total;
+    primary["excluded_children"] = json!(excluded);
+    Ok(primary)
+}
+
+fn primary_attempt_usage(db: &Connection, attempt: &str) -> Result<Value> {
     // Records collected before their version was certified keep NULL counters
     // until a collect re-reads their rollout, so the session stays uncertified
     // rather than summing to 0; `detail` says when that rollout is gone.

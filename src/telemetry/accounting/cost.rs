@@ -909,15 +909,17 @@ pub fn cost(db: &Connection, revision: Option<i64>, as_of: Option<i64>) -> Resul
             .2
             .push(entry);
     }
-    let mut attempts = BTreeMap::<Option<String>, (Vec<&Value>, Vec<&Value>)>::new();
+    let membership = super::graph::attempt_membership(db)?;
+    type AttemptEntries<'a> = (Vec<&'a Value>, Vec<&'a Value>, Vec<Value>);
+    let mut attempts = BTreeMap::<Option<String>, AttemptEntries<'_>>::new();
     let mut out = Vec::new();
     for (session, (role, attempt, entries)) in &sessions {
-        let slot = attempts.entry(attempt.clone()).or_default();
-        if role == "primary" {
-            slot.0.extend(entries)
-        } else {
-            slot.1.extend(entries)
-        }
+        let (owner, reason) = membership.get(session).cloned().unwrap_or_else(|| (attempt.clone(), (role != "primary").then(|| "no_native_parent_evidence".to_owned())));
+        let slot = attempts.entry(owner.clone()).or_default();
+        if let Some(reason) = &reason {
+            let (estimate, coverage) = summarize(&entries.iter().collect::<Vec<_>>())?;
+            slot.2.push(json!({"session_id": session, "role": role, "reason": reason, "estimate": estimate, "coverage": coverage}));
+        } else if role == "primary" { slot.0.extend(entries); } else { slot.1.extend(entries); }
         let (estimate, coverage) = summarize(&entries.iter().collect::<Vec<_>>())?;
         let cards: BTreeSet<String> = entries
             .iter()
@@ -930,21 +932,27 @@ pub fn cost(db: &Connection, revision: Option<i64>, as_of: Option<i64>) -> Resul
                 )
             })
             .collect();
-        out.push(json!({"session_id": session, "role": role, "attempt_id": attempt, "estimate": estimate, "coverage": coverage,
+        out.push(json!({"session_id": session, "role": role, "attempt_id": owner, "exclusion_reason": reason, "estimate": estimate, "coverage": coverage,
             "rate_cards": cards, "entries": entries}));
     }
-    // Guardian and subagent sessions have no native parent evidence (§3):
-    // their estimate stays apart from the attempt's primary sessions.
     let mut rollups = Vec::new();
-    for (attempt, (primary, children)) in &attempts {
-        let (estimate, coverage) = summarize(primary)?;
-        let children = if children.is_empty() {
-            Value::Null
-        } else {
-            let (estimate, coverage) = summarize(children)?;
-            json!({"estimate": estimate, "coverage": coverage})
+    for (attempt, (primary, children, excluded)) in &attempts {
+        let summary = |entries: &[&Value]| -> Result<Value> {
+            let (estimate, coverage) = summarize(entries)?;
+            Ok(json!({"estimate": estimate, "coverage": coverage}))
         };
-        rollups.push(json!({"attempt_id": attempt, "estimate": estimate, "coverage": coverage, "unlinked_children": children}));
+        let mut included = summary(children)?;
+        let mut roles = BTreeMap::new();
+        for role in ["subagent", "guardian", "fork"] {
+            let entries: Vec<&Value> = out.iter().filter(|s| s["attempt_id"] == json!(attempt) && s["role"] == role && s["exclusion_reason"].is_null())
+                .flat_map(|s| s["entries"].as_array().into_iter().flatten()).collect();
+            if !entries.is_empty() { roles.insert(role, summary(&entries)?); }
+        }
+        included["by_role"] = json!(roles);
+        let all: Vec<&Value> = primary.iter().chain(children).copied().collect();
+        let (estimate, coverage) = summarize(&all)?;
+        rollups.push(json!({"attempt_id": attempt, "estimate": estimate, "coverage": coverage,
+            "primary": summary(primary)?, "children": included, "excluded_children": excluded}));
     }
     Ok(
         json!({"revision": revision, "basis": basis, "policy": policy, "ledger_synced_unix_ms": synced,
@@ -1098,18 +1106,15 @@ pub fn text(value: &Value) -> String {
     );
     for attempt in value["attempts"].as_array().into_iter().flatten() {
         out += &format!(
-            "attempt {}: {}\n",
+            "attempt {}: {} (primary {} + subagents {})\n",
             attempt["attempt_id"].as_str().unwrap_or("(unattributed)"),
-            text_estimate(&attempt["estimate"], &attempt["coverage"])
+            text_estimate(&attempt["estimate"], &attempt["coverage"]),
+            text_estimate(&attempt["primary"]["estimate"], &attempt["primary"]["coverage"]),
+            text_estimate(&attempt["children"]["estimate"], &attempt["children"]["coverage"])
         );
-        if attempt["unlinked_children"].is_object() {
-            out += &format!(
-                "  unlinked children: {}\n",
-                text_estimate(
-                    &attempt["unlinked_children"]["estimate"],
-                    &attempt["unlinked_children"]["coverage"]
-                )
-            );
+        for child in attempt["excluded_children"].as_array().into_iter().flatten() {
+            out += &format!("  excluded child {}: {} ({})\n", child["session_id"].as_str().unwrap_or_default(),
+                text_estimate(&child["estimate"], &child["coverage"]), child["reason"].as_str().unwrap_or_default());
         }
         for session in value["sessions"]
             .as_array()
