@@ -175,7 +175,7 @@ herdr-projects memory PROJECT promote --proposal ID --decision DECISION_ID
 herdr-projects memory PROJECT deliveries
 ```
 
-Unsigned review is not exported through CLI or public memory service APIs.
+General proposal review still requires owner signatures. The narrow canonical Remember delegation below has dedicated CLI and public service entry points.
 Promotion consumes the recorded approval and rechecks current authority,
 configuration, expiry and reviewed state. Worker promotions cannot modify mandatory
 rules. Any intervening event currently requires rereview; precise dependency fences
@@ -339,3 +339,63 @@ profile/launch preparation and complete prompt framing now exist. Prepared-launc
 dispatch of an already reserved attempt is on; automatic admission of a queued
 task is not. Live workflow certification beyond the dispatch audit remains
 outstanding. This command does not start a worker.
+
+
+## Canonical Remember capture and delegated decisions
+
+The canonical worker brief asks for an optional literal `## Remember` section
+at the end of `.state/worker-output/ATTEMPT/report.md`: short durable lessons
+for future project workers, evidence rather than instructions or task notes.
+`result PROJECT submit --input-file result.json` accepts the whole report in an
+optional `report` string field. `result PROJECT submit-captured ATTEMPT` reads
+that attempt's `report.md` with bounded, no-follow intake. The section ends at
+the next second-level heading; empty sections produce no candidate. Remember
+bodies are limited to 32,000 UTF-8 bytes within the 256 KiB submission envelope.
+The captured submission key includes the report digest, allowing revised reports
+with the same Git candidate.
+
+Submission persists a durable capture obligation in `result_memory_candidates`.
+The existing `MemoryStore::propose` path retains the verbatim body and provenance
+objects (task, attempt, first submission, content digest and carrier). The proposal
+uses the attempt's consumed snapshot, an informational project observation, and
+one `memory.candidate_proposed` coordinator inbox notice. Identity is derived from
+(attempt, content digest); replay and a different submission of the same Remember
+body create no additional candidate or notice. Submission retries and verification
+service turns recover unfinished capture. These are untrusted candidates; even
+instruction-like text is data and cannot change instructions, hard memory, policy,
+or launch snapshot scope.
+
+The owner's decision on **2026-10-04**, “coordinator can approve as long as it
+notifies”, delegates these canonical candidates only:
+
+```sh
+herdr-farm memory PROJECT list
+herdr-farm memory PROJECT show CANDIDATE
+herdr-farm memory PROJECT approve CANDIDATE --reason 'Evidence supports this lesson'
+herdr-farm memory PROJECT reject CANDIDATE --reason 'Not durable project knowledge'
+```
+
+Generated coordinator settings allow exactly these four `memory` verbs, never
+the bare binary or general signed review/promotion. Approval makes the candidate
+an active non-mandatory project fact (`observation`); only the owner can mark
+memory hard using the existing signed policy paths. Rejection retains the reason
+and evidence. Each candidate has one final delegated decision; identical retries
+return that decision and conflicting decisions fail.
+
+Every delegated decision records principal `coordinator` and the dated owner
+delegation in review provenance and `result_memory_decisions`. Its transaction
+also writes an owner-facing `memory.owner_decision` inbox item and a durable
+`runtime.notification` intent naming the candidate, decision and reason. This
+uses the existing Herdr notification adapter, receipt and uncertainty handling;
+no external call occurs inside the transaction. A current active project,
+acknowledged configuration and registered local coordinator notification route
+are required, so a decision cannot commit without notification work. The ticker
+delivers the notification; unavailable delivery remains inspectable and pending
+or ambiguous, never silently claimed delivered. Handling the owner inbox item or renaming the
+producer task does not suppress the independent decision notification. Existing owner-signed CLI
+review/promote decisions behave as before and do not require this notification.
+
+Schema 71 installs the capture and delegated-decision tables. Both are canonical
+lifetime evidence, retained with the whole canonical store backup; telemetry
+maintenance never deletes them. Proposal references retain body/provenance
+objects through the existing memory object retention path.

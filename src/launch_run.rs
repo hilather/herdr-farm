@@ -864,7 +864,7 @@ fn steps(run: &mut Run, args: &Args, plan: ProfilePlan) -> Result<Value> {
             migration::open_active(&project)?.create_review_run_snapshot(herdr_farm::domain::SnapshotPlan {
                 coordinator: false, session_id: None, request, profile_name: resolved.name.clone(), profile_digest: resolved.definition_digest.clone(),
                 config_digest: Some(resolved.config_digest.clone()), budget_chars: resolved.budget.soft_input_chars,
-                estimator: "char-count-worker-brief-v2".into(), instructions: instructions.clone(), now_unix_ms: now, expected_heads_digest: None,
+                estimator: "char-count-worker-brief-v3".into(), instructions: instructions.clone(), now_unix_ms: now, expected_heads_digest: None,
             }, &project, reviewed, &args.review_kind, &args.review_scope, &ctx.root.display().to_string(), &run.slug)?
         } else {
             let mut memory = herdr_farm::memory::MemoryStore::from_sqlite(migration::open_active(&project)?, project.join(".state/objects"));

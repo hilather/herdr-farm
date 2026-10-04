@@ -289,3 +289,6 @@ mod regression_tests;
 
 mod barriers;
 pub use barriers::{freeze_memory_barrier,freeze_memory_barrier_file,inspect_memory_barrier};
+
+mod result_memory;
+pub use result_memory::extract_remember;

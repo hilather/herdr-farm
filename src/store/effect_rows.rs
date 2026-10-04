@@ -113,7 +113,7 @@ impl SqliteStore {
         let control = control::read(&tx)?;
         let tasks = match task { Some(id) => find_task(&tx, id)?.into_iter().collect(), None => Vec::new() };
         let bindings = runtime::read_binding(&tx, "coordinator", None)?.into_iter().collect();
-        let inbox = inbox::read_unseen(&tx)?;
+        let inbox = inbox::read_notification_items(&tx)?;
         let deliveries = delivery::read_unresolved(&tx)?;
         let mut operations = Vec::new();
         for delivery in &deliveries {

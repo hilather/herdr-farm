@@ -45,6 +45,15 @@ fn binding_current(db:&Connection,id:&OperationId,admission:bool)->Result<bool> 
     let (task,kind,expected):(Option<String>,String,u64)=db.query_row("SELECT task_id,kind,expected_revision FROM operations WHERE id=?1",[id.as_str()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
     if let Some(task)=task {
         let actual:u64=db.query_row("SELECT revision FROM tasks WHERE id=?1",[task],|r|r.get(0))?;
+        if kind=="runtime.notification" {
+            let version:u32=db.query_row("PRAGMA user_version",[],|r|r.get(0))?;
+            if version>=71 {
+                // A committed delegated decision owns this notification; the
+                // producer task is provenance, not its continuing authority.
+                let decision:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM result_memory_decisions WHERE notification_id=?1 AND principal='coordinator' AND delegation=?2)",params![id.as_str(),super::result_memory::DELEGATION],|r|r.get(0))?;
+                if decision {return Ok(true);}
+            }
+        }
         return Ok(actual==expected);
     }
     let version:u32=db.query_row("PRAGMA user_version",[],|r|r.get(0))?;

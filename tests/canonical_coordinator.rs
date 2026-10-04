@@ -236,6 +236,11 @@ fn socket_open_primes_owned_coordinator_retries_swallowed_prompt_and_recreates_c
         "telemetry demo review findings validate", "telemetry demo review findings reject", "telemetry demo review findings duplicate"] {
         assert!(permissions["permissions"]["allow"].as_array().unwrap().contains(&json!(format!("Bash({prefix} {verb}:*)"))), "missing allow {verb}");
     }
+    let memory_rules=permissions["permissions"]["allow"].as_array().unwrap().iter().filter_map(Value::as_str).filter(|rule|rule.starts_with(&format!("Bash({prefix} memory demo "))).collect::<Vec<_>>();
+    assert_eq!(memory_rules.len(),4);
+    for verb in ["list","show","approve","reject"] {
+        assert!(memory_rules.contains(&format!("Bash({prefix} memory demo {verb}:*)").as_str()));
+    }
     for verb in ["merge", "unmerge", "split", "restore", "reset"] {
         assert!(!permissions["permissions"]["allow"].as_array().unwrap().contains(&json!(format!("Bash({prefix} telemetry demo review findings {verb}:*)"))));
     }

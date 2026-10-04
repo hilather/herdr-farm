@@ -304,6 +304,11 @@ impl ControlledStore {
         self.work_budget.check()?;
         self.store.service_integration_jobs(&self.work_budget).map_err(|e|self.error(e))
     }
+    pub(crate) fn capture_pending_result_memory(&mut self)->Result<()> {
+        self.control.check()?;
+        self.store.capture_pending_result_memory().map_err(|e|self.error(e))?;
+        self.control.check()
+    }
     pub(crate) fn service_verification_jobs(&mut self)->Result<super::verification_jobs::VerificationJobTurn> {
         self.work_budget.check()?;
         self.store.service_verification_jobs(&self.work_budget).map_err(|e|self.error(e))

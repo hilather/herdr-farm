@@ -239,7 +239,9 @@ pub fn set_project_result_automation(project: &Path, expected_head: u64, verify:
 pub fn service_project_verification_jobs(project: &Path) -> anyhow::Result<VerificationJobTurn> {
     let _guard = crate::migration::runtime_mutation(project)?;
     let control = controlled::ReadControl::new(std::time::Instant::now() + Duration::from_secs(2), Default::default());
-    Ok(crate::migration::open_active_scoped(project, control)?.service_verification_jobs()?)
+    let mut db = crate::migration::open_active_scoped(project, control)?;
+    db.capture_pending_result_memory()?;
+    Ok(db.service_verification_jobs()?)
 }
 pub fn project_verification_jobs(project: &Path) -> anyhow::Result<Vec<VerificationJob>> {
     Ok(crate::migration::open_active(project)?.verification_jobs()?)

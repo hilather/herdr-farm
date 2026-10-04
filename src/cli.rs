@@ -216,6 +216,12 @@ enum MemoryCommand {
     Record { #[arg(long)] title:String, #[arg(long)] provenance:String, #[arg(long)] body_file:PathBuf },
     /// Import owner-approved Markdown decisions and switch memory authority
     Adopt { #[arg(long)] dry_run:bool, #[arg(long)] sign_with:Option<PathBuf> },
+    /// List canonical Remember candidates (untrusted evidence)
+    List,
+    Show { id:String },
+    /// Approve under the dated owner delegation, with mandatory notification
+    Approve { id:String, #[arg(long)] reason:String },
+    Reject { id:String, #[arg(long)] reason:String },
     Import {
         document:Option<PathBuf>,
         signature:Option<PathBuf>,
@@ -1180,6 +1186,7 @@ pub fn run() -> Result<()> {
                 if matches!(&command, MemoryCommand::Record { .. }) { bail!("legacy-markdown memory: use `memory-review {slug} record` to record owner decisions"); }
                 bail!("project `{slug}` uses legacy-markdown memory; `memory` requires a migrated SQLite store. Use `memory-review {slug} list/show/ingest/propose/reject/defer` for Remember candidates, or `migration {slug} plan/apply` for an explicit migration");
             }
+            let cli_memory_action=match &command {MemoryCommand::Approve{..}=>Some(true),MemoryCommand::Reject{..}=>Some(false),_=>None};
             let value=match command {
                 MemoryCommand::Record{title,provenance,body_file}=>crate::launch_run::record_memory(&ctx,&dir,&title,&provenance,&body_file)?,
                 MemoryCommand::Adopt{dry_run,sign_with}=>crate::launch_run::adopt_memory(&ctx,&dir,dry_run,sign_with)?,
@@ -1278,6 +1285,18 @@ pub fn run() -> Result<()> {
                         value["review_brief"]=herdr_farm::telemetry::review::bind_review_brief(&dir,&opportunity,&task,snapshot.id.as_str())?;
                     }
                     value
+                },
+                MemoryCommand::List=>serde_json::to_value(herdr_farm::migration::open_active(&dir)?.result_memory_candidates()?)?,
+                MemoryCommand::Show{id}=>{
+                    let mut db=herdr_farm::migration::open_active(&dir)?;
+                    serde_json::json!({"candidate":db.result_memory_candidates()?.into_iter().find(|r|r.proposal_id==id),"proposal":db.memory_proposal_payload(&id)?,"decision":db.result_memory_decision(&id)?,"promotion":db.memory_promotion(&id)?})
+                },
+                MemoryCommand::Approve{id,reason}|MemoryCommand::Reject{id,reason}=>{
+                    let approve=matches!(&cli_memory_action, Some(true));
+                    let _guard=herdr_farm::memory::mutation_guard(&dir)?;
+                    let config=crate::notification_delivery::config(&ctx,&dir)?;
+                    let mut memory=herdr_farm::memory::MemoryStore::from_sqlite(herdr_farm::migration::open_active(&dir)?,dir.join(".state/objects"));
+                    serde_json::to_value(memory.decide_result_candidate(&id,approve,&reason,&config)?)?
                 },
                 MemoryCommand::Propose{input}=>{
                     let _guard=herdr_farm::memory::mutation_guard(&dir)?;

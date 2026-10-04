@@ -99,6 +99,7 @@ impl SqliteStore {
         if version<=67 {tx.execute_batch(include_str!("../../migrations/0068_verification_metadata.sql"))?;}
         if version<=68 {tx.execute_batch(include_str!("../../migrations/0069_owner_requests.sql"))?;}
         if version<=69 {super::fix_launch::migrate(&tx)?;}
+        if version<=70 {tx.execute_batch(include_str!("../../migrations/0071_result_memory.sql"))?;}
         tx.commit()?;
         Ok(())
     }

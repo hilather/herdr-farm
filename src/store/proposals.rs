@@ -60,6 +60,7 @@ impl SqliteStore {
         )?;
         tx.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES('memory.proposal_received',?1,1,1,?2)",
             params![id,serde_json::json!({"id":id,"digest":digest,"state":review_state}).to_string()])?;
+        super::result_memory::captured(&tx,id)?;
         tx.commit()?;
         Ok(ProposalReceipt{proposal_id:id.into(),payload_digest:digest.into(),review_state:review_state.into(),validation:result.into(),reason:reason.into(),reused:false})
     }

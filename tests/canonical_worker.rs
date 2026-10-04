@@ -608,6 +608,9 @@ fn an_operator_finishes_a_worker_that_never_submitted_and_the_result_lands_autom
     lab.wait_for(&mut ticker, "the worker to launch and edit work.txt", &attempt, 120, &|| fs::read_to_string(worktree.join("work.txt")).is_ok_and(|t| t == "worker change\n"));
     assert_eq!(lab.ok_live(&|| ["result", "demo", "show"].map(String::from).to_vec()), json!([]), "the worker never submitted");
 
+    let report_dir=lab.project.join(".state/worker-output").join(attempt.as_str());
+    fs::create_dir_all(&report_dir).unwrap();
+    fs::write(report_dir.join("report.md"),"## Results\nEdited output\n\n## Remember\nThe verifier needs the unchanged base closure.\n").unwrap();
     let done = lab.ok_live(&|| ["result", "demo", "submit-captured", attempt.as_str()].map(String::from).to_vec());
     let candidate = done["capture"]["candidate_oid"].as_str().unwrap().to_owned();
     assert_eq!((done["capture"]["base_oid"].as_str(), done["contract_revision"].as_u64(), done["contract_digest"].as_str(), done["submission"]["replayed"].as_bool()),
@@ -621,6 +624,11 @@ fn an_operator_finishes_a_worker_that_never_submitted_and_the_result_lands_autom
     let again = lab.ok_live(&|| ["result", "demo", "submit-captured", attempt.as_str()].map(String::from).to_vec());
     assert_eq!((again["submission"]["replayed"].as_bool(), again["capture"]["captured"].as_bool(), again["submission"]["submission_id"].clone()), (Some(true), Some(false), done["submission"]["submission_id"].clone()), "{again}");
     assert_eq!(lab.ok_live(&|| ["result", "demo", "show"].map(String::from).to_vec()).as_array().unwrap().len(), 1);
+    let candidates=lab.ok_live(&|| ["memory","demo","list"].map(String::from).to_vec());
+    assert_eq!(candidates.as_array().unwrap().len(),1);
+    assert_eq!(candidates[0]["remember"],"The verifier needs the unchanged base closure.");
+    assert_eq!(candidates[0]["submission_id"],done["submission"]["submission_id"]);
+    assert_eq!(lab.state().inbox.iter().filter(|i|i.content.kind=="memory.candidate_proposed").count(),1);
     // The submission enters automatic verification at once, while the worker is still running.
     let jobs = lab.ok_live(&|| ["result", "demo", "jobs"].map(String::from).to_vec());
     assert!(jobs.as_array().is_some_and(|jobs| jobs.iter().any(|job| job["kind"] == "verification.run" && job["submission_id"] == done["submission"]["submission_id"])), "no verification job after submit-captured: {jobs}\n{:?}", lab.attempt(&attempt).state);
@@ -896,8 +904,9 @@ fn ticker_does_not_dispatch_a_launch_cancelled_before_creation() {
 /// Replaces `resource_preparation_enforces_profile_budget_before_claim_or_external_effect`.
 #[test]
 fn profile_budgets_refuse_preparation_and_draft_before_any_approval() {
-    // The retained knowledge fits in 500 tokens; the whole brief does not.
-    let mut small = Lab::new("soft_input_tokens=500\nunknown_usage='allow_with_warning'");
+    // The retained knowledge including Remember intake fits in 650 tokens;
+    // the complete brief with worktree framing does not.
+    let mut small = Lab::new("soft_input_tokens=650\nunknown_usage='allow_with_warning'");
     small.prepare_profile();
     let selection = small.selection("Retained instructions");
     let error = small.refused(&["launch", "demo", "draft", "--selection", selection.to_str().unwrap(), "--expected-head", &small.head().to_string()]);
@@ -2655,4 +2664,38 @@ fn review_auto_fix_round(lab: &mut Lab, prompt: &std::path::Path, socket: &std::
     let reserved = lab.attempt(&rereview_attempt);
     lab.ok(&["task","demo","cancel-attempt",rereview_attempt.as_str(),"--expected-revision",&reserved.revision.to_string(),"--expected-head",&lab.head().to_string(),"--reason","re-review binding checked"]);
     lab.run_until(120,&|| lab.attempt(&rereview_attempt).termination_observed);
+}
+
+/// Operator recovery uses the retained attempt report without starting an agent.
+/// A local Herdr socket fixture supplies preparation inventory; worktree
+/// preparation and submission use public entry points.
+#[test]
+fn submit_captured_retains_remember_from_the_attempt_report_and_replays_once() {
+    let mut lab=Lab::new("unknown_usage='allow_with_warning'\n");
+    lab.install_work_contract("verify_only");
+    let (_,attempt)=lab.reserve("Retained instructions");
+    lab.serve();
+    let state=lab.state();
+    let record=state.attempt_inputs.iter().find(|r|r.attempt==attempt).unwrap();
+    let receipts=herdr_farm::worktree_preparation::prepare(&lab.project,&record.operation,1,Instant::now()+Duration::from_secs(45),Default::default()).unwrap();
+    fs::write(PathBuf::from(&receipts[0].plan.path).join("work.txt"),"recovered change\n").unwrap();
+    let brief=lab.ok(&["memory","demo","attempt-brief","--attempt",attempt.as_str()]);
+    assert!(brief["text"].as_str().unwrap().contains("## Remember"));
+    let output=PathBuf::from(brief["output_directory"].as_str().unwrap());
+    fs::create_dir_all(&output).unwrap();
+    fs::write(output.join("report.md"),"## Results\nRecovered edit\n\n## Remember\nRetries retain the captured base closure.\n").unwrap();
+    let first=lab.ok(&["result","demo","submit-captured",attempt.as_str()]);
+    let again=lab.ok(&["result","demo","submit-captured",attempt.as_str()]);
+    assert_eq!(again["submission"]["replayed"],true);
+    assert_eq!(first["submission"]["submission_id"],again["submission"]["submission_id"]);
+    let candidates=lab.ok(&["memory","demo","list"]);
+    assert_eq!(candidates.as_array().unwrap().len(),1);
+    assert_eq!(candidates[0]["remember"],"Retries retain the captured base closure.");
+    assert_eq!(candidates[0]["attempt_id"],attempt.as_str());
+    assert_eq!(candidates[0]["submission_id"],first["submission"]["submission_id"]);
+    assert_eq!(lab.state().inbox.iter().filter(|i|i.content.kind=="memory.candidate_proposed").count(),1);
+    // Empty Remember evidence does not produce a second candidate.
+    fs::write(output.join("report.md"),"## Results\nSame recovered edit\n\n## Remember\n\n").unwrap();
+    lab.ok(&["result","demo","submit-captured",attempt.as_str()]);
+    assert_eq!(lab.ok(&["memory","demo","list"]).as_array().unwrap().len(),1);
 }

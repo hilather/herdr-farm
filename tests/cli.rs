@@ -20,7 +20,7 @@ fn launch_worker_snapshot_cli_retains_instructions_and_refuses_missing_source() 
     std::fs::write(project.join("PROJECT.md"),"Retained instructions 🔥").unwrap();
     let args=["--root",r,"memory","demo","snapshot","--task","task","--profile","worker","--input-file",scope.to_str().unwrap(),"--worker"];
     let out=hp(home.path(),&args);assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stderr));
-    let snapshot:serde_json::Value=serde_json::from_slice(&out.stdout).unwrap();assert_eq!(snapshot["estimator"],"char-count-worker-brief-v2");
+    let snapshot:serde_json::Value=serde_json::from_slice(&out.stdout).unwrap();assert_eq!(snapshot["estimator"],"char-count-worker-brief-v3");
     std::fs::remove_file(project.join("PROJECT.md")).unwrap();
     let retained=herdr_farm::memory::render_knowledge_snapshot(&project,snapshot["id"].as_str().unwrap()).unwrap();
     assert!(retained["text"].as_str().unwrap().contains("Retained instructions 🔥"));

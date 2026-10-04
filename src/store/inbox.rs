@@ -6,6 +6,19 @@ pub(super) fn read_all(db:&Connection)->Result<Vec<InboxItem>> {read_all_with_bu
 pub(super) fn read_all_with_budget(db:&Connection,budget:Option<&read_budget::ReadBudget>)->Result<Vec<InboxItem>> {read_matching(db,"",budget)}
 /// Exactly the items with `!seen && !done`, through `inbox_items_unseen`.
 pub(super) fn read_unseen(db:&Connection)->Result<Vec<InboxItem>> {read_matching(db,"WHERE seen=0 AND done=0",None)}
+/// Owner memory decision delivery survives inbox consumption: keep its exact
+/// evidence visible while the associated notification is unresolved.
+pub(super) fn read_notification_items(db:&Connection)->Result<Vec<InboxItem>> {
+    // Keep the ordinary unseen read on its existing partial index. Only the
+    // sealed decision operations add consumed owner evidence by primary key.
+    let mut items:std::collections::BTreeMap<_,_>=read_unseen(db)?.into_iter().map(|item|(item.content.id.clone(),item)).collect();
+    let version:u32=db.query_row("PRAGMA user_version",[],|r|r.get(0))?;
+    if version>=71 {
+        let retained=read_matching(db,"WHERE id IN (SELECT json_extract(o.payload,'$.inbox_ids[0]') FROM result_memory_decisions m JOIN operations o ON o.id=m.notification_id JOIN operation_delivery d ON d.operation_id=o.id WHERE d.state IN ('pending','claimed','ambiguous'))",None)?;
+        for item in retained {items.insert(item.content.id.clone(),item);}
+    }
+    Ok(items.into_values().collect())
+}
 fn read_matching(db:&Connection,filter:&str,budget:Option<&read_budget::ReadBudget>)->Result<Vec<InboxItem>> {
     let mut stmt=db.prepare(&format!("SELECT revision,payload,payload_hash,seen,done,id FROM inbox_items {filter} ORDER BY id"))?;
     let mut rows=stmt.query([])?;
