@@ -193,6 +193,12 @@ fn cadence_seconds(nominal: f64) -> f64 {
     nominal * (scale * 30.0).ceil() / 30.0
 }
 fn gaps(times: &[f64]) -> Vec<f64> { times.windows(2).map(|w| w[1] - w[0]).collect() }
+/// The fake Herdr logs a call once its interpreter is running, while the
+/// ticker sets the next deadline just before it spawns the call, so a logged
+/// gap is the deadline gap plus the difference in startup latency of the two
+/// calls. Allow that jitter; it stays far below the 15 s pass interval
+/// (0.5 s at the test scale) these assertions exist to rule out.
+const SPAWN_JITTER: f64 = 0.1;
 
 /// Replaces `open_retains_launch_history_and_queues_a_new_request_without_starting`
 /// and `plain_open_cannot_turn_a_missing_agent_observation_into_another_launch_request`.
@@ -351,9 +357,9 @@ fn remote_machines_poll_on_their_own_deadlines_and_only_long_outages_are_reporte
     ticker.next_pass();
     ticker.stop();
     let b = polls("b");
-    assert!(gaps(&b).iter().all(|gap| *gap >= cadence_seconds(60.0) - 0.002), "b was polled before its deadline: {b:?}");
+    assert!(gaps(&b).iter().all(|gap| *gap >= cadence_seconds(60.0) - SPAWN_JITTER), "b was polled before its deadline: {b:?}");
     let a = polls("a");
-    assert!(gaps(&a).iter().all(|gap| *gap >= cadence_seconds(120.0) - 0.002), "a was retried before its backoff: {a:?}");
+    assert!(gaps(&a).iter().all(|gap| *gap >= cadence_seconds(120.0) - SPAWN_JITTER), "a was retried before its backoff: {a:?}");
     assert_eq!(outages("a").len(), 1, "{:?}", outages("a"));
     assert!(outages("a")[0].contains("`box` has been unreachable"), "{:?}", outages("a"));
     assert!(outages("b").is_empty());
