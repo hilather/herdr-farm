@@ -9,7 +9,7 @@ use std::{
     process::Command,
 };
 
-use crate::verification::{hidden_digest, parse_checks, parse_hidden, program_allowed};
+use crate::verification::{hidden_digest, parse_checks, parse_hidden};
 
 const EXIT_SAME_NS: i32 = 71;
 const EXIT_SETUP: i32 = 72;
@@ -51,6 +51,8 @@ struct Args {
     git: PathBuf,
     hidden: Vec<PathBuf>,
     checks: Vec<String>,
+    toolchain: Option<super::toolchains::Resolved>,
+    repository: Option<PathBuf>,
 }
 
 fn parse_args(args: &[String]) -> Option<Args> {
@@ -61,6 +63,8 @@ fn parse_args(args: &[String]) -> Option<Args> {
     let mut git = None;
     let mut hidden = Vec::new();
     let mut checks = Vec::new();
+    let mut toolchain = None;
+    let mut repository = None;
     let mut index = start;
     while index < args.len() {
         let arg = &args[index];
@@ -74,6 +78,8 @@ fn parse_args(args: &[String]) -> Option<Args> {
             "--checkout" => checkout = Some(PathBuf::from(value)),
             "--policy" => policy = Some(PathBuf::from(value)),
             "--git" => git = Some(PathBuf::from(value)),
+            "--repository" => repository = Some(PathBuf::from(value)),
+            "--toolchain" => toolchain = Some(serde_json::from_slice(&fs::read(value).ok()?).ok()?),
             "--hidden" => hidden.push(PathBuf::from(value)),
             _ => return None,
         }
@@ -86,6 +92,8 @@ fn parse_args(args: &[String]) -> Option<Args> {
         git: git?,
         hidden,
         checks,
+        toolchain,
+        repository,
     })
 }
 
@@ -98,6 +106,7 @@ fn enter(parsed: &Args) -> i32 {
         return fail("env", 0);
     }
     let scratch = PathBuf::from(scratch);
+    if parsed.toolchain.as_ref().is_some_and(|r| !super::toolchains::unchanged(r)) { return EXIT_POLICY; }
     let libraries = match Command::new("/usr/bin/ldd").arg(&parsed.git).output_gated() {
         Ok(output) if output.status.success() => {
             super::manifest::parse_ldd(&String::from_utf8_lossy(&output.stdout))
@@ -110,6 +119,7 @@ fn enter(parsed: &Args) -> i32 {
     if let Err(errno) = switch_root(&scratch, parsed, &libraries) {
         return fail("root", errno);
     }
+    if !drop_privileges() { return fail("drop-privileges", 0); }
     let bytes = match fs::read(&parsed.policy) {
         Ok(bytes) => bytes,
         Err(error) => return fail("policy", error.raw_os_error().unwrap_or(0)),
@@ -118,7 +128,7 @@ fn enter(parsed: &Args) -> i32 {
         return EXIT_POLICY;
     }
     let checks = match parse_checks(&bytes) {
-        Ok(checks) if checks == parsed.checks && program_allowed(&checks[0], &parsed.checkout) => {
+        Ok(checks) if checks == parsed.checks && super::toolchains::command_allowed(&checks[0], &parsed.checkout, parsed.toolchain.as_ref()) => {
             checks
         }
         Ok(_) => return EXIT_CHECKS,
@@ -161,7 +171,11 @@ fn enter(parsed: &Args) -> i32 {
         Ok(policy) => policy,
         Err(_) => return EXIT_POLICY,
     };
-    if !policy.commands().all(|args| program_allowed(&args[0], &parsed.checkout)) {
+    if policy.toolchain.as_deref() != parsed.toolchain.as_ref().map(|r| r.name.as_str())
+        || policy.toolchain_digest.as_deref() != parsed.toolchain.as_ref().map(|r| r.digest.as_str()) {
+        return EXIT_POLICY;
+    }
+    if !policy.commands().all(|args| super::toolchains::command_allowed(&args[0], &parsed.checkout, parsed.toolchain.as_ref())) {
         return EXIT_CHECKS;
     }
     let code = if policy.version == 2 {
@@ -171,7 +185,7 @@ fn enter(parsed: &Args) -> i32 {
             Err(error) => return fail("exec", error.raw_os_error().unwrap_or(0)),
         }
     } else {
-        let status = match Command::new(&checks[0])
+        let status = match super::check_command(&checks[0])
             .args(&checks[1..])
             .current_dir(&parsed.checkout)
             .stdin(std::process::Stdio::null())
@@ -288,12 +302,16 @@ fn switch_root(scratch: &Path, parsed: &Args, libraries: &[PathBuf]) -> Result<(
         fs::create_dir_all(scratch.join(directory))
             .map_err(|error| error.raw_os_error().unwrap_or(1))?;
     }
+    // Install private /tmp before copying paths: a checkout or toolchain under
+    // /tmp must not be hidden by a later mount on its ancestor.
+    let tmp = scratch.join("tmp").display().to_string();
+    mount_path(Some("tmpfs"), &tmp, Some("tmpfs"), libc::MS_NOSUID | libc::MS_NODEV, Some("mode=1777"))?;
     let proc = scratch.join("proc");
     mount_path(
         Some("proc"),
         &proc.display().to_string(),
         Some("proc"),
-        libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+        libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC | libc::MS_RDONLY,
         None,
     )?;
     device(scratch, "null", 1, 3, "/dev/null")?;
@@ -302,12 +320,35 @@ fn switch_root(scratch: &Path, parsed: &Args, libraries: &[PathBuf]) -> Result<(
     for library in libraries {
         bind_ro(scratch, library)?;
     }
+    if let Some(resolved) = &parsed.toolchain {
+        for identity in &resolved.identities {
+            if identity.sha256.is_none() && identity.symlink.is_none() {
+                fs::create_dir_all(scratch.join(identity.path.strip_prefix("/").map_err(|_| 1)?)).map_err(|e| e.raw_os_error().unwrap_or(1))?;
+            }
+        }
+        for path in &resolved.mounts { bind_toolchain_ro_at(scratch, path, path)?; }
+    }
     bind_ro(scratch, &parsed.policy)?;
     for hidden in &parsed.hidden {
         bind_ro(scratch, hidden)?;
     }
     // A private copy, not a bind of the live host directory. Host writes cannot land after the check.
     copy_checkout(scratch, &parsed.checkout)?;
+    // Keep only the disposable checkout and /tmp writable.
+    let checkout_dest = scratch.join(parsed.checkout.strip_prefix("/").map_err(|_| 1)?);
+    let checkout_text = checkout_dest.display().to_string();
+    mount_path(Some(&checkout_text), &checkout_text, None, libc::MS_BIND, None)?;
+    if let (Some(resolved), Some(repository)) = (&parsed.toolchain, &parsed.repository) {
+        for source in &resolved.mounts {
+            if let Ok(relative) = source.strip_prefix(repository) {
+                // Explicit owner tools inside a repository (e.g. ignored
+                // .tools/Godot) are also available relative to its private copy.
+                let alias = parsed.checkout.join(relative);
+                bind_toolchain_ro_at(scratch, source, &alias)?;
+            }
+        }
+    }
+    mount_path(None, &scratch.display().to_string(), None, libc::MS_REMOUNT | libc::MS_BIND | libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV, None)?;
     let put_old = scratch.join("old");
     pivot(
         &scratch.display().to_string(),
@@ -373,18 +414,45 @@ fn copy_snapshot(source: &Path, dest: &Path) -> Result<(), i32> {
 }
 
 fn bind_ro(root: &Path, source: &Path) -> Result<(), i32> {
-    let relative = source.strip_prefix("/").map_err(|_| 1)?;
+    bind_ro_at(root, source, source)
+}
+
+// libmount applies read-only attributes recursively, including nested mounts.
+// A plain bind remount only protects the top mount.
+fn bind_toolchain_ro_at(root: &Path, source: &Path, target: &Path) -> Result<(), i32> {
+    bind_ro_at(root, source, target)?;
+    let status = Command::new("/usr/bin/mount")
+        .args(["--rbind", "-o", "ro=recursive"])
+        .arg(source)
+        .arg(root.join(target.strip_prefix("/").map_err(|_| 1)?))
+        .status_gated()
+        .map_err(|error| error.raw_os_error().unwrap_or(1))?;
+    if status.success() { Ok(()) } else { Err(libc::EIO) }
+}
+
+fn bind_ro_at(root: &Path, source: &Path, target: &Path) -> Result<(), i32> {
+    let relative = target.strip_prefix("/").map_err(|_| 1)?;
     let dest = root.join(relative);
+    // A worker checkout can contain symlink ancestors. Never follow them while
+    // still in the host root, including when exposing ignored repository tools.
+    let mut ancestor = root.to_path_buf();
+    for component in relative.components() {
+        ancestor.push(component);
+        if fs::symlink_metadata(&ancestor).is_ok_and(|m| m.file_type().is_symlink()) { return Err(libc::ELOOP); }
+    }
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).map_err(|error| error.raw_os_error().unwrap_or(1))?;
     }
-    fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o644)
-        .open(&dest)
-        .map_err(|error| error.raw_os_error().unwrap_or(1))?;
+    match fs::symlink_metadata(&dest) {
+        Ok(meta) if meta.is_file() => {},
+        Ok(_) => return Err(libc::EINVAL),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::OpenOptions::new().write(true).create_new(true).mode(0o644)
+                .custom_flags(libc::O_NOFOLLOW).open(&dest)
+                .map_err(|error| error.raw_os_error().unwrap_or(1))?;
+        }
+        Err(error) => return Err(error.raw_os_error().unwrap_or(1)),
+    }
     let source_text = source.display().to_string();
     let dest_text = dest.display().to_string();
     mount_path(Some(&source_text), &dest_text, None, libc::MS_BIND, None)?;
@@ -490,5 +558,26 @@ static VERIFICATION_SETUP_HOOK: unsafe extern "C" fn() = enter_verification_setu
 unsafe extern "C" fn enter_verification_setup_hook() {
     if std::env::args().any(|arg| arg == "verification-setup") {
         std::process::exit(setup_from_args(&std::env::args().collect::<Vec<_>>()));
+    }
+}
+
+// A check must not remount owner toolchain binds writable or regain privileges.
+fn drop_privileges() -> bool {
+    #[repr(C)] struct Header { version: u32, pid: i32 }
+    #[repr(C)] #[derive(Clone, Copy)] struct Data { effective: u32, permitted: u32, inheritable: u32 }
+    let last = match fs::read_to_string("/proc/sys/kernel/cap_last_cap").ok().and_then(|s| s.trim().parse::<i32>().ok()) {
+        Some(last) if (0..=63).contains(&last) => last,
+        _ => return false,
+    };
+    for capability in 0..=last {
+        // SAFETY: a numeric Linux capability, with no pointer arguments.
+        if unsafe { libc::prctl(libc::PR_CAPBSET_DROP, capability, 0, 0, 0) } != 0 { return false; }
+    }
+    let header = Header { version: 0x20080522, pid: 0 };
+    let data = [Data { effective: 0, permitted: 0, inheritable: 0 }; 2];
+    // SAFETY: Linux capset receives two v3 capability records; prctl has no pointers.
+    unsafe {
+        libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0
+            && libc::syscall(libc::SYS_capset, &header, data.as_ptr()) == 0
     }
 }

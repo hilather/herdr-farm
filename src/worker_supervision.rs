@@ -456,7 +456,7 @@ fn forms(path: &str) -> Vec<std::path::PathBuf> {
 /// expanded). The sandboxed agent's environment carries no loader variables,
 /// so the default library directories need nothing. Only 64-bit
 /// little-endian ELF is read; anything unreadable yields nothing.
-fn executable_dependencies(executable: &Path) -> Vec<std::path::PathBuf> {
+pub(crate) fn executable_dependencies(executable: &Path) -> Vec<std::path::PathBuf> {
     use std::os::unix::fs::FileExt;
     let Ok(file) = std::fs::File::open(executable) else { return Vec::new() };
     let read = |offset: u64, length: usize| {
@@ -516,7 +516,7 @@ fn executable_dependencies(executable: &Path) -> Vec<std::path::PathBuf> {
     for name in needed.iter().take(64).filter_map(|n| text(strings.saturating_add(*n))) {
         if name.contains('/') {
             out.extend(Some(std::path::PathBuf::from(&name)).filter(|p| p.is_absolute()));
-        } else if let Some(found) = directories.iter().map(|d| Path::new(d).join(&name)).find(|p| p.is_absolute() && p.is_file()) {
+        } else if let Some(found) = directories.iter().map(String::as_str).chain(["/usr/lib", "/usr/lib64", "/lib", "/lib64", "/usr/lib/x86_64-linux-gnu", "/lib/x86_64-linux-gnu"]).map(|d| Path::new(d).join(&name)).find(|p| p.is_absolute() && p.is_file()) {
             out.push(found);
         }
     }

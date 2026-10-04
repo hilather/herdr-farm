@@ -11,9 +11,9 @@ use crate::{executor::{Executor,Identity,Lane,Limits,Request,Ticket},runner::{Ru
 use herdr_farm::{migration,execution_guard::{CheckGuard,ProjectGuard,Resource},domain::{Operation,OperationId},store::SqliteStore,verification,
     operations::{Claim,Outcome,DeliveryState}};
 const JOB:&str="\0herdr-projects-canonical-verification";
-/// Verifier timeout plus checkout and record; the claim lease is the store's 300 s maximum.
-const BUDGET:Duration=Duration::from_secs(330);
-const LEASE_MS:i64=300_000;
+/// Maximum toolchain timeout plus checkout and record margin.
+const BUDGET:Duration=Duration::from_secs(3750);
+const LEASE_MS:i64=3_720_000;
 const OWNER:&str="ticker.verification";
 #[derive(Clone,Copy,Serialize,Deserialize,PartialEq,Eq)]
 #[serde(rename_all="snake_case")]

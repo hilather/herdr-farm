@@ -154,15 +154,8 @@ pub fn reconcile_project(project: &Path, repository: &PathBuf, key: &str) -> Res
 /// Each acceptance policy gets its own candidate check budget, like the
 /// verifier's per-check timeout; one slow policy cannot starve the next.
 pub const POLICY_TIMEOUT: Duration = Duration::from_secs(30);
-/// Most policies whose checks fit the claim lease (the store allows 300 s) and
-/// the automatic job budget (240 s) with room for the merge and publication.
+/// Bound policy count; toolchain budgets are summed when extending the claim.
 pub const MAX_POLICIES: usize = 6;
-/// The claim lease the checks run under: every policy's budget plus a margin
-/// for recording the verdicts.
-fn checks_lease_ms(policies: usize) -> i64 {
-    (policies as u64 * POLICY_TIMEOUT.as_millis() as u64 + 30_000) as i64
-}
-
 /// Budget for importing a live worker's verified candidate from its Git quarantine.
 const QUARANTINE_IMPORT: Duration = Duration::from_secs(60);
 
@@ -775,7 +768,7 @@ fn finish(
 }
 
 /// Every acceptance policy of the contract revision runs on the candidate, in
-/// id order, each within its own `POLICY_TIMEOUT`; the first failure stops the
+/// id order, each within its own toolchain budget or `POLICY_TIMEOUT`; the first failure stops the
 /// check. The claim is first extended to cover every policy's budget, and each
 /// verdict is recorded under it. Returns the extended claim. With `ownership`,
 /// the checks run without project ownership, and nothing is recorded unless
@@ -794,12 +787,15 @@ fn policies_pass(
     if verified.policies.len() > MAX_POLICIES {
         bail!("{}", Refused::TooManyPolicies { count: verified.policies.len() });
     }
-    let claim = store.extend_integration_lease(&claim, checks_lease_ms(verified.policies.len()), now_ms())?;
+    let project = Path::new(&verified.project_store).parent().and_then(Path::parent).context("integration project path")?;
+    let toolchains = verified.policies.iter().map(|(_, body)| verification::toolchains::for_policy(project, body.as_bytes())).collect::<Result<Vec<_>>>()?;
+    let lease_ms = toolchains.iter().map(|r| verification::toolchains::timeout(r.as_ref(), POLICY_TIMEOUT).as_millis() as i64).sum::<i64>() + if toolchains.iter().any(Option::is_some) { 90_000 } else { 30_000 };
+    let claim = store.extend_integration_lease(&claim, lease_ms, now_ms())?;
     let run = || -> Result<(Vec<(String, String, bool)>, bool)> {
         let mut checks = Vec::new();
         let mut all = !verified.policies.is_empty();
         for (index, (policy_id, body)) in verified.policies.iter().enumerate() {
-            let passed = check_passes(work, checkout, index, body, POLICY_TIMEOUT, commit, tree)?;
+            let passed = check_passes(work, checkout, index, body, verification::toolchains::timeout(toolchains[index].as_ref(), POLICY_TIMEOUT), commit, tree, toolchains[index].as_ref(), Path::new(&verified.repository))?;
             checks.push((policy_id.clone(), format!("{:x}", Sha256::digest(body.as_bytes())), passed));
             if !passed {
                 all = false;
@@ -842,6 +838,7 @@ fn unchanged(store: &mut SqliteStore, claim: &Claim, verified: &VerifiedIntegrat
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn check_passes(
     work: &Path,
     checkout: &Path,
@@ -850,6 +847,8 @@ fn check_passes(
     timeout: Duration,
     commit: &str,
     tree: &str,
+    toolchain: Option<&verification::toolchains::Resolved>,
+    repository: &Path,
 ) -> Result<bool> {
     let checks = match parse_checks(body.as_bytes()) {
         Ok(checks) => checks,
@@ -875,6 +874,8 @@ fn check_passes(
         policy_digest,
         // Hidden replay inputs are never bound here: a replay candidate never integrates.
         hidden: Vec::new(),
+        toolchain: toolchain.cloned(),
+        repository: Some(repository.to_path_buf()),
     });
     let Ok(launch) = launch else {
         return Ok(false);
@@ -883,7 +884,7 @@ fn check_passes(
         Ok(output) => output,
         Err(_) => return Ok(false),
     };
-    Ok(verification::isolated_check_ok(&output, commit, tree))
+    Ok(verification::isolated_check_ok(&output, commit, tree) && toolchain.is_none_or(verification::toolchains::unchanged))
 }
 
 fn oid_len(format: &str) -> Result<usize> {

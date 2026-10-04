@@ -311,6 +311,9 @@ sandbox, a canonical local repository listed in PROJECT.md, a frozen profile
 name in the current owner configuration, and unfinished reserved, launching, or
 running attempts plus this launch within `[launch] max_workers` (default 4,
 range 1..64). `--max-active-workers` defaults to this cap and cannot exceed it.
+A refusal solely for capacity or an unlisted repository creates an owner request
+for an in-session decision; see “Approve an owner request inside coordinator chat”
+below. Capacity approval exempts one exact reservation without changing the cap.
 The coordinator never passes `--sign-with`, reads or searches for keys, or edits
 config.toml. It reports the exact refused rule to the owner. The coordinator obeys
 `start_threads=propose/auto`, `resolve_threads=propose/auto` and
@@ -405,3 +408,40 @@ An interrupted creation retains a `.creating` marker. `list` reports `creating`,
 and ticker passes, doctor scans and open leave it inert. A second `new` explains
 that, after confirming no creation command is running, you can remove that
 project directory and run `new` again. Do not move a partially created store.
+
+
+## Approve an owner request inside coordinator chat
+
+When launch policy refuses for capacity or an unlisted repository, the
+coordinator receives a canonical owner-request and runs the exact printed
+`owner <slug> approve REQUEST --summary '…'` command. Read the summary in Claude
+Code's confirmation dialog and press the approval key if you agree. You do not
+need a terminal or configuration edit. Decline if you disagree; the coordinator
+can mark the request rejected with the same exact summary. Rejection grants
+nothing. A wrong summary, expired request or already decided request refuses.
+
+A capacity approval allows one reservation of the named task and contract
+within 24 hours, leaving the configured cap unchanged for other tasks. A
+repository approval adds that exact repository to PROJECT.md's repos. The
+coordinator then repeats the original launch. Separate requests require separate
+decisions when both policies refuse. Signer/profile failures and an explicit
+owner pause require their ordinary repair; owner requests cannot waive them.
+
+Legacy PERM-1 requests can use the same in-session owner command and the exact
+`Owner permission requested: …` inbox summary. Terminal `safety approve` remains
+available. Existing coordinators pick up regenerated settings when `open` next starts
+the coordinator agent. Ask rules cover normal command forms, not hostile owner processes;
+see operations.md for wrapper rules and limits. Retain owner-request history in
+whole-project canonical backups; do not replay approved authority from telemetry.
+
+For real project tests, declare `[verification.toolchains.NAME]` once in the
+owner's external `config.toml`, with absolute `paths`, validated `env`, optional
+`network` (default false) and `timeout_seconds` (default 600, maximum 3600).
+A code launch can then add repeatable
+`--accept 'NAME:./tools/run-tests.sh --headless'` alongside `--write` and `--output`.
+The generated signed policy pins the toolchain and its dependencies. Tests run
+in the private checkout with read-only tools, private `/tmp` and no network by
+default. Ignored caches are allowed; tracked or unignored changes fail acceptance.
+After an intended toolchain update, sign a new contract revision. See
+[acceptance toolchains](factory/verified-results.md#owner-declared-acceptance-toolchains)
+for manual policy preparation, evidence and timeout details.

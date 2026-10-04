@@ -877,6 +877,13 @@ impl SqliteStore {
         if parsed.project_store != path.to_string_lossy() {
             return Err(invalid("contract belongs to another project"));
         }
+        #[cfg(target_os = "linux")]
+        for policy in &parsed.acceptance_policies {
+            if serde_json::from_str::<serde_json::Value>(&policy.text).ok().is_some_and(|p| p.get("toolchain").is_some()) {
+                crate::verification::toolchains::for_policy(path.parent().and_then(Path::parent).ok_or_else(|| invalid("project path"))?, policy.text.as_bytes())
+                    .map_err(|e| invalid(&e.to_string()))?;
+            }
+        }
         let repository = fs::canonicalize(&parsed.repository)
             .map_err(|_| invalid("contract repository is unavailable"))?;
         if repository.to_string_lossy() != parsed.repository {

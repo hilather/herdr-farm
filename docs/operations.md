@@ -48,7 +48,7 @@ Every thread works from `<its working directory>/.herdr-project/<project>-<id>/`
 | `thread stop`, `thread restart`, `thread prompt`, `thread adopt`, `thread list`, `thread show`, `thread ack`, `thread resolve` | See `--help` on each. |
 | `overview [<project>] [--wait]`, `focus [<project>]`, `unfocus` | Threads grouped by what needs you, as text and in the sidebar. |
 | `routine list`, `routine approve`, `safety show` | Routines and safety settings. |
-| `safety grant`, `safety requests`, `safety approve`, `safety reject`, `safety revoke` | Worker permission policy; decisions and revocation require the owner at a terminal. |
+| `safety grant`, `safety requests`, `safety approve`, `safety reject`, `safety revoke` | Worker permission policy; safety decisions and revocation require the owner at a terminal. In-session decisions use `owner <slug> approve/reject` with an exact summary. |
 | `pause`, `resume`, `archive`, `unarchive`, `delete [--force]` | Project lifecycle. `delete` moves the folder to `.trash/`. |
 | `ticker start \| run \| stop \| status`, `doctor`, `skill` | Housekeeping. |
 
@@ -927,7 +927,9 @@ the exact prefix and reason. `safety requests PROJECT` is read-only.
 
 The owner runs `safety approve PROJECT ID`, `safety reject PROJECT ID --reason
 "reason"`, or `safety revoke PROJECT "prefix:*"` at a terminal and confirms the
-exact ID or prefix. Decisions record `owner:terminal`, time and rejection reason.
+exact ID or prefix. Those decisions record `owner:terminal`, time and rejection reason.
+Alternatively, PERM-1 requests accept `owner PROJECT approve ID --summary` or
+`reject` with the exact inbox summary via the Claude Code ask path described below.
 Never allow-list approve, reject or revoke for the coordinator. Permissions are
 stored in project state; these commands do not rewrite config.toml.
 
@@ -1033,3 +1035,59 @@ and label still match. A closed viewer or unreachable owner session is harmless.
 `project.launch_run_paused` control event before relinquishing and rebinding.
 The same run reconciles and activates this pause; explicit owner pauses retain
 `project.control_changed` and still require an owner resume.
+
+
+## Owner requests in coordinator chat
+
+A canonical `launch <slug> run` refused solely for an unlisted local repository
+or unfinished attempts above `[launch] max_workers` delivers an `owner-request`
+to the canonical inbox. These are independent actions: when both policies refuse,
+each has its own request. Signer errors, unknown profiles, missing execution homes,
+invalid task inputs and an explicit owner pause still refuse without approval
+requests. An invalid PROJECT.md must be repaired rather than approved.
+
+The refusal prints the stable request id and exact command, for example:
+
+```sh
+herdr-farm --root /path/to/projects owner demo approve REQUEST --summary 'EXACT STORED SUMMARY'
+herdr-farm --root /path/to/projects owner demo reject REQUEST --summary 'EXACT STORED SUMMARY'
+```
+
+The coordinator runs the printed approval command. Claude Code's generated
+`permissions.ask` rule prompts the human even in auto mode; the owner presses a
+key inside the chat. The command refuses unless the summary bytes match the
+stored summary, so its dialog describes the stored action. Approval records
+`owner:claude-code-ask` and the decision time and marks the inbox request done.
+Reject marks it done without performing the action. Expired requests (24 hours)
+and decided requests cannot be approved again.
+
+A cap approval permits one reservation of that task with those exact contract
+decisions, consumed atomically with reservation. The scheduler cap remains in
+force for other tasks, including concurrent launches. The request's contract
+digest is SHA-256 of the JSON contract decisions, excluding the installation
+head and contract revision; it stays stable when unrelated store events advance
+the head. Other contract fields, including repository, base, scope, outputs and
+approval authority, remain bound. Repository approval appends only the stored
+local repository to PROJECT.md using the atomic project writer, preserving other
+settings and the instruction body. It is a lasting repository policy change.
+Legacy PERM-1 permission requests also accept these owner commands with the exact
+inbox summary; `safety approve` and `safety reject` retain their terminal check.
+
+Generated settings put normal `owner <slug> approve` and `reject` command forms
+in `ask`. They deny obvious wrapper shapes: `env *`, `sh -c *`, `bash -c *`,
+`bash -lc *`, `zsh -c *`, `eval *`, `command *`, and `exec *`, as well as direct
+`ssh-keygen`. Additional wrapper rules cover `xargs`, `direnv exec`, `devbox run`,
+`mise exec`, `npx`, `docker exec`, `nocorrect`, `watch`, `setsid`, `ionice`, and
+`flock`. [Claude Code's permission documentation](https://code.claude.com/docs/en/permissions#wrappers)
+describes wrapper stripping: some wrappers are normalized before rule matching,
+and alternate executable spellings can evade a command rule. These generated
+patterns are best-effort coverage, not a comprehensive wrapper parser.
+Claude Code prefix rules are evadable. These settings **prompt the
+owner for the normal command form**; they do not contain a hostile process
+running as the owner (see authority.md). A process running as the owner could
+invoke the CLI directly or alter owner files. Attribution identifies this
+approval path, not an independently authenticated identity or dialog receipt.
+
+Owner requests and decision history live in canonical `state.db` (migration
+0069). Retain them for the project's lifetime and include them in canonical
+backups; telemetry retention and restore never prune or replay their authority.

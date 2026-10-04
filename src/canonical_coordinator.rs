@@ -358,6 +358,7 @@ fn permissions(ctx: &Ctx, dir: &Path, slug: &str) -> Result<String> {
         allow.push(format!("Bash({prefix} reconcile {slug} --plan)"));
         allow.push(format!("Bash({prefix} reconcile {slug} --plan *)"));
         allow.push(format!("Bash({prefix} reconcile {slug} * --plan*)"));
+        for verb in ["approve", "reject"] { ask.push(format!("Bash({prefix} owner {slug} {verb}:*)")); }
         ask.push(format!("Bash({prefix} reconcile {slug} *--apply*)"));
         ask.push(format!("Bash({prefix} reconcile {slug} *--record*)"));
         for verb in ["attempts", "usage", "report", "query", "view", "watch", "compare", "recommend", "metrics registry", "workspace show", "workspace digest",
@@ -384,7 +385,7 @@ fn permissions(ctx: &Ctx, dir: &Path, slug: &str) -> Result<String> {
         for verb in ["state", "rebind", "adopt", "relinquish"] { ask.push(format!("Bash({prefix} runtime * {verb}:*)")); }
         for verb in ["cancel-attempt", "complete"] { ask.push(format!("Bash({prefix} task * {verb}:*)")); }
     }
-    let mut deny = vec!["Bash(ssh-keygen:*)".to_string()];
+    let mut deny = ["Bash(ssh-keygen:*)", "Bash(env *)", "Bash(sh -c *)", "Bash(bash -c *)", "Bash(bash -lc *)", "Bash(zsh -c *)", "Bash(eval *)", "Bash(command *)", "Bash(exec *)", "Bash(xargs *)", "Bash(direnv exec *)", "Bash(devbox run *)", "Bash(mise exec *)", "Bash(npx *)", "Bash(docker exec *)", "Bash(nocorrect *)", "Bash(watch *)", "Bash(setsid *)", "Bash(ionice *)", "Bash(flock *)"].iter().map(|s|s.to_string()).collect::<Vec<_>>();
     for path in ["~/.config/herdr-projects/**".to_string(), "~/.config/herdr-farm/**".into(), "~/.ssh/**".into(),
         format!("/{}", file.display()), format!("/{}/.claude/**", dir.display())] {
         for tool in ["Read", "Edit", "Write"] { deny.push(format!("{tool}({path})")); }

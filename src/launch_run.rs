@@ -33,6 +33,7 @@ pub struct Args {
     pub plan_output: Option<String>,
     pub write: Vec<String>,
     pub output: Vec<String>,
+    pub accept: Vec<String>,
     pub deliverable: Option<String>,
     /// The task's instructions (appended to PROJECT.md in the retained brief).
     pub prompt_file: Option<PathBuf>,
@@ -146,9 +147,15 @@ fn contract_document(args: &Args, repository: &Path, head: u64, kind: &str, proj
         serde_json::from_slice(&planning_contract(args, repository, head, kind, project)?)?
     } else {
         let (writes, outputs) = code_paths(args)?;
-        let policies = outputs.iter().enumerate().map(|(i, output)| {
+        let mut policies = outputs.iter().enumerate().map(|(i, output)| {
             json!({"id":format!("output-{}", i + 1),"text":serde_json::to_string(&json!({"version":1,"checks":["/usr/bin/git","grep","--quiet","--no-index","-e",".","--",output]})).expect("JSON policy")})
         }).collect::<Vec<_>>();
+        for (index, acceptance) in args.accept.iter().enumerate() {
+            let (name, command) = acceptance.split_once(':').context("--accept must be TOOLCHAIN:COMMAND [ARGS]")?;
+            let checks = split_command(command)?;
+            let text = herdr_farm::verification::toolchains::policy(project, name, checks)?;
+            policies.push(json!({"id":format!("accept-{}", index + 1),"text":text}));
+        }
         json!({"version":3,"task_id":args.task,"profile_kind":kind,
             "scope":{"paths":writes.iter().map(|p| json!({"path":p,"access":"write"})).collect::<Vec<_>>()},
             "outputs":outputs.iter().map(|p| json!({"path":p,"kind":"git_file"})).collect::<Vec<_>>(),
@@ -530,11 +537,15 @@ pub fn run(ctx: &Ctx, slug: &str, mut args: Args) -> Result<Value> {
     }
     let held = snapshot.attempts.iter().filter(|a| a.retains_capacity()).count();
     let existing = snapshot.tasks.iter().any(|t|t.id.as_str()==args.task && t.active_attempt.is_some());
-    if held + usize::from(!existing) > cap as usize { problems.push(format!("owner cap: unfinished attempts plus this launch exceed launch.max_workers ({cap})")); }
+    let cap_refusal=format!("owner cap: unfinished attempts plus this launch exceed launch.max_workers ({cap})");
+    let above_cap=held + usize::from(!existing) > cap as usize;
+    if above_cap { problems.push(cap_refusal.clone()); }
     let repository = args.repository.canonicalize()?;
+    let mut unlisted_repository=false;
     match crate::project::parse_project_md(&String::from_utf8(migration::read_plan_file(&project.join("PROJECT.md"))?)?) {
         Ok((settings, _)) if settings.repos.iter().any(|r|r.machine.is_none() && Path::new(&r.path).canonicalize().is_ok_and(|p|p==repository)) => {},
-        _ => problems.push("project repositories: canonical repository is not a local repository listed in PROJECT.md".into()),
+        Ok(_) => { unlisted_repository=true; problems.push("project repositories: canonical repository is not a local repository listed in PROJECT.md".into()); },
+        Err(error) => problems.push(format!("PROJECT.md: {error:#}")),
     }
     if let Some(path)=&args.contract_file {
         let document:Value=serde_json::from_slice(&migration::read_plan_file(path)?)?;
@@ -578,6 +589,18 @@ pub fn run(ctx: &Ctx, slug: &str, mut args: Args) -> Result<Value> {
         if let Err(error)=herdr_farm::profile_config::check_worker_login(&frozen, &project) {problems.push(format!("profile evidence: {error:#}"));}
         if report["preparation"]["profile"]["execution_home"].as_str().is_none() { problems.push("sandboxed workers: profile has no execution home".into()); }
     }
+    let kind=config.get("profiles").and_then(|p|p.get(&args.profile)).and_then(|p|p.get("kind")).and_then(|v|v.as_str());
+    let request_digest=(|| -> Result<String> {
+        let document=match store.task_contract_document(&args.task)? {
+            Some(document)=>document,
+            None=>serde_json::from_slice(&contract_document(&args,&repository,snapshot.head,kind.context("profile kind missing")?,&project)?)?,
+        };
+        Ok(herdr_farm::store::owner_requests::contract_digest(document))
+    })();
+    if above_cap && let Ok(digest)=&request_digest
+        && store.owner_cap_exemption(&args.task,digest,jiff::Timestamp::now().as_millisecond())? {
+        problems.retain(|p|p!=&cap_refusal);
+    }
     let needs_activation=snapshot.control.as_ref().is_none_or(|c|c.state!=ProjectState::Active || c.reconciliation_required || c.config_digest.as_deref()!=migration::config_reference(Path::new(&pinned.path)).ok().and_then(|r|r.digest).as_deref());
     if needs_activation {
         for blocker in runtime::admission(&project, Path::new(&pinned.path))?.blockers {
@@ -590,6 +613,17 @@ pub fn run(ctx: &Ctx, slug: &str, mut args: Args) -> Result<Value> {
     let plan=profile_plan(ctx, &project, &args, problems.is_empty());
     if let Err(error)=&plan {problems.push(format!("profile evidence: {error:#}"));}
     problems.dedup();
+    let repository_refusal="project repositories: canonical repository is not a local repository listed in PROJECT.md";
+    if !problems.is_empty() && problems.iter().all(|p|p==&cap_refusal || p==repository_refusal) {
+        let digest=request_digest.context("cannot bind owner request to contract decisions")?;
+        for action in ["cap","repository"] {
+            if (action=="cap" && problems.contains(&cap_refusal)) || (action=="repository" && unlisted_repository) {
+                let request=store.request_owner(action,&args.task,&digest,&repository.display().to_string(),slug,jiff::Timestamp::now().as_millisecond())?;
+                let command=format!("{} owner {slug} approve {} --summary {}",crate::coordinator::current_prefix(&ctx.root)?,request.id,crate::remote::quote(&request.summary));
+                problems.push(format!("owner request {}: {command}",request.id));
+            }
+        }
+    }
     ensure!(problems.is_empty(), "launch run preflight refused:\n{}", problems.join("\n"));
     let mut run = Run { ctx, project: project.clone(), slug: slug.to_owned(), steps: Vec::new() };
     match steps(&mut run, &args, plan.context("profile evidence preflight failed")?) {
@@ -953,4 +987,24 @@ pub fn sweep_servers(ctx: &Ctx, slug: &str) -> Vec<String> {
         }
     }
     lines
+}
+
+fn split_command(raw: &str) -> Result<Vec<String>> {
+    let mut args = Vec::new();
+    let mut word = String::new();
+    let mut quote = None;
+    let mut escape = false;
+    let mut started = false;
+    for c in raw.chars() {
+        if escape { word.push(c); escape = false; started = true; continue; }
+        if c == '\\' && quote != Some('\'') { escape = true; started = true; continue; }
+        if let Some(q) = quote { if c == q { quote = None; } else { word.push(c); } }
+        else if c == '\'' || c == '"' { quote = Some(c); started = true; }
+        else if c.is_whitespace() { if started { args.push(std::mem::take(&mut word)); started = false; } }
+        else { word.push(c); started = true; }
+    }
+    ensure!(quote.is_none() && !escape, "unclosed quote or escape in --accept");
+    if started { args.push(word); }
+    ensure!(!args.is_empty(), "empty --accept command");
+    Ok(args)
 }

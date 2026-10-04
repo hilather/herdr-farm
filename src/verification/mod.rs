@@ -6,6 +6,7 @@
 mod checkout;
 mod evidence;
 mod manifest;
+pub mod toolchains;
 mod setup;
 mod repetitions;
 pub(crate) mod supervise;
@@ -266,8 +267,8 @@ pub(crate) fn program_allowed(program: &str, checkout: &Path) -> bool {
 /// only the shared root and the work directory's fence.
 pub fn verify_project(project: &Path, request: &VerifyRequest) -> Result<VerifyOutcome> {
     use std::os::unix::fs::DirBuilderExt;
-    if request.timeout < Duration::from_secs(1) || request.timeout > Duration::from_secs(300) {
-        bail!("verification timeout must be between 1 and 300 seconds");
+    if request.timeout < Duration::from_secs(1) || request.timeout > Duration::from_secs(3600) {
+        bail!("verification timeout must be between 1 and 3600 seconds");
     }
     if !request.work_dir.is_absolute() { bail!("verification work directory must be absolute"); }
     let scratch = crate::execution_guard::Resource::new("scratch", request.work_dir.display().to_string())?;
@@ -313,8 +314,8 @@ impl CheckOwnership for OperatorOwnership {
     fn held(&self) -> bool { matches!(self.slot, OperatorSlot::Project(_)) }
 }
 
-/// Automatic verifier timeout. The job lease (300 s) must cover the checkout,
-/// the check and the record.
+/// Legacy automatic timeout. Toolchain policies use their owner-declared
+/// timeout; the automatic job lease covers 3600 seconds plus preparation.
 pub const AUTO_TIMEOUT: Duration = Duration::from_secs(240);
 
 /// One automatic verification job. The policy is the stored signed body, never
@@ -479,6 +480,11 @@ fn verify_owned(store: &mut SqliteStore, request: &VerifyRequest, ownership: Opt
         );
     }
     let checks = parse_checks(&policy_bytes)?;
+    let toolchain = match toolchains::for_policy(Path::new(&target.project_store).parent().and_then(Path::parent).context("project path")?, &policy_bytes) {
+        Ok(resolved) => resolved,
+        Err(_) => return persist(store, &target, request, payload_digest, Vec::new(), Vec::new(), None, Some("toolchain_identity_mismatch"), None, String::new(), None, None),
+    };
+    let timeout = toolchains::timeout(toolchain.as_ref(), request.timeout);
     let hidden = parse_hidden(&policy_bytes)?;
     if !hidden.is_empty() && !hidden_inputs_ok(Path::new(&target.project_store), &hidden) {
         return persist(store, &target, request, payload_digest, Vec::new(), Vec::new(), None, Some("hidden_check_unavailable"), None, String::new(), None, None);
@@ -520,7 +526,7 @@ fn verify_owned(store: &mut SqliteStore, request: &VerifyRequest, ownership: Opt
             Some(checkout.tree), Some("required_output_missing"), None, String::new(), None, None);
     }
     if !crate::domain::verification_policy::ExecutionPolicy::parse(&policy_bytes)?
-        .commands().all(|args| program_allowed(&args[0], &checkout.path)) {
+        .commands().all(|args| toolchains::command_allowed(&args[0], &checkout.path, toolchain.as_ref())) {
         return persist(
             store,
             &target,
@@ -590,7 +596,7 @@ fn verify_owned(store: &mut SqliteStore, request: &VerifyRequest, ownership: Opt
     };
     let mut launch = supervise::launch(&supervise::Spec {
         unshare_program: request.unshare_program.clone(),
-        timeout: request.timeout,
+        timeout,
         checkout: checkout.path.clone(),
         policy: request.policy_path.clone(),
         scratch: request.work_dir.join("ns-root"),
@@ -598,6 +604,8 @@ fn verify_owned(store: &mut SqliteStore, request: &VerifyRequest, ownership: Opt
         commit: checkout.commit.clone(),
         tree: checkout.tree.clone(),
         policy_digest: target.policy_digest.clone(),
+        toolchain: toolchain.clone(),
+        repository: Some(PathBuf::from(&target.repository)),
         hidden: hidden.iter().map(|input| PathBuf::from(&input.path)).collect(),
     })?;
     if !unshare_ready(&request.unshare_program) {
@@ -620,7 +628,7 @@ fn verify_owned(store: &mut SqliteStore, request: &VerifyRequest, ownership: Opt
     launch.cmd.cancellation = request.cancellation.clone();
     let mut execution = evidence::Execution::start(Path::new(&target.project_store));
     launch.cmd.env.push(("HP_VERIFY_DEADLINE_MONOTONIC_MS".into(),
-        (repetitions::monotonic_ms().saturating_add(request.timeout.as_millis() as u64)).to_string()));
+        (repetitions::monotonic_ms().saturating_add(timeout.as_millis() as u64)).to_string()));
     // The check touches only its own scratch; record only if the inputs still hold.
     let (ran, target) = match ownership {
         Some(ownership) => {
@@ -666,7 +674,11 @@ fn verify_owned(store: &mut SqliteStore, request: &VerifyRequest, ownership: Opt
             );
         }
     };
-    let report = classify(&output, &checkout.commit, &checkout.tree);
+    let mut report = classify(&output, &checkout.commit, &checkout.tree);
+    if toolchain.as_ref().is_some_and(|r| !toolchains::unchanged(r)) {
+        report.success = false;
+        report.reason = Some("toolchain_identity_mismatch");
+    }
     #[cfg(test)]
     if request.fault == Fault::BumpFence {
         store.testing_append_event()?;
@@ -683,6 +695,7 @@ fn verify_owned(store: &mut SqliteStore, request: &VerifyRequest, ownership: Opt
         None
     };
     let mut metadata = execution.metadata(&report.stdout, output.stdout_truncated);
+    if let Some(resolved) = &toolchain { metadata["toolchain"] = serde_json::json!({"name":resolved.name,"digest":resolved.digest,"paths":resolved.identities,"network":resolved.toolchain.network,"timeout_seconds":resolved.toolchain.timeout_seconds}); }
     if crate::domain::verification_policy::ExecutionPolicy::parse(&policy_bytes)?.version == 2 {
         metadata["version"] = serde_json::json!("verification-metadata.v2");
         let observations = evidence::repetitions(&output.stderr, output.timed_out || output.code == Some(78));
@@ -925,6 +938,22 @@ pub(crate) fn unshare_ready(path: &Path) -> bool {
         && meta.uid() == root.uid()
         && meta.mode() & 0o022 == 0
         && meta.mode() & 0o111 != 0
+}
+
+
+/// Toolchain checks receive only the owner-declared environment. Legacy checks
+/// retain the verifier environment, as before toolchain policies.
+pub(super) fn check_command(program: &str) -> std::process::Command {
+    let mut command = std::process::Command::new(program);
+    let Ok(raw) = std::env::var("HP_VERIFY_CHECK_ENV") else { return command; };
+    command.env_clear().env("PATH", "/usr/bin:/bin").env("HOME", "/tmp").env("TMPDIR", "/tmp")
+        .env("LANG", "C").env("LC_ALL", "C").env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_NO_LAZY_FETCH", "1").env("GIT_NO_REPLACE_OBJECTS", "1").env("GIT_OPTIONAL_LOCKS", "0");
+    if let Ok(env) = serde_json::from_str::<Vec<String>>(&raw) {
+        for entry in env { if let Some((name, value)) = entry.split_once('=') { command.env(name, value); } }
+    }
+    command
 }
 
 #[cfg(test)]

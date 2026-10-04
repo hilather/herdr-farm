@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use std::{
     io::{Read, Write},
     path::Path,
-    process::{Child, Command, Stdio},
+    process::{Child, Stdio},
     thread,
 };
 
@@ -58,7 +58,7 @@ fn start(
         "tests": {"status":"unavailable","reason":"incomplete","results":[]}});
     *sequence += 1;
     eprintln!("hp-verify observation={observation}");
-    let mut child = Command::new(&args[0])
+    let mut child = super::check_command(&args[0])
         .args(&args[1..])
         .current_dir(checkout)
         .stdin(Stdio::null())

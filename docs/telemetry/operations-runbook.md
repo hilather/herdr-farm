@@ -138,6 +138,7 @@ optin.external_export_files prune 7d source_of_truth destructive
 optin.captured_evidence not_built 7d source_of_truth destructive
 canonical.worker_permissions external_lifecycle - canonical destructive
 canonical.state external_lifecycle - canonical destructive
+canonical.owner_request_lock external_lifecycle - canonical destructive
 canonical.coordinator_journal external_lifecycle - canonical destructive
 canonical.coordinator_permissions external_lifecycle - derivable
 canonical.verification_execution_slots external_lifecycle - derivable
