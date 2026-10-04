@@ -183,8 +183,12 @@ impl Directory {
     }
     /// Remove a private owned tree without following links. Callers must exclude
     /// managed writers; cancellation may leave a partly removed temporary tree.
+    /// Durable on success: each directory is synced once after its entries are
+    /// removed, and this directory after the tree's own unlink (a sync per
+    /// unlink made a maximum library take over 10 s on disk).
     pub fn remove_owned_tree(&self,name:&OsStr,budget:&mut Budget)->Result<()> {
-        self.remove_owned_node(name,budget,0,self.metadata()?.dev(),&mut ||{})
+        self.remove_owned_node(name,budget,0,self.metadata()?.dev(),&mut ||{})?;
+        self.0.sync_all()?;Ok(())
     }
     fn remove_owned_node(&self,name:&OsStr,budget:&mut Budget,depth:usize,device:u64,after_unlink:&mut impl FnMut())->Result<()> {
         // The private staging root is outside the source content depth; a
@@ -198,13 +202,14 @@ impl Directory {
         if directory {
             let child=Self::from_file(file)?;
             for entry in child.names(budget)? {child.remove_owned_node(&entry,budget,depth+1,device,after_unlink)?;}
+            child.0.sync_all()?;
         }
         budget.check()?;
         let current=self.child(name)?.metadata()?;
         ensure!(current.dev()==before.dev()&&current.ino()==before.ino()&&current.is_dir()==directory,"staging entry identity changed");
         let name=CString::new(name.as_bytes())?;
         if unsafe{libc::unlinkat(self.0.as_raw_fd(),name.as_ptr(),if directory{libc::AT_REMOVEDIR}else{0})}<0 {return Err(io::Error::last_os_error().into());}
-        self.0.sync_all()?;after_unlink();Ok(())
+        after_unlink();Ok(())
     }
     pub fn names(&self,budget:&Budget)->Result<Vec<OsString>> {
         budget.check()?;

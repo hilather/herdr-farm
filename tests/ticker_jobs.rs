@@ -277,10 +277,13 @@ fn cooldown_lab(slugs: [&str; 2]) -> Lab {
     lab
 }
 /// Asserts every run of `own` follows its cooldown (measured from completion),
-/// and that `other` work ran in between.
+/// and that `other` work ran while one of those cooldowns was pending. Other
+/// work may be one-shot (a coordinator start, a prime), so which window it
+/// falls in depends on scheduling; any window proves the cooldown did not
+/// block the ticker.
 fn assert_cooled_down(what: &str, own: &[f64], other: &[f64]) {
     assert!(own.len() >= 2 && gaps(own).iter().all(|gap| *gap >= cadence_seconds(40.0)), "{what} ran again before its cooldown: {own:?}");
-    assert!(other.iter().any(|t| own[0] < *t && *t < own[1]), "nothing else ran while {what} cooled down: {own:?} {other:?}");
+    assert!(other.iter().any(|t| own.windows(2).any(|w| w[0] < *t && *t < w[1])), "nothing else ran while {what} cooled down: {own:?} {other:?}");
 }
 
 /// Replaces `coordinator_start_confirms_submission_once_without_certifying_readiness`
