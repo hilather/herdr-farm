@@ -152,7 +152,7 @@ impl SqliteStore {
     pub fn create_memory_snapshot(&mut self,plan:crate::domain::SnapshotPlan)->Result<crate::domain::MemorySnapshot> {
         use crate::domain::{selection_score, SELECTION_POLICY_VERSION, SnapshotId};
         if plan.profile_digest.len()!=64 {return Err(invalid("invalid profile digest"));}
-        let tx=self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx=super::mutation_transaction(&mut self.connection)?;
         let version:u32=tx.query_row("PRAGMA user_version",[],|r|r.get(0))?;
         if version<23 {return Err(StoreError::UnsupportedSchema(version));}
         if plan.instructions.len()>MAX_RECORD_BYTES {return Err(invalid("snapshot instructions exceed 1 MiB"));}
@@ -275,7 +275,7 @@ impl SqliteStore {
     }
     pub(crate) fn read_memory_snapshot_with_budget(&mut self,id:&str,budget:Option<&read_budget::ReadBudget>)->Result<crate::domain::MemorySnapshot> {
         if let Some(budget)=budget {budget.check()?;}
-        let tx=self.connection.transaction()?;
+        let tx=super::read_transaction(&mut self.connection)?;
         let row=read_budget::one(&tx,"SELECT id,task_id,task_revision,profile_name,profile_digest,config_digest,selection_policy_version,estimator,sequence,required_bytes,optional_bytes,budget_bytes,omitted_optional_count,manifest_hash,scope_digest FROM memory_snapshots WHERE id=?1",[id],budget,&[],|r| Ok((
             r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,u64>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?,
             r.get::<_,Option<String>>(5)?,r.get::<_,u32>(6)?,r.get::<_,String>(7)?,r.get::<_,u64>(8)?,r.get::<_,u64>(9)?,
@@ -318,7 +318,7 @@ impl SqliteStore {
         Ok(record(&tx,id)?)
     }
     pub(crate) fn memory_record_with_budget(&mut self,id:&str,budget:Option<&read_budget::ReadBudget>)->Result<Option<MemoryRecord>> {
-        let tx=self.connection.transaction()?;schema(&tx)?;
+        let tx=super::read_transaction(&mut self.connection)?;schema(&tx)?;
         record_with_budget(&tx,id,budget)
     }
     pub fn memory_record_by_key(&mut self,key:&str)->Result<Option<MemoryRecord>> {
@@ -341,7 +341,7 @@ impl SqliteStore {
         self.memory_revision_with_budget(id,revision,None)
     }
     pub(crate) fn memory_revision_with_budget(&mut self,id:&str,revision:u64,budget:Option<&read_budget::ReadBudget>)->Result<Option<MemoryRevision>> {
-        let tx=self.connection.transaction()?;schema(&tx)?;
+        let tx=super::read_transaction(&mut self.connection)?;schema(&tx)?;
         let row:Option<(String,u64,String,String,u64,String)>=read_budget::optional(&tx,"SELECT record_id,revision,body_hash,provenance_hash,promoted_seq,applicability FROM memory_revisions WHERE record_id=?1 AND revision=?2",params![id,integer(revision)?],budget,&[(5,1)],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)))?;
         Ok(match row {
             Some((record_id,revision,body,prov,promoted_seq,applicability))=>Some(MemoryRevision{

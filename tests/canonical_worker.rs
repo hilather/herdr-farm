@@ -1162,7 +1162,8 @@ struct ReviewWorld { opportunity: String, submission: String, candidate: String,
     author_configuration: String, author_profile_digest: String, snapshot: Value, selection: PathBuf }
 
 impl Lab {
-    fn review_world(&mut self) -> ReviewWorld {
+    fn review_world(&mut self) -> ReviewWorld { self.review_world_setup(true) }
+    fn review_world_setup(&mut self, bind: bool) -> ReviewWorld {
         self.prepare_profile();
         let head = self.head().to_string();
         self.ok(&["task", "demo", "add", "authored", "--title", AUTHOR_TITLE, "--expected-head", &head]);
@@ -1203,6 +1204,8 @@ impl Lab {
             "attempt_id": AUTHOR_ATTEMPT, "repository": repository, "base_oid": base, "candidate_oid": candidate, "object_format": "sha256",
             "artifact_manifest": [{"path": "lib.rs", "oid": candidate}], "claimed_checks": [], "objects": objects}).to_string()).unwrap();
         let submission = self.ok(&["result", "demo", "submit", "--input-file", result.to_str().unwrap()])["submission_id"].as_str().unwrap().to_owned();
+        if !bind { return ReviewWorld { opportunity: String::new(), submission, candidate, base, repository, store, author_configuration, author_profile_digest,
+            snapshot: Value::Null, selection: self.path("unused-selection.json") }; }
         let opportunity = self.ok(&["telemetry", "demo", "review", "open", &submission, "--protocol", "review-protocol.v1", "--budget-ms", "600000",
             "--prior-finding", "finding:prior-a"])["opportunity"]["opportunity_id"].as_str().unwrap().to_owned();
         let assignment = self.ok(&["telemetry", "demo", "review", "assign", &opportunity, "--blind", "--candidate", "worker"])["assignment"].clone();
@@ -2060,7 +2063,7 @@ impl Lab {
     fn write_agent(&self, source: &str, consts: &[(&str, String)]) {
         let mut text = format!("const TEST_TIME_SCALE: &str = {:?};\n{source}", include_str!("support/time-scale.txt").trim());
         for (name, value) in consts { text += &format!("const {name}: &str = {value:?};\n"); }
-        let (agent, file) = (self.path("bin/claude"), self.path("bin/probe.rs"));
+        let (agent, file) = (self.agent(), self.path("bin/probe.rs"));
         fs::write(&file, text).unwrap();
         let built = Command::new("rustc").args(["--edition", "2021", "-o"]).arg(&agent).arg(&file).output().unwrap();
         assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
@@ -2437,4 +2440,87 @@ fn canonical_inbox_wait_timeout_is_read_only_and_rejects_excessive_timeout() {
     assert_eq!(lab.ok(&["inbox", "demo", "wait", "--timeout", "1"]), json!({"items":0,"timed_out":true}));
     assert_eq!(lab.state(), before);
     assert!(!lab.cli(&["inbox", "demo", "wait", "--timeout", "7201"]).status.success());
+}
+
+const REVIEW_AUTO_PROBE: &str = r##"
+use std::{fs, path::Path, process::Command};
+fn field(json: &str, key: &str) -> String {
+    let marker = format!("\"{key}\": \"");
+    let start = json.find(&marker).unwrap() + marker.len();
+    json[start..].split('"').next().unwrap().to_owned()
+}
+fn review(args: &[&str]) -> String {
+    let out = Command::new(BIN).env("HERDR_FARM_TEST_TIME_SCALE", TEST_TIME_SCALE).args(["--root", ROOT, "telemetry", "demo", "review"]).args(args).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8(out.stdout).unwrap()
+}
+fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--version") { println!("{VERSION}"); return }
+    let spool = std::env::var("HERDR_FARM_SUBMISSION_SPOOL").unwrap();
+    let attempt = Path::new(&spool).file_name().unwrap().to_str().unwrap();
+    let session = review(&["session", "--attempt", attempt]);
+    let view = review(&["present", &field(&session, "opportunity_id")]);
+    let findings = if field(&view, "kind") == "skeptical" { r#"[{"ref":"finding:new","title":"New edge case"}]"# }
+        else { r#"[{"ref":"finding:first","title":"First edge case"},{"ref":"finding:second","title":"Second edge case"}]"# };
+    fs::write("receipt.json", format!("{{\"schema\":\"review_receipt.v1\",\"session_id\":\"{}\",\"submission_id\":\"{}\",\"candidate_oid\":\"{}\",\"outcome\":\"completed\",\"findings\":{},\"evidence\":[\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"]}}",
+        field(&session,"session_id"), field(&session,"submission_id"), field(&session,"candidate_oid"),findings)).unwrap();
+    let receipt = review(&["submit","--input-file","receipt.json"]);
+    fs::write("submitted.tmp", receipt).unwrap(); fs::rename("submitted.tmp","submitted.json").unwrap();
+    loop { std::thread::park() }
+}
+"##;
+
+#[test]
+fn launch_run_reviews_use_the_claude_spool_and_record_skeptical_yield() { review_auto_spool("claude"); }
+#[test]
+fn launch_run_reviews_use_the_codex_spool_and_record_skeptical_yield() { review_auto_spool("codex"); }
+
+fn review_auto_spool(kind: &'static str) {
+    let mut lab = Lab::of_kind(kind, "unknown_usage='allow_with_warning'\n[worker_isolation]\nshare_login=false", |repo| repo.to_owned());
+    lab.write_agent(REVIEW_AUTO_PROBE, &[("ROOT", lab.path("root").display().to_string()), ("BIN", BIN.into()), ("VERSION",lab.version().into())]);
+    let world = lab.review_world_setup(false);
+    fs::write(lab.project.join("PROJECT.md"), format!("+++\n[[repos]]\npath={:?}\n+++\nRetained project review context.\n", lab.repo)).unwrap();
+    let prompt = lab.path("instructions.md");
+    fs::write(&prompt, "Check the candidate's edge cases.").unwrap();
+    lab.serve();
+    let socket = lab.socket();
+    for (task, method) in [("review-code","code"),("review-skeptic","skeptical")] {
+        let args = ["launch", "demo", "run", "--task", task, "--profile", "worker", "--repository", lab.repo.to_str().unwrap(), "--review-of", "authored",
+            "--review-kind", method, "--prompt-file", prompt.to_str().unwrap(), "--herdr-socket", socket.to_str().unwrap(), "--sign-with", lab.key.to_str().unwrap()];
+        let report = lab.ok(&args);
+        let attempt = AttemptId::new(report["attempt"].as_str().unwrap()).unwrap();
+        let before = lab.review_show(None);
+        assert_eq!(lab.ok(&args)["attempt"], report["attempt"]);
+        assert_eq!(lab.review_show(None), before);
+        let worktree = lab.planned_worktree(&attempt);
+        let mut ticker = lab.spawn();
+        lab.wait(&mut ticker, 180, &|| worktree.join("submitted.json").exists());
+        lab.stop(ticker);
+        let shown = lab.review_show(None);
+        let opportunity = shown["opportunities"].as_array().unwrap().iter().find(|o|o["kind"]==method).unwrap();
+        assert_eq!(opportunity["submission_id"], world.submission);
+        assert_eq!(opportunity["assignment"]["blind"], false);
+        assert_eq!(opportunity["role"], "gate");
+        assert_eq!(opportunity["sessions"][0]["completion"]["findings_submitted"], if method=="code" {2} else {1});
+        let delivered = lab.requests().into_iter().rfind(|(m,_)|m=="agent.prompt").unwrap().1["text"].as_str().unwrap().to_owned();
+        assert!(delivered.contains("Retained project review context") && delivered.contains("Review instructions") && delivered.contains("Check the candidate's edge cases."), "{delivered}");
+        // Stop this worker before launching the next review; the receipt remains
+        // a completion even though this probe intentionally omitted its report.
+        let running = lab.attempt(&attempt);
+        lab.ok(&["task","demo","cancel-attempt",attempt.as_str(),"--expected-revision",&running.revision.to_string(),"--expected-head",&lab.head().to_string(),"--reason","probe done"]);
+        let mut ticker = lab.spawn();
+        lab.wait(&mut ticker, 120, &|| lab.attempt(&attempt).termination_observed);
+        lab.stop(ticker);
+        let inbox = lab.ok(&["inbox","list","demo"]).to_string();
+        assert!(inbox.contains("review_receipt_without_result"), "{inbox}");
+    }
+    let report = lab.ok(&["telemetry","demo","review","report"]);
+    assert_eq!(report["metrics"]["M20"]["value"], "2/2");
+    assert_eq!(report["metrics"]["M28"]["excluded"]["pending_triage"], 1);
+    let findings = lab.ok(&["telemetry","demo","review","findings","show"]);
+    let claim = findings["findings"]["submissions"].as_array().unwrap().iter().find(|s|s["finding_ref"]=="finding:new").unwrap()["claims"][0]["claim_id"].as_i64().unwrap().to_string();
+    lab.ok(&["telemetry","demo","review","findings","validate",&claim,"--new","--severity","high","--evidence",&format!("sha256:{}","a".repeat(64))]);
+    let report = lab.ok(&["telemetry","demo","review","report"]);
+    assert_eq!(report["metrics"]["M28"]["denominator"], 1);
+    assert_eq!(report["metrics"]["M28"]["value"], "1/1");
 }

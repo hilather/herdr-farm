@@ -131,7 +131,7 @@ fn load_by_snapshot(db: &Connection, snapshot_id: &str) -> Result<Option<Consume
 }
 
 fn insert_binding(
-    tx: &rusqlite::Transaction,
+    tx: &Connection,
     consumer_id: &str,
     snapshot_id: &str,
     task_id: Option<&str>,
@@ -165,7 +165,7 @@ fn insert_binding(
 }
 
 pub(super) fn ensure_for_snapshot(
-    tx: &rusqlite::Transaction,
+    tx: &Connection,
     consumer_id: &str,
     snapshot_id: &str,
     task_id: Option<&str>,

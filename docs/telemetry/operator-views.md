@@ -243,3 +243,21 @@ use in Unix milliseconds. Edited profiles retain separate labelled hashes and
 use ranges. These labels are display evidence only: configuration identity,
 comparison grouping, and metric populations remain unchanged. Model and effort
 are the verified requested pins, not claims about effective runtime routing.
+
+
+Reviews launched by the coordinator should use
+`launch PROJECT run --task REVIEW --profile PROFILE --repository REPO --review-of TASK --output docs/reviews/R.md --prompt-file BRIEF`.
+Skeptic challenges add `--review-kind skeptical`; use `--review-scope tree`
+for a whole-gate challenge. The launch records the opportunity, operator
+assignment and session automatically and retains the project context and
+review instructions. The worker submits a review receipt (including
+`findings: []` for an empty review) through the spool in addition to its normal
+report result. Receipts remain proposals: triage with
+`telemetry PROJECT review findings validate|reject|duplicate` at the owner CLI.
+`telemetry PROJECT review report` shows M20 completion and M28 skeptical yield;
+pending pass claims appear as `pending_triage` until decided. A
+`attempt.review_receipt_without_result` notice means the receipt is recorded
+but the report still needs submission. Fix rounds use ordinary scoped
+`launch run --write ... --output ... --prompt-file FIX_BRIEF` tasks; automatic
+fix attribution is a later card. See
+[review launch contracts](contracts-review.md) §13.

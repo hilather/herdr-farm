@@ -243,7 +243,8 @@ fn log(tx: &Connection, kind: &str, principal: &str, expected: Option<i64>, now:
     Ok(seq)
 }
 
-fn done(tx: rusqlite::Transaction<'_>, seq: i64, subject: serde_json::Value) -> Result<FindingEvent> {
+fn done<'a>(tx: impl Into<super::MutationTransaction<'a>>, seq: i64, subject: serde_json::Value) -> Result<FindingEvent> {
+    let tx = tx.into();
     let out = tx.query_row("SELECT kind,principal,authority,expected_seq,recorded_unix_ms FROM protocol_log WHERE seq=?1", [seq],
         |r| Ok(FindingEvent { seq, kind: r.get(0)?, principal: r.get(1)?, authority: r.get(2)?, expected_seq: r.get(3)?, recorded_unix_ms: r.get(4)?, subject }))?;
     tx.commit()?;
@@ -285,7 +286,7 @@ impl SqliteStore {
         if d.evidence_min > 64 { return Err(invalid("evidence_min is 0 to 64".into())); }
         let (challenges, failure_classes, tools) = (tokens(&d.challenges, "challenges", 1)?, tokens(&d.failure_classes, "failure_classes", 1)?, tokens(&d.permitted_tools, "permitted_tools", 0)?);
         let budget = integer(d.budget_ms)?;
-        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = super::mutation_transaction(&mut self.connection)?;
         schema_57(&tx)?;
         finding_triage::triage_authority(&tx, principal)?;
         if tx.query_row("SELECT EXISTS(SELECT 1 FROM review_protocols WHERE protocol=?1)", [&d.protocol], |r| r.get::<_, bool>(0))? {
@@ -321,7 +322,7 @@ impl SqliteStore {
         sorted.sort();
         sorted.dedup();
         if sorted.len() != priors.len() { return Err(invalid("duplicate prior opportunity".into())); }
-        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = super::mutation_transaction(&mut self.connection)?;
         schema_57(&tx)?;
         finding_triage::triage_authority(&tx, principal)?;
         let (submission, task, candidate, scope, kind, role, protocol, budget, created) = opportunity(&tx, opportunity_id)?;

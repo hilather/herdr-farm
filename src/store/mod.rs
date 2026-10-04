@@ -61,6 +61,9 @@ impl std::ops::Deref for MutationTransaction<'_> {
     type Target = Connection;
     fn deref(&self) -> &Connection { match self { Self::Transaction(tx) => tx, Self::Savepoint(tx) => tx } }
 }
+impl<'a> From<rusqlite::Transaction<'a>> for MutationTransaction<'a> {
+    fn from(tx: rusqlite::Transaction<'a>) -> Self { Self::Transaction(tx) }
+}
 impl MutationTransaction<'_> {
     fn commit(self) -> rusqlite::Result<()> { match self { Self::Transaction(tx) => tx.commit(), Self::Savepoint(tx) => tx.commit() } }
 }
@@ -70,6 +73,11 @@ fn mutation_transaction(connection: &mut Connection) -> rusqlite::Result<Mutatio
     } else {
         Ok(MutationTransaction::Savepoint(connection.savepoint()?))
     }
+}
+// Preserve deferred reads while permitting internal composition in a write transaction.
+fn read_transaction(connection: &mut Connection) -> rusqlite::Result<MutationTransaction<'_>> {
+    if connection.is_autocommit() { Ok(MutationTransaction::Transaction(connection.transaction()?)) }
+    else { Ok(MutationTransaction::Savepoint(connection.savepoint()?)) }
 }
 impl SqliteStore {
     /// Internal composition of store operations only; no external effects.

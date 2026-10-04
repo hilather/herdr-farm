@@ -278,7 +278,7 @@ impl SqliteStore {
         if spec.budget_ms == Some(0) { return Err(invalid("budget must be positive".into())); }
         let budget = spec.budget_ms.map(integer).transpose()?;
         let prior = refs(&spec.prior_findings, finding_ref, MAX_REFS, "prior finding")?;
-        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = super::mutation_transaction(&mut self.connection)?;
         schema_54(&tx)?;
         let (task, revision, candidate): (String, i64, String) = tx.query_row("SELECT task_id,contract_revision,candidate_oid FROM result_submissions WHERE submission_id=?1",
             [&spec.submission_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?
@@ -307,7 +307,7 @@ impl SqliteStore {
     /// same-family review as a covariate (contracts-review.md §3).
     pub fn assign_review(&mut self, opportunity: &str, choice: &ReviewAssignmentChoice, principal: &str, now: i64) -> Result<ReviewAssignment> {
         principal_ok(principal)?;
-        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = super::mutation_transaction(&mut self.connection)?;
         schema_54(&tx)?;
         let (_, _, author) = opportunity_binding(&tx, opportunity)?;
         if tx.query_row("SELECT EXISTS(SELECT 1 FROM review_assignments WHERE opportunity_id=?1)", [opportunity], |r| r.get::<_, bool>(0))? {
