@@ -862,7 +862,7 @@ fn admit_background(_ctx:&Ctx,log:&Log,memory:&mut Memory,canonical:Vec<PathBuf>
         if admit_effects(log,memory){memory.prefer_copy=false;return;}
     }
     #[cfg(feature="state-store")]
-    if let Some(queue)=memory.routine_jobs.as_mut(){for error in queue.admit_projects_where(canonical,|project|!memory.canonical_observations.as_ref().is_some_and(|reads|reads.pending_project(&project.display().to_string()))){log.line(&error);}if queue.pending(){memory.prefer_copy=true;return;}}
+    if let Some(queue)=memory.routine_jobs.as_mut(){for error in queue.admit_projects_where(canonical,|project|!memory.canonical_observations.as_ref().is_some_and(|reads|reads.pending_project(&project.display().to_string()))){log.line(&error);}for passed in queue.take_passed(){log.line(&passed);}if queue.pending(){memory.prefer_copy=true;return;}}
     #[cfg(not(feature="state-store"))]
     let _=canonical;
     if admit_effects(log,memory){memory.prefer_copy=false;}

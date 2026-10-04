@@ -98,6 +98,10 @@ pub fn read_routine_execution_hint(project:&Path,budget:&mut Budget,last:Option<
     let(project,publication)=publication(project,budget)?;
     crate::store::controller_hint::read_routine(&project.join(".state/state.db"),&publication,budget,last,now)
 }
+pub fn read_routine_queued(project:&Path,budget:&mut Budget)->Result<bool> {
+    let(project,publication)=publication(project,budget)?;
+    crate::store::controller_hint::read_routine_queued(&project.join(".state/state.db"),&publication,budget)
+}
 pub fn read_controller_effect_hint(project:&Path,budget:&mut Budget,turn:u64,now:i64)->Result<Option<crate::store::controller_hint::ControllerEffectHint>> {
     let(project,publication)=publication(project,budget)?;
     crate::store::controller_hint::read(&project.join(".state/state.db"),&publication,budget,turn,now)
