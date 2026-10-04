@@ -1429,7 +1429,8 @@ fn launch_run_records_reviews_and_skeptical_yield_and_refuses_without_writes() {
 
 fn plant_owner_memory(lab: &Lab) {
     fs::create_dir_all(lab.project.join("memory/candidates")).unwrap();
-    let mut index = String::from("# Memory\n");
+    // The real project template's prose names an example link; it is not an entry.
+    let mut index = String::from("# Memory\n\nOne line per memory file: `- [title](memory/file.md): what it holds`.\n");
     for n in 1..=3 {
         index.push_str(&format!("- [Decision {n}](memory/decision-{n}.md)\n"));
         fs::write(lab.project.join(format!("memory/decision-{n}.md")), format!("<!-- herdr-projects user memory; source=user; created=2026-10-04; provenance=owner-{n} -->\n\n# Owner decision {n}\n\nKeep decision {n}.\n")).unwrap();

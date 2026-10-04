@@ -662,25 +662,28 @@ pub fn adopt_plan(project: &Path) -> Result<AdoptPlan> {
     plan.owner_policy_digest = migration::config_reference(Path::new(&config.path))?.digest.context("owner config missing")?;
     let index = read_memory_file(&project.join("MEMORY.md"))?;
     let index = std::str::from_utf8(&index)?;
+    // Only list entries (`- [title](memory/...)`) name memory files; prose such as
+    // the template's "One line per memory file: `- [title](memory/file.md)`" does not.
+    let entries: Vec<String> = index.lines().map(str::trim_start)
+        .filter(|line| line.starts_with("- ["))
+        .filter_map(|line| line.split_once("](memory/").and_then(|(_, rest)| rest.split_once(')')).map(|(name, _)| format!("memory/{name}")))
+        .collect();
     let mut outcomes = vec![serde_json::json!({"path":"MEMORY.md","outcome":"retained_index"})];
     let mut blockers = Vec::new();
     for source in &plan.sources {
         if source.path == "MEMORY.md" { continue; }
         let bytes = read_memory_file(&project.join(&source.path))?;
         let provenance = owner_header(std::str::from_utf8(&bytes)?);
-        let listed = index.contains(&format!("({})", source.path));
+        let listed = entries.iter().any(|entry| entry == &source.path);
         let approved = listed && provenance.is_some();
         outcomes.push(serde_json::json!({"path":source.path,"outcome":if approved {"import_constraint"} else {"refused"},"provenance":provenance}));
         if !approved { blockers.push(format!("{}: requires a source=user header with provenance and a MEMORY.md link", source.path)); }
     }
-    for link in index.split("(memory/").skip(1) {
-        if let Some((name, _)) = link.split_once(')') {
-            let path = format!("memory/{name}");
-            if name.starts_with("candidates/") { continue; }
-            if !plan.sources.iter().any(|s| s.path == path) {
-                blockers.push(format!("{path}: listed memory file missing or unsupported"));
-                outcomes.push(serde_json::json!({"path":path,"outcome":"refused"}));
-            }
+    for path in &entries {
+        if path.starts_with("memory/candidates/") { continue; }
+        if !plan.sources.iter().any(|s| &s.path == path) {
+            blockers.push(format!("{path}: listed memory file missing or unsupported"));
+            outcomes.push(serde_json::json!({"path":path,"outcome":"refused"}));
         }
     }
     let candidates = project.join("memory/candidates");
