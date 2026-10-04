@@ -448,7 +448,9 @@ pub(crate) fn attempt_usage_with(db: &Connection, attempt: &str, index: &ChildIn
     let mut primary = primary_attempt_usage(db, attempt)?;
     // An unavailable usage (e.g. `schema_unrecognized`) stays exactly as it is.
     if index.empty || primary["status"] == "unavailable" { return Ok(primary); }
-    let (own, children, excluded) = index.by_attempt.get(attempt).cloned().unwrap_or_else(|| (zero_usage(), zero_usage(), Vec::new()));
+    // Attempts without child sessions keep exactly the primary-only shape.
+    let Some((own, children, excluded)) = index.by_attempt.get(attempt).cloned() else { return Ok(primary) };
+    if children["records"] == 0 && excluded.is_empty() { return Ok(primary); }
     let mut total = own;
     add_usage(&mut total, &children);
     primary["children"] = children;
