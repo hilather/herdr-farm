@@ -32,6 +32,8 @@ pub struct Args {
     /// Planning task: its single deliverable, a Markdown document under `docs/`.
     pub plan_output: Option<String>,
     pub review_of: Option<String>,
+    pub fixes_review: Option<String>,
+    pub fixes: Vec<String>,
     pub review_kind: String,
     pub review_scope: String,
     pub write: Vec<String>,
@@ -536,6 +538,7 @@ pub fn run(ctx: &Ctx, slug: &str, mut args: Args) -> Result<Value> {
         if let Some(task) = runtime::snapshot(&project)?.tasks.iter().find(|t| t.id.as_str() == args.task) { context.push_str(&task.title); }
         migration::open_active(&project)?.check_review_run(&args.task, args.review_of.as_deref().unwrap(), &args.review_kind, &args.review_scope, &args.profile, &context)?;
     }
+    migration::open_active(&project)?.check_fix_run(&args.task, args.fixes_review.as_deref(), &args.fixes, &args.profile)?;
     eprintln!("launch run: preflight");
     let pinned = migration::status(&project)?.plan.config.context("migration has no pinned config")?;
     let config: toml::Value = toml::from_str(&String::from_utf8(migration::read_plan_file(Path::new(&pinned.path))?)?)?;
@@ -818,6 +821,9 @@ fn steps(run: &mut Run, args: &Args, plan: ProfilePlan) -> Result<Value> {
     eprintln!("launch run: reconcile_and_activate");
     activate(run, "reconcile_and_activate", created)?;
 
+    if args.fixes_review.is_some() || !args.fixes.is_empty() {
+        migration::open_active(&project)?.prepare_fix_run(&args.task, args.fixes_review.as_deref(), &args.fixes, &args.profile, jiff::Timestamp::now().as_millisecond())?;
+    }
     if args.prepare_only {
         return Ok(report(run, &args.task, &profile, &kind, &herdr, &socket, None, None, worker_wall_seconds));
     }

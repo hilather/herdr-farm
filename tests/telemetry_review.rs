@@ -2503,3 +2503,102 @@ fn review_cost_and_acceptance_metrics() {
         &json!({"status": "partial", "currency": "USD", "amount": "0.018"})));
     assert_eq!(m24["sessions"], json!({"total": 5, "priced": 4, "partial": 0, "unavailable": {"no_usage_bound": 1}}));
 }
+
+#[test]
+fn fix_launch_selects_pending_and_validated_findings_and_refuses_atomically() {
+    let f = Fixture::new();
+    let world = review_world(&f, &["rev-fix-selection"]);
+    completed_review(&f, &world, "code", "rev-fix-selection", json!(["finding:selected","finding:retained","finding:false","finding:duplicate"]));
+    let add = |task: &str| {
+        use herdr_farm::domain::{Commit, Mutation, Task, TaskId, TaskState};
+        let mut store = SqliteStore::open(&f.project.join(".state/state.db")).unwrap();
+        store.commit(Commit { expected_head: store.current_head().unwrap(), mutations: vec![Mutation::Task {
+            expected: None, next: Task { id: TaskId::new(task).unwrap(), revision: 1, state: TaskState::Draft, title: task.into(), active_attempt: None }
+        }] }).unwrap();
+    };
+    add("selected-fix"); add("validated-fix"); add("rollback-fix");
+    let path = f.project.join(".state/state.db");
+    let selected = vec!["finding:selected".to_owned()];
+    let mut store = SqliteStore::open(&path).unwrap();
+    let before = f.cli_args(&["review","findings","show"]).0;
+    assert!(store.prepare_fix_run("rollback-fix",None,&selected,"missing-profile",unix_ms()).is_err());
+    assert_eq!(f.cli_args(&["review","findings","show"]).0,before,"profile refusal rolls back validation and binding");
+    assert_eq!(fixes_show(&f,None)["repairs"],json!([]));
+    store.prepare_fix_run("selected-fix",None,&selected,"fast",unix_ms()).unwrap();
+    let triage = f.cli_args(&["review","findings","show"]).0["findings"].clone();
+    let claim = |reference: &str| triage["submissions"].as_array().unwrap().iter().find(|s|s["finding_ref"]==reference).unwrap()["claims"][0].clone();
+    assert_eq!(claim("finding:selected")["outcome"],"validated");
+    for reference in ["finding:retained","finding:false","finding:duplicate"] { assert_eq!(claim(reference)["outcome"],"pending"); }
+    let repairs = fixes_show(&f,None);
+    assert_eq!(repairs["repairs"].as_array().unwrap().len(),1);
+    assert_eq!(repairs["repairs"][0]["assignment"],"configuration");
+    assert_eq!(repairs["repairs"][0]["attempts"],json!([]));
+    store.prepare_fix_run("selected-fix",None,&selected,"fast",unix_ms()).unwrap();
+    assert_eq!(fixes_show(&f,None),repairs);
+    assert_eq!(f.cli_args(&["review","findings","show"]).0["findings"],triage);
+    let id = |reference: &str| claim(reference)["claim_id"].as_i64().unwrap().to_string();
+    let canonical = claim("finding:selected")["canonical_finding"].as_str().unwrap().to_owned();
+    f.cli_args(&["review","findings","reject",&id("finding:false"),"--reason","intended_behavior"]);
+    f.cli_args(&["review","findings","duplicate",&id("finding:duplicate"),"--of",&canonical]);
+    let validated = f.cli_args(&["review","findings","validate",&id("finding:retained"),"--new","--severity","high","--evidence",&evidence('e')]).0["event"]["subject"]["finding_id"].as_str().unwrap().to_owned();
+    store.prepare_fix_run("validated-fix",None,std::slice::from_ref(&validated),"fast",unix_ms()).unwrap();
+    let after = fixes_show(&f,None);
+    assert_eq!(after["repairs"].as_array().unwrap().len(),2);
+    let decisions = f.cli_args(&["review","findings","show"]).0;
+    for refs in [vec!["finding:false".into()],vec!["finding:duplicate".into()],vec![canonical],vec!["finding:missing".into()]] {
+        assert!(store.check_fix_run("rollback-fix",None,&refs,"fast").is_err());
+        assert!(store.prepare_fix_run("rollback-fix",None,&refs,"fast",unix_ms()).is_err());
+        assert_eq!(fixes_show(&f,None),after);
+        assert_eq!(f.cli_args(&["review","findings","show"]).0,decisions);
+    }
+    assert!(store.check_fix_run("rollback-fix",Some("selected-fix"),&[],"fast").is_err());
+    assert_eq!(fixes_show(&f,None),after);
+    let metrics = f.cli_args(&["review","report"]).0["metrics"].clone();
+    assert_eq!(metrics["M22"]["value"],"2/4");
+    assert_eq!(metrics["M25"]["value"],"0/2");
+}
+
+#[test]
+fn fix_launch_upgrade_preserves_manual_repairs_and_allows_one_attempt_to_fix_two_findings() {
+    let f = Fixture::new();
+    let world = review_world(&f,&["rev-upgrade"]);
+    completed_review(&f,&world,"code","rev-upgrade",json!(["finding:upgrade-a","finding:upgrade-b"]));
+    let claims = f.cli_args(&["review","findings","show"]).0["findings"]["submissions"].clone();
+    let mut findings = Vec::new();
+    for submission in claims.as_array().unwrap() {
+        let claim = submission["claims"][0]["claim_id"].as_i64().unwrap().to_string();
+        let event = f.cli_args(&["review","findings","validate",&claim,"--new","--severity","high","--evidence",&evidence('e')]).0["event"].clone();
+        findings.push(event["subject"]["finding_id"].as_str().unwrap().to_owned());
+    }
+    let open = |finding: &str| f.cli_args(&["review","fixes","open",finding,"--assign","fast"]).0["event"]["seq"].as_i64().unwrap().to_string();
+    let first = open(&findings[0]);
+    let factory = Factory::open(&f);
+    factory.attempt("upgrade-fixer",&agent_configuration(&fast_profile(&f)).id);
+    f.cli_args(&["review","fixes","bind",&first,"--attempt","upgrade-fixer"]);
+    let before = fixes_show(&f,None);
+    let path = f.project.join(".state/state.db");
+    {
+        // Reconstruct schema 69's uniqueness guarantees on the populated input
+        // store. All other columns and guards of these tables are unchanged.
+        let db = rusqlite::Connection::open(&path).unwrap();
+        db.execute_batch("DROP TABLE fix_launch_findings; DROP TABLE fix_launches;
+            CREATE UNIQUE INDEX legacy_repair_attempt ON repair_attempts(attempt_id);
+            CREATE UNIQUE INDEX legacy_fix_submission ON fix_proposals(submission_id);
+            CREATE UNIQUE INDEX legacy_fix_integration ON fix_integrations(integrated_id);
+            UPDATE store_meta SET schema_version=69; PRAGMA user_version=69;").unwrap();
+    }
+    SqliteStore::open(&path).unwrap().upgrade_v1().unwrap();
+    assert_eq!(fixes_show(&f,None),before,"upgrade preserves populated append-only history");
+    let second = open(&findings[1]);
+    f.cli_args(&["review","fixes","bind",&second,"--attempt","upgrade-fixer"]);
+    factory.submission(&hex('3'),"upgrade-fixer",&oid('3'),unix_ms());
+    for repair in [&first,&second] {
+        f.cli_args(&["review","fixes","propose",repair,"--submission",&hex('3')]);
+    }
+    let state = fixes_show(&f,None);
+    assert_eq!(state["repairs"].as_array().unwrap().len(),2);
+    for repair in state["repairs"].as_array().unwrap() {
+        assert_eq!(repair["attempts"][0]["attempt_id"],"upgrade-fixer");
+        assert_eq!(repair["proposals"][0]["submission_id"],hex('3'));
+    }
+}

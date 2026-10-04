@@ -495,6 +495,7 @@ impl SqliteStore {
             }
             // Narrative acceptance is not enough; only this stored receipt can satisfy.
             super::satisfaction::record_verified_result(&tx, stored_result)?;
+            super::fix_launch::verified(&tx, &run_id, now)?;
         }
         if state == "rejected" {
             super::feedback::insert_feedback(

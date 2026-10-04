@@ -843,6 +843,7 @@ fn apply_finish(
                 }
                 // The wake event is not evidence. The satisfaction row is the stored receipt.
                 super::satisfaction::record_integrated_commit(tx, &integrated_id)?;
+                super::fix_launch::integrated(tx, &integrated_id, created)?;
                 tx.execute(
                     "INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES('integration.wake',?1,1,1,?2)",
                     params![

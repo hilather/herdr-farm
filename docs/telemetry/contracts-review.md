@@ -155,10 +155,15 @@ Canonical migration `0055_finding_triage.sql`; store API
 show|validate|reject|duplicate|reset|split|restore|merge|unmerge`.
 
 **Authority decision.** A reviewer's report is always a proposal. The only
-triage principal is `operator:cli`, the project owner at the CLI, recorded
-with authority `operator_owner.v1`. The owner already holds every project
-decision at the CLI (operator dispatch, operator candidate selection), so
-this needs no delegation. Delegated `code_review` authority (§10) decides
+triage principal is `operator:cli`, recorded with authority `operator_owner.v1`.
+On 2026-10-04 the owner's shepherd, acting under its overnight authority,
+decided that the owner's coordinator may validate findings when launching
+fixes, mark them repaired after verification, reject false claims with a reason,
+and mark duplicates. This is the shepherd's decision, not a statement by the
+owner. The coordinator runs the CLI in the owner's session, so these records
+use the same principal and authority and do not distinguish the owner from
+his coordinator. Merge, unmerge, split, restore, reset, review acceptance,
+protocols and experiments remain the owner's decisions. Delegated `code_review` authority (§10) decides
 review completions, never findings; `SqliteStore` refuses every other
 principal, writing
 nothing: a worker (`worker:*` or any attempt's identity, including the
@@ -248,14 +253,22 @@ watermark, and M22/M23 leave seed-linked claims out (§9).
 
 Not built here: conflict records between
 submissions, imports of third-party review comments (any such producer can
-only write submissions), and delegated triage (a `code_review` grant cannot
-permit it, §10).
+only write submissions), and delegated reviewer triage under a separate
+principal (a `code_review` grant cannot permit it, §10).
 
 ## 6. Fix attribution, regressions and role credit (TM3.3, card D3)
 
 Canonical migration `0056_fix_attribution.sql` (schema 56); store API
 `src/store/fix_attribution.rs` (`fix_state`); CLI `telemetry <slug> review
 fixes show|open|bind|propose|verify|integrate|close|reopen|introduce|credit|retract`.
+
+Since `0070_fix_launch.sql`, one attempt and its submission or integration
+may link multiple findings: uniqueness is `(repair_seq, attempt_id)` and
+`(repair_seq, submission_id)`, while verification and integration remain unique
+per proposal. `fix_launches` freezes a task's selectors and profile;
+`fix_launch_findings` binds its repair opportunities. Both retain for the
+project lifetime under `canonical.state` and its whole-store backup; telemetry
+retention and sidecar backup never prune or restore them.
 
 **One ordering.** `fix_log(seq, kind, principal, authority, expected_seq,
 recorded_unix_ms)` shares its sequence with `finding_log` (§5): every new row
@@ -281,7 +294,7 @@ kind (triggers).
   with no other open opportunity. The initial assignment group (a retained
   profile's contracts §2 configuration, or explicitly `unassigned`, policy
   `repair_assignment.v1`) and horizon are frozen before any repair runs.
-- **Attempt binding** `repair_attempts(seq, repair_seq, attempt_id UNIQUE,
+- **Attempt binding** `repair_attempts(seq, repair_seq, attempt_id,
   ordinal, configuration_id)`, `bind <repair> --attempt A`: only before the
   attempt's outcome is known (store: the attempt is not `completed`,
   `failed`, `cancelled` or `lost`; store and trigger: it has no
@@ -289,9 +302,9 @@ kind (triggers).
   the initial attempt; later ones are reassignments (`reassignment: true`),
   provenance only: the opportunity never leaves its initial group. The
   configuration is the attempt's dispatch decision (null if it predates it).
-  Binding at launch would need launch/scheduler changes and is not built;
-  it is recorded explicitly.
-- **Fix proposal** `fix_proposals(seq, repair_seq, submission_id UNIQUE,
+  Since schema 70, `launch run --fixes-review`/`--fixes` binds every named
+  opportunity in the reservation transaction (§13).
+- **Fix proposal** `fix_proposals(seq, repair_seq, submission_id,
   attempt_id, candidate_oid)`, `propose <repair> --submission S`: a result
   submission of an attempt bound to that opportunity, at its exact candidate
   (trigger).
@@ -305,7 +318,7 @@ kind (triggers).
   without a verified result refuses (store and trigger): passing checks on
   one commit never verifies another, and worker claims are never evidence.
 - **Integration** `fix_integrations(seq, proposal_seq UNIQUE,
-  verification_seq, integrated_id UNIQUE, commit_oid, integrated_unix_ms)`,
+  verification_seq, integrated_id, commit_oid, integrated_unix_ms)`,
   `integrate <proposal> --integrated ID`: only a verified proposal, and only
   an `integrated_commits` row whose operation integrated a verified result of
   the same submission and candidate and whose integration candidate's
@@ -416,8 +429,7 @@ credit sums are reduced fractions (`"3/2"`).
 Doc 07 labels these observational: assignment is not randomized, and M21 is
 not model ability.
 
-Not built: binding repair attempts at launch (needs launch/scheduler
-changes); finding occurrences as a separate record beyond reopenings;
+Not built: finding occurrences as a separate record beyond reopenings;
 mixed-model segment splits within one attempt; artifact-only publication
 contracts. M24 is §10, M28 §7.
 
@@ -1418,7 +1430,7 @@ Not built: a ticker hook (by owner decision the owner runs or schedules the
 CLI); hardware-backed signer keys (§11 option 4); isolating the coordinator.
 
 
-## 13. Review launch through launch run (REVIEW-AUTO-1a)
+## 13. Review and fix launch through launch run (REVIEW-AUTO-1a/1b)
 
 The coordinator's ordinary `launch PROJECT run` records reviews automatically:
 
@@ -1489,7 +1501,44 @@ claims as `pending_triage`; owner CLI triage makes new validated unique
 findings eligible under §7. Changed scopes and incomplete prior reviews
 retain their existing exclusions. No automatic duplicate decision is made.
 
-Not built: `--fixes`/`--fixes-review`, repair attempt launch binding, fix
-proposal/verify/integrate linking, re-review prior findings, automated triage,
-reviewer-grant acceptance and blind cross-provider selection through
-`launch run` (REVIEW-AUTO-1b and later cards).
+Fix tasks name findings through either or both forms:
+
+```sh
+herdr-farm launch PROJECT run --task FIX --profile PROFILE --repository REPO --fixes-review REVIEW --write src/ --output src/lib.rs --prompt-file FIX_BRIEF
+herdr-farm launch PROJECT run --task FIX --profile PROFILE --repository REPO --fixes finding:token --fixes finding:other --write src/ --output src/lib.rs --prompt-file FIX_BRIEF
+```
+
+`--fixes-review` selects all current claims in the review task's latest completed
+receipt. `--fixes` selects an unambiguous receipt finding reference or a validated
+canonical finding. Each pending claim becomes a new canonical finding, severity
+`medium`, with the receipt digest as evidence; each validated finding keeps its
+identity. Other claims stay pending. A rejected/duplicate claim, unvalidated or
+merged canonical finding, already open/resolved repair, ambiguous reference,
+or review task without a completed receipt refuses before launch mutations.
+An empty selection refuses. Review and fix flags cannot share one launch.
+
+Selection and profile freeze on the fix task. Validation, one assigned repair
+opportunity per finding (default 14-day horizon), and the task bindings commit
+atomically; reservation binds its attempt to every opportunity before any
+outcome. Result submission, including `submit-captured`, records the proposals
+in the submission transaction. Accepted native verification of each proposal's
+exact candidate records `fixes verify` with `approved_alternative` assurance
+and a `verification_run` evidence reference, then closes its opportunity
+`fixed`, in the verification transaction. This does not claim a reproduced
+regression. Native integration links every verified proposal of that candidate
+in the integration transaction. Replays create no extra bindings or ledger rows.
+`--review-of FIX` reviews that task's current submission and retains the
+canonical findings named by its repairs as `prior_findings`; the protocol's
+prior-disclosure rule still governs the worker's brief.
+
+The triage delegation is the owner's shepherd's 2026-10-04 overnight decision
+(§5), not the owner's own words. The coordinator may validate when launching a
+fix, mark repaired after verification, reject with a reason, and mark duplicates.
+These CLI records remain `operator:cli` / `operator_owner.v1`; they do not identify
+whether the owner or his coordinator acted. Coordinator settings grant the
+existing prefixed `review show`, `findings show|validate|reject|duplicate` verbs,
+never the bare binary or broader mutation verbs. M22, M25 and M28 now reflect
+those decisions and verified repairs.
+
+Not built: reviewer-grant acceptance and blind cross-provider selection through
+`launch run` (later cards).

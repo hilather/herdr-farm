@@ -204,6 +204,7 @@ impl SqliteStore {
         if version>=53 {super::candidate_groups::bind(&tx,&record.inputs,&attempt_id,now)?;}
         // A reserved review attempt's session starts here (contracts-review.md §11).
         if version>=62 {super::review_launch::start(&tx,&record.inputs,&attempt_id,now)?;}
+        if version>=70 {super::fix_launch::start(&tx,&record.inputs,&attempt_id,now)?;}
         super::dispatch_log::mark(&tx,&attempt,now,"admit_prepared")?;
         tx.execute("UPDATE tasks SET revision=?2,state='running',active_attempt=?3 WHERE id=?1",params![attempt.task.as_str(),integer(task_revision)?,attempt_id.as_str()])?;
         tx.execute("INSERT INTO operations VALUES(?1,?2,'runtime.launch',?3,1,?4,?5,?6,?7,?1)",params![operation_id.as_str(),attempt.task.as_str(),record.inputs.binding,payload,digest,integer(task_revision)?,now])?;

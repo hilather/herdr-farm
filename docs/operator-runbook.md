@@ -459,7 +459,16 @@ report result. Receipts remain proposals: triage with
 `telemetry PROJECT review report` shows M20 completion and M28 skeptical yield;
 pending pass claims appear as `pending_triage` until decided. A
 `attempt.review_receipt_without_result` notice means the receipt is recorded
-but the report still needs submission. Fix rounds use ordinary scoped
-`launch run --write ... --output ... --prompt-file FIX_BRIEF` tasks; automatic
-fix attribution is a later card. See
+but the report still needs submission. Fix rounds use
+`launch PROJECT run --task FIX --profile PROFILE --repository REPO --fixes-review REVIEW --write ... --output ... --prompt-file FIX_BRIEF`,
+or repeatable `--fixes finding:<token>` for a subset. Selected pending claims
+become canonical findings and assigned repairs; submissions record proposals,
+accepted exact-candidate verification closes them `fixed`, and integration links
+them. Re-review with `--review-of FIX` retains the repair findings as priors.
+The owner's shepherd delegated validation on fix launch, repair decisions after
+verification, rejection with reasons and duplicate triage to the coordinator on
+2026-10-04 under its overnight authority. That is the shepherd's decision, not
+the owner's own words; the owner's session records both as `operator:cli` with
+`operator_owner.v1`, without distinguishing who acted. Review M22 and M25 as
+well as M28 after triage; merge/reset and broader review decisions stay the owner's. See
 [review launch contracts](telemetry/contracts-review.md) §13.

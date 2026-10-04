@@ -232,9 +232,17 @@ fn socket_open_primes_owned_coordinator_retries_swallowed_prompt_and_recreates_c
     for verb in ["skill", "context demo", "inbox list", "inbox done", "inbox demo wait", "task demo list", "task demo show", "task demo add", "task demo rename",
         "launch demo run", "launch demo stop", "result demo show", "result demo jobs", "result demo capture", "result demo submit-captured",
         "scheduler demo inspect", "operations demo inspect", "runtime demo inspect", "telemetry demo usage", "memory-review demo propose", "doctor",
-        "thread prompt", "safety requests"] {
+        "thread prompt", "safety requests", "telemetry demo review show", "telemetry demo review findings show",
+        "telemetry demo review findings validate", "telemetry demo review findings reject", "telemetry demo review findings duplicate"] {
         assert!(permissions["permissions"]["allow"].as_array().unwrap().contains(&json!(format!("Bash({prefix} {verb}:*)"))), "missing allow {verb}");
     }
+    for verb in ["merge", "unmerge", "split", "restore", "reset"] {
+        assert!(!permissions["permissions"]["allow"].as_array().unwrap().contains(&json!(format!("Bash({prefix} telemetry demo review findings {verb}:*)"))));
+    }
+    for verb in ["accept", "protocols", "experiments"] {
+        assert!(!permissions["permissions"]["allow"].as_array().unwrap().contains(&json!(format!("Bash({prefix} telemetry demo review {verb}:*)"))));
+    }
+    assert!(!permissions["permissions"]["allow"].as_array().unwrap().contains(&json!(format!("Bash({BIN}:*)"))));
     assert!(permissions["permissions"]["allow"].as_array().unwrap().contains(&json!(format!("Bash({prefix} reconcile demo --plan)"))));
     for verb in ["owner demo approve", "owner demo reject", "safety approve", "safety reject", "safety revoke", "approval", "delegation", "budget", "routine-store", "migration", "archive", "delete",
         "runtime * state", "runtime * rebind", "runtime * adopt", "runtime * relinquish", "task * cancel-attempt", "task * complete"] {

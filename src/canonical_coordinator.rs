@@ -366,6 +366,7 @@ fn permissions(ctx: &Ctx, dir: &Path, slug: &str) -> Result<String> {
             "accounting status", "accounting entries", "accounting sessions", "accounting rate-cards", "accounting cost", "accounting charges", "accounting fx", "accounting budget-shadow", "accounting quota", "accounting attention", "accounting tools", "accounting fleet",
             "quality status", "quality flaky", "quality report", "quality groups present", "quality groups report", "quality groups show",
             "review status", "review present", "review show", "review report", "review findings show",
+            "review findings validate", "review findings reject", "review findings duplicate",
             "review fixes show", "review protocols show", "review experiments show", "review seeds show", "review seeds report", "review authority show", "review signer status",
             "analytics status", "analytics snapshot", "analytics revisions", "analytics plans", "experiments plan", "experiments report",
             "maintenance classes", "maintenance plan", "maintenance hold list", "backup list", "backup verify",
@@ -855,7 +856,7 @@ pub fn commands(root: &Path, slug: &str) -> Result<String> {
 {p} operations {slug} inspect\n\
 {p} inbox list {slug}\n\
 {p} inbox done {slug} ITEM\n\
-Launch reviews with --review-of and skeptic challenges with --review-kind skeptical so review telemetry is recorded. Fixes use ordinary scoped launch run tasks; fix-attribution linking remains separate.\n\
+Launch reviews with --review-of and skeptic challenges with --review-kind skeptical so review telemetry is recorded. Launch fixes with --fixes-review REVIEW_TASK or repeatable --fixes finding:<token>. After a receipt, validate claims you will fix (or use --fixes-review), reject false claims with a reason and mark duplicates so skeptic yield (M28) and fix metrics are computed.\n\
 Workers appear as worker: <task> tabs beside the coordinator. Use launch {slug} view --task TASK to reopen one. The profile's max_wall_seconds ends a worker that runs out of time. After attempt.ended_without_submission, run result {slug} submit-captured ATTEMPT to submit what it produced, then review it. Tell the owner before launching a task that looks longer than the budget.\n\
 After launching workers, start `{p} inbox {slug} wait` as a background Bash command. When it returns, run context, review result data, relaunch rejected tasks or report to the owner, mark handled items done, and start the wait again. A timeout also restarts the wait.\n\
 Herdr Farm signs launches automatically within owner policy; the coordinator never handles key files or edits config.toml. Use a background command or long timeout and rerun after interruption. Thread commands are legacy-only. Start requires user authorization and owner-signed contracts and approvals; verification is evidence, integration requires the configured target; cleanup requires canonical finalization and proven worker termination. Never edit TASKS.md or old thread records as live state."

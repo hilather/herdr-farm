@@ -239,7 +239,7 @@ fn schema_56(tx: &Connection) -> Result<()> {
 fn oid(value: &str) -> bool { (value.len() == 40 || value.len() == 64) && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) }
 
 /// Append the owner's attribution row after the authority and expected-head checks.
-fn log(tx: &Connection, kind: &str, principal: &str, expected: Option<i64>, now: i64) -> Result<i64> {
+pub(super) fn log(tx: &Connection, kind: &str, principal: &str, expected: Option<i64>, now: i64) -> Result<i64> {
     finding_triage::triage_authority(tx, principal)?;
     let head = finding_triage::head(tx)?;
     if let Some(expected) = expected && head != expected { return Err(invalid(format!("finding history moved: head is {head}, expected {expected}"))); }
@@ -248,7 +248,8 @@ fn log(tx: &Connection, kind: &str, principal: &str, expected: Option<i64>, now:
     Ok(seq)
 }
 
-fn done(tx: rusqlite::Transaction<'_>, seq: i64, subject: serde_json::Value) -> Result<FindingEvent> {
+fn done<'a>(tx: impl Into<super::MutationTransaction<'a>>, seq: i64, subject: serde_json::Value) -> Result<FindingEvent> {
+    let tx = tx.into();
     let out = tx.query_row("SELECT kind,principal,authority,expected_seq,recorded_unix_ms FROM fix_log WHERE seq=?1", [seq],
         |r| Ok(FindingEvent { seq, kind: r.get(0)?, principal: r.get(1)?, authority: r.get(2)?, expected_seq: r.get(3)?, recorded_unix_ms: r.get(4)?, subject }))?;
     tx.commit()?;
@@ -297,7 +298,7 @@ impl SqliteStore {
     /// finding; a currently resolved finding needs a reopening first.
     pub fn open_repair(&mut self, finding: &str, assignment: &RepairAssignment, horizon_ms: i64, expected_seq: Option<i64>, principal: &str, now: i64) -> Result<FindingEvent> {
         if horizon_ms <= 0 { return Err(invalid("the repair horizon must be positive".into())); }
-        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = super::mutation_transaction(&mut self.connection)?;
         schema_56(&tx)?;
         finding_triage::triage_authority(&tx, principal)?;
         let state = current(&tx)?;
@@ -337,7 +338,7 @@ impl SqliteStore {
         if tx.query_row("SELECT EXISTS(SELECT 1 FROM result_submissions WHERE attempt_id=?1)", [attempt], |r| r.get::<_, bool>(0))? {
             return Err(invalid(format!("attempt {attempt} already has a result: an attempt is bound before its outcome is known")));
         }
-        if let Some(other) = tx.query_row("SELECT repair_seq FROM repair_attempts WHERE attempt_id=?1", [attempt], |r| r.get::<_, i64>(0)).optional()? {
+        if let Some(other) = tx.query_row("SELECT repair_seq FROM repair_attempts WHERE attempt_id=?1 AND repair_seq=?2", params![attempt, repair], |r| r.get::<_, i64>(0)).optional()? {
             return Err(invalid(format!("attempt {attempt} is already bound to repair opportunity {other}")));
         }
         let ordinal: i64 = tx.query_row("SELECT count(*)+1 FROM repair_attempts WHERE repair_seq=?1", [repair], |r| r.get(0))?;
@@ -356,9 +357,9 @@ impl SqliteStore {
         if tx.query_row("SELECT EXISTS(SELECT 1 FROM repair_closures WHERE repair_seq=?1)", [repair], |r| r.get::<_, bool>(0))? { return Err(invalid(format!("repair opportunity {repair} is closed"))); }
         let (attempt, candidate): (String, String) = tx.query_row("SELECT attempt_id,candidate_oid FROM result_submissions WHERE submission_id=?1", [submission], |r| Ok((r.get(0)?, r.get(1)?)))
             .optional()?.ok_or_else(|| invalid(format!("no result submission {submission}")))?;
-        let bound: Option<i64> = tx.query_row("SELECT repair_seq FROM repair_attempts WHERE attempt_id=?1", [&attempt], |r| r.get(0)).optional()?;
+        let bound: Option<i64> = tx.query_row("SELECT repair_seq FROM repair_attempts WHERE attempt_id=?1 AND repair_seq=?2", params![attempt, repair], |r| r.get(0)).optional()?;
         if bound != Some(repair) { return Err(invalid(format!("submission {submission} is by attempt {attempt}, which is not bound to repair opportunity {repair}"))); }
-        if tx.query_row("SELECT EXISTS(SELECT 1 FROM fix_proposals WHERE submission_id=?1)", [submission], |r| r.get::<_, bool>(0))? { return Err(invalid(format!("submission {submission} is already a fix proposal"))); }
+        if tx.query_row("SELECT EXISTS(SELECT 1 FROM fix_proposals WHERE submission_id=?1 AND repair_seq=?2)", params![submission, repair], |r| r.get::<_, bool>(0))? { return Err(invalid(format!("submission {submission} is already a fix proposal"))); }
         let seq = log(&tx, "proposed", principal, expected_seq, now)?;
         tx.execute("INSERT INTO fix_proposals(seq,repair_seq,submission_id,attempt_id,candidate_oid) VALUES(?1,?2,?3,?4,?5)", params![seq, repair, submission, attempt, candidate])?;
         done(tx, seq, serde_json::json!({"repair_seq": repair, "submission_id": submission, "attempt_id": attempt, "candidate_oid": candidate}))

@@ -389,6 +389,10 @@ impl SqliteStore {
             let (kind,scope,role,budget) = self.connection.query_row("SELECT kind,scope,role,budget_ms FROM review_protocols WHERE protocol=?1", [&spec.protocol], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,u64>(3)?)))?;
             spec.kind=kind; spec.scope=scope; spec.role=role; spec.budget_ms=Some(budget);
         }
+        if super::fix_launch::prior_findings_available(&self.connection)? {
+            spec.prior_findings = self.connection.prepare("SELECT DISTINCT r.finding_id FROM repair_attempts a JOIN attempts t ON t.id=a.attempt_id JOIN repair_opportunities r ON r.seq=a.repair_seq WHERE t.task_id=?1 ORDER BY r.finding_id")?
+                .query_map([reviewed], |r| r.get(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        }
         let priors = self.connection.prepare("SELECT opportunity_id FROM review_opportunities WHERE submission_id=?1 ORDER BY created_unix_ms,opportunity_id")?
             .query_map([&submission], |r| r.get::<_,String>(0))?.collect::<std::result::Result<Vec<_>,_>>()?;
         let opportunity = self.open_review_opportunity(&spec, "operator:cli", now)?.opportunity_id;
