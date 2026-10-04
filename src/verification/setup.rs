@@ -326,7 +326,7 @@ fn switch_root(scratch: &Path, parsed: &Args, libraries: &[PathBuf]) -> Result<(
                 fs::create_dir_all(scratch.join(identity.path.strip_prefix("/").map_err(|_| 1)?)).map_err(|e| e.raw_os_error().unwrap_or(1))?;
             }
         }
-        for path in &resolved.mounts { bind_ro(scratch, path)?; }
+        for path in &resolved.mounts { bind_toolchain_ro_at(scratch, path, path)?; }
     }
     bind_ro(scratch, &parsed.policy)?;
     for hidden in &parsed.hidden {
@@ -344,7 +344,7 @@ fn switch_root(scratch: &Path, parsed: &Args, libraries: &[PathBuf]) -> Result<(
                 // Explicit owner tools inside a repository (e.g. ignored
                 // .tools/Godot) are also available relative to its private copy.
                 let alias = parsed.checkout.join(relative);
-                bind_ro_at(scratch, source, &alias)?;
+                bind_toolchain_ro_at(scratch, source, &alias)?;
             }
         }
     }
@@ -415,6 +415,19 @@ fn copy_snapshot(source: &Path, dest: &Path) -> Result<(), i32> {
 
 fn bind_ro(root: &Path, source: &Path) -> Result<(), i32> {
     bind_ro_at(root, source, source)
+}
+
+// libmount applies read-only attributes recursively, including nested mounts.
+// A plain bind remount only protects the top mount.
+fn bind_toolchain_ro_at(root: &Path, source: &Path, target: &Path) -> Result<(), i32> {
+    bind_ro_at(root, source, target)?;
+    let status = Command::new("/usr/bin/mount")
+        .args(["--rbind", "-o", "ro=recursive"])
+        .arg(source)
+        .arg(root.join(target.strip_prefix("/").map_err(|_| 1)?))
+        .status_gated()
+        .map_err(|error| error.raw_os_error().unwrap_or(1))?;
+    if status.success() { Ok(()) } else { Err(libc::EIO) }
 }
 
 fn bind_ro_at(root: &Path, source: &Path, target: &Path) -> Result<(), i32> {

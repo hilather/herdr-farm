@@ -789,7 +789,7 @@ fn policies_pass(
     }
     let project = Path::new(&verified.project_store).parent().and_then(Path::parent).context("integration project path")?;
     let toolchains = verified.policies.iter().map(|(_, body)| verification::toolchains::for_policy(project, body.as_bytes())).collect::<Result<Vec<_>>>()?;
-    let lease_ms = toolchains.iter().map(|r| verification::toolchains::timeout(r.as_ref(), POLICY_TIMEOUT).as_millis() as i64).sum::<i64>() + 90_000;
+    let lease_ms = toolchains.iter().map(|r| verification::toolchains::timeout(r.as_ref(), POLICY_TIMEOUT).as_millis() as i64).sum::<i64>() + if toolchains.iter().any(Option::is_some) { 90_000 } else { 30_000 };
     let claim = store.extend_integration_lease(&claim, lease_ms, now_ms())?;
     let run = || -> Result<(Vec<(String, String, bool)>, bool)> {
         let mut checks = Vec::new();

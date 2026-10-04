@@ -228,6 +228,8 @@ resolver. File contents and path metadata, including recursively enumerated
 directory entries and dependency identities, are pinned. Files are exposed
 read-only at the same paths; paths inside the contract repository are also
 exposed relative to the private checkout, so ignored `.tools/` executables work.
+Toolchain binds use `ro=recursive`, including repository-relative aliases, so
+nested mounts cannot leave owner tools writable.
 Directory contents are snapshotted as individual read-only file mounts. Empty
 original directories are present read-only. Interpreters such as `/bin/sh` and
 `/usr/bin/env` must be declared; they are not supplied by default.
@@ -236,8 +238,10 @@ original directories are present read-only. Interpreters such as `/bin/sh` and
 names, no NUL values, and no loader, Git, shell startup, `PATH` or `HOME`
 overrides. Checks receive a cleared environment, fixed sandbox defaults and
 these entries. Verifier control variables are not passed to the test command.
-Network access is disabled by default using a separate network namespace; only
-an owner toolchain with `network = true` may inherit network access.
+For toolchain policies, network access is disabled by default using a separate
+network namespace; `network = true` inherits network access. Policies without a
+toolchain retain their existing command admission, verifier environment, network
+access and per-check timeout; integration retains its original lease margin.
 
 For generated code contracts, use repeatable
 `launch PROJECT run --write … --output … --accept 'godot:./tools/run-tests.sh --headless'`.

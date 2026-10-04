@@ -940,19 +940,21 @@ pub(crate) fn unshare_ready(path: &Path) -> bool {
         && meta.mode() & 0o111 != 0
 }
 
-#[cfg(test)]
-mod tests;
 
-/// A check receives no verifier control variables or inherited owner state.
+/// Toolchain checks receive only the owner-declared environment. Legacy checks
+/// retain the verifier environment, as before toolchain policies.
 pub(super) fn check_command(program: &str) -> std::process::Command {
     let mut command = std::process::Command::new(program);
+    let Ok(raw) = std::env::var("HP_VERIFY_CHECK_ENV") else { return command; };
     command.env_clear().env("PATH", "/usr/bin:/bin").env("HOME", "/tmp").env("TMPDIR", "/tmp")
         .env("LANG", "C").env("LC_ALL", "C").env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_NO_LAZY_FETCH", "1").env("GIT_NO_REPLACE_OBJECTS", "1").env("GIT_OPTIONAL_LOCKS", "0");
-    if let Ok(raw) = std::env::var("HP_VERIFY_CHECK_ENV")
-        && let Ok(env) = serde_json::from_str::<Vec<String>>(&raw) {
+    if let Ok(env) = serde_json::from_str::<Vec<String>>(&raw) {
         for entry in env { if let Some((name, value)) = entry.split_once('=') { command.env(name, value); } }
     }
     command
 }
+
+#[cfg(test)]
+mod tests;

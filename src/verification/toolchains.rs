@@ -256,6 +256,9 @@ pub(crate) fn timeout(resolved: Option<&Resolved>, fallback: Duration) -> Durati
     })
 }
 pub(crate) fn command_allowed(program: &str, checkout: &Path, resolved: Option<&Resolved>) -> bool {
+    if resolved.is_none() {
+        return crate::verification::program_allowed(program, checkout);
+    }
     if let Some(relative) = program.strip_prefix("./") {
         let relative = Path::new(relative);
         return resolved.is_some()
