@@ -98,6 +98,7 @@ impl SqliteStore {
         if version<=66 {tx.execute_batch(include_str!("../../migrations/0067_telemetry_read_indexes.sql"))?;}
         if version<=67 {tx.execute_batch(include_str!("../../migrations/0068_verification_metadata.sql"))?;}
         if version<=68 {tx.execute_batch(include_str!("../../migrations/0069_owner_requests.sql"))?;}
+        if version<=69 {super::fix_launch::migrate(&tx)?;}
         tx.commit()?;
         Ok(())
     }

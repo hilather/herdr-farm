@@ -1068,6 +1068,7 @@ impl SqliteStore {
                 params![submission_id, object.oid, submission.object_format.as_str(), object.relative_path, object.byte_sha256, integer(object.size)?],
             )?;
         }
+        super::fix_launch::submitted(&tx, &submission_id, jiff::Timestamp::now().as_millisecond())?;
         super::inbox::result_notice(&tx, "result.submitted", &submission_id, submission.task_id.as_str(), submission.attempt_id.as_str(), &submission_id, "")?;
         tx.commit()?;
         Ok(receipt(

@@ -2533,4 +2533,117 @@ fn review_auto_spool(kind: &'static str) {
     let report = lab.ok(&["telemetry","demo","review","report"]);
     assert_eq!(report["metrics"]["M28"]["denominator"], 1);
     assert_eq!(report["metrics"]["M28"]["value"], "1/1");
+    review_auto_fix_round(&mut lab, &prompt, &socket);
+}
+
+/// One task repairs both findings of a completed review, with the worker's
+/// public result submission and native verification/integration driving links.
+fn review_auto_fix_round(lab: &mut Lab, prompt: &std::path::Path, socket: &std::path::Path) {
+    let template = lab.path("fix-template.json");
+    let source = SUBMITTING_EDITING_AGENT.replace("2.1.0 (Claude Code)", lab.version())
+        .replace("for index in 0..2", "for index in 0..1")
+        .replace("Command::new(\"herdr-farm\").args", "Command::new(\"herdr-farm\").env(\"HERDR_FARM_TEST_TIME_SCALE\", TEST_TIME_SCALE).args");
+    lab.write_agent(&source, &[("ROOT",lab.path("root").display().to_string()),("TEMPLATE_PATH",template.display().to_string())]);
+    let args = ["launch","demo","run","--task","fix-review","--profile","worker","--repository",lab.repo.to_str().unwrap(),
+        "--fixes-review","review-code","--fixes","finding:first","--write","work.txt","--output","work.txt",
+        "--prompt-file",prompt.to_str().unwrap(),"--herdr-socket",socket.to_str().unwrap(),"--sign-with",lab.key.to_str().unwrap()];
+    let launch = lab.ok(&args);
+    let attempt = AttemptId::new(launch["attempt"].as_str().unwrap()).unwrap();
+    let fixes = || lab.ok(&["telemetry","demo","review","fixes","show"])["fixes"].clone();
+    let opened = fixes();
+    assert_eq!(opened["repairs"].as_array().unwrap().len(), 2);
+    for repair in opened["repairs"].as_array().unwrap() {
+        assert_eq!(repair["assignment"], "configuration");
+        assert_eq!(repair["attempts"][0]["attempt_id"], attempt.as_str());
+        assert_eq!(repair["proposals"], json!([]));
+    }
+    assert_eq!(lab.ok(&args)["attempt"], launch["attempt"]);
+    assert_eq!(fixes(), opened, "launch replay must not mint findings or repairs twice");
+    let triage = lab.ok(&["telemetry","demo","review","findings","show"])["findings"].clone();
+    for reference in ["finding:first","finding:second"] {
+        let submitted = triage["submissions"].as_array().unwrap().iter().find(|s|s["finding_ref"]==reference).unwrap();
+        assert_eq!(submitted["claims"][0]["outcome"], "validated");
+    }
+    let metrics = lab.ok(&["telemetry","demo","review","report"])["metrics"].clone();
+    assert_eq!(metrics["M22"]["value"], "3/3");
+    assert_eq!(metrics["M25"]["value"], "0/3");
+    lab.ok(&["result","demo","auto","--verify","off","--integrate","off","--expected-head",&lab.head().to_string()]);
+    let contract = migration::open_active(&lab.project).unwrap().task_contract_document("fix-review").unwrap().unwrap();
+    let digest = runtime::task_contract(&lab.project,&TaskId::new("fix-review").unwrap()).unwrap().unwrap().digest;
+    fs::write(&template,json!({"idempotency_key":"KEY","task_id":"fix-review","contract_revision":1,"contract_digest":digest,
+        "attempt_id":attempt.as_str(),"repository":lab.repo.canonicalize().unwrap(),"base_oid":contract["base_oid"],"candidate_oid":"CANDIDATE","object_format":"sha256",
+        "artifact_manifest":[{"path":"work.txt","oid":"BLOB"}],"claimed_checks":[],"objects":"OBJECTS"}).to_string()).unwrap();
+    let worktree = lab.planned_worktree(&attempt);
+    let mut ticker = lab.spawn();
+    lab.wait(&mut ticker,180,&|| worktree.join("submitted-0").exists() && lab.ok(&["result","demo","show"]).as_array().unwrap().iter().any(|s|s["attempt_id"]==attempt.as_str()));
+    lab.stop(ticker);
+    let shown = lab.ok(&["result","demo","show"]);
+    let submitted = shown.as_array().unwrap().iter().find(|s|s["attempt_id"]==attempt.as_str()).unwrap();
+    let submission = submitted["submission_id"].as_str().unwrap();
+    let candidate = submitted["candidate_oid"].as_str().unwrap();
+    let proposed = fixes();
+    for repair in proposed["repairs"].as_array().unwrap() {
+        assert_eq!(repair["proposals"].as_array().unwrap().len(),1);
+        assert_eq!(repair["proposals"][0]["submission_id"],submission);
+        assert_eq!(repair["proposals"][0]["candidate_oid"],candidate);
+    }
+    assert!(lab.ok(&["result","demo","submit","--input-file",worktree.join("submission.json").to_str().unwrap()])["replayed"].as_bool().unwrap());
+    assert_eq!(fixes(),proposed);
+    let policy = lab.path("fix-policy.json");
+    fs::write(&policy,contract["acceptance_policies"][0]["text"].as_str().unwrap()).unwrap();
+    let verify_dir = lab.path("fix-verify");
+    let verify = ["result","demo","verify",submission,"--policy-id","output-1","--policy-file",policy.to_str().unwrap(),"--idempotency-key","fix-verify","--work-dir",verify_dir.to_str().unwrap()];
+    let verified = lab.ok(&verify);
+    assert_eq!(verified["state"],"accepted","{verified}");
+    let fixed = fixes();
+    for repair in fixed["repairs"].as_array().unwrap() {
+        assert_eq!(repair["closure"], "fixed", "{repair}");
+        assert_eq!(repair["proposals"][0]["verification"]["run_id"],verified["run_id"]);
+    }
+    lab.ok(&verify);
+    assert_eq!(fixes(),fixed);
+    assert_eq!(lab.ok(&["telemetry","demo","review","report"])["metrics"]["M25"]["value"],"2/3");
+    lab.git(&["branch","fix-integration"]);
+    lab.ok(&["result","demo","configure-integration","--repository",lab.repo.to_str().unwrap(),"--reference","refs/heads/fix-integration"]);
+    let integrate_dir = lab.path("fix-integrate");
+    let integrate = ["result","demo","integrate",verified["receipt"]["result_id"].as_str().unwrap(),"--repository",lab.repo.to_str().unwrap(),"--idempotency-key","fix-integrate","--work-dir",integrate_dir.to_str().unwrap()];
+    let integrated = lab.ok(&integrate);
+    assert_eq!(integrated["state"],"integrated","{integrated}");
+    let landed = fixes();
+    for repair in landed["repairs"].as_array().unwrap() { assert!(repair["proposals"][0]["integration"].is_object()); }
+    lab.ok(&integrate);
+    assert_eq!(fixes(),landed);
+    // The coordinator uses the ordinary owner-session CLI verbs. Both decisions
+    // persist in history even when the duplicate decision supersedes rejection.
+    let claim = triage["submissions"].as_array().unwrap().iter().find(|s|s["finding_ref"]=="finding:new").unwrap()["claims"][0]["claim_id"].as_i64().unwrap().to_string();
+    let rejected = lab.ok(&["telemetry","demo","review","findings","reject",&claim,"--reason","intended_behavior"]);
+    assert_eq!(rejected["event"]["principal"],"operator:cli");
+    let canonical = landed["repairs"][0]["finding_id"].as_str().unwrap();
+    let duplicate = lab.ok(&["telemetry","demo","review","findings","duplicate",&claim,"--of",canonical]);
+    assert_eq!(duplicate["event"]["authority"],"operator_owner.v1");
+    let before = lab.state();
+    let history = fixes();
+    for (flag,reference) in [("--fixes","finding:new"),("--fixes-review","authored")] {
+        let refused = lab.cli(&["launch","demo","run","--task","refused-fix","--profile","worker","--repository",lab.repo.to_str().unwrap(),flag,reference,"--write","work.txt","--output","work.txt"]);
+        assert!(!refused.status.success());
+        assert_eq!(lab.state(),before,"a refused selector writes nothing");
+        assert_eq!(fixes(),history);
+    }
+    // After native completion and termination, reuse the lab for a re-review.
+    lab.run_until(120,&|| lab.attempt(&attempt).termination_observed);
+    fs::write(lab.path("lab/reset-workspace"),"").unwrap();
+    lab.write_agent(REVIEW_AUTO_PROBE,&[("ROOT",lab.path("root").display().to_string()),("BIN",BIN.into()),("VERSION",lab.version().into())]);
+    let rereview = lab.ok(&["launch","demo","run","--task","review-fix","--profile","worker","--repository",lab.repo.to_str().unwrap(),"--review-of","fix-review",
+        "--prompt-file",prompt.to_str().unwrap(),"--herdr-socket",socket.to_str().unwrap(),"--sign-with",lab.key.to_str().unwrap()]);
+    let rereview_attempt = AttemptId::new(rereview["attempt"].as_str().unwrap()).unwrap();
+    let session = lab.ok(&["telemetry","demo","review","session","--attempt",rereview_attempt.as_str()]);
+    let reviewed = lab.review_show(None);
+    let opportunity = reviewed["opportunities"].as_array().unwrap().iter().find(|o|o["opportunity_id"]==session["opportunity_id"]).unwrap();
+    assert_eq!(opportunity["submission_id"],submission);
+    let mut expected: Vec<_> = landed["repairs"].as_array().unwrap().iter().map(|r|r["finding_id"].clone()).collect();
+    expected.sort_by(|a,b|a.as_str().cmp(&b.as_str()));
+    assert_eq!(opportunity["prior_findings"],json!(expected));
+    let reserved = lab.attempt(&rereview_attempt);
+    lab.ok(&["task","demo","cancel-attempt",rereview_attempt.as_str(),"--expected-revision",&reserved.revision.to_string(),"--expected-head",&lab.head().to_string(),"--reason","re-review binding checked"]);
+    lab.run_until(120,&|| lab.attempt(&rereview_attempt).termination_observed);
 }

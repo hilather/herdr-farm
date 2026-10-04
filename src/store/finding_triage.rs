@@ -346,7 +346,7 @@ impl SqliteStore {
                 ("pending", None, reason.clone(), None)
             }
         };
-        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = super::mutation_transaction(&mut self.connection)?;
         schema_55(&tx)?;
         triage_authority(&tx, principal)?;
         let (submission, revision): (i64, i64) = tx.query_row("SELECT submission_id,revision FROM finding_claims WHERE claim_id=?1", [claim], |r| Ok((r.get(0)?, r.get(1)?))).optional()?
