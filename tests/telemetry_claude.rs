@@ -10,7 +10,7 @@ fn claude() -> Fixture {
     let mut f = Fixture::new();
     let home = f.tmp.path().join("claude-execution-home");
     let mut profile = codex_profile(&f.config, "claude", "claude", Some(&home));
-    profile.agent.version = "2.1.3".into();
+    profile.agent.version = "2.1.286".into();
     let path = f.project.join(".state/state.db");
     plant_profile(&path, profile);
     f.readmit("claude");
@@ -46,7 +46,7 @@ fn no_secrets(f: &Fixture) {
 #[test]
 fn native_claude_usage_tools_sidechains_and_privacy() {
     let f = claude();
-    transcript(&f, SID, &f.worktree(), "2.1.3", f.decided + 1000);
+    transcript(&f, SID, &f.worktree(), "2.1.286", f.decided + 1000);
     let collected = f.cli("collect").0;
     assert_eq!(collected["collected"]["records"], 2);
     assert_eq!(attempt_usage(&f), json!({"input_tokens":382,"cached_input_tokens":240,"cache_write_input_tokens":32,
@@ -103,7 +103,7 @@ fn native_claude_usage_tools_sidechains_and_privacy() {
 #[test]
 fn native_claude_partial_lines_and_truncation_replay() {
     let f = claude();
-    let path = transcript(&f, SID, &f.worktree(), "2.1.3", f.decided + 1000);
+    let path = transcript(&f, SID, &f.worktree(), "2.1.286", f.decided + 1000);
     let text = fs::read_to_string(&path).unwrap();
     let split = text.find("\n{\"type\":\"assistant\",\"uuid\":\"side-1\"").unwrap() + 1;
     fs::write(&path, &text[..split + 30]).unwrap();
@@ -126,9 +126,9 @@ fn native_claude_partial_lines_and_truncation_replay() {
 #[test]
 fn native_claude_unbound_and_uncertified_stay_unknown() {
     let f = claude();
-    transcript(&f, "unbound", "/tmp/synthetic-unrelated-project", "2.1.3", f.decided + 1000);
-    transcript(&f, "too-early", &f.worktree(), "2.1.3", f.decided - 1);
-    transcript(&f, "uncertified", &f.worktree(), "9.9.9", f.decided + 1000);
+    transcript(&f, "unbound", "/tmp/synthetic-unrelated-project", "2.1.286", f.decided + 1000);
+    transcript(&f, "too-early", &f.worktree(), "2.1.286", f.decided - 1);
+    transcript(&f, "uncertified", &f.worktree(), "2.1.2", f.decided + 1000);
     f.cli("collect");
     assert_eq!(attempt_usage(&f)["reason"], "cli_version_uncertified");
     let db = f.sidecar();
@@ -146,7 +146,7 @@ fn codex_and_claude_native_sources_keep_separate_identity() {
     let (old, decided): (String, i64) = db.query_row("SELECT attempt_id,decided_unix_ms FROM dispatch_decisions WHERE attempt_id<>?1", [&f.attempt], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
     let cwd = format!("{}/.state/worktrees/{old}/repo-00", f.project.display());
     f.rollout(&codex_home, SID, &["head.jsonl", "tail.jsonl"], &cwd, decided + 1000, "0.154.0");
-    transcript(&f, SID, &f.worktree(), "2.1.3", f.decided + 1000);
+    transcript(&f, SID, &f.worktree(), "2.1.286", f.decided + 1000);
     f.cli("collect");
     let usage = f.cli_args(&["usage", "--json"]).0;
     let old_usage = &usage["attempts"].as_array().unwrap().iter().find(|a| a["attempt_id"] == old).unwrap()["usage"];
@@ -168,7 +168,7 @@ fn codex_and_claude_native_sources_keep_separate_identity() {
 #[test]
 fn native_claude_backup_restore_retention_and_tombstones() {
     let f = claude();
-    transcript(&f, SID, &f.worktree(), "2.1.3", f.decided + 1000);
+    transcript(&f, SID, &f.worktree(), "2.1.286", f.decided + 1000);
     f.cli("collect");
     f.cli_args(&["accounting", "sync"]);
     let backup = f.tmp.path().join("synthetic-claude-backup");
@@ -225,7 +225,7 @@ fn claude_upgrade_preserves_an_existing_codex_ledger() {
     drop(db);
     // A writable public command upgrades; every Codex byte visible in the ledger stays.
     f.cli("collect");
-    assert_eq!(f.cli_args(&["accounting", "status"]).0["version"], 20);
+    assert_eq!(f.cli_args(&["accounting", "status"]).0["version"], 21);
     assert_eq!(f.cli_args(&["accounting", "entries"]).1, before);
     assert_eq!(attempt_usage(&f)["total_tokens"], 1680);
 }
@@ -233,7 +233,7 @@ fn claude_upgrade_preserves_an_existing_codex_ledger() {
 #[test]
 fn unreported_claude_tool_outcome_is_unknown_in_its_own_scope() {
     let f = claude();
-    let path = transcript(&f, SID, &f.worktree(), "2.1.3", f.decided + 1000);
+    let path = transcript(&f, SID, &f.worktree(), "2.1.286", f.decided + 1000);
     fs::write(&path, fs::read_to_string(&path).unwrap().replace("\"is_error\":true,", "")).unwrap();
     f.cli("collect");
     let tools = f.cli_args(&["accounting", "tools", "--json"]).0;
@@ -257,7 +257,7 @@ fn claude_aggregate_reads_match_replay_and_verified_rebuild() {
         "INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES('runtime.worker_terminated',?1,2,1,?2)",
         rusqlite::params![f.attempt, json!({"version": 1, "attempt": f.attempt,
             "cause": "cancellation", "observed_unix_ms": terminated}).to_string()]).unwrap();
-    transcript(&f, SID, &f.worktree(), "2.1.3", terminated + 1000);
+    transcript(&f, SID, &f.worktree(), "2.1.286", terminated + 1000);
     f.cli("collect");
     let reads = || {
         let report = f.report();
@@ -371,7 +371,7 @@ fn claude_2_1_286_two_turns_in_lossy_project_directory() {
 #[test]
 fn claude_model_identifiers_and_planted_secret_conformance() {
     let f = claude();
-    let path = transcript(&f, SID, &f.worktree(), "2.1.3", f.decided + 1000);
+    let path = transcript(&f, SID, &f.worktree(), "2.1.286", f.decided + 1000);
     let models = [
         "claude-haiku-4-5-20251001",
         "claude-sonnet-4-5-20250929",
@@ -383,7 +383,7 @@ fn claude_model_identifiers_and_planted_secret_conformance() {
     let mut lines = String::new();
     for (i, model) in models.iter().enumerate() {
         lines.push_str(&format!("{}\n", json!({"type":"assistant", "sessionId":SID,
-            "cwd":f.worktree(), "version":"2.1.3",
+            "cwd":f.worktree(), "version":"2.1.286",
             "timestamp":jiff::Timestamp::from_millisecond(f.decided + 1000).unwrap().to_string(),
             "message":{"id":format!("model-{i}"), "model":model,
                 "usage":{"input_tokens":10,"output_tokens":1},
@@ -421,11 +421,11 @@ fn otlp_request_fallback_yields_to_later_native_attempt_source() {
         f.cli("collect");
         f.cli_args(&["accounting", "sync"]);
         if native_first {
-            transcript(&f, SID, &f.worktree(), "2.1.3", f.decided + 1000);
+            transcript(&f, SID, &f.worktree(), "2.1.286", f.decided + 1000);
             f.cli("collect");
         }
         let mut request: Value = serde_json::from_str(&fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/telemetry/otlp/claude-logs.json")).unwrap().replace("@ATTEMPT@", &f.attempt)).unwrap();
-        request["resourceLogs"][0]["resource"]["attributes"].as_array_mut().unwrap().push(json!({"key":"service.version","value":{"stringValue":"2.1.3"}}));
+        request["resourceLogs"][0]["resource"]["attributes"].as_array_mut().unwrap().push(json!({"key":"service.version","value":{"stringValue":"2.1.286"}}));
         let bytes = serde_json::to_vec(&request).unwrap();
         assert_eq!(otlp::ingest(&f.project, "/v1/logs", &bytes).unwrap(), 2);
         assert_eq!(otlp::ingest(&f.project, "/v1/logs", &bytes).unwrap(), 0);
@@ -433,7 +433,7 @@ fn otlp_request_fallback_yields_to_later_native_attempt_source() {
         if !native_first {
             assert_eq!(attempt_usage(&f)["total_tokens"], 23);
             assert_eq!(accepted_delta_entries(&f.cli_args(&["accounting", "entries"]).0).len(), 1);
-            transcript(&f, SID, &f.worktree(), "2.1.3", f.decided + 1000);
+            transcript(&f, SID, &f.worktree(), "2.1.286", f.decided + 1000);
             f.cli("collect");
             assert_eq!(attempt_usage(&f)["total_tokens"], 407, "live read applies precedence before sync");
         }
@@ -460,7 +460,7 @@ fn accepted_otlp_cannot_hide_an_uncertified_native_surface() {
     transcript(&f, SID, &f.worktree(), "2.1.99", f.decided + 1000);
     f.cli("collect");
     let mut request: Value = serde_json::from_str(&fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/telemetry/otlp/claude-logs.json")).unwrap().replace("@ATTEMPT@", &f.attempt)).unwrap();
-    request["resourceLogs"][0]["resource"]["attributes"].as_array_mut().unwrap().push(json!({"key":"service.version","value":{"stringValue":"2.1.3"}}));
+    request["resourceLogs"][0]["resource"]["attributes"].as_array_mut().unwrap().push(json!({"key":"service.version","value":{"stringValue":"2.1.286"}}));
     otlp::ingest(&f.project, "/v1/logs", &serde_json::to_vec(&request).unwrap()).unwrap();
     assert_eq!(attempt_usage(&f)["reason"], "cli_version_uncertified");
     assert_eq!(f.report()["metrics"]["M08"]["value"]["reason"], "no_certified_source");
@@ -481,7 +481,7 @@ fn accepted_otlp_cannot_hide_an_uncertified_native_surface() {
 #[test]
 fn claude_cache_writes_are_priced_by_a_cache_write_rate_or_refused() {
     let f = claude();
-    transcript(&f, SID, &f.worktree(), "2.1.3", f.decided + 1000);
+    transcript(&f, SID, &f.worktree(), "2.1.286", f.decided + 1000);
     f.cli("collect");
     f.cli_args(&["accounting", "sync"]);
     let card = |id: &str, model: &str, write: bool| {
@@ -520,4 +520,54 @@ fn claude_cache_writes_are_priced_by_a_cache_write_rate_or_refused() {
     let again = f.cli_args(&["accounting", "reprice"]).0;
     assert_eq!(again["appended"], false, "repricing is idempotent: {again}");
     assert_eq!(f.cli_args(&["accounting", "cost", "--json"]).0, cost);
+}
+
+#[test]
+fn newer_claude_usage_and_historical_refusal_are_recollected() {
+    let f = claude();
+    transcript(&f, SID, &f.worktree(), "2.1.300", f.decided + 1000);
+    f.cli("collect");
+    let usage = attempt_usage(&f);
+    assert_eq!(usage["total_tokens"], 407);
+    assert_eq!(usage["certification"], "newer_than_certified");
+    assert_eq!(usage["nearest_certified_version"], "2.1.286");
+    for command in [vec!["collect"], vec!["accounting", "sync"]] {
+        f.sidecar().execute_batch("UPDATE codex_usage SET accepted=0,reason='cli_version_uncertified',cache_write_input_tokens=NULL,cached_input_tokens=NULL,input_tokens=NULL,output_tokens=NULL,reasoning_output_tokens=NULL,total_tokens=NULL;").unwrap();
+        assert_eq!(attempt_usage(&f)["reason"], "cli_version_uncertified");
+        f.cli_args(&command);
+        assert_eq!(attempt_usage(&f), usage);
+        assert_eq!(f.count("codex_usage"), 2);
+    }
+    plant_aggregate_termination(&f);
+    assert_eq!(f.report()["metrics"]["M13"]["coverage"]["newer_than_certified"], 1);
+    assert_eq!(f.report()["metrics"]["M15"]["coverage"]["newer_than_certified"], 1);
+    no_secrets(&f);
+}
+
+#[test]
+fn newer_claude_schema_drift_is_never_partial_usage() {
+    for missing in [false, true] {
+        let f = claude();
+        let path = transcript(&f, SID, &f.worktree(), "2.1.300", f.decided + 1000);
+        let mut changed = false;
+        let lines: Vec<String> = fs::read_to_string(&path).unwrap().lines().map(|line| {
+            let mut value: Value = serde_json::from_str(line).unwrap();
+            if !changed && value["type"] == "assistant" && value["message"]["usage"].is_object() {
+                changed = true;
+                if missing { value["message"]["usage"].as_object_mut().unwrap().remove("output_tokens"); }
+                else { value["message"]["usage"]["output_tokens"] = json!("changed"); }
+            }
+            value.to_string()
+        }).collect();
+        assert!(changed);
+        fs::write(path, format!("{}\n", lines.join("\n"))).unwrap();
+        f.cli("collect");
+        assert_eq!(attempt_usage(&f)["reason"], "schema_unrecognized");
+        assert_eq!(attempt_usage(&f)["cli_version"], "claude-code/2.1.300");
+        assert!(attempt_usage(&f).get("total_tokens").is_none());
+        assert!(f.sidecar().query_row("SELECT EXISTS(SELECT 1 FROM source_observations WHERE json_extract(measurement,'$.reason')='schema_unrecognized' AND json_extract(measurement,'$.coverage')='unavailable' AND json_extract(provenance,'$.adapter_version')='claude-code/2.1.300')", [], |r| r.get::<_, bool>(0)).unwrap());
+        f.cli_args(&["accounting", "sync"]);
+        assert_eq!(attempt_usage(&f)["reason"], "schema_unrecognized");
+        no_secrets(&f);
+    }
 }

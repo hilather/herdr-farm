@@ -690,7 +690,7 @@ fn workspace_doc_captures_are_real_outputs() {
 }
 
 
-/// L1/F6 (certificate-live.md §7): Codex 0.158.0 is installed and a version
+/// L1/F6 (certificate-live.md §7): Codex 0.153.0 is installed and a version
 /// manager's default while 0.154.0 and 0.159.2 are certified. `collectors
 /// capabilities` lists each retained Codex profile with its recorded agent
 /// version and warns, and `doctor` warns (never fails) with how to pin, when
@@ -703,7 +703,7 @@ fn doctor_and_capabilities_warn_on_an_uncertified_or_drifting_codex_profile() {
     let f = Fixture::new();
     migrated(&f);
     let mise = f.tmp.path().canonicalize().unwrap().join("mise");
-    for path in ["installs/codex/0.154.0/bin/codex", "installs/codex/0.158.0/bin/codex", "bin/mise"] {
+    for path in ["installs/codex/0.154.0/bin/codex", "installs/codex/0.153.0/bin/codex", "bin/mise"] {
         fs::create_dir_all(mise.join(path).parent().unwrap()).unwrap();
         fs::write(mise.join(path), "#!/bin/sh\n").unwrap();
     }
@@ -711,7 +711,7 @@ fn doctor_and_capabilities_warn_on_an_uncertified_or_drifting_codex_profile() {
     std::os::unix::fs::symlink("../bin/mise", mise.join("shims/codex")).unwrap();
     let db = f.project.join(".state/state.db");
     let home = f.tmp.path().canonicalize().unwrap().join("codex-home");
-    for (name, agent, version) in [("pinned", "installs/codex/0.154.0/bin/codex", "0.154.0"), ("drift", "shims/codex", "0.158.0"), ("stale", "installs/codex/0.158.0/bin/codex", "0.154.0")] {
+    for (name, agent, version) in [("pinned", "installs/codex/0.154.0/bin/codex", "0.154.0"), ("drift", "shims/codex", "0.153.0"), ("stale", "installs/codex/0.153.0/bin/codex", "0.154.0")] {
         let mut profile = codex_profile(&f.config, "codex", name, Some(&home));
         profile.agent.path = mise.join(agent).display().to_string();
         profile.agent.version = version.into();
@@ -725,17 +725,17 @@ fn doctor_and_capabilities_warn_on_an_uncertified_or_drifting_codex_profile() {
     assert_eq!(codes("drift"), ["version_uncertified", "agent_is_a_launcher"]);
     assert_eq!(codes("stale"), ["resolved_version_differs"]);
     let drift = profiles.iter().find(|p| p["profile"] == "drift").unwrap();
-    assert_eq!((&drift["version"], &drift["certified"], &drift["resolved"]), (&json!("0.158.0"), &json!(false), &json!(mise.join("bin/mise").display().to_string())));
+    assert_eq!((&drift["version"], &drift["certified"], &drift["resolved"]), (&json!("0.153.0"), &json!(false), &json!(mise.join("bin/mise").display().to_string())));
     let text = f.text(&["collectors", "capabilities"]);
-    assert!(text.lines().any(|l| l == format!("profile drift agent {} version 0.158.0 certified=false", mise.join("shims/codex").display())), "{text}");
-    assert!(text.lines().any(|l| l.starts_with("  WARNING version_uncertified: Codex 0.158.0 is not certified (certified: 0.154.0, 0.159.2)")), "{text}");
+    assert!(text.lines().any(|l| l == format!("profile drift agent {} version 0.153.0 certified=false", mise.join("shims/codex").display())), "{text}");
+    assert!(text.lines().any(|l| l.starts_with("  WARNING version_uncertified: Codex 0.153.0 is not certified (certified: 0.154.0, 0.159.2)")), "{text}");
     assert!(text.lines().any(|l| l.starts_with("  to fix: pin the profile to a certified Codex binary by its resolved path")), "{text}");
 
     let text = doctor(&f);
     let pinned = mise.join("installs/codex/0.154.0/bin/codex");
     assert!(text.lines().any(|l| l == format!("[ok  ] project demo: codex profile `pinned`: agent 0.154.0 at {} (certified)", pinned.display())), "{text}");
-    assert!(text.lines().any(|l| l.starts_with(&format!("[warn] project demo: codex profile `drift`: agent 0.158.0 at {}: Codex 0.158.0 is not certified", mise.join("shims/codex").display()))
+    assert!(text.lines().any(|l| l.starts_with(&format!("[warn] project demo: codex profile `drift`: agent 0.153.0 at {}: Codex 0.153.0 is not certified", mise.join("shims/codex").display()))
         && l.contains("resolves to `mise`, a launcher") && l.contains("--agent-executable ~/.local/share/mise/installs/codex/0.154.0/bin/codex")), "{text}");
-    assert!(text.lines().any(|l| l.starts_with("[warn] project demo: codex profile `stale`: agent 0.154.0") && l.contains("installed as Codex 0.158.0, not the recorded 0.154.0")), "{text}");
+    assert!(text.lines().any(|l| l.starts_with("[warn] project demo: codex profile `stale`: agent 0.154.0") && l.contains("installed as Codex 0.153.0, not the recorded 0.154.0")), "{text}");
     assert!(!text.contains("[FAIL] project demo: codex profile"), "{text}");
 }

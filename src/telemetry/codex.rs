@@ -28,16 +28,12 @@ const MAX_DEPTH: usize = 4;
 const MAX_SAFE: u64 = 1 << 53;
 
 pub fn certified(version: &str) -> bool {
-    CERTIFIED.contains(&version)
+    super::version::accepted(version, CERTIFIED, CERTIFIED)
 }
 
 /// Adapter-qualified versions keep fixture Claude acceptance separate from live Codex certification.
 pub fn accepted_version(version: &str) -> bool {
-    if let Some(v) = version.strip_prefix("grok/") { return v == "1.0.46"; }
-    if let Some(v) = version.strip_prefix("devin/") { return v == "3000.11.3"; }
-    if let Some(v) = version.strip_prefix("muse/") { return muse::FIXTURE_VERSIONS.contains(&v); }
-    if let Some(v) = version.strip_prefix("opencode/") { return opencode::FIXTURE_VERSIONS.contains(&v); }
-    version.strip_prefix("claude-code/").map_or_else(|| certified(version), |v| claude::FIXTURE_VERSIONS.contains(&v))
+    super::version::qualified_accepted(version)
 }
 
 /// Bytes one collect may read across all native sources.
@@ -184,7 +180,7 @@ fn canonical(project: &Path) -> Result<(Vec<CanonicalAttempt>, Vec<String>)> {
 /// version is certified, and whether its agent path can now resolve to
 /// another version without the product noticing. Read-only; never runs the
 /// agent and never certifies anything. `warnings` (each `{code, detail}`):
-/// `version_uncertified` (the recorded version is not in [`CERTIFIED`]: its
+/// `version_uncertified` (the recorded version is unparseable or below the lowest live-certified version: its
 /// usage is gated `cli_version_uncertified`), `agent_missing`,
 /// `agent_is_a_launcher` (the path resolves to an executable not named
 /// `codex`, such as a version manager shim whose target can change), and
@@ -235,7 +231,7 @@ pub fn profile_versions(project: &Path) -> Result<Vec<Value>> {
 }
 
 /// How to pin a profile to a certified Codex binary, for the warnings above.
-pub const PIN_ADVICE: &str = "pin the profile to a certified Codex binary by its resolved path, not a version manager shim (e.g. `profile prepare <slug> <profile> --agent-executable ~/.local/share/mise/installs/codex/0.154.0/bin/codex ...`); a new version needs its own live certification first";
+pub const PIN_ADVICE: &str = "pin the profile to a certified Codex binary by its resolved path, not a version manager shim (e.g. `profile prepare <slug> <profile> --agent-executable ~/.local/share/mise/installs/codex/0.154.0/bin/codex ...`); versions at or above the lowest live-certified version are accepted";
 
 /// `doctor` lines for [`profile_versions`]: `ok` for a certified, pinned
 /// profile, `warn` otherwise. Advisory: never FAIL.
@@ -353,6 +349,16 @@ pub fn collect(project: &Path, budget: Budget, create: bool) -> Result<Option<Co
     terminated_turns(&db, &attempts)?;
     super::maintenance::enforce(&mut db, &tombstones)?;
     Ok(Some(done))
+}
+
+/// Accounting sync re-reads newly compatible refused sources before replaying.
+pub(crate) fn recollect_refused(project: &Path) -> Result<()> {
+    let needed = match super::sidecar::open(project, false)? {
+        Some(db) => !reread(&db)?.is_empty() || !recertify(&db)?.is_empty(),
+        None => false,
+    };
+    if needed { collect(project, Budget::CLI, true)?; }
+    Ok(())
 }
 
 /// Sources whose version is now certified but that hold rows stored while it
@@ -1095,7 +1101,13 @@ fn record(tx: &Transaction, ledger: &ingest::Ledger, at: u64, tag: &Tag, line: &
         // Keyed by the rollout's own `session_meta.id`, never the record's
         // `session_id`: a guardian's records report its parent's (A5).
         (Some("token_usage_record"), _) => {
-            let Ok(Envelope { payload: record }) = serde_json::from_slice::<Envelope<UsageRecord>>(line) else { return Ok(false) };
+            let parsed = serde_json::from_slice::<Envelope<UsageRecord>>(line);
+            let record = match parsed {
+                Ok(Envelope { payload }) => payload,
+                Err(_) if cursor.session.as_ref().is_some_and(|s| super::version::nearest(&s.1).is_some()) =>
+                    UsageRecord { turn_id: None, response_id: Some(format!("schema:{key}:{at}")), usage: Usage::default(), thread_token_usage: None },
+                Err(_) => return Ok(false),
+            };
             cursor.records += 1;
             let Some((session, version, _)) = &cursor.session else { return Ok(true) };
             let payload = json!({"response_id": record.response_id, "turn_id": record.turn_id, "model": cursor.model, "effort": cursor.effort, "usage": record.usage.json()});
@@ -1284,7 +1296,7 @@ fn record(tx: &Transaction, ledger: &ingest::Ledger, at: u64, tag: &Tag, line: &
 /// `cli_version_uncertified`; a record not accepted keeps no counters.
 fn evaluate(usage: &Usage, version: &str) -> (Option<&'static str>, [Option<i64>; 6]) {
     let valid = usage.counters().filter(|[_, cached, input, output, reasoning, total]| *total == input + output && cached <= input && reasoning <= output);
-    let reason = if valid.is_none() { Some("invariant_violation") } else if !accepted_version(version) { Some("cli_version_uncertified") } else { None };
+    let reason = if usage.counters().is_none() && super::version::nearest(version).is_some() { Some("schema_unrecognized") } else if valid.is_none() { Some("invariant_violation") } else if !accepted_version(version) { Some("cli_version_uncertified") } else { None };
     (reason, valid.filter(|_| reason.is_none()).map(|c| c.map(Some)).unwrap_or([None; 6]))
 }
 

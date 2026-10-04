@@ -49,7 +49,15 @@ pub(crate) fn declare_usage(record: &mut serde_json::Value, harness: &str, versi
         if read.checked_add(write)? > input || reasoning > output || [input,output,read,write,reasoning,total].iter().any(|n| *n > 1 << 53) { return None; }
         Some([input,read,write,output,reasoning,total])
     })();
-    let Some(counters) = counters else { return; };
+    let Some(counters) = counters else {
+        if crate::telemetry::version::nearest(&format!("{harness}/{version}")).is_some() {
+            record["kind"] = json!("unmapped");
+            record["reason"] = json!("schema_unrecognized");
+            record["cli_version"] = json!(version);
+            record.as_object_mut().unwrap().remove("attributes");
+        }
+        return;
+    };
     record["cli_version"] = json!(version);
     record["usage_authority"] = json!(if harness == "claude-code" { "api_request" } else { "model_call" });
     for (key, value) in ["input_tokens","cached_input_tokens","cache_write_input_tokens","output_tokens","reasoning_output_tokens","total_tokens"].into_iter().zip(counters) {

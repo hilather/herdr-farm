@@ -406,7 +406,7 @@ fn local_gemini_keeps_codex_and_claude_results_unchanged() {
     );
     let claude_home = f.tmp.path().join("synthetic-claude-home");
     let mut profile = codex_profile(&f.config, "claude", "claude", Some(&claude_home));
-    profile.agent.version = "2.1.3".into();
+    profile.agent.version = "2.1.286".into();
     let state = f.project.join(".state/state.db");
     plant_profile(&state, profile);
     f.readmit("claude");
@@ -427,7 +427,7 @@ fn local_gemini_keeps_codex_and_claude_results_unchanged() {
     .unwrap()
     .replace("@SID@", SID)
     .replace("@CWD@", &f.worktree())
-    .replace("@VERSION@", "2.1.3")
+    .replace("@VERSION@", "2.1.286")
     .replace(
         "@TS@",
         &jiff::Timestamp::from_millisecond(f.decided + 1000)

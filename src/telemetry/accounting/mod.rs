@@ -41,7 +41,8 @@ pub const MIGRATIONS: &[&str] = &[include_str!("../../../migrations/telemetry/ac
     include_str!("../../../migrations/telemetry/accounting/0017_compact_dispositions.sql"),
     include_str!("../../../migrations/telemetry/accounting/0018_muse.sql"),
     include_str!("../../../migrations/telemetry/accounting/0019_otlp_ledger.sql"),
-    include_str!("../../../migrations/telemetry/accounting/0020_otlp_devin.sql")];
+    include_str!("../../../migrations/telemetry/accounting/0020_otlp_devin.sql"),
+    include_str!("../../../migrations/telemetry/accounting/0021_newer_cli_usage.sql")];
 
 /// `herdr-farm telemetry <slug> accounting ...`
 #[derive(clap::Subcommand)]
@@ -193,9 +194,12 @@ pub fn run(project: &Path, command: Command) -> Result<String> {
             }
             value
         },
-        Command::Sync => match super::sidecar::open(project, false)? {
-            Some(mut db) => ledger::sync(&mut db)?,
-            None => unavailable("collection_not_run"),
+        Command::Sync => {
+            super::codex::recollect_refused(project)?;
+            match super::sidecar::open(project, false)? {
+                Some(mut db) => ledger::sync(&mut db)?,
+                None => unavailable("collection_not_run"),
+            }
         },
         Command::Entries => match super::sidecar::read(project)? {
             Some(db) => ledger::read(&db)?,
@@ -373,22 +377,35 @@ fn usage_metrics_with(project: &Path, since: Option<i64>, aggregates: bool) -> R
         "SELECT s.session_id,s.binding,s.attempt_id,
         CASE WHEN EXISTS(SELECT 1 FROM codex_usage u WHERE u.path_digest=s.path_digest AND u.reason='cli_version_uncertified') THEN '' ELSE s.cli_version END,
         EXISTS(SELECT 1 FROM codex_quarantine q WHERE q.session_id=s.session_id),s.session_unix_ms,
-        EXISTS(SELECT 1 FROM codex_usage u WHERE u.session_id=s.session_id AND u.reason='invariant_violation') FROM rollout_sources s ORDER BY s.path_digest"
+        EXISTS(SELECT 1 FROM codex_usage u WHERE u.session_id=s.session_id AND u.reason IN ('invariant_violation','schema_unrecognized')) FROM rollout_sources s ORDER BY s.path_digest"
     };
     let sources: Vec<Source> = db.prepare(sql)?
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)))?.collect::<rusqlite::Result<_>>()?;
+        .query_map([], |r| {
+            let session: String = r.get(0)?;
+            let version: String = r.get(3)?;
+            let rejected = r.get::<_, bool>(6)? || super::sidecar::incomplete_newer(&db, &session, &version)?;
+            Ok((session, r.get(1)?, r.get(2)?, version, r.get(4)?, r.get(5)?, rejected))
+        })?.collect::<rusqlite::Result<_>>()?;
     let losing = if sources.iter().any(|s| s.0.starts_with("otlp:")) { otlp::losing_sessions(&db)? } else { BTreeSet::new() };
+    let incomplete_sessions: BTreeSet<&str> = sources.iter().filter(|s| s.6 && super::version::nearest(&s.3).is_some()).map(|s| s.0.as_str()).collect();
     let (mut certified, mut excluded) = (BTreeSet::new(), BTreeMap::<&str, usize>::new());
     for (session, binding, attempt, version, quarantined, at, rejected) in &sources {
         if since.is_some_and(|since| at.is_none_or(|at| at < since)) { continue; }
         let reason = if binding != "bound" { binding.as_str() } else if !attempt.as_ref().is_some_and(|a| known.contains(a)) { "orphan" }
             else if losing.contains(session) { "native_surface_precedence" }
             else if *quarantined { "quarantined" } else if !super::codex::accepted_version(version) { "cli_version_uncertified" }
-            else if *rejected { "records_not_accepted" }
+            else if *rejected || incomplete_sessions.contains(session.as_str()) { "records_not_accepted" }
             else { certified.insert(session.as_str()); continue };
         *excluded.entry(reason).or_default() += 1;
     }
-    let coverage = json!({"certified_sessions": certified.len(), "excluded": excluded});
+    let newer: BTreeMap<&str, Value> = sources.iter().filter(|s| certified.contains(s.0.as_str()) && super::version::nearest(&s.3).is_some())
+        .map(|s| (s.3.as_str(), super::version::provenance(&s.3))).collect();
+    let newer_sessions: BTreeSet<&str> = sources.iter().filter(|s| certified.contains(s.0.as_str()) && super::version::nearest(&s.3).is_some()).map(|s| s.0.as_str()).collect();
+    let mut coverage = json!({"certified_sessions": certified.len(), "excluded": excluded});
+    if !newer_sessions.is_empty() {
+        coverage["newer_than_certified"] = json!(newer_sessions.len());
+        coverage["versions"] = json!(newer);
+    }
     if certified.is_empty() {
         let body = json!({"value": unavailable("no_certified_source"), "coverage": coverage});
         return Ok(both(body.clone(), body));

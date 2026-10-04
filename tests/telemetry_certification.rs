@@ -986,7 +986,7 @@ fn accounting_fields_match_the_adapter_certificate() {
     // An uncertified version is stored without counters and never summed.
     let t = f.decided + 1_000;
     let mut rollout = Rollout::new(&sid(0x0d01), &f.worktree(), t).model(t, "turn-1", "gpt-5.5").usage(t + 1, "turn-1", "resp-1", [100, 0, 0, 20, 0], None).text();
-    rollout = rollout.replace("\"cli_version\":\"0.154.0\"", "\"cli_version\":\"0.999.0\"");
+    rollout = rollout.replace("\"cli_version\":\"0.154.0\"", "\"cli_version\":\"0.153.0\"");
     plant(&f.home, "future", &rollout);
     sync(&f);
     let report = f.report();

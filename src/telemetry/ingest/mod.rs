@@ -109,7 +109,21 @@ impl Ledger {
         let version = normalization_version(record.kind);
         let mut measured = json!({"measurement_basis": "reported", "coverage": "complete", "normalization_version": version,
             "certified": record.certified});
-        if adapter != "codex" { measured["certification"] = json!(if record.certified { "fixture" } else { "none" }); }
+        if super::version::nearest(record.adapter_version).is_some() {
+            for (k, v) in super::version::provenance(record.adapter_version).as_object().unwrap() { measured[k] = v.clone(); }
+        } else if adapter != "codex" { measured["certification"] = json!(if record.certified { "fixture" } else { "none" }); }
+        let schema_invalid = match record.kind {
+            "token_usage_record" => ["input_tokens", "cached_input_tokens", "cache_write_input_tokens", "output_tokens", "reasoning_output_tokens", "total_tokens"]
+                .iter().any(|k| !record.payload["usage"][k].is_u64()),
+            "claude_line" if record.payload["line_type"] == "assistant" =>
+                ["input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"]
+                    .iter().any(|k| !record.payload[k].is_u64()),
+            _ => false,
+        };
+        if super::version::nearest(record.adapter_version).is_some() && schema_invalid {
+            measured["coverage"] = json!("unavailable");
+            measured["reason"] = json!("schema_unrecognized");
+        }
         let measurement = canonical(&measured);
         let envelope = json!({"schema_version": SCHEMA_VERSION, "event_id": event_id, "producer_id": producer, "producer_epoch": self.source,
             "producer_sequence": sequence, "idempotency_key": event_id, "event_kind": kind, "occurred_unix_ms": record.occurred_unix_ms,

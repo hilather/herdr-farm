@@ -535,3 +535,22 @@ the 100k storage, default-retention and vacuum measurements.
 Compatibility: legacy environment variables and existing data/config locations remain supported; see [renaming](../renaming.md).
 
 The `state-store` feature is enabled by default; build recipes above use that default.
+
+### Newer CLI versions and refused usage
+
+Codex, Claude Code, Muse, Grok and Devin accept versions at or above their
+lowest live-certified version. Gemini CLI and OpenCode still require exact
+fixture versions. A newer accepted source reports `newer_than_certified` and
+`nearest_certified_version`; inspect these fields in `telemetry PROJECT usage
+--json` and the newer-version count beside coverage in operator views.
+
+After upgrading the collector, run `telemetry PROJECT collect` or
+`telemetry PROJECT accounting sync` to re-read retained sessions previously
+refused with `cli_version_uncertified`. The collector preserves history and
+rebuilds affected projections. A missing rollout remains unavailable; restore
+it through the normal isolated source recovery workflow before collecting.
+
+Treat `schema_unrecognized` with its `cli_version` as an adapter format-change
+incident. Keep the isolated rollout for diagnosis, update its field mapping and
+exercise the public collection/accounting workflows before relying on usage.
+The attempt's total stays unavailable while any required usage record is rejected.

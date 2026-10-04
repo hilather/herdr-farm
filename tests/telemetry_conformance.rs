@@ -104,7 +104,7 @@ struct Case {
 const CASES: &[Case] = &[
     Case { name: "complete", sid: SID, parts: &["head.jsonl", "tail.jsonl"], version: "0.154.0", place: Place::Bound },
     Case { name: "edge", sid: EDGE_SID, parts: &["head.jsonl", EDGE], version: "0.154.0", place: Place::Bound },
-    Case { name: "uncertified", sid: OLD_SID, parts: &["head.jsonl", "tail.jsonl"], version: "0.999.0", place: Place::Bound },
+    Case { name: "uncertified", sid: OLD_SID, parts: &["head.jsonl", "tail.jsonl"], version: "0.153.0", place: Place::Bound },
     Case { name: "cwd-outside", sid: "00000000-0000-4000-8000-0000000a3002", parts: &["head.jsonl"], version: "0.154.0", place: Place::CwdOutside },
     Case { name: "other-home", sid: "00000000-0000-4000-8000-0000000a3003", parts: &["head.jsonl"], version: "0.154.0", place: Place::OtherHome },
     Case { name: "earlier", sid: "00000000-0000-4000-8000-0000000a3004", parts: &["head.jsonl"], version: "0.154.0", place: Place::BeforeDecision },
@@ -376,7 +376,7 @@ fn uncertified_version_is_gated_everywhere() {
     assert_eq!((&m08["value"], &m08["coverage"]), (&1500.into(), &json!({"certified_sessions": 1, "excluded": {"cli_version_uncertified": 1}})));
     let versions: Vec<String> = f.sidecar().prepare("SELECT DISTINCT json_extract(provenance,'$.adapter_version') FROM source_observations WHERE producer_epoch=?1").unwrap()
         .query_map([source(&old)], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
-    assert_eq!(versions, ["0.999.0"]);
+    assert_eq!(versions, ["0.153.0"]);
     let certified = |path: &Path| rows::<i64>(&f, &format!("SELECT json_extract(measurement,'$.certified'),count(*) FROM source_observations
         WHERE producer_epoch='{}' GROUP BY 1", source(path)));
     assert_eq!((certified(&old), certified(&complete)), (vec![vec![0, 10]], vec![vec![1, 10]]));
