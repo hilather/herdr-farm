@@ -17,17 +17,21 @@ const BIN: &str = env!("CARGO_BIN_EXE_herdr-farm");
 /// replaces the ping reply; `lose-create` runs the command but drops the reply;
 /// `drop-release` drops gate-release input unsent and unanswered; `vanish`
 /// closes the worker's workspace, pane and agent without touching its process;
-/// `swallow-prompts` is a count of prompts the agent ignores (it stays idle).
+/// `swallow-prompts` is a count of prompts the agent ignores (it stays idle);
+/// `reset-workspace` (consumed) forgets the ended worker so a lab can launch another.
 const SERVER: &str = r#"
 import json,os,sys,socket,subprocess
-path=sys.argv[1];root=os.path.dirname(path);s={}
+path=sys.argv[1];root=os.path.dirname(path);s={};gen=1
 server=socket.socket(socket.AF_UNIX);server.bind(path);server.listen()
 while True:
  c,_=server.accept();f=c.makefile('rw');r=json.loads(f.readline());m=r['method'];p=r.get('params') or {}
+ if os.path.exists(os.path.join(root,'reset-workspace')):
+  os.remove(os.path.join(root,'reset-workspace'));s.clear();gen+=1
+  if os.path.exists(os.path.join(root,'input')):os.remove(os.path.join(root,'input'))
  live='pid' in s and not os.path.exists(os.path.join(root,'vanish'))
  with open(os.path.join(root,'requests'),'a') as log:log.write(json.dumps({'method':m,'params':p})+'\n')
  with open(os.path.join(root,'request-ids'),'a') as log:log.write(str(r['id'])+'\n')
- pane={'pane_id':'w1:p1','workspace_id':'w1','tab_id':'w1:t1','terminal_id':'term1','cwd':s.get('cwd')}
+ pane={'pane_id':f'w{gen}:p1','workspace_id':f'w{gen}','tab_id':f'w{gen}:t1','terminal_id':'term1','cwd':s.get('cwd')}
  if os.path.exists(os.path.join(root,'changed-terminal')):pane['terminal_id']='replacement-terminal'
  kind=open(os.path.join(root,'agent-kind')).read() if os.path.exists(os.path.join(root,'agent-kind')) else 'claude'
  status=open(os.path.join(root,'agent-status')).read() if os.path.exists(os.path.join(root,'agent-status')) else 'idle'
@@ -41,12 +45,12 @@ while True:
   fifo=os.path.join(root,'input');os.mkfifo(fifo);fd=os.open(fifo,os.O_RDWR)
   child=subprocess.Popen(p['command'],cwd=p['cwd'],stdin=fd,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True,env={'PATH':'/usr/bin:/bin'})
   s.update(pid=child.pid,argv=p['command'],cwd=p['cwd'],label=p['label'],fifo=fifo)
-  if not os.path.exists(os.path.join(root,'lose-create')):res={'type':'workspace_created','workspace':{'workspace_id':'w1'},'root_pane':{'pane_id':'w1:p1'}}
- elif m=='workspace.list':res={'type':'workspace_list','workspaces':[{'workspace_id':'w1','label':s['label'],'pane_count':1,'tab_count':1}] if live else []}
+  if not os.path.exists(os.path.join(root,'lose-create')):res={'type':'workspace_created','workspace':{'workspace_id':f'w{gen}'},'root_pane':{'pane_id':f'w{gen}:p1'}}
+ elif m=='workspace.list':res={'type':'workspace_list','workspaces':[{'workspace_id':f'w{gen}','label':s['label'],'pane_count':1,'tab_count':1}] if live else []}
  elif m=='pane.list':res={'panes':[pane] if live else []}
  elif m=='pane.get':res={'pane':pane}
  elif m=='pane.report_metadata':res={'type':'ok'}
- elif m=='pane.process_info':res={'process_info':{'pane_id':'w1:p1','foreground_processes':[{'pid':s['pid'],'argv':s['argv']}] if live else []}}
+ elif m=='pane.process_info':res={'process_info':{'pane_id':f'w{gen}:p1','foreground_processes':[{'pid':s['pid'],'argv':s['argv']}] if live else []}}
  elif m=='pane.send_input' and os.path.exists(os.path.join(root,'drop-release')):pass
  elif m=='pane.send_input':
   fd=os.open(s['fifo'],os.O_WRONLY);os.write(fd,p['text'].encode());os.close(fd);s['released']=True;res={'type':'ok'}
@@ -2502,7 +2506,11 @@ fn review_auto_spool(kind: &'static str) {
         assert_eq!(opportunity["assignment"]["blind"], false);
         assert_eq!(opportunity["role"], "gate");
         assert_eq!(opportunity["sessions"][0]["completion"]["findings_submitted"], if method=="code" {2} else {1});
-        let delivered = lab.requests().into_iter().rfind(|(m,_)|m=="agent.prompt").unwrap().1["text"].as_str().unwrap().to_owned();
+        // A launch-target worker receives its brief with the launch command, not
+        // as `agent.prompt`: read the retained brief of the launched review session.
+        let snapshot: String = rusqlite::Connection::open(lab.project.join(".state/state.db")).unwrap()
+            .query_row("SELECT snapshot_id FROM review_session_launches WHERE attempt_id=?1", [attempt.as_str()], |r| r.get(0)).unwrap();
+        let delivered = migration::open_active(&lab.project).unwrap().memory_snapshot_inputs(&snapshot).unwrap().instructions;
         assert!(delivered.contains("Retained project review context") && delivered.contains("Review instructions") && delivered.contains("Check the candidate's edge cases."), "{delivered}");
         // Stop this worker before launching the next review; the receipt remains
         // a completion even though this probe intentionally omitted its report.
@@ -2513,6 +2521,8 @@ fn review_auto_spool(kind: &'static str) {
         lab.stop(ticker);
         let inbox = lab.ok(&["inbox","list","demo"]).to_string();
         assert!(inbox.contains("review_receipt_without_result"), "{inbox}");
+        // The Herdr stand-in serves one workspace; forget the ended worker.
+        fs::write(lab.path("lab/reset-workspace"), "").unwrap();
     }
     let report = lab.ok(&["telemetry","demo","review","report"]);
     assert_eq!(report["metrics"]["M20"]["value"], "2/2");

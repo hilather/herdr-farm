@@ -1476,10 +1476,12 @@ report are stated separately, and the receipt remains in `review show` and
 metrics. A worker with neither produces `attempt.ended_without_submission`.
 Neither result acceptance nor receipt submission triages or accepts findings.
 
-For skeptical launches, `skeptical-challenge.v1` is registered once if absent
-with §7's example method, role `gate` and `prior_disclosure: withheld`.
-Its initial scope follows `--review-scope`; once registered its own `kind`,
-`scope`, `role` and `budget_ms` govern opportunities (protocols are immutable).
+For skeptical launches, one protocol per scope is registered once if absent
+with §7's example method, role `gate` and `prior_disclosure: withheld`:
+`skeptical-challenge.v1` (scope `candidate_diff`, `--review-scope diff`) and
+`skeptical-challenge-tree.v1` (scope `candidate_tree`, `--review-scope tree`).
+Protocols are immutable, so a scope never inherits another's; the registered
+protocol's `kind`, `scope`, `role` and `budget_ms` govern the opportunity.
 If that exact submission already has review opportunities, they are frozen
 as priors using `protocols bind` before admission; without priors it is an
 ordinary skeptical opportunity. M28 excludes a completed pass with pending

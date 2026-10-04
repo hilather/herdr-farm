@@ -336,7 +336,7 @@ impl SqliteStore {
             |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
         let requested_scope = if scope == "tree" { "candidate_tree" } else { "candidate_diff" };
         let registered: Option<(String, String)> = if kind == "skeptical" {
-            self.connection.query_row("SELECT kind,scope FROM review_protocols WHERE protocol='skeptical-challenge.v1'", [], |r| Ok((r.get(0)?, r.get(1)?))).optional()?
+            self.connection.query_row("SELECT kind,scope FROM review_protocols WHERE protocol=?1", [skeptical_protocol(scope)], |r| Ok((r.get(0)?, r.get(1)?))).optional()?
         } else { None };
         let (effective_kind, scope) = registered.as_ref().map(|(k,s)| (k.as_str(),s.as_str())).unwrap_or((kind,requested_scope));
         let submission = if let Some((submission, target, method, bound_scope)) = bound {
@@ -377,7 +377,7 @@ impl SqliteStore {
         let mut spec = super::ReviewOpportunitySpec { submission_id: submission.clone(), scope: if scope == "tree" { "candidate_tree" } else { "candidate_diff" }.into(),
             kind: kind.into(), role: "gate".into(), protocol: "review-protocol.v1".into(), prior_findings: vec![], budget_ms: None };
         if kind == "skeptical" {
-            spec.protocol = "skeptical-challenge.v1".into();
+            spec.protocol = skeptical_protocol(scope).into();
             if !self.connection.query_row("SELECT EXISTS(SELECT 1 FROM review_protocols WHERE protocol=?1)", [&spec.protocol], |r| r.get::<_,bool>(0))? {
                 let definition = serde_json::json!({"schema":"review_protocol.v1","protocol":spec.protocol,"kind":"skeptical","scope":spec.scope,"role":"gate",
                     "challenges":["unsupported_claims","missed_edge_cases","unsafe_concurrency","missing_acceptance_criteria","evidence_gaps"],
@@ -428,4 +428,11 @@ impl SqliteStore {
                 "receipt_schema": super::review_capture::RECEIPT_SCHEMA}))).optional()?;
         row.ok_or_else(|| invalid(format!("attempt {attempt} has no review session recorded at launch")))
     }
+}
+
+/// The skeptical protocol `launch run` registers for a review scope: one per
+/// scope, because a registered protocol never changes and §7 refuses a pass
+/// whose opportunity scope differs from its protocol's.
+fn skeptical_protocol(scope: &str) -> &'static str {
+    if scope == "tree" { "skeptical-challenge-tree.v1" } else { "skeptical-challenge.v1" }
 }
