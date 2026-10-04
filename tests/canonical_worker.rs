@@ -2544,8 +2544,13 @@ fn review_auto_fix_round(lab: &mut Lab, prompt: &std::path::Path, socket: &std::
         .replace("for index in 0..2", "for index in 0..1")
         .replace("Command::new(\"herdr-farm\").args", "Command::new(\"herdr-farm\").env(\"HERDR_FARM_TEST_TIME_SCALE\", TEST_TIME_SCALE).args");
     lab.write_agent(&source, &[("ROOT",lab.path("root").display().to_string()),("TEMPLATE_PATH",template.display().to_string())]);
+    // A new agent binary is a new profile: re-record its evidence as the lab
+    // setup does (the Herdr stand-in cannot serve a live probe).
+    lab.prepare_profile();
+    // A fix that lands is routed verify-then-integrate by its contract.
+    lab.git(&["branch","fix-integration"]);
     let args = ["launch","demo","run","--task","fix-review","--profile","worker","--repository",lab.repo.to_str().unwrap(),
-        "--fixes-review","review-code","--fixes","finding:first","--write","work.txt","--output","work.txt",
+        "--fixes-review","review-code","--fixes","finding:first","--write","work.txt","--output","work.txt","--integration-ref","refs/heads/fix-integration",
         "--prompt-file",prompt.to_str().unwrap(),"--herdr-socket",socket.to_str().unwrap(),"--sign-with",lab.key.to_str().unwrap()];
     let launch = lab.ok(&args);
     let attempt = AttemptId::new(launch["attempt"].as_str().unwrap()).unwrap();
@@ -2603,8 +2608,6 @@ fn review_auto_fix_round(lab: &mut Lab, prompt: &std::path::Path, socket: &std::
     lab.ok(&verify);
     assert_eq!(fixes(),fixed);
     assert_eq!(lab.ok(&["telemetry","demo","review","report"])["metrics"]["M25"]["value"],"2/3");
-    lab.git(&["branch","fix-integration"]);
-    lab.ok(&["result","demo","configure-integration","--repository",lab.repo.to_str().unwrap(),"--reference","refs/heads/fix-integration"]);
     let integrate_dir = lab.path("fix-integrate");
     let integrate = ["result","demo","integrate",verified["receipt"]["result_id"].as_str().unwrap(),"--repository",lab.repo.to_str().unwrap(),"--idempotency-key","fix-integrate","--work-dir",integrate_dir.to_str().unwrap()];
     let integrated = lab.ok(&integrate);
@@ -2629,14 +2632,20 @@ fn review_auto_fix_round(lab: &mut Lab, prompt: &std::path::Path, socket: &std::
         assert_eq!(lab.state(),before,"a refused selector writes nothing");
         assert_eq!(fixes(),history);
     }
-    // After native completion and termination, reuse the lab for a re-review.
+    // The editing agent stays alive after submitting: stop it, as the review
+    // rounds do, then reuse the lab for a re-review.
+    let running = lab.attempt(&attempt);
+    lab.ok(&["task","demo","cancel-attempt",attempt.as_str(),"--expected-revision",&running.revision.to_string(),"--expected-head",&lab.head().to_string(),"--reason","fix round done"]);
     lab.run_until(120,&|| lab.attempt(&attempt).termination_observed);
     fs::write(lab.path("lab/reset-workspace"),"").unwrap();
-    lab.write_agent(REVIEW_AUTO_PROBE,&[("ROOT",lab.path("root").display().to_string()),("BIN",BIN.into()),("VERSION",lab.version().into())]);
+    // A distinct build (new digest) is a new profile, re-recorded as at setup.
+    let rebuilt = format!("{REVIEW_AUTO_PROBE}\n#[used] static REBUILD: [u8; 9] = *b\"re-review\";\n");
+    lab.write_agent(&rebuilt,&[("ROOT",lab.path("root").display().to_string()),("BIN",BIN.into()),("VERSION",lab.version().into())]);
+    lab.prepare_profile();
     let rereview = lab.ok(&["launch","demo","run","--task","review-fix","--profile","worker","--repository",lab.repo.to_str().unwrap(),"--review-of","fix-review",
         "--prompt-file",prompt.to_str().unwrap(),"--herdr-socket",socket.to_str().unwrap(),"--sign-with",lab.key.to_str().unwrap()]);
     let rereview_attempt = AttemptId::new(rereview["attempt"].as_str().unwrap()).unwrap();
-    let session = lab.ok(&["telemetry","demo","review","session","--attempt",rereview_attempt.as_str()]);
+    let session = lab.ok(&["telemetry","demo","review","session","--attempt",rereview_attempt.as_str()])["session"].clone();
     let reviewed = lab.review_show(None);
     let opportunity = reviewed["opportunities"].as_array().unwrap().iter().find(|o|o["opportunity_id"]==session["opportunity_id"]).unwrap();
     assert_eq!(opportunity["submission_id"],submission);
