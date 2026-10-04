@@ -621,6 +621,7 @@ fn frozen_configuration_names_survive_profile_edits() {
         let line = models.lines().find(|line| line.contains(&label)).unwrap_or_else(|| panic!("missing {label}: {models}"));
         assert!(line.contains("first_use=") && line.contains("last_use="));
     }
+    assert!(models.contains("configurations (profile (kind model effort) hash, first and last dispatch):"));
     assert!(models.contains("codex (codex unknown unknown)"));
     assert!(models.contains("claude-sonnet (claude sonnet medium)"));
 }

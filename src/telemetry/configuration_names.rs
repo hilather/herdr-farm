@@ -25,10 +25,14 @@ pub(crate) fn read_db(db: &rusqlite::Connection) -> anyhow::Result<Vec<Value>> {
 }
 
 pub(crate) fn text(rows: &[Value]) -> String {
-    let mut out = String::new();
+    if rows.is_empty() { return String::new(); }
+    // Text shows UTC minutes; JSON keeps the exact Unix milliseconds.
+    let when = |v: &Value| v.as_i64().and_then(|ms| jiff::Timestamp::from_millisecond(ms).ok())
+        .map_or_else(|| "unknown".to_owned(), |t| t.strftime("%Y-%m-%d %H:%MZ").to_string());
+    let mut out = String::from("configurations (profile (kind model effort) hash, first and last dispatch):\n");
     for row in rows {
         let id = row["configuration_id"].as_str().unwrap_or("unknown");
-        out += &format!("  {} {} first_use={} last_use={}\n", row["label"].as_str().unwrap_or("unknown"), id.get(..19).unwrap_or(id), row["first_use_unix_ms"], row["last_use_unix_ms"]);
+        out += &format!("  {} {} first_use={} last_use={}\n", row["label"].as_str().unwrap_or("unknown"), id.get(..19).unwrap_or(id), when(&row["first_use_unix_ms"]), when(&row["last_use_unix_ms"]));
     }
     out
 }
