@@ -5016,7 +5016,7 @@ fn retained_pane_projection_excludes_reused_history_and_tracks_recovery_boundari
             // intentionally not fresh authority for these synthetic operations.
             let op=format!("archived-launch-{n}");let attempt=format!("archived-attempt-{n}");
             tx.prepare_cached("INSERT INTO attempts(id,task_id,revision,state,snapshot,reservation,termination_observed) SELECT ?1,task_id,1,'cancelled',NULL,?1,1 FROM attempts WHERE id=?2").unwrap().execute(rusqlite::params![attempt,target.attempt.as_str()]).unwrap();
-            tx.prepare_cached("INSERT INTO attempt_inputs SELECT ?1,?2,payload,payload_hash FROM attempt_inputs WHERE operation_id=?3").unwrap().execute(rusqlite::params![attempt,op,target.operation.as_str()]).unwrap();
+            tx.prepare_cached("INSERT INTO attempt_inputs(attempt_id,operation_id,payload,payload_hash) SELECT ?1,?2,payload,payload_hash FROM attempt_inputs WHERE operation_id=?3").unwrap().execute(rusqlite::params![attempt,op,target.operation.as_str()]).unwrap();
             for kind in ["runtime.launch_started","runtime.launch_target"] {
                 tx.prepare_cached("INSERT INTO events(kind,entity,revision,payload_version,payload) SELECT kind,?1,revision,payload_version,payload FROM events WHERE entity=?2 AND kind=?3").unwrap().execute(rusqlite::params![op,target.operation.as_str(),kind]).unwrap();
             }

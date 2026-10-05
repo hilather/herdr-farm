@@ -101,6 +101,8 @@ pub struct PreparedWorkerBriefReceipt {
 pub enum WorkerTerminationCause {
     Cancellation,
     ProcessExit,
+    /// Proven quiescence after the retained worker wall deadline.
+    TimedOut,
     /// Stopped after an operator completion request for an accepted result.
     Completion,
 }

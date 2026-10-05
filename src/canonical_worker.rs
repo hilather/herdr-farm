@@ -679,6 +679,8 @@ pub fn reconcile_termination(
                 WorkerTerminationCause::Cancellation
             } else if state.completion {
                 WorkerTerminationCause::Completion
+            } else if state.wall_expired {
+                WorkerTerminationCause::TimedOut
             } else {
                 WorkerTerminationCause::ProcessExit
             },

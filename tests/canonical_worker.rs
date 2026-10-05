@@ -2856,3 +2856,60 @@ fn idle_worker_notice_restarts_stretch_and_deduplicates_within_a_ticker() {
     lab.run_quiet(2);
     assert_eq!(notices().len(), 3);
 }
+
+/// The real timeout ends the stand-in agent while the root barrier is held.
+/// Failed observations remain retryable, including across ticker restart.
+#[test]
+fn wall_budget_termination_retries_contention_and_notifies_once() {
+    wall_budget_termination(true);
+}
+
+#[test]
+fn wall_budget_termination_without_contention() {
+    wall_budget_termination(false);
+}
+
+fn wall_budget_termination(contended: bool) {
+    let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+    let config = lab.path(".config/herdr-farm/config.toml");
+    fs::write(&config, fs::read_to_string(&config).unwrap().replace("max_wall_seconds=600", "max_wall_seconds=15")).unwrap();
+    lab.resume();
+    let (_, attempt) = lab.reserve("Stay alive until the wall budget ends");
+    lab.serve();
+    let mut ticker = lab.spawn();
+    lab.wait(&mut ticker, 60, &|| lab.attempt(&attempt).state == AttemptState::Running);
+    if contended {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let guard = loop {
+            match herdr_farm::execution_guard::ProjectGuard::acquire(&lab.project) {
+                Ok(guard) => break guard,
+                Err(error) => {
+                    assert!(Instant::now() < deadline, "{error:#}");
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+        };
+        let started: LaunchStartedReceipt = serde_json::from_value(lab.events("runtime.launch_started")[0].payload.clone()).unwrap();
+        lab.wait(&mut ticker, 60, &|| {
+            let log = fs::read_to_string(lab.path("root/.ticker.log")).unwrap_or_default();
+            log.lines().filter(|line| line.contains("termination recording deferred by contention") && line.contains(attempt.as_str())).count() >= 2
+                && herdr_farm::worker_supervision::SupervisorObservation::recover_exited(started.supervisor.as_ref().unwrap()).unwrap()
+        });
+        assert!(!lab.attempt(&attempt).termination_observed);
+        lab.stop(ticker);
+        drop(guard);
+        ticker = lab.spawn();
+    }
+    lab.wait(&mut ticker, 60, &|| lab.attempt(&attempt).termination_observed);
+    lab.stop(ticker);
+    let ended = lab.attempt(&attempt);
+    assert_eq!(ended.state, AttemptState::Failed);
+    assert!(!ended.retains_capacity());
+    let events = lab.events("runtime.worker_terminated");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].payload["cause"], "timed_out");
+    let notices = lab.ok(&["inbox", "list", "demo"]);
+    assert_eq!(notices.as_array().unwrap().iter().filter(|item| item["content"]["kind"] == "attempt.ended_without_submission").count(), 1, "{notices}");
+    let log = fs::read_to_string(lab.path("root/.ticker.log")).unwrap();
+    assert!(log.lines().any(|line| line.contains("termination recording succeeded") && line.contains(attempt.as_str())), "{log}");
+}

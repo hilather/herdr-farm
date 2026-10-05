@@ -51,7 +51,7 @@ fn project_outbox_upgrade_preserves_claims_inputs_and_consumed_approvals() {
     db.connection.execute("INSERT INTO attempts VALUES(?1,'b',1,'reserved',NULL,?2,0)",params![attempt.as_str(),format!("worker:{}",attempt.as_str())]).unwrap();
     db.connection.execute("UPDATE tasks SET revision=4,state='running',active_attempt=?1 WHERE id='b'",[attempt.as_str()]).unwrap();
     db.connection.execute("INSERT INTO operations VALUES(?1,'b','runtime.launch','task:b',1,?2,?3,4,1000,?1)",params![operation.as_str(),payload,digest]).unwrap();
-    db.connection.execute("INSERT INTO attempt_inputs VALUES(?1,?2,?3,?4)",params![attempt.as_str(),operation.as_str(),payload,digest]).unwrap();
+    db.connection.execute("INSERT INTO attempt_inputs(attempt_id,operation_id,payload,payload_hash) VALUES(?1,?2,?3,?4)",params![attempt.as_str(),operation.as_str(),payload,digest]).unwrap();
     db.connection.execute_batch("CREATE TRIGGER attempt_inputs_effective_profile BEFORE INSERT ON attempt_inputs WHEN COALESCE(json_extract(NEW.payload,'$.inputs.version'),0)<>2 OR COALESCE(json_type(NEW.payload,'$.inputs.effective_profile'),'missing')<>'object' BEGIN SELECT RAISE(ABORT,'effective profile evidence is required'); END;").unwrap();
     let mut before=db.read_snapshot(None).unwrap();
     let sql=include_str!("../../../migrations/0015_project_operations.sql");
@@ -230,7 +230,7 @@ fn schema11_upgrade_retains_records_and_blocks_old_format_insertions() {
     tx.execute("INSERT INTO attempts VALUES(?1,'a',1,'reserved',NULL,?2,0)",params![attempt.as_str(),format!("worker:{}",attempt.as_str())]).unwrap();
     tx.execute("UPDATE tasks SET revision=4,state='running',active_attempt=?1 WHERE id='a'",params![attempt.as_str()]).unwrap();
     tx.execute("INSERT INTO operations VALUES(?1,'a','runtime.launch',?2,1,?3,?4,4,1000,?1)",params![operation.as_str(),record.inputs.binding,payload,digest]).unwrap();
-    tx.execute("INSERT INTO attempt_inputs VALUES(?1,?2,?3,?4)",params![attempt.as_str(),operation.as_str(),payload,digest]).unwrap();
+    tx.execute("INSERT INTO attempt_inputs(attempt_id,operation_id,payload,payload_hash) VALUES(?1,?2,?3,?4)",params![attempt.as_str(),operation.as_str(),payload,digest]).unwrap();
     event(&tx,"attempt.reserved",attempt.as_str(),1,&record).unwrap();
     let task=read_tasks(&tx).unwrap().into_iter().find(|t|t.id.as_str()=="a").unwrap();
     event(&tx,"task.changed","a",4,&task).unwrap();event(&tx,"operation.enqueued",operation.as_str(),4,&record).unwrap();
@@ -240,7 +240,7 @@ fn schema11_upgrade_retains_records_and_blocks_old_format_insertions() {
     db.upgrade_v1().unwrap();let after=db.read_snapshot(None).unwrap();
     assert_eq!(after.schema_version,crate::store::SCHEMA);assert_eq!(after.attempt_inputs,before.attempt_inputs);assert_eq!(after.events,before.events);
     assert_eq!(after.head,before.head);
-    assert!(db.connection.execute("INSERT INTO attempt_inputs VALUES('old','old','{\"inputs\":{\"version\":1}}',?1)",params!["a".repeat(64)]).is_err());
+    assert!(db.connection.execute("INSERT INTO attempt_inputs(attempt_id,operation_id,payload,payload_hash) VALUES('old','old','{\"inputs\":{\"version\":1}}',?1)",params!["a".repeat(64)]).is_err());
     assert_eq!(after.attempt_inputs[0],record);
     assert_eq!(serde_json::to_string(&after.attempt_inputs[0]).unwrap(),payload);
     drop(db);let mut db=SqliteStore::open(&temp.path().join(".state/state.db")).unwrap();
