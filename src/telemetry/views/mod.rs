@@ -98,6 +98,10 @@ pub struct Window { pub from: Option<i64>, pub to: Option<i64>, pub as_of: Optio
 /// views and the fleet pane only: collection, the ticker, admission and
 /// budgets never read it.
 pub fn enabled(config_dir: &Path) -> Result<bool> {
+    telemetry_switch(config_dir, "views")
+}
+
+pub(crate) fn telemetry_switch(config_dir: &Path, key: &str) -> Result<bool> {
     use std::io::Read;
     use std::os::unix::fs::OpenOptionsExt;
     let path = config_dir.join("config.toml");
@@ -112,10 +116,10 @@ pub fn enabled(config_dir: &Path) -> Result<bool> {
     anyhow::ensure!(bytes.len() as u64 <= CONFIG_LIMIT, "{} exceeds its {CONFIG_LIMIT}-byte limit", path.display());
     let text = String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("{} is not UTF-8 (contents withheld)", path.display()))?;
     let table: toml::Table = toml::from_str(&text).map_err(|_| anyhow::anyhow!("{} does not parse (contents withheld)", path.display()))?;
-    match table.get("telemetry").and_then(|t| t.get("views")) {
+    match table.get("telemetry").and_then(|t| t.get(key)) {
         None => Ok(true),
         Some(toml::Value::Boolean(on)) => Ok(*on),
-        Some(_) => bail!("[telemetry] views in {} must be true or false", path.display()),
+        Some(_) => bail!("[telemetry] {key} in {} must be true or false", path.display()),
     }
 }
 

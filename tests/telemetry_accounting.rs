@@ -2318,7 +2318,7 @@ fn coordinator_overhead_and_overlap_waste_from_accepted_reasons() {
     let fleet = fleet_after_reprice(&f);
     let m34 = &fleet["metrics"]["M34"];
     assert_eq!((&m34["value"], &m34["scope"], &m34["allocation_rule"]),
-        (&json!({"status": "unavailable", "reason": "coordinator_usage_not_observed"}), &json!("coordinator-scope-v1"), &json!("coordinator-allocation-v2")));
+        (&json!({"status": "unavailable", "reason": "coordinator_usage_not_observed"}), &json!("coordinator-scope-v2"), &json!("coordinator-allocation-v2")));
 
     // The coordinator: Codex at the project directory, from another scanned home, an hour into the run.
     let coordinator_at = f.decided - 3_600_000;

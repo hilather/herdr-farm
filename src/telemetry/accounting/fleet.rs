@@ -9,7 +9,7 @@
 //! read-only `git`, counts only). M35 buckets fixed activity windows by their
 //! time-weighted active-attempt count; M36 counts integrator-observed and,
 //! apart, worker-observed conflict/rebase events; M34 prices the coordinator
-//! scope (`coordinator-scope-v1`) against the project's lifecycle cost and
+//! scope (`coordinator-scope-v2`) against the project's lifecycle cost and
 //! allocates it by rule `coordinator-allocation-v2`; M37 prices attempts
 //! superseded because a sibling changed the same area. The coordinator has no
 //! canonical attempt, so its time and cost never enter a worker figure.
@@ -462,8 +462,8 @@ fn conflicts(f: &Fleet, project: &Path, since: Option<i64>) -> Value {
 }
 
 /// M34 coordinator usage scope, versioned (§10).
-pub const COORDINATOR_SCOPE: &str = "coordinator-scope-v1";
-const COORDINATOR_SCOPE_RULE: &str = "Codex rollouts collected from a scanned execution home, bound to no attempt and outside every task worktree, \
+pub const COORDINATOR_SCOPE: &str = "coordinator-scope-v2";
+const COORDINATOR_SCOPE_RULE: &str = "Codex rollouts from scanned execution homes or Claude Code sessions from the exact owner coordinator project directory, bound to no attempt and outside every task worktree, \
     whose session_meta.cwd is the project directory (the coordinator pane's working directory)";
 /// M34 allocation of coordinator cost to tasks, versioned (§10; plan doc 05
 /// §5a). v2 (v1 read the horizon and first-observation times, so a rebuilt

@@ -571,3 +571,79 @@ fn newer_claude_schema_drift_is_never_partial_usage() {
         no_secrets(&f);
     }
 }
+
+#[test]
+fn owner_claude_coordinator_is_scoped_private_and_optional() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::{io::Read, os::fd::{AsRawFd, FromRawFd}};
+    for enabled in [true, false] {
+        let mut f = claude();
+        fs::write(f.project.join("PROJECT.md"), "+++\ncoordinator_agent = 'claude'\n+++\n").unwrap();
+        let owner = f.tmp.path().join("home");
+        let config = owner.join(".config/herdr-farm");
+        fs::create_dir_all(&config).unwrap();
+        fs::write(config.join("config.toml"), if enabled { "[telemetry]\n" } else { "[telemetry]\ncollect_coordinator_usage = false\n" }).unwrap();
+        transcript(&f, SID, &f.worktree(), "2.1.286", f.decided + 1000);
+        f.cli("collect");
+        let worker = attempt_usage(&f);
+        let m35 = f.cli_args(&["accounting", "fleet", "--json"]).0["metrics"]["M35"].clone();
+        let execution_home = f.home.clone();
+        f.home = owner.clone();
+        let cwd = f.project.display().to_string();
+        let path = transcript(&f, "owner-coordinator", &cwd, "2.1.286", f.decided + 1000);
+        // Different session and API ids preserve two independent observations.
+        let text = fs::read_to_string(&path).unwrap().replace("msg-", "owner-msg-");
+        fs::write(&path, text).unwrap();
+        let sibling = transcript(&f, "sibling-sentinel", "/synthetic/sibling", "2.1.286", f.decided + 1000);
+        fs::set_permissions(&sibling, fs::Permissions::from_mode(0o000)).unwrap();
+        let credentials = owner.join(".claude/credentials.json");
+        fs::write(&credentials, "CLAUDE_SECRET_CREDENTIAL_SENTINEL").unwrap();
+        // Watch forbidden paths for real opens, so a collector silently skipping
+        // unreadable files cannot hide a boundary violation.
+        let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
+        assert!(fd >= 0);
+        let mut forbidden_opens = unsafe { fs::File::from_raw_fd(fd) };
+        for watched in [sibling.parent().unwrap(), &credentials] {
+            let name = std::ffi::CString::new(watched.as_os_str().as_encoded_bytes()).unwrap();
+            assert!(unsafe { libc::inotify_add_watch(forbidden_opens.as_raw_fd(), name.as_ptr(), libc::IN_OPEN) } >= 0);
+        }
+        // A linked source inside the permitted directory must also be ignored.
+        symlink(&sibling, path.parent().unwrap().join("linked.jsonl")).unwrap();
+        f.home = execution_home;
+        f.cli("collect");
+        let mut events = [0u8; 4096];
+        assert_eq!(forbidden_opens.read(&mut events).unwrap_err().kind(), std::io::ErrorKind::WouldBlock,
+            "sibling projects and credentials must never be opened");
+        assert_eq!(attempt_usage(&f), worker, "coordinator does not enter worker totals");
+        assert_eq!(f.sidecar().query_row("SELECT count(*) FROM rollout_sources WHERE session_id='claude-code:sibling-sentinel'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        f.cli_args(&["accounting", "sync"]);
+        let card = f.tmp.path().join("coordinator-rates.json");
+        fs::write(&card, json!({"card_id":"synthetic-coordinator","version":1,"provider":"anthropic","product":"claude-code",
+            "models":["claude-fixture-sonnet","claude-fixture-haiku"],"currency":"USD","rate_unit":1000000,"effective_from_unix_ms":0,
+            "includes":{"discounts":false,"taxes":false,"fees":false},"source":"INVENTED synthetic fixture rates",
+            "rates":[{"category":"input","rate":"1"},{"category":"output","rate":"1"},{"category":"cache_read","rate":"1"},{"category":"cache_write","rate":"1"}]}).to_string()).unwrap();
+        f.cli_args(&["accounting", "import-rate-card", card.to_str().unwrap()]);
+        f.cli_args(&["accounting", "reprice"]);
+        let fleet = f.cli_args(&["accounting", "fleet", "--json"]).0;
+        assert_eq!(fleet["metrics"]["M35"], m35);
+        let m34 = &fleet["metrics"]["M34"];
+        assert_eq!(m34["scope"], "coordinator-scope-v2");
+        if enabled {
+            assert_eq!(m34["coordinator"]["sessions"], 1);
+            assert_eq!(m34["coordinator"]["coverage"]["entries"], 2);
+            assert_eq!(m34["value"], "1/2");
+            assert_eq!(f.sidecar().query_row("SELECT binding FROM rollout_sources WHERE session_id='claude-code:owner-coordinator'", [], |r| r.get::<_, String>(0)).unwrap(), "unbound");
+        } else {
+            assert_eq!(m34["value"]["reason"], "coordinator_usage_not_observed");
+        }
+        let cost = f.cli_args(&["view", "cost", "--json"]).0;
+        let row = cost["rows"].as_array().unwrap().iter().find(|r| r["metric_id"] == "M34").unwrap();
+        assert_eq!(row["value"], fleet["metrics"]["M34"]["value"]);
+        no_secrets(&f);
+        fs::write(f.project.join(".state/format.json"), r#"{"memory":"sqlite-v1","runtime":"sqlite-v1"}"#).unwrap();
+        let doctor = std::process::Command::new(BIN).env_clear().env("HOME", &owner).env("PATH", "/usr/bin:/bin")
+            .env("HERDR_FARM_TEST_TIME_SCALE", f.scale).args(["--root", f.root.to_str().unwrap(), "doctor"]).output().unwrap();
+        let output = String::from_utf8(doctor.stdout).unwrap();
+        assert!(output.contains(&format!("coordinator usage: {} ({})", if enabled { "collected" } else { "disabled" }, path.parent().unwrap().display())), "{output}");
+    }
+}

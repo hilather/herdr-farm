@@ -236,14 +236,20 @@ pub const PIN_ADVICE: &str = "pin the profile to a certified Codex binary by its
 /// `doctor` lines for [`profile_versions`]: `ok` for a certified, pinned
 /// profile, `warn` otherwise. Advisory: never FAIL.
 pub fn doctor_checks(project: &Path) -> Vec<(Option<bool>, String)> {
-    match profile_versions(project) {
+    let mut checks = match profile_versions(project) {
         Err(error) => vec![(None, format!("codex profiles: unreadable: {error:#}"))],
         Ok(profiles) => profiles.iter().map(|p| {
             let head = format!("codex profile `{}`: agent {} at {}", p["profile"].as_str().unwrap_or(""), p["version"].as_str().unwrap_or("?"), p["agent"].as_str().unwrap_or("?"));
             let warnings: Vec<&str> = p["warnings"].as_array().into_iter().flatten().filter_map(|w| w["detail"].as_str()).collect();
             if warnings.is_empty() { (Some(true), format!("{head} (certified)")) } else { (None, format!("{head}: {}; {PIN_ADVICE}", warnings.join("; "))) }
         }).collect(),
+    };
+    match claude::coordinator_source(project) {
+        Ok(Some((path, enabled))) => checks.push((Some(true), format!("coordinator usage: {} ({})", if enabled { "collected" } else { "disabled" }, path.display()))),
+        Ok(None) => checks.push((Some(true), "coordinator usage: no Claude Code coordinator source".into())),
+        Err(error) => checks.push((None, format!("coordinator usage: unreadable configuration: {error:#}"))),
     }
+    checks
 }
 
 pub fn canonical_attempts(project: &Path) -> Result<Vec<CanonicalAttempt>> {
@@ -254,10 +260,11 @@ fn digest(bytes: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
 }
 
-/// Cheap ticker eligibility probe. Use only recorded execution homes, never
-/// discover an owner's agent directories. Full collection still validates and
+/// Cheap ticker eligibility probe. Use recorded execution homes and the
+/// explicitly scoped owner coordinator source. Full collection still validates and
 /// binds the same canonical inputs; this probe only avoids empty worker turns.
 pub fn collection_configured(project: &Path) -> Result<bool> {
+    if claude::coordinator_source(project)?.is_some_and(|(_, enabled)| enabled) { return Ok(true); }
     let db=super::read_only_nowait(&project.join(".state/state.db"))?;
     let table=|name:&str|db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",[name],|r|r.get::<_,bool>(0));
     if table("attempt_inputs")? && db.query_row("SELECT EXISTS(SELECT 1 FROM attempt_inputs
@@ -274,7 +281,10 @@ pub fn collection_configured(project: &Path) -> Result<bool> {
 /// Scan every Codex execution home, ingest complete new lines, recompute bindings.
 /// `create` false: a project without Codex homes gets no sidecar.
 pub fn collect(project: &Path, budget: Budget, create: bool) -> Result<Option<Collected>> {
-    let (attempts, homes) = canonical(project)?;
+    let (attempts, mut homes) = canonical(project)?;
+    let coordinator = claude::coordinator_source(project)?.filter(|(_, enabled)| *enabled).map(|(path, _)| path);
+    // A separate source root prevents worker discovery in the owner home.
+    if let Some(path) = &coordinator { homes.push(path.display().to_string()); }
     super::gemini::collect(project, budget, &attempts)?;
     let Some(mut db) = super::sidecar::open(project, create || !homes.is_empty())? else { return Ok(None) };
     // Foreground collection races the same accounting/analytics writers. A
@@ -303,20 +313,24 @@ pub fn collect(project: &Path, budget: Budget, create: bool) -> Result<Option<Co
     terminated_turns(&db, &attempts)?;
     for home in &homes {
         let mut files = Vec::new();
-        if !attempts.iter().any(|a| matches!(a.kind.as_deref(), Some("claude" | "gemini" | "opencode" | "muse")) && a.home.as_ref() == Some(home)) || attempts.iter().any(|a| a.codex() && a.home.as_ref() == Some(home)) {
+        let owner_source = coordinator.as_ref().is_some_and(|p| p == Path::new(home));
+        if owner_source { files.extend(claude::coordinator_files(Path::new(home))); }
+        if !owner_source && (!attempts.iter().any(|a| matches!(a.kind.as_deref(), Some("claude" | "gemini" | "opencode" | "muse")) && a.home.as_ref() == Some(home)) || attempts.iter().any(|a| a.codex() && a.home.as_ref() == Some(home))) {
             walk(&Path::new(home).join(".codex/sessions"), 0, &mut files);
         }
-        if attempts.iter().any(|a| a.kind.as_deref() == Some("claude") && a.home.as_ref() == Some(home)) {
+        if !owner_source && attempts.iter().any(|a| a.kind.as_deref() == Some("claude") && a.home.as_ref() == Some(home)) {
             claude::walk(&Path::new(home).join(".claude/projects"), &mut files);
         }
-        let muse_sources = muse::discover(home, &attempts);
+        let muse_sources = if owner_source { Default::default() } else { muse::discover(home, &attempts) };
         files.extend(muse_sources.keys().cloned());
-        let native = gemini::discover(home, &attempts, &worktrees);
+        let native = if owner_source { Default::default() } else { gemini::discover(home, &attempts, &worktrees) };
         files.extend(native.keys().cloned());
-        if attempts.iter().any(|a| a.kind.as_deref() == Some("opencode") && a.home.as_ref() == Some(home)) {
+        if !owner_source && attempts.iter().any(|a| a.kind.as_deref() == Some("opencode") && a.home.as_ref() == Some(home)) {
             opencode::collect(&mut db, home, &worktrees, &tombstones, &mut remaining, &mut done)?;
         }
         files.sort();
+        // Coordinator identities cannot match any attempt execution-home digest.
+        let home_key = if owner_source { digest(format!("coordinator-source:{home}").as_bytes()) } else { digest(home.as_bytes()) };
         seen.extend(files.iter().map(|file| digest(file.as_os_str().as_encoded_bytes())));
         for file in files {
             if tombstones.key(super::maintenance::SESSIONS, &format!("path:{}", digest(file.as_os_str().as_encoded_bytes()))).is_some() { continue; }
@@ -325,7 +339,7 @@ pub fn collect(project: &Path, budget: Budget, create: bool) -> Result<Option<Co
                 break;
             }
             let mut span = (0, 0);
-            let read = match tail(&mut db, &file, &digest(home.as_bytes()), &worktrees, remaining, budget.bytes <= Budget::TICK.bytes, &from_start, &tombstones, &mut done, &mut span, file.starts_with(Path::new(home).join(".claude/projects")), native.get(&file), muse_sources.get(&file)) {
+            let read = match tail(&mut db, &file, &home_key, &worktrees, remaining, budget.bytes <= Budget::TICK.bytes, &from_start, &tombstones, &mut done, &mut span, owner_source || file.starts_with(Path::new(home).join(".claude/projects")), owner_source, native.get(&file), muse_sources.get(&file)) {
                 Ok(read) => read,
                 // The pass rolled back: its range is a coverage gap and later
                 // sources wait for the next collect (contracts-collection.md A2).
@@ -810,13 +824,13 @@ fn final_event(tx: &Transaction, ledger: &ingest::Ledger, key: &str, cursor: &Cu
 /// pass resumes at the last committed prefix, with the same native identities.
 #[allow(clippy::too_many_arguments)]
 fn tail(db: &mut Connection, file: &Path, home: &str, worktrees: &str, allowance: u64, bounded: bool, reread: &std::collections::BTreeSet<String>,
-    tombstones: &super::maintenance::Tombstones, done: &mut Collected, span: &mut (u64, u64), claude: bool, gemini: Option<&gemini::Source>, muse: Option<&muse::Source>) -> Result<u64> {
+    tombstones: &super::maintenance::Tombstones, done: &mut Collected, span: &mut (u64, u64), claude: bool, scoped: bool, gemini: Option<&gemini::Source>, muse: Option<&muse::Source>) -> Result<u64> {
     let mut observed = None;
     let (mut pulled, files) = (0, done.files);
     let empty = std::collections::BTreeSet::new();
     loop {
         let (read, more) = tail_batch(db, file, home, worktrees, allowance - pulled, bounded,
-            if pulled == 0 { reread } else { &empty }, tombstones, done, span, &mut observed, claude, gemini, muse)?;
+            if pulled == 0 { reread } else { &empty }, tombstones, done, span, &mut observed, claude, scoped, gemini, muse)?;
         pulled += read;
         // Public collect counts files, not transaction batches.
         if done.files > files { done.files = files + 1; }
@@ -830,9 +844,9 @@ fn tail(db: &mut Connection, file: &Path, home: &str, worktrees: &str, allowance
 /// Keeping a line atomic preserves malformed/oversized/partial-line semantics.
 #[allow(clippy::too_many_arguments)]
 fn tail_batch(db: &mut Connection, file: &Path, home: &str, worktrees: &str, allowance: u64, bounded: bool, reread: &std::collections::BTreeSet<String>,
-    tombstones: &super::maintenance::Tombstones, done: &mut Collected, span: &mut (u64, u64), observed: &mut Option<i64>, claude: bool, gemini: Option<&gemini::Source>, muse: Option<&muse::Source>) -> Result<(u64, bool)> {
+    tombstones: &super::maintenance::Tombstones, done: &mut Collected, span: &mut (u64, u64), observed: &mut Option<i64>, claude: bool, scoped: bool, gemini: Option<&gemini::Source>, muse: Option<&muse::Source>) -> Result<(u64, bool)> {
     let key = digest(file.as_os_str().as_encoded_bytes());
-    let Ok(mut handle) = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(file) else { return Ok((0, false)) };
+    let Ok(mut handle) = (if scoped { self::claude::open_scoped(file, false) } else { std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(file) }) else { return Ok((0, false)) };
     let meta = handle.metadata()?;
     // Unchanged prefixes have no write work unless an open turn is idle.
     // Keep replacement, replay and missing ingest cursors on the atomic path.

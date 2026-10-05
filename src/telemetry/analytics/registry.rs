@@ -189,7 +189,7 @@ pub const METRICS: &[Metric] = &[
     m!("M31", "human_interventions_per_accepted_task", Attention, "interventions_per_task", [lane("accounting", "M31.attention-v1", T, "attention_interval")], "certified-live", CORE, None),
     m!("M32", "waiting_on_you_share", Attention, "ratio", [lane("accounting", "M32.attention-v1", AS, "attention_interval")], "certified-live", CORE, None),
     m!("M33", "permission_prompts_per_attempt", Attention, "prompts_per_attempt", [lane("accounting", "M33.attention-v1", A, "attention_interval")], "restricted", CORE, Some("attention_reason_not_exposed")),
-    m!("M34", "coordinator_overhead", Fleet, "ratio", [lane("accounting", "M34.fleet-v1", A, "usage_time")], "certified-fixture", CORE, Some("R6 coordinator observed only as Codex")),
+    m!("M34", "coordinator_overhead", Fleet, "ratio", [lane("accounting", "M34.fleet-v1", A, "usage_time")], "certified-fixture", CORE, Some("R6 coordinator observed as Codex or scoped Claude Code")),
     m!("M35", "fan_out_efficiency", Fleet, "ratio", [lane("accounting", "M35.fanout-v1", A, "active_attempts")], "certified-fixture", CORE, None),
     m!("M36", "integration_conflict_rate", Fleet, "ratio", [lane("accounting", "M36.integration-v1", A, "integration")], "certified-fixture", CORE, None),
     m!("M37", "overlap_waste_share", Fleet, "ratio", [lane("accounting", "M37.fleet-v1", A, "usage_time")], "certified-fixture", CORE, None),
