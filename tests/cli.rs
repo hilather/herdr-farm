@@ -3192,6 +3192,7 @@ fn outcome_success_path() {
     let installed=cli(&["task","demo","contract","put","--input-file",contract_path.to_str().unwrap(),"--signature",contract_path.with_extension("json.sig").to_str().unwrap()]);
     runtime::add_task(&f.project,TaskId::new("b").unwrap(),"task b".into(),head()).unwrap();
     for (task,edges) in [("a",serde_json::json!([])),("b",serde_json::json!([{"predecessor":"a","requirement":"integrated_commit"}]))] {
+        migration::open_active(&f.project).unwrap().prepare_task_lineage(task, &format!("item-{task}"), "build", None).unwrap();
         let request=f.home.path().join(format!("{task}-queue.json"));fs::write(&request,serde_json::json!({"priority":0,"dependencies":edges}).to_string()).unwrap();
         cli(&["task","demo","queue",task,"--input-file",request.to_str().unwrap(),"--expected-revision","1","--expected-head",&head().to_string()]);
     }
@@ -3319,6 +3320,26 @@ fn outcome_success_path() {
     assert_eq!(marks.iter().map(|(state,revision,_,source)|(state.as_str(),*revision,source.as_str())).collect::<Vec<_>>(),
         [("reserved",1,"admit_prepared"),("launching",2,"apply_launch_started"),("running",3,"apply_worker_brief"),("completed",5,"record_worker_termination_with_budget")]);
     assert!(marks.windows(2).all(|pair|pair[0].2<=pair[1].2),"{marks:?}");
+    let breakdown=cli(&["telemetry","demo","query","--metric","M93","--json"]);
+    let item=&breakdown["results"][0]["value"][0]["value"];
+    let elapsed=marks[3].2-marks[0].2;
+    let running=marks[3].2-marks[2].2;
+    let overhead=marks[2].2-marks[0].2;
+    assert_eq!(item["worker_running_ms"],running);
+    assert_eq!(item["launch_overhead_ms"],overhead);
+    assert_eq!(item["waiting_between_attempts_ms"],0);
+    assert_eq!(item["total_elapsed_ms"],elapsed);
+    assert_eq!(item["shares"]["worker_running"],format!("{running}/{elapsed}"));
+    assert_eq!(item["shares"]["launch_overhead"],format!("{overhead}/{elapsed}"));
+    let memory=cli(&["telemetry","demo","query","--metric","M95","--json"]);
+    let delivered=&memory["results"][0]["value"]["briefs"];
+    assert_eq!(delivered["briefs"],1);
+    let snapshot_id:String=f.db().query_row("SELECT snapshot FROM attempts WHERE id=?1",[&attempt],|r|r.get(0)).unwrap();
+    let facts:i64=f.db().query_row("SELECT count(*) FROM snapshot_entries WHERE snapshot_id=?1",[&snapshot_id],|r|r.get(0)).unwrap();
+    let omitted:i64=f.db().query_row("SELECT omitted_optional_count FROM memory_snapshots WHERE id=?1",[&snapshot_id],|r|r.get(0)).unwrap();
+    assert_eq!(delivered["facts_delivered"],facts);
+    assert_eq!(delivered["omitted_for_budget"],omitted);
+
     // TM1.1: the launch transaction writes the attempt's collector binding, at the launching mark's time.
     let binding=f.db().query_row("SELECT revision,state,collector,unix_ms,source FROM collector_bindings WHERE attempt_id=?1",[&attempt],
         |r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,i64>(3)?,r.get::<_,String>(4)?))).unwrap();
@@ -3343,7 +3364,7 @@ fn outcome_success_path() {
         "effort_observed":{"reason":"effort_not_reported","status":"unavailable"},
         "integration":{"state":"integrated"},
         "launching_unix_ms":marks[1].2,
-        "lineage":{"reason":"lineage_not_recorded","status":"unavailable"},
+        "lineage":{"work_item":"item-a","role":"build","supersedes":null},
         "queue_to_launch_ms":marks[1].2-marks[0].2,
         "reserved_unix_ms":marks[0].2,
         "result":{"candidate_oid":a_candidate,"created_unix_ms":submitted_ms,"state":"submitted","submission_id":a,"submissions":1},
@@ -4018,6 +4039,16 @@ fn task_contract_put_and_result_submit_keep_worker_bytes_untrusted() {
     let good = verify(first["submission_id"].as_str().unwrap(), "scope-good");
     assert!(good.status.success(), "{}", String::from_utf8_lossy(&good.stderr));
     assert_eq!(serde_json::from_slice::<serde_json::Value>(&good.stdout).unwrap()["state"], "accepted");
+    // MET-LAUNCH-1: verifier-owned whole-range counts survive collection that
+    // starts only after the real verification checkout has been consumed.
+    let metrics = hp(home.path(), &["--root",root_arg,"telemetry","demo","query","--metric","M94","--json"]);
+    assert!(metrics.status.success(), "{}", String::from_utf8_lossy(&metrics.stderr));
+    let metrics: serde_json::Value = serde_json::from_slice(&metrics.stdout).unwrap();
+    let diff = &metrics["results"][0]["value"][0]["value"];
+    assert_eq!((diff["added"].clone(),diff["removed"].clone(),diff["binary_files"].clone()),
+        (serde_json::json!(1),serde_json::json!(0),serde_json::json!(0)));
+    assert_eq!(metrics["results"][0]["detail"]["by_profile"]["unknown"]["cost_per_changed_line"]["reason"],"cost_not_observed");
+
     // A newer historical receipt must not hide an older usable receipt from
     // the same active attempt when a consumer is queued after both runs.
     let newer = verify(first["submission_id"].as_str().unwrap(), "scope-newer-historical");
@@ -5489,6 +5520,7 @@ fn fleet_text_matches_report_json() {
             (serde_json::Value::Number(value),_)=>value.to_string(),
             (value,_) if value["status"] == "partial" && value.get("denominator").is_some() => format!("partial {}/{} ({}: {} attempts without usage)",
                 value["priced_amount"].as_str().map(str::to_owned).unwrap_or_else(|| value["tokens"].to_string()), value["denominator"], value["reason"].as_str().unwrap(), value["attempts_without_usage"]),
+            (_,_) if id=="M95" => "proposed=0 accepted=0 rejected=0 facts=n/a (no_brief_delivery_samples) omitted=n/a (no_brief_delivery_samples) remember=0".to_owned(),
             (value,_) if ["M60","M61","M62","M64","M70"].contains(&id.as_str()) && value.get("reason").is_none() => value.to_string(),
             (value,_)=>format!("n/a ({})",value["reason"].as_str().unwrap_or_else(||panic!("{id}: a structured value needs its own expectation: {value}"))),
         };

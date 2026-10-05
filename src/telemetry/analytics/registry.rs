@@ -1,11 +1,11 @@
-//! The TM4.1 metric registry `analytics-registry.v10` (docs/telemetry/contracts-analytics.md §1):
+//! The TM4.1 metric registry `analytics-registry.v11` (docs/telemetry/contracts-analytics.md §1):
 //! one declared, read-only table of every metric the report or the query
 //! service can name, with its definition versions, family, cohorts, window
 //! semantics, unit, certification and activation. A change here is a new
 //! registry version, never an edit in place of a published definition.
 use serde_json::{Value, json};
 
-pub const VERSION: &str = "analytics-registry.v10";
+pub const VERSION: &str = "analytics-registry.v11";
 
 /// The TM3.5 quality certificate. Without it every validated-quality family is
 /// `unavailable: awaiting_quality_certificate`; landing or withdrawing it is
@@ -234,6 +234,20 @@ pub const METRICS: &[Metric] = &[
     m!("M75", "unanswered_worker_questions", Attention, "questions_per_attempt", [lane("analytics", "M75.v1", A, "attempt_reserved_time")], "fixture", "tests/telemetry.rs (MET-WORKER-1)", Some("metadata only; incomplete observation explicit")),
     m!("M76", "context_window_fill", Consumption, "ratio", [lane("analytics", "M76.v1", A, "attempt_reserved_time")], "fixture", "tests/telemetry.rs (MET-WORKER-1)", Some("metadata only; incomplete observation explicit")),
     m!("M77", "coordinator_reaction_time", Fleet, "milliseconds", [lane("analytics", "M77.v1", A, "cli_invocation_or_notice_time")], "fixture", "tests/telemetry.rs (MET-WORKER-1)", Some("metadata only; incomplete observation explicit")),
+    m!("M80", "coordinator_context_size", Consumption, "tokens", [lane("analytics", "M80.v1", A, "coordinator_turn_start")], "fixture", "tests/telemetry_claude.rs", Some("metadata only; missing times explicit")),
+    m!("M81", "coordinator_cache_rewrite_cost", Cost, "currency", [lane("analytics", "M81.v1", A, "coordinator_turn_start")], "fixture", "tests/telemetry_claude.rs", Some("metadata only; missing times explicit")),
+    m!("M82", "coordinator_cost_by_trigger", Cost, "currency", [lane("analytics", "M82.v1", A, "coordinator_turn_start")], "fixture", "tests/telemetry_claude.rs", Some("metadata only; missing times explicit")),
+    m!("M83", "owner_pull_rate", Attention, "ratio", [lane("analytics", "M83.v1", A, "coordinator_turn_start")], "fixture", "tests/telemetry_claude.rs", Some("metadata only; missing times explicit")),
+    m!("M84", "waiting_on_owner", Attention, "milliseconds", [lane("analytics", "M84.v1", A, "coordinator_turn_start")], "fixture", "tests/telemetry_claude.rs", Some("metadata only; missing times explicit")),
+    m!("M85", "permission_prompts_shown", Attention, "prompts", [lane("analytics", "M85.v1", A, "coordinator_turn_start")], "fixture", "tests/telemetry_claude.rs", Some("metadata only; missing times explicit")),
+    m!("M86", "unattended_stretch", Fleet, "milliseconds", [lane("analytics", "M86.v1", A, "coordinator_turn_start")], "fixture", "tests/telemetry_claude.rs", Some("metadata only; missing times explicit")),
+    m!("M87", "friction_index", Attention, "ratio", [lane("analytics", "M87.v1", A, "coordinator_turn_start")], "fixture", "tests/telemetry_claude.rs", Some("metadata only; missing times explicit")),
+    m!("M90", "launch_success_rate", Lifecycle, "ratio", [lane("analytics", "M90.v1", A, "cli_invocation_time")], "fixture", "tests/telemetry_launch.rs", Some("metadata only")),
+    m!("M91", "stuck_attempt_interventions", Attention, "interventions", [lane("analytics", "M91.v1", A, "cli_invocation_time")], "fixture", "tests/telemetry_launch.rs", Some("metadata only")),
+    m!("M92", "ticker_error_rate", Fleet, "errors_per_hour", [lane("analytics", "M92.v1", A, "ticker_pass_time")], "fixture", "tests/telemetry_launch.rs", Some("metadata only")),
+    m!("M93", "work_item_time_breakdown", Lifecycle, "milliseconds", [lane("analytics", "M93.v1", A, "work_item_first_reservation")], "fixture", "tests/telemetry_launch.rs", Some("metadata only")),
+    m!("M94", "diff_size", Cost, "lines", [lane("analytics", "M94.v1", A, "submission_time")], "fixture", "tests/telemetry_launch.rs", Some("metadata only")),
+    m!("M95", "memory_use", Consumption, "facts", [lane("analytics", "M95.v1", A, "proposal_or_brief_delivery_time")], "fixture", "tests/telemetry_launch.rs", Some("metadata only")),
     m!("flaky_tests", "newly_flaky_tests_proxy", Proxy, "tests", [lane("quality", "flaky_tests.proxy-v1", A, "ci_run")], "unavailable", QUALITY, Some("no_repeat_runs")),
     m!("verification_flip_rate", "verification_flip_rate", Proxy, "ratio", [lane("quality", "verification_flip_rate.v1", A, "verification_completed")], "fixture", "tests/telemetry_quality.rs (DG6)", Some("passive reruns only; accepted vs checks_failed; policy drill-down in quality flaky")),
 ];

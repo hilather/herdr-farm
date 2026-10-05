@@ -292,6 +292,12 @@ pub fn structured_text(value: &Value) -> Option<String> {
         });
         return Some(sizes.join("; "));
     }
+    if o.contains_key("candidates_proposed") {
+        let observed = |v: &Value| v.as_i64().map_or_else(||format!("n/a ({})",v["reason"].as_str().unwrap_or("unknown")),|n|n.to_string());
+        return Some(format!("proposed={} accepted={} rejected={} facts={} omitted={} remember={}",
+            value["candidates_proposed"],value["candidates_accepted"],value["candidates_rejected"],
+            observed(&value["briefs"]["facts_delivered"]),observed(&value["briefs"]["omitted_for_budget"]),observed(&value["remember_sections_written"])));
+    }
     if o.contains_key("median") || o.contains_key("median_ms") || o.contains_key("reserved_to_launching") || o.contains_key("launch_samples") || o.contains_key("small") { return Some(value.to_string()); }
     let issued = o.get("issued")?.as_u64()?;
     let accepted = &value["accepted"];

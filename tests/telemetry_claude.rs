@@ -743,6 +743,7 @@ fn claude_turn_metadata_workers_and_coordinator_detail() {
     f.cli("collect");
     let attempts = f.cli_args(&["attempts","--json"]).0;
     let a = attempts["attempts"].as_array().unwrap().iter().find(|a| a["attempt_id"] == f.attempt).unwrap();
+    assert_eq!(f.report()["metrics"]["M80"]["value"]["reason"], "coordinator_turn_metadata_missing");
     assert_eq!(a["turns"],8);
     assert_eq!(a["stop_reasons"]["end_turn"],8);
     let db = f.sidecar();
@@ -777,6 +778,7 @@ fn claude_turn_metadata_workers_and_coordinator_detail() {
     assert_eq!(early["sessions"][0]["turns"].as_array().unwrap().len(),2);
     assert_eq!(early["sessions"][0]["turns"][0]["context_tokens_sum"],60);
     assert_eq!(early["sessions"][0]["turns"][0]["unpriced_requests"],1);
+    assert_eq!(f.report()["metrics"]["M81"]["value"]["unpriced_requests"], 2);
     assert_eq!(early["sessions"][0]["turns"][1]["idle_gap_ms"],1000);
     fs::write(owner_path,format!("{}\n",rows.iter().map(Value::to_string).collect::<Vec<_>>().join("\n"))).unwrap();
     // Worker execution homes are scanned but the root cwd still scopes coordinator.
@@ -815,5 +817,131 @@ fn claude_turn_metadata_workers_and_coordinator_detail() {
     assert_eq!(view["no_tool_call_turns"][0]["trigger_class"],"scheduled_wakeup");
     assert_eq!(view["cost_by_trigger_class"]["other"]["USD"],"0.000124");
     assert_eq!(view["idle_gaps_before_cache_rewrites"].as_array().unwrap().len(),7);
+    let metrics = f.report()["metrics"].clone();
+    assert_eq!(metrics["M80"]["value"], json!({"samples":8,"median":60,"p90":60,"max":60,"total":480}));
+    assert_eq!(metrics["M81"]["value"]["by_currency"]["USD"], "0.000496");
+    assert_eq!(metrics["M81"]["rewrites"].as_array().unwrap().len(), 8);
+    assert_eq!(metrics["M82"]["value"]["other"]["by_currency"]["USD"], "0.000124");
+    assert_eq!(metrics["M82"]["no_tool_call_turns"], 1);
+    assert_eq!(metrics["M82"]["no_tool_call_cost"]["by_currency"]["USD"], "0.000062");
+    assert_eq!(metrics["M83"]["value"]["ratio"], "1/1");
+    assert_eq!(metrics["M84"]["ask_user_question_answer_time_ms"]["median"], 1000);
+    assert_eq!(metrics["M84"]["value"]["reason"], "no_timed_samples");
+    assert_eq!(metrics["M85"]["prompts"], 1);
+    assert_eq!(metrics["M85"]["value"]["reason"], "empty_denominator");
+    assert_eq!(metrics["M86"]["value"]["reason"], "no_timed_samples");
+    assert_eq!(metrics["M87"]["value"]["reason"], "empty_denominator");
+    let next_owner = json!({"sessionId":"turn-coordinator","cwd":f.project.display().to_string(),
+        "version":"2.1.286","type":"user","turnOrigin":"owner_typed","promptSource":"owner_typed",
+        "timestamp":jiff::Timestamp::from_millisecond(f.decided+40000).unwrap().to_string(),
+        "message":{"content":[{"type":"text","text":"CLAUDE_SECRET_NEXT_OWNER"}]}});
+    let owner_path = transcript(&f,"turn-coordinator",&f.project.display().to_string(),"2.1.286",f.decided+1000);
+    let text = rows.iter().chain(std::iter::once(&next_owner)).map(Value::to_string).collect::<Vec<_>>().join("\n");
+    fs::write(&owner_path,format!("{text}\n")).unwrap();
+    f.cli("collect");
+    let metrics = f.report()["metrics"].clone();
+    assert_eq!(metrics["M83"]["value"]["ratio"], "2/2");
+    assert_eq!(metrics["M84"]["value"], json!({"samples":1,"median":36000,"p90":36000,"max":36000,"total":36000}));
+    assert_eq!(metrics["M86"]["launches_per_owner_turn"]["ratio"], "0/2");
+    let canonical = rusqlite::Connection::open(f.project.join(".state/state.db")).unwrap();
+
+    // Synthetic lifecycle and acceptance records are inputs; assertions go
+    // through the real report CLI and exercise joins to coordinator timestamps.
+    canonical.execute("INSERT INTO attempt_lifecycle VALUES(?1,'running',2,?2,'fixture')",
+        rusqlite::params![f.attempt,f.decided+5000]).unwrap();
+    canonical.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+    canonical.execute("INSERT INTO task_contracts(task_id,contract_revision,plan_revision,project_store,expected_head,repository,base_oid,object_format,memory_snapshot_id,route,raw_bytes,raw_digest,installed_seq)
+        VALUES('work',1,NULL,'store',0,'/repo',?1,'sha1',NULL,'verify_only',x'61',?2,(SELECT max(sequence) FROM events))",rusqlite::params!["b".repeat(40),"c".repeat(64)]).unwrap();
+    canonical.execute("INSERT INTO result_submissions(submission_id,project_store,idempotency_key,payload_digest,payload,task_id,contract_revision,contract_digest,attempt_id,repository,base_oid,candidate_oid,object_format,artifact_manifest,claimed_checks,created_unix_ms)
+        VALUES(?1,'store',?1,?2,'{}','work',1,?2,?3,'/repo',?4,?4,'sha1','[]','[]',?5)",rusqlite::params!["1".repeat(64),"d".repeat(64),f.attempt,"b".repeat(40),f.decided+35000]).unwrap();
+    canonical.execute("INSERT INTO verified_results(result_id,run_id,submission_id,commit_oid,tree_oid,object_format,policy_digest,receipt_digest,isolation,memory_fence,created_unix_ms)
+        VALUES(?1,?1,?2,?3,?3,'sha1',?4,?4,'linux-unshare-user-pid-mount-v1',0,?5)",rusqlite::params!["2".repeat(64),"1".repeat(64),"b".repeat(40),"7".repeat(64),f.decided+36000]).unwrap();
+    let metrics=f.report()["metrics"].clone();
+    assert_eq!(metrics["M85"]["value"]["ratio"],"1/1");
+    assert_eq!(metrics["M86"]["value"]["max"],35000);
+    assert_eq!(metrics["M86"]["launches_per_owner_turn"]["ratio"],"1/2");
+    assert_eq!(metrics["M87"]["value"]["ratio"],"2/1");
+    canonical.execute("INSERT INTO owner_requests(id,action,task,contract_digest,repository,summary,expires,status) VALUES('fixture-permission','cap','work',?1,'/repo','synthetic permission',?2,'pending')",rusqlite::params!["c".repeat(64),unix_ms()+100000]).unwrap();
+    canonical.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES('owner.requested','fixture-permission',1,1,'{}')",[]).unwrap();
+    let prompts=f.report()["metrics"]["M85"].clone();
+    assert_eq!(prompts["prompts"],2);
+    assert_eq!(prompts["value"]["ratio"],"2/1");
+    let query=f.cli_args(&["query","--json","--metric","M80,M87"]).0;
+    assert_eq!(query["results"][0]["detail"]["value"],metrics["M80"]["value"]);
+    assert_eq!(query["results"][1]["detail"]["value"],metrics["M87"]["value"]);
+    assert_eq!(f.cli_args(&["accounting","coordinator"]).0["metrics"]["M87"]["value"],metrics["M87"]["value"]);
+
+    canonical.execute_batch("DROP TRIGGER attempt_lifecycle_no_delete; DELETE FROM attempt_lifecycle WHERE state='reserved'").unwrap();
+    let incomplete=f.report()["metrics"].clone();
+    assert_eq!(incomplete["M83"]["value"]["reason"],"historical_activity_times_missing");
+    assert_eq!(incomplete["M86"]["launches_per_owner_turn"]["reason"],"historical_activity_times_missing");
+    canonical.execute_batch("DROP TRIGGER events_record_time; DROP TABLE event_times").unwrap();
+    assert_eq!(f.report()["metrics"]["M83"]["value"]["reason"], "event_times_not_recorded");
+
+
+    no_secrets(&f);
+}
+
+#[test]
+fn coordinator_request_percentiles_and_idle_owner_waits() {
+    use herdr_farm::{domain::AttemptId, store::SqliteStore};
+    let f = claude();
+    let mut store = SqliteStore::open(&f.project.join(".state/state.db")).unwrap();
+    let snapshot = store.read_snapshot(None).unwrap();
+    let attempt = snapshot.attempts.iter().find(|a|a.id.as_str()==f.attempt).unwrap();
+    store.cancel_attempt(&AttemptId::new(&f.attempt).unwrap(),attempt.revision,snapshot.head,"fixture complete",f.decided+500).unwrap();
+    drop(store);
+    let cwd=f.project.display().to_string();
+    let path=transcript(&f,"percentiles",&cwd,"2.1.286",f.decided+1000);
+    let mut rows=Vec::new();
+    for (i,context) in [10,20,100].into_iter().enumerate() {
+        for (offset,kind) in [(0,"user"),(100,"assistant")] {
+            let mut row=json!({"sessionId":"percentiles","cwd":cwd,"version":"2.1.286","type":kind,
+                "timestamp":jiff::Timestamp::from_millisecond(f.decided+(i as i64+1)*1000+offset).unwrap().to_string()});
+            if kind=="user" {row["turnOrigin"]=json!("owner_typed"); row["message"]=json!({"content":"CLAUDE_SECRET_PROMPT"});}
+            else {row["requestId"]=json!(format!("r-{i}"));row["message"]=json!({"id":format!("m-{i}"),"model":"claude-fixture-sonnet","stop_reason":"end_turn",
+                "usage":{"input_tokens":context-5,"cache_read_input_tokens":5,"cache_creation_input_tokens":0,"output_tokens":1},"content":[]});}
+            rows.push(row.to_string());
+        }
+    }
+    fs::write(path,format!("{}\n",rows.join("\n"))).unwrap();
+    f.cli("collect");
+    let metrics=f.report()["metrics"].clone();
+    assert_eq!(metrics["M80"]["value"],json!({"samples":3,"median":20,"p90":100,"max":100,"total":130}));
+    assert_eq!(metrics["M81"]["rewrites"],json!([]));
+    assert_eq!(metrics["M82"]["no_tool_call_turns"],3);
+    assert_eq!(metrics["M82"]["value"]["owner_typed"]["unpriced_requests"],3);
+    assert_eq!(metrics["M83"]["value"]["ratio"],"0/3");
+    assert_eq!(metrics["M84"]["value"],json!({"samples":2,"median":900,"p90":900,"max":900,"total":1800}));
+    assert_eq!(metrics["M84"]["open_censored"],1);
+    assert_eq!(metrics["M85"]["prompts"],0);
+    let canonical=rusqlite::Connection::open(f.project.join(".state/state.db")).unwrap();
+    canonical.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES('inbox.delivered','worker-result-fixture',1,1,'{}')",[]).unwrap();
+    let delivered:i64=canonical.query_row("SELECT recorded_unix_ms FROM event_times ORDER BY sequence DESC LIMIT 1",[],|r|r.get(0)).unwrap();
+    let next=unix_ms().max(f.decided+3100)+1000;
+    rows.push(json!({"sessionId":"percentiles","cwd":cwd,"version":"2.1.286","type":"user","turnOrigin":"owner_typed",
+        "timestamp":jiff::Timestamp::from_millisecond(next).unwrap().to_string(),"message":{"content":"CLAUDE_SECRET_NOTICE_PULL"}}).to_string());
+    let path=transcript(&f,"percentiles",&cwd,"2.1.286",f.decided+1000);
+    fs::write(&path,format!("{}\n",rows.join("\n"))).unwrap();
+    f.cli("collect");
+    let metrics=f.report()["metrics"].clone();
+    let pulled=(1..=3).filter(|i|f.decided+i*1000>=delivered).count()+1;
+    assert_eq!(metrics["M83"]["value"]["ratio"],format!("{pulled}/4"));
+    assert_eq!(metrics["M86"]["value"]["max"],next-delivered.max(f.decided+3000));
+    canonical.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES('inbox.seen','worker-result-fixture',2,1,'{}')",[]).unwrap();
+    let seen:i64=canonical.query_row("SELECT recorded_unix_ms FROM event_times ORDER BY sequence DESC LIMIT 1",[],|r|r.get(0)).unwrap();
+    // Recollect the final owner turn after the actual seen mark; metadata
+    // replay must consume the notice and keep the preceding owner count.
+    let final_time=seen.max(next)+1000;
+    let mut owner:Value=serde_json::from_str(rows.last().unwrap()).unwrap();
+    owner["timestamp"]=json!(jiff::Timestamp::from_millisecond(final_time).unwrap().to_string());
+    rows.push(owner.to_string());
+    fs::write(path,format!("{}\n",rows.join("\n"))).unwrap();
+    f.cli("collect");
+    let metrics=f.report()["metrics"].clone();
+    // The transcript uses future fixture times, so a real seen event can
+    // precede both appended owner turns. Replaying both is deterministic.
+    let expected=(1..=3).filter(|i|f.decided+i*1000>=delivered && f.decided+i*1000<seen).count()+usize::from(next<seen);
+    assert_eq!(metrics["M83"]["value"]["ratio"],format!("{expected}/5"));
     no_secrets(&f);
 }

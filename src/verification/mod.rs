@@ -497,6 +497,11 @@ fn verify_owned(store: &mut SqliteStore, request: &VerifyRequest, ownership: Opt
         &target.object_format,
         Some((Path::new(&target.repository), &target.base_oid)),
     )?;
+    let diff_counts = checkout::diff_counts(&checkout.path, &target.base_oid, &target.candidate_oid);
+    if let Some(project) = Path::new(&target.project_store).parent().and_then(Path::parent) {
+        let counts = diff_counts;
+        let _ = crate::telemetry::operations::launch::submission_diff(project, &target.submission_id, counts);
+    }
     if let Some(scopes) = &target.write_scopes {
         let reason = match checkout::changed_paths(&checkout.path, &target.base_oid, &target.candidate_oid) {
             Ok(paths) if paths.iter().any(|path| !crate::domain::in_write_scope(scopes, path)) => Some("scope_violation"),
@@ -695,6 +700,7 @@ fn verify_owned(store: &mut SqliteStore, request: &VerifyRequest, ownership: Opt
         None
     };
     let mut metadata = execution.metadata(&report.stdout, output.stdout_truncated);
+    metadata["diff_size"] = match diff_counts { Some((a,d,b)) => serde_json::json!({"added":a,"removed":d,"binary_files":b}), None => serde_json::json!({"status":"unavailable","reason":"diff_unavailable"}) };
     if let Some(resolved) = &toolchain { metadata["toolchain"] = serde_json::json!({"name":resolved.name,"digest":resolved.digest,"paths":resolved.identities,"network":resolved.toolchain.network,"timeout_seconds":resolved.toolchain.timeout_seconds}); }
     if crate::domain::verification_policy::ExecutionPolicy::parse(&policy_bytes)?.version == 2 {
         metadata["version"] = serde_json::json!("verification-metadata.v2");

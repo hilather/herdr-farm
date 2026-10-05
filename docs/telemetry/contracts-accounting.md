@@ -1903,3 +1903,52 @@ context fill and coordinator reaction latency. The full definitions and
 unavailable reasons are in [contracts-analytics.md](contracts-analytics.md#met-worker-1-worker-and-command-friction-registry-v10).
 M78–M79 remain reserved until definitions are supplied. No prompts, commands,
 arguments, answers or result message contents enter these metrics.
+
+### Coordinator and owner experience (MET-COORD-1)
+
+`accounting coordinator` includes the same metrics as `report` and `query`.
+Registry v11 adds fixture-certified M80–M87; M88–M89 are reserved. These
+activity-window projections select coordinator turns by start time, using the
+same scope and tag precedence as `accounting coordinator`. Only `owner_typed`
+counts as an owner turn; message content never identifies an owner.
+
+- M80 `coordinator_context_size`: distinct request context maxima (input plus
+  cache reads and writes), nearest-rank median, p90 and maximum.
+- M81 `coordinator_cache_rewrite_cost`: published request costs by currency
+  for zero-read, positive-write requests, with each rewrite's preceding turn
+  idle gap. Unpriced requests are explicit and totals are partial.
+- M82 `coordinator_cost_by_trigger`: request costs by trigger and currency,
+  plus count and cost of turns without tools (candidate no-op wake-ups).
+- M83 `owner_pull_rate`: owner turns with an open reserved/running attempt or
+  an unread worker-result notice, divided by owner turns. Lifecycle intervals
+  and timestamped delivery/seen/done events reconstruct activity at turn start.
+- M84 `waiting_on_owner`: nearest-rank distribution and total milliseconds
+  from qualifying turn ends to the next owner turn. Qualifying means a question
+  was issued or no background work remained. Unmatched waits are open censored;
+  question call-to-result answer times have a separate distribution.
+- M85 `permission_prompts_shown`: owner.requested events and AskUserQuestion
+  calls by UTC day and per accepted task. The two sources count distinct
+  surfaces, even when part of one approval workflow.
+- M86 `unattended_stretch`: longest continuous running-work or unread-result interval between
+  owner turns within the observed transcript span; launches per owner turn.
+  Transcript endpoints censor the observation, never extrapolate to wall clock.
+- M87 `friction_index`: owner turns per currently accepted task, using the
+  canonical report acceptance evidence.
+
+Empty denominators are unavailable, never zero. Missing coordinator metadata,
+missing historical activity/event times and absent timing samples have explicit
+unavailable reasons. Metadata remains readable before pricing. These are
+observational fixture metrics, not claims about owner intent or productivity.
+No migration, retention class or backup classification changes are required;
+all inputs already belong to existing canonical and accounting classes.
+
+## MET-LAUNCH-1 metadata projections
+
+Registry v11 M90–M95 are defined in [analytics contracts §12](contracts-analytics.md#12-met-launch-1-launch-reliability-and-miscellaneous-metadata-registry-v11).
+Operations stream v2 attaches bounded local task/attempt identifiers and a
+force flag to existing accounting CLI invocations; no arguments, memory
+text or log text enter telemetry. CLI retention also removes target rows.
+M93 uses canonical lifecycle wall-time unions, M94 exact published-rate
+attempt spend per submitted changed line, and M95 canonical proposal,
+consumer-snapshot and Remember counts. Missing evidence remains unavailable.
+Accounting stream and canonical schema versions are unchanged.
