@@ -68,7 +68,9 @@ migrated sidecar.
   results or writes memory. Canonical rows below are written by existing
   controller transactions; the sidecar is analytics only.
 - **Unknown is not zero.** Every value that can be missing is either a value
-  or `{"status":"unavailable","reason":<code>}`. Numeric `0` means observed
+  or `{"status":"unavailable","reason":<code>}`. A known subtotal with missing
+  coverage is `{"status":"partial","reason":<code>,…subtotal…}`; it never
+  presents the subtotal as a complete total. Numeric `0` means observed
   eligible exposure with no events. Ratios with a zero denominator are `null`
   with reason `empty_denominator`.
 - **Canonical JSON.** Sorted object keys, compact UTF-8, no trailing newline,
@@ -543,7 +545,7 @@ separately. `succeeded` without evidence stays in `T \ A` and is counted as
 | M07 Attempt amplification | attempts of tasks in `T` / `count(A)` | `count(A)=0` → null; attempts without a decision counted and flagged |
 | M08 Input consumption | Σ accepted `input_tokens` of bound records, activity window | No certified bound session → `unavailable: no_certified_source`; 0 only if a certified bound session had zero records |
 | M09 Output consumption | Σ accepted `output_tokens`; `reasoning_output_tokens` shown as subset, not added | same as M08 |
-| M13 Usage coverage (adapted: attempt-level) | terminated Codex attempts with complete usage / terminated Codex attempts in window | complete = ≥1 bound session, none quarantined/ambiguous, all records accepted, certified version. Non-Codex attempts reported as `adapter_absent` count, not in denominator |
+| M13 Usage coverage (adapted: attempt-level) | terminated Codex attempts with complete usage / terminated Codex attempts in window, excluding unbound never-running attempts | complete = ≥1 bound session, none quarantined/ambiguous, all records accepted, certified version. Non-Codex attempts reported as `adapter_absent` count, not in denominator |
 | M15 Effective-model coverage | accepted records with a non-null reported `model` / accepted records | requested model (null) never qualifies |
 | M31–M33 | lane B attention (contracts-accounting.md §6) | before any sample `unavailable: attention_not_collected` |
 | M40 Quota headroom at dispatch (extended, `M40.quota-windows-v1`) | per decision and limit window: remaining percent of the latest trusted quota observation of the attempt's account with `observed ≤ decided_unix_ms` (contracts-accounting.md §5), with age and freshness | decision- or window-level `unavailable` with a reason; native units; never summed or averaged across accounts, limits or services |
@@ -570,7 +572,11 @@ S6 refinements:
 - M08/M09/M15 source = bound, non-quarantined, certified rollouts of a known
   attempt; none → `unavailable: no_certified_source` (also without a sidecar).
   M15 counts accepted records of that source with a non-null `model`.
-- M13: without a sidecar `unavailable: collection_not_run`; otherwise
+- M13 (`M13.slice-v2`): unbound attempts with a `reserved` lifecycle mark
+  and no `running` mark leave the denominator and appear in
+  `excluded: {never_running: n}`, never in health’s `incomplete`. Pre-log
+  attempts remain `not_bound`; never-running attempts with bound usage count
+  normally. Without a sidecar `unavailable: collection_not_run`; otherwise
   terminated (`completed|failed|cancelled|lost`) Codex attempts, with
   `adapter_absent` (terminated non-Codex) and `incomplete` by first failing
   reason: `not_bound`, `quarantined`, `cli_version_uncertified`,

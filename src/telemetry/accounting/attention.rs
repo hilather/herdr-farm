@@ -27,6 +27,7 @@ const DEFAULT_INTERVAL_SECS: i64 = crate::timing::TELEMETRY_COLLECT_SECS as i64;
 /// Distinct Herdr sockets queried per pass; later attempts record `budget_exhausted`.
 const MAX_SOCKETS: usize = 4;
 const CALL_TIMEOUT: Duration = Duration::from_secs(5);
+const LIFECYCLE_CALL_TIMEOUT: Duration = Duration::from_millis(500);
 const MAX_REPLY: u64 = 1 << 20;
 const MAX_AGENTS: usize = 1024;
 const OPEN: [&str; 3] = ["launching", "running", "awaiting_input"];
@@ -51,16 +52,16 @@ struct Bound {
 }
 
 /// Attempts with a `runtime.launch_started` receipt (the latest per attempt), in attempt order.
-fn bindings(project: &Path) -> Result<Vec<Bound>> { bindings_filtered(project, None, false) }
+fn bindings(project: &Path) -> Result<Vec<Bound>> { bindings_filtered(project, None, false, false) }
 
-fn bindings_selected(project: &Path, selected: Option<&BTreeSet<String>>) -> Result<Vec<Bound>> { bindings_filtered(project, selected, false) }
+fn bindings_selected(project: &Path, selected: Option<&BTreeSet<String>>) -> Result<Vec<Bound>> { bindings_filtered(project, selected, false, false) }
 
-fn bindings_scoped(project: &Path, open_only: bool) -> Result<Vec<Bound>> { bindings_filtered(project, None, open_only) }
+fn bindings_scoped(project: &Path, open_only: bool) -> Result<Vec<Bound>> { bindings_filtered(project, None, open_only, false) }
 
-fn bindings_filtered(project: &Path, selected: Option<&BTreeSet<String>>, open_only: bool) -> Result<Vec<Bound>> {
+fn bindings_filtered(project: &Path, selected: Option<&BTreeSet<String>>, open_only: bool, nowait: bool) -> Result<Vec<Bound>> {
     let path = project.join(".state/state.db");
     if !path.exists() { return Ok(Vec::new()); }
-    let db = crate::telemetry::read_only(&path)?;
+    let db = if nowait { crate::telemetry::read_only_nowait(&path)? } else { crate::telemetry::read_only(&path)? };
     let table = |name: &str| db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)", [name], |r| r.get::<_, bool>(0));
     let ended = if table("attempt_lifecycle")? {
         "(SELECT min(l.unix_ms) FROM attempt_lifecycle l WHERE l.attempt_id=a.id AND l.state IN ('completed','failed','cancelled','lost'))"
@@ -101,10 +102,10 @@ fn herdr_bin() -> String {
 /// One read-only `herdr agent list` on `socket` through the shared Herdr
 /// client (its socket variable and `HERDR_SESSION` removal) and the gated
 /// runner, with its reply bounded by the remaining byte budget.
-fn agent_list(bin: &str, socket: &str, remaining: &mut u64) -> std::result::Result<Vec<Value>, &'static str> {
+fn agent_list(bin: &str, socket: &str, remaining: &mut u64, timeout: Duration) -> std::result::Result<Vec<Value>, &'static str> {
     if !Path::new(socket).exists() { return Err("herdr_unreachable"); }
     let limit = (*remaining).min(MAX_REPLY) as usize;
-    let out = Herdr::new(bin, socket, &RealRunner).agent_list_bounded(CALL_TIMEOUT, limit).map_err(|_| "herdr_unreachable")?;
+    let out = Herdr::new(bin, socket, &RealRunner).agent_list_bounded(timeout, limit).map_err(|_| "herdr_unreachable")?;
     *remaining = remaining.saturating_sub(out.stdout_total_bytes.saturating_add(out.stderr_total_bytes));
     if out.stdout_truncated || out.stderr_truncated { return Err("budget_exhausted"); }
     let reply = herdr::reply_json(&out);
@@ -140,7 +141,36 @@ fn classify(b: &Bound, agents: &[Value]) -> std::result::Result<&'static str, &'
 /// Herdr is queried before the sidecar transaction; writes only the sidecar.
 pub fn observe(project: &Path, db: &mut Connection, budget: crate::telemetry::codex::Budget) -> Result<Value> {
     let bound: Vec<Bound> = bindings(project)?.into_iter().filter(|b| b.open).collect();
-    let (now, interval, bin) = (jiff::Timestamp::now().as_millisecond(), interval_ms(), herdr_bin());
+    observe_bound(db, budget, bound, jiff::Timestamp::now().as_millisecond(), false, CALL_TIMEOUT)
+}
+
+/// Best-effort lifecycle observation. Never creates or migrates a sidecar and
+/// never waits for its writer. End-of-life pane disappearance adds no gap;
+/// earlier failures and stale observation spans still fail completeness.
+pub fn observe_selected(project: &Path, ids: &BTreeSet<String>) {
+    observe_selected_at(project, ids, jiff::Timestamp::now().as_millisecond(), false);
+}
+
+pub(crate) fn observe_selected_at(project: &Path, ids: &BTreeSet<String>, now: i64, ending: bool) {
+    let _ = (|| -> Result<()> {
+        let path = crate::telemetry::sidecar::path(project);
+        if !path.is_file() { return Ok(()); }
+        let mut db = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW)?;
+        db.busy_timeout(Duration::ZERO)?;
+        let table: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='attention_samples')", [], |r| r.get(0))?;
+        if !table { return Ok(()); }
+        crate::telemetry::sidecar::stream_versions(&db)?;
+        // Acquire before the external call: contention skips the entire hook.
+        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let bound = bindings_filtered(project, Some(ids), false, true)?.into_iter().filter(|b| b.open).collect();
+        observe_bound(&tx, crate::telemetry::codex::Budget { bytes: MAX_REPLY }, bound, now, ending, LIFECYCLE_CALL_TIMEOUT)?;
+        tx.commit()?;
+        Ok(())
+    })();
+}
+
+fn observe_bound(db: &Connection, budget: crate::telemetry::codex::Budget, bound: Vec<Bound>, now: i64, ending: bool, timeout: Duration) -> Result<Value> {
+    let (interval, bin) = (interval_ms(), herdr_bin());
     let mut remaining = budget.bytes;
     let mut replies: BTreeMap<String, std::result::Result<Vec<Value>, &'static str>> = BTreeMap::new();
     let mut samples = Vec::new();
@@ -149,21 +179,23 @@ pub fn observe(project: &Path, db: &mut Connection, budget: crate::telemetry::co
             else if b.pane.is_empty() || !Path::new(&b.socket).is_absolute() { Err("route_unrecorded") }
             else {
                 if !replies.contains_key(&b.socket) {
-                    let reply = if replies.len() >= MAX_SOCKETS || remaining == 0 { Err("budget_exhausted") } else { agent_list(&bin, &b.socket, &mut remaining) };
+                    let reply = if replies.len() >= MAX_SOCKETS || remaining == 0 { Err("budget_exhausted") } else { agent_list(&bin, &b.socket, &mut remaining, timeout) };
                     replies.insert(b.socket.clone(), reply);
                 }
                 match &replies[&b.socket] { Err(reason) => Err(*reason), Ok(agents) => classify(b, agents) }
             };
+        if ending && sample == Err("agent_absent") { continue; }
         samples.push((b.attempt.as_str(), sample));
     }
-    let tx = db.transaction()?;
+    let owned = db.is_autocommit().then(|| db.unchecked_transaction()).transpose()?;
+    let tx = owned.as_deref().unwrap_or(db);
     let (mut states, mut gaps) = (0, BTreeMap::<&str, i64>::new());
     for (attempt, sample) in &samples {
         let (state, gap) = match sample { Ok(state) => { states += 1; (Some(*state), None) } Err(gap) => { *gaps.entry(gap).or_default() += 1; (None, Some(*gap)) } };
         tx.execute("INSERT INTO attention_samples(attempt_id,observed_unix_ms,state,gap,interval_ms,source) VALUES(?1,?2,?3,?4,?5,?6)",
             params![attempt, now, state, gap, interval, SOURCE])?;
     }
-    tx.commit()?;
+    if let Some(tx) = owned { tx.commit()?; }
     Ok(json!({"attempts": samples.len(), "states": states, "gaps": gaps}))
 }
 
@@ -417,7 +449,7 @@ pub fn read(project: &Path, db: &Connection) -> Result<Value> {
 const NAMES: [(&str, &str); 3] = [("M31", "human_interventions_per_accepted_task"), ("M32", "waiting_on_you_share"), ("M33", "permission_prompts_per_attempt")];
 
 fn metric(id: &str, mut body: Value) -> Value {
-    body["definition"] = json!(format!("{id}.attention-v1"));
+    body["definition"] = json!(if id == "M31" { "M31.attention-v2".to_owned() } else { format!("{id}.attention-v1") });
     body["name"] = json!(NAMES.iter().find(|(n, _)| *n == id).map_or("", |(_, name)| *name));
     body
 }

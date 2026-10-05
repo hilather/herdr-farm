@@ -8,9 +8,9 @@ are [contracts.md](contracts.md) §0. Code: `src/telemetry/analytics/`
 (TM4.3). Telemetry never grants launch, changes budgets or accepts results;
 nothing here writes `state.db`.
 
-## 1. Metric registry (`analytics-registry.v6`)
+## 1. Metric registry (`analytics-registry.v7`)
 
-Version history: v1 TM4.1; v2 adds `verification_flip_rate` (DG6, #198); v3 adds M30 `M30.submission-v1` (DG1, #202); v4 adds M10 `M10.v1` (DG2, #204); v5 adds M03 operating throughput (DG3); v6 adds M05 lifecycle tokens and specifies M19’s missing timed history.
+Version history: v1 TM4.1; v2 adds `verification_flip_rate` (DG6, #198); v3 adds M30 `M30.submission-v1` (DG1, #202); v4 adds M10 `M10.v1` (DG2, #204); v5 adds M03 operating throughput (DG3); v6 adds M05 lifecycle tokens and specifies M19’s missing timed history; v7 adds M13 never-running exclusions, M04/M05 partial values and M31 lifecycle sampling. Previous M13.slice-v1, M04.cost-v1, M05.tokens-v1 and M31.attention-v1 definitions remain only as absent (`definition_superseded`).
 
 `telemetry <slug> metrics registry [--json]` prints one declared table
 (`registry.rs`) of every metric `telemetry report` or `query` can name:
@@ -128,7 +128,7 @@ Plan doc 07 §1. `T`/`A` evidence is exactly contracts §6 (`metrics::task_evide
 
 ### Lifecycle consumption and blocked time
 
-M05 (`M05.tokens-v1`, fixture certification) uses M04’s contracts §6 T/A
+M05 (`M05.tokens-v2`, fixture certification) uses M04’s contracts §6 T/A
 cohort and since-only window: a task qualifies when any attempt was decided
 at or after `since`; every attempt of that task contributes its full lifecycle
 input plus output tokens. Counted ledger normalization matches M08/M09;
@@ -137,8 +137,11 @@ children follow attempt ownership, including guardians and subagents;
 uncertified fork replay and unowned children stay excluded. Divide by count(A)
 as an exact unreduced `tokens/tasks` ratio. An empty A gives null with
 `empty_denominator`; any attempt missing counted usage gives
-`lifecycle_usage_incomplete`, with per-reason coverage and the observed
-numerator retained as a partial subtotal. `M05.v1` remains the historical
+`value: {status: partial, reason: lifecycle_usage_incomplete, tokens,
+denominator, attempts_without_usage}`, with per-reason coverage and the
+observed numerator retained as a subtotal. Never-running attempts without
+usage use M04’s exemption; bound usage still counts. Text explicitly labels
+the subtotal partial and gives its denominator and missing-attempt count. `M05.v1` remains the historical
 absent definition.
 
 M19 (`M19.blocked-v1`; historical `M19.v1` remains absent) would divide

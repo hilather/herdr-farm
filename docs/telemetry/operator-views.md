@@ -270,3 +270,12 @@ but the report still needs submission. Fix rounds use ordinary scoped
 `launch run --write ... --output ... --prompt-file FIX_BRIEF` tasks; automatic
 fix attribution is a later card. See
 [review launch contracts](contracts-review.md) §13.
+
+Coverage and lifecycle subtotals (registry v7): M13 excludes unbound attempts
+proven never running by reserved/no-running lifecycle marks; they are not
+usage-loss alerts. Pre-log unbound attempts still count as missing. M04 and
+M05 show `partial subtotal/accepted (reason: N attempts without usage)` when
+coverage is incomplete, with the currency retained for priced cost values.
+M31 samples at running and just before termination as well as periodically;
+a missing pane at the end alone adds no gap, while real mid-run failures and
+long unsampled spans remain incomplete observations.

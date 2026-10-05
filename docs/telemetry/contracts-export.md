@@ -59,7 +59,9 @@ with pinned records). One entry per query result:
 |---|---|
 | `metric_id`, `name`, `definition`, `registry`, `family`, `proxy`, `unit`, `certification` | registry identity and definition version |
 | `cohort`, `time_basis`, `window {from_unix_ms, to_unix_ms, semantics}`, `horizon_ms`, `by` | the evaluated cohort |
-| `status`, `value`, `value_type`, `value_status`, `reason` | `value_type` `ratio` (unreduced `"n/d"`), `integer`, `decimal`, `string`, `object`, `missing`; `value_status` is `available` or `<status>:<reason>` |
+| `status`, `value`, `value_type`, `value_status`, `reason` | `value_type` `ratio` (unreduced `"n/d"`), `integer`, `decimal`, `string`, `object`, `missing`; `value_status` is `available` or `<status>:<reason>` (including
+`partial:lifecycle_cost_incomplete` and `partial:lifecycle_usage_incomplete`;
+the object value retains the observed subtotal and coverage counts) |
 | `numerator`, `denominator`, `missing` | counters as the query answers them; every null among value/numerator/denominator has a typed token in `missing`: `unavailable:<reason>`, `empty:<reason>` or `not_applicable:no_<field>` — unknown is never 0 |
 | `exclusions`, `coverage`, `breakdown`, `censored`, `provisional`, `diagnostic`, `detail` | as the query (lane `detail` redacted) |
 | `as_of {requested, event_cutoff_unix_ms, observation_cutoff_unix_ms}` | requested knowledge time or sequence (null live), latest occurrence in the cohort, knowledge time |

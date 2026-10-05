@@ -121,7 +121,7 @@ fn nd(m: &Value) -> (Value, Value, Value) { (m["numerator"].clone(), m["denomina
 fn registry_declares_every_metric_and_gates_families() {
     let p = Planted::new();
     let registry = p.json(&["metrics", "registry", "--json"]);
-    assert_eq!(registry["registry"], "analytics-registry.v6");
+    assert_eq!(registry["registry"], "analytics-registry.v7");
     assert_eq!(registry["rejected_cohorts"], json!({"completed_task": "ambiguous_cohort"}));
     let metrics = registry["metrics"].as_array().unwrap();
     let ids: Vec<&str> = metrics.iter().map(|m| m["id"].as_str().unwrap()).collect();
@@ -140,6 +140,11 @@ fn registry_declares_every_metric_and_gates_families() {
     assert_eq!(report["metrics"]["M19"]["reason"], "blocked_intervals_not_recorded");
     assert_eq!(p.query(&["--metric", "M19"])["reason"], "blocked_intervals_not_recorded");
     let get = |id: &str| metrics.iter().find(|m| m["id"] == id).unwrap().clone();
+    for (id, current, previous) in [("M04", "M04.cost-v2", "M04.cost-v1"), ("M05", "M05.tokens-v2", "M05.tokens-v1"), ("M13", "M13.slice-v2", "M13.slice-v1"), ("M31", "M31.attention-v2", "M31.attention-v1")] {
+        assert_eq!(get(id)["versions"][0]["definition"], current);
+        assert_eq!(get(id)["versions"][1]["definition"], previous);
+        assert_eq!(get(id)["versions"][1]["provider"]["kind"], "absent");
+    }
     let m02 = get("M02");
     assert_eq!((&m02["definition"], &m02["family"], &m02["unit"]), (&json!("M02.cohort-v1"), &json!("lifecycle"), &json!("ratio")));
     assert_eq!(m02["versions"][0]["cohorts"], json!(["terminal_cohort", "assignment_cohort"]));

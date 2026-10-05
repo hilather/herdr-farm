@@ -312,13 +312,10 @@ fn retained_terminal_attempts_do_not_change_live_sections_or_recorded_history() 
     assert_eq!((&active["attempt_id"], &active["task_id"], &active["state"]), (&json!(f.attempt), &json!("work"), &json!("running")));
     assert_eq!(active["waiting"], json!({"waiting_ms": 0, "open": true, "open_since_unix_ms": f.decided - 370_000, "open_observed_ms": 360_000}));
     let needs = snap["needs_you"].as_array().unwrap();
-    // Retained attempts without usage also raise the recorded critical
-    // coverage-loss alert; it precedes the warning and the live wait.
-    assert_eq!(needs.len(), 3, "{needs:?}");
-    assert_eq!(needs[0], json!({"kind": "alert", "alert_id": 1, "rule": "usage_coverage", "state": "critical",
-        "labels": {"family": "consumption", "project": "demo", "rule": "usage_coverage", "service": "codex"}, "reasons": ["coverage_loss"]}));
-    assert_eq!((&needs[1]["kind"], &needs[1]["rule"], &needs[1]["state"]), (&json!("alert"), &json!("waiting_on_you"), &json!("warn")));
-    assert_eq!(needs[2], json!({"kind": "waiting_on_you", "attempt_id": f.attempt, "task_id": "work", "since_unix_ms": f.decided - 370_000, "observed_ms": 360_000}));
+    // Never-launched retained attempts are excluded from usage-loss health.
+    assert_eq!(needs.len(), 2, "{needs:?}");
+    assert_eq!((&needs[0]["kind"], &needs[0]["rule"], &needs[0]["state"]), (&json!("alert"), &json!("waiting_on_you"), &json!("warn")));
+    assert_eq!(needs[1], json!({"kind": "waiting_on_you", "attempt_id": f.attempt, "task_id": "work", "since_unix_ms": f.decided - 370_000, "observed_ms": 360_000}));
     let revisions = f.cli_args(&["analytics", "revisions", "--metric", "M40"]).0;
     let revision = revisions["revisions"].as_array().unwrap().last().unwrap();
     assert_eq!(snap["services"]["M40"]["as_of"], json!({"seq": revision["revision"], "unix_ms": revision["recorded_unix_ms"]}));

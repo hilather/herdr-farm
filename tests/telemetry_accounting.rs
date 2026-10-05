@@ -1225,7 +1225,7 @@ fn attention_intervals_union_and_censor() {
     // M31: T = {t1} (A = {t1}), a1 fully observed with 2 interventions → 2/1.
     // M32: (120000 + 240000) / (240000 + 420000); a3 unobserved is counted, not 0.
     // M33: Herdr's `blocked` has no typed reason.
-    let m31 = json!({"definition": "M31.attention-v1", "name": "human_interventions_per_accepted_task", "reason_type": "blocked_untyped",
+    let m31 = json!({"definition": "M31.attention-v2", "name": "human_interventions_per_accepted_task", "reason_type": "blocked_untyped",
         "source": "controller_observed", "scope": "human_routed_waits", "coverage": {"attempts": 1, "complete": 1, "not_observed": 0, "with_gaps": 0}, "numerator": 2, "denominator": 1, "value": "2/1"});
     let m32 = json!({"definition": "M32.attention-v1", "name": "waiting_on_you_share", "unit": "ms", "scope": "human_routed_waits", "waiting_union_ms": 300_000,
         "coverage": {"attempts": 3, "observed": 2, "not_observed": 1, "with_gaps": 1, "censored_intervals": 3},
@@ -2250,7 +2250,7 @@ fn shadow_budget_bridge_matches_doc05_goldens() {
     drop(db);
     let m04 = f.report()["metrics"]["M04"].clone();
     assert_eq!((&m04["definition"], &m04["name"], &m04["value"], &m04["currency"], &m04["denominator"], &m04["numerator"], &m04["basis"]),
-        (&json!("M04.cost-v1"), &json!("cost_per_accepted_task"), &json!("70/1"), &json!("USD"), &json!(1),
+        (&json!("M04.cost-v2"), &json!("cost_per_accepted_task"), &json!("70/1"), &json!("USD"), &json!(1),
          &json!({"status": "complete", "currency": "USD", "amount": "70"}), &json!("published_rate_estimate")));
     assert_eq!(m04["coverage"], json!({"entries": 2, "priced": 2, "unpriced": {}, "attempts": 2, "attempts_without_usage": {}}));
     assert!(f.text(&["report"]).lines().any(|l| l == "M04 cost_per_accepted_task 70/1"));
@@ -3133,8 +3133,27 @@ fn attempt_totals_include_only_native_separate_children() {
         VALUES('missing-usage','work',1,'failed',NULL,'missing-usage-slot',1)", []).unwrap();
     drop(db);
     let incomplete = f.report();
-    assert_eq!(incomplete["metrics"]["M05"]["value"], json!({"status": "unavailable", "reason": "lifecycle_usage_incomplete"}));
+    assert_eq!(incomplete["metrics"]["M05"]["value"], json!({"status": "partial", "reason": "lifecycle_usage_incomplete", "tokens": 250, "denominator": 1, "attempts_without_usage": 1}));
     assert_eq!(incomplete["metrics"]["M05"]["coverage"]["attempts_without_usage"]["not_bound"], 1);
-    assert_eq!(f.cli_args(&["query", "--metric", "M05", "--json"]).0["results"][0]["reason"], "lifecycle_usage_incomplete");
+    let query = f.cli_args(&["query", "--metric", "M05", "--json"]).0;
+    assert_eq!(query["results"][0]["status"], "partial");
+    assert_eq!(query["results"][0]["value"], incomplete["metrics"]["M05"]["value"]);
+    assert_eq!(incomplete["metrics"]["M04"]["value"], json!({"status": "partial", "reason": "lifecycle_cost_incomplete", "currency": "USD", "priced_amount": "250", "denominator": 1, "attempts_without_usage": 1}));
+    let text = f.text(&["report"]);
+    assert!(text.contains("M04 cost_per_accepted_task partial 250/1 (lifecycle_cost_incomplete: 1 attempts without usage)"), "{text}");
+    assert!(text.contains("M05 tokens_per_accepted_task partial 250/1 (lifecycle_usage_incomplete: 1 attempts without usage)"), "{text}");
+    // Missing pricing also preserves the one-currency priced subtotal.
+    let path = f.rollout(&f.home, "unpriced-model", &[&format!("{ACCOUNTING}/parent.jsonl")], &f.worktree(), f.decided + 1000, "0.154.0");
+    let text = fs::read_to_string(&path).unwrap().replace(PARENT, "00000000-0000-4000-8000-0000000b7097").replace("gpt-5.5", "unpriced-model");
+    fs::write(path, text).unwrap();
+    f.cli("collect");
+    f.cli_args(&["accounting", "sync"]);
+    f.cli_args(&["accounting", "reprice"]);
+    let partial = f.report()["metrics"]["M04"].clone();
+    assert_eq!(partial["value"]["status"], "partial");
+    assert_eq!(partial["value"]["currency"], "USD");
+    assert_eq!(partial["value"]["priced_amount"], "250");
+    assert!(partial["coverage"]["unpriced"]["no_rate_card"].as_u64().unwrap() > 0);
+
 
 }

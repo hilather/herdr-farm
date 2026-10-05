@@ -637,13 +637,23 @@ that gap may be the same wait: kept, `counted: false`
 censored waits is excluded). An attempt with no successful sample is
 `unavailable not_observed` with its gaps, never 0.
 
+Lifecycle sampling also runs after the worker brief commits `running` and
+immediately before a terminal lifecycle mark for a launched attempt. These
+hooks never create or migrate a sidecar, skip a busy writer without waiting,
+and bound each Herdr call to 500 ms with a 1 MiB reply budget. They reuse the
+same bindings, labels and insertion as periodic observation. A terminal
+`agent_absent` is omitted: the pane may already be gone, and a recent successful
+sample still covers a short trailing span under the unchanged two-interval
+rule. Other failures remain gaps, including genuine mid-run failures; no
+state is inferred at termination and long unsampled tails remain incomplete.
+
 **`accounting attention [--json]`** (read-only): `signal`, per launched
 attempt `{attempt_id, task_id, state: open|ended, launched_unix_ms,
 ended_unix_ms, certified, attention}`, `orphan_samples`, `fleet {waiting_union_ms,
 waiting_sum_ms, interventions}` (overlapping waits of different attempts
 counted once in the union), and `metrics`:
 
-- M31 `human_interventions_per_accepted_task` (`M31.attention-v1`): counted
+- M31 `human_interventions_per_accepted_task` (`M31.attention-v2`): counted
   wait starts of launched attempts of `T` / `count(A)` (contracts §6 cohort,
   same window rule). Needs every such attempt observed without gaps; else
   `unavailable incomplete_observation` with `observed_interventions` (a lower
@@ -1498,7 +1508,7 @@ as integers, money as exact decimal strings with `currency`).
   valuation_computed_unix_ms, ledger_synced_unix_ms, sidecar, what_if_policy
   {policy_id, version, digest, synthetic, source}}`.
 
-**M04 `cost_per_accepted_task`** (`M04.cost-v1`, report hook): contracts §6
+**M04 `cost_per_accepted_task`** (`M04.cost-v2`, report hook): contracts §6
 `T`/`A` (the central `task_evidence`, same window rule). The numerator is the
 estimate over every valued entry of every attempt of the tasks in `T`, which
 includes failed and cancelled attempts and native-linked child sessions whose
@@ -1506,8 +1516,14 @@ inclusion is `separate`, using the same attempt membership as `cost`.
 Uncertified forks and truly unlinked children are excluded with their reasons. The denominator is
 `count(A)`. `value` is `"<amount>/<count(A)>"` with `currency` only when every
 such attempt has usage and all its entries are priced in one currency.
-Otherwise it is `unavailable lifecycle_cost_incomplete`, with the numerator
-estimate (partial or unavailable) and `coverage.attempts_without_usage`.
+An attempt with a `reserved` mark and no `running` mark is exempt from
+missing usage; attempts predating the lifecycle log are not exempt. Bound
+usage from never-running attempts still contributes. Missing usage or partial
+pricing gives `value: {status: partial, reason: lifecycle_cost_incomplete,
+currency, priced_amount, denominator, attempts_without_usage}` when a subtotal
+in one currency exists, with the existing numerator estimate and coverage.
+No priced subtotal or mixed currencies remain unavailable; currencies are
+never summed.
 `count(A) = 0` gives `null empty_denominator`. Open tasks are excluded and
 counted (`tasks.open_excluded`). Basis `published_rate_estimate`,
 `rate_cards: fixture_only`, `never_added_to: M11`.

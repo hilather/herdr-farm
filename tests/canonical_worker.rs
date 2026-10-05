@@ -273,8 +273,9 @@ sys.stdout.buffer.write(json.dumps({'result':json.loads(reply)['result']}).encod
     }
     fn count(&self, method: &str) -> usize { self.requests().iter().filter(|(m, _)| m == method).count() }
     fn attempt(&self, id: &AttemptId) -> Attempt { self.state().attempts.into_iter().find(|a| &a.id == id).unwrap() }
-    fn spawn(&self) -> Ticker {
-        Ticker(Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", &self.herdr)
+    fn spawn(&self) -> Ticker { self.spawn_attention_interval("300") }
+    fn spawn_attention_interval(&self, interval: &str) -> Ticker {
+        Ticker(Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", &self.herdr).env("HERDR_FARM_TELEMETRY_COLLECT_SECS", interval)
             .args(["--root", self.path("root").to_str().unwrap(), "ticker", "run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap())
     }
     fn wait(&self, ticker: &mut Ticker, seconds: u64, predicate: &dyn Fn() -> bool) {
@@ -757,14 +758,28 @@ fn accepted_editing_worker_completes_automatically_after_integration() {
 #[test]
 fn accepted_verify_only_editing_worker_completes_without_integration_automation() {
     let (mut lab, attempt, _) = editing_submission_lab("verify_only", WORK_POLICY, true, false);
+    lab.ok(&["telemetry", "demo", "collect"]);
     lab.serve();
-    let mut ticker = lab.spawn();
+    let mut ticker = lab.spawn_attention_interval("3600");
     lab.wait_for(&mut ticker, "verify-only automatic completion", &attempt, 120, &|| lab.attempt(&attempt).termination_observed);
     assert_eq!(lab.attempt(&attempt).state, AttemptState::Completed);
     assert!(!lab.attempt(&attempt).retains_capacity());
     assert_eq!(lab.state().tasks.iter().find(|t| t.id.as_str() == "work").unwrap().state, TaskState::Succeeded);
     assert!(!lab.git_ok(&["rev-parse", "--verify", "-q", "integration^2"]));
     lab.stop(ticker);
+    let db = rusqlite::Connection::open(lab.project.join(".state/telemetry.db")).unwrap();
+    let samples: Vec<(i64, Option<String>, Option<String>)> = db.prepare("SELECT observed_unix_ms,state,gap FROM attention_samples WHERE attempt_id=?1 ORDER BY rowid").unwrap()
+        .query_map([attempt.as_str()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap().map(Result::unwrap).collect();
+    assert!(samples.len() >= 2, "running and end observations: {samples:?}");
+    assert!(samples.iter().all(|(_, state, gap)| state.is_some() && gap.is_none()), "{samples:?}");
+    let canonical = rusqlite::Connection::open(lab.project.join(".state/state.db")).unwrap();
+    let ended: i64 = canonical.query_row("SELECT unix_ms FROM attempt_lifecycle WHERE attempt_id=?1 AND state='completed'", [attempt.as_str()], |r| r.get(0)).unwrap();
+    assert!(samples.iter().any(|(at, _, _)| *at == ended), "the end hook samples before the terminal mark: {samples:?}");
+    let interval: i64 = db.query_row("SELECT interval_ms FROM attention_samples WHERE attempt_id=?1 ORDER BY observed_unix_ms LIMIT 1", [attempt.as_str()], |r| r.get(0)).unwrap();
+    assert!(ended - samples[0].0 < 2 * interval);
+    let m31 = lab.ok(&["telemetry", "demo", "report", "--json"])["metrics"]["M31"].clone();
+    assert_eq!(m31["coverage"], json!({"attempts": 1, "complete": 1, "not_observed": 0, "with_gaps": 0}));
+    assert_eq!(m31["value"], "0/1");
 }
 
 #[test]
@@ -2703,4 +2718,33 @@ fn submit_captured_retains_remember_from_the_attempt_report_and_replays_once() {
     fs::write(output.join("report.md"),"## Results\nSame recovered edit\n\n## Remember\n\n").unwrap();
     lab.ok(&["result","demo","submit-captured",attempt.as_str()]);
     assert_eq!(lab.ok(&["memory","demo","list"]).as_array().unwrap().len(),1);
+}
+
+/// A failed mid-run observation remains a gap even when both lifecycle hooks
+/// succeed. All operations use the CLI and an isolated local Herdr fixture.
+#[test]
+fn attention_mid_run_failure_remains_incomplete_after_terminal_hook() {
+    let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+    let (_, attempt) = lab.reserve("Attention observation lab");
+    lab.ok(&["telemetry", "demo", "collect"]);
+    lab.serve();
+    let mut ticker = lab.spawn_attention_interval("3600");
+    lab.wait_for(&mut ticker, "running observation", &attempt, 120, &|| lab.attempt(&attempt).state == AttemptState::Running);
+    lab.stop(ticker);
+    fs::write(lab.path("lab/agent-status"), "unknown").unwrap();
+    let out = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim())
+        .env("HOME", lab.home.path()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", &lab.herdr).env("HERDR_FARM_TELEMETRY_COLLECT_SECS", "3600")
+        .args(["--root", lab.path("root").to_str().unwrap(), "telemetry", "demo", "accounting", "observe-attention"]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let observed: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(observed["gaps"]["state_unknown"], 1);
+    fs::remove_file(lab.path("lab/agent-status")).unwrap();
+    let running = lab.attempt(&attempt);
+    lab.ok(&["task", "demo", "cancel-attempt", attempt.as_str(), "--expected-revision", &running.revision.to_string(), "--expected-head", &lab.head().to_string(), "--reason", "finished"]);
+    let mut ticker = lab.spawn_attention_interval("3600");
+    lab.wait_for(&mut ticker, "terminal observation", &attempt, 120, &|| lab.attempt(&attempt).termination_observed);
+    lab.stop(ticker);
+    let m31 = lab.ok(&["telemetry", "demo", "report", "--json"])["metrics"]["M31"].clone();
+    assert_eq!(m31["value"], json!({"status": "unavailable", "reason": "incomplete_observation"}));
+    assert_eq!(m31["coverage"]["with_gaps"], 1);
 }

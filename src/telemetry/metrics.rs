@@ -11,14 +11,21 @@ const TERMINAL: [&str; 4] = ["completed", "failed", "cancelled", "lost"];
 const NAMES: [(&str, &str); 10] = [("M02", "task_acceptance_rate"), ("M07", "attempt_amplification"), ("M08", "input_tokens"), ("M09", "output_tokens"),
     ("M13", "usage_coverage"), ("M15", "effective_model_coverage"), ("M31", "attention"), ("M32", "attention"), ("M33", "attention"), ("M40", "quota_headroom_at_dispatch")];
 
-struct Attempt { id: String, task: String, state: String, kind: Option<String>, home: Option<String>, decided: Option<i64> }
+struct Attempt { id: String, task: String, state: String, kind: Option<String>, home: Option<String>, decided: Option<i64>, never_running: bool }
+
+/// A reserved lifecycle with no running mark proves no session ran. Pre-log
+/// attempts have no such proof and remain eligible for missing-usage coverage.
+pub(crate) fn never_running_sql(db: &Connection) -> Result<&'static str> {
+    let present: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='attempt_lifecycle')", [], |r| r.get(0))?;
+    Ok(if present { "EXISTS(SELECT 1 FROM attempt_lifecycle l WHERE l.attempt_id=a.id AND l.state='reserved') AND NOT EXISTS(SELECT 1 FROM attempt_lifecycle l WHERE l.attempt_id=a.id AND l.state='running')" } else { "0" })
+}
 
 fn unavailable(reason: &str) -> Value {
     json!({"status": "unavailable", "reason": reason})
 }
 
 fn metric(id: &str, mut body: Value) -> Value {
-    body["definition"] = json!(format!("{id}.slice-v1"));
+    body["definition"] = json!(if id == "M13" { "M13.slice-v2".to_owned() } else { format!("{id}.slice-v1") });
     body
 }
 
@@ -76,9 +83,10 @@ pub(crate) fn central_uncached(project: &Path, since: Option<i64>, aggregates: b
     let db = super::read_only(&path)?;
     let table = |name: &str| db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)", [name], |r| r.get::<_, bool>(0));
     let decided = if table("dispatch_decisions")? { "(SELECT decided_unix_ms FROM dispatch_decisions d WHERE d.attempt_id=a.id)" } else { "NULL" };
+    let never = never_running_sql(&db)?;
     let attempts: Vec<Attempt> = db.prepare(&format!("SELECT a.id,a.task_id,a.state,json_extract(i.payload,'$.inputs.effective_profile.kind'),
-        json_extract(i.payload,'$.inputs.effective_profile.execution_home'),{decided} FROM attempts a LEFT JOIN attempt_inputs i ON i.attempt_id=a.id ORDER BY a.rowid"))?
-        .query_map([], |r| Ok(Attempt { id: r.get(0)?, task: r.get(1)?, state: r.get(2)?, kind: r.get(3)?, home: r.get(4)?, decided: r.get(5)? }))?
+        json_extract(i.payload,'$.inputs.effective_profile.execution_home'),{decided},{never} FROM attempts a LEFT JOIN attempt_inputs i ON i.attempt_id=a.id ORDER BY a.rowid"))?
+        .query_map([], |r| Ok(Attempt { id: r.get(0)?, task: r.get(1)?, state: r.get(2)?, kind: r.get(3)?, home: r.get(4)?, decided: r.get(5)?, never_running: r.get(6)? }))?
         .collect::<rusqlite::Result<_>>()?;
     let in_window = |a: &Attempt| since.is_none_or(|since| a.decided.is_some_and(|at| at >= since));
 
@@ -210,18 +218,20 @@ fn usage_metrics(sidecar: Option<&Connection>, attempts: &[Attempt], since: Opti
         if source.1 == "bound" && let Some(attempt) = source.2.as_deref() { by_attempt.entry(attempt).or_default().push(source); }
     }
     let mut incomplete = BTreeMap::<&str, usize>::new();
+    let mut excluded = 0;
     for a in &codex {
         let bound = by_attempt.get(a.id.as_str()).map(Vec::as_slice).unwrap_or_default();
+        if bound.is_empty() && a.never_running { excluded += 1; continue; }
         let reason = if bound.is_empty() { "not_bound" } else if bound.iter().any(|s| s.4) { "quarantined" }
             else if bound.iter().any(|s| !s.3) { "cli_version_uncertified" } else if bound.iter().any(|s| s.5 != s.6 || s.8) { "records_not_accepted" } else { continue };
         *incomplete.entry(reason).or_default() += 1;
     }
-    let complete = codex.len() - incomplete.values().sum::<usize>();
-    let mut detail = json!({"adapter_absent": adapter_absent, "incomplete": incomplete});
+    let complete = codex.len() - excluded - incomplete.values().sum::<usize>();
+    let mut detail = json!({"adapter_absent": adapter_absent, "incomplete": incomplete, "excluded": {"never_running": excluded}});
     let newer_attempts = codex.iter().filter(|a| by_attempt.get(a.id.as_str()).is_some_and(|sources|
         sources.iter().any(|s| newer_sessions.contains(&s.0)) && sources.iter().all(|s| s.3 && !s.4 && s.5 == s.6 && !s.8))).count();
     if newer_attempts > 0 { detail["coverage"] = json!({"newer_than_certified": newer_attempts, "versions":newer_provenance}); }
-    metrics.insert("M13", ratio("M13", complete, codex.len(), detail));
+    metrics.insert("M13", ratio("M13", complete, codex.len() - excluded, detail));
     Ok(())
 }
 
@@ -263,6 +273,10 @@ fn headroom(project: &Path, sidecar: Option<&Connection>, attempts: &[Attempt], 
 /// tools` prints it, never `n/a` while the counts are known.
 pub fn structured_text(value: &Value) -> Option<String> {
     let o = value.as_object()?;
+    if value["status"] == "partial" && o.contains_key("denominator") {
+        let subtotal = value["priced_amount"].as_str().map(str::to_owned).unwrap_or_else(|| value["tokens"].to_string());
+        return Some(format!("partial {subtotal}/{} ({}: {} attempts without usage)", value["denominator"], value["reason"].as_str().unwrap_or("unknown"), value["attempts_without_usage"]));
+    }
     if o.contains_key("reason") { return None; }
     let issued = o.get("issued")?.as_u64()?;
     let accepted = &value["accepted"];
