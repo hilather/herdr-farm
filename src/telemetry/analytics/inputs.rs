@@ -87,6 +87,7 @@ pub(crate) fn group(provider: Provider, id: &str) -> &'static str {
             "M12" | "M14" => "cost",
             "M11" => "charges",
             "M04" => "budget",
+            "M05" => "tokens",
             "M16" | "M17" | "M18" => "tools",
             "M31" | "M32" | "M33" => "attention",
             _ => "fleet",

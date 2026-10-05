@@ -13,6 +13,15 @@ projection and rate-card revision is the query service's
 (`analytics::query::{request, run}`). They write nothing, launch nothing,
 release no budget and grant no authority.
 
+`telemetry PROJECT report` (text and JSON) lists the entire metric registry
+in registry order, giving a value or unavailable reason for every entry.
+M50 reads “per recommendation (see `telemetry PROJECT recommend`)”. M05 is
+full lifecycle input + output tokens of every attempt in M04’s terminal-task
+cohort divided by accepted tasks; unknown attempt usage yields
+`lifecycle_usage_incomplete`. M19 remains `blocked_intervals_not_recorded`:
+task state events lack timestamps needed for assignment-cohort blocked time
+and censored observation intervals. See [analytics contracts](contracts-analytics.md#lifecycle-consumption-and-blocked-time).
+
 ## 1. Commands
 
 ```

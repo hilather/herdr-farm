@@ -314,7 +314,7 @@ pub fn metrics(project: &Path, since: Option<i64>) -> Result<BTreeMap<String, Va
 
 pub(crate) fn metrics_without_attention(project: &Path, since: Option<i64>) -> Result<BTreeMap<String, Value>> {
     let mut metrics = BTreeMap::new();
-    for group in ["usage", "cost", "charges", "budget", "tools", "fleet"] {
+    for group in ["usage", "cost", "charges", "budget", "tokens", "tools", "fleet"] {
         metrics.extend(metric_group(project, group, since)?);
     }
     Ok(metrics)
@@ -344,6 +344,7 @@ pub(crate) fn metric_group_uncached(project: &Path, group: &str, since: Option<i
         "cost" => cost::metrics_with(project, since, aggregates),
         "charges" => charges::metrics(project, since),
         "budget" => budget::metrics(project, since),
+        "tokens" => budget::token_metric(project, since),
         "attention" => attention::metrics(project, since),
         "tools" => tools::metrics_with(project, since, aggregates),
         _ => fleet::metrics_with(project, since, aggregates),

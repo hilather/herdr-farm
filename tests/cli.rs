@@ -5479,7 +5479,8 @@ fn fleet_text_matches_report_json() {
             (_,Some(decisions))=>format!("n/a ({})",decisions[0]["value"]["reason"].as_str().unwrap()),
             (serde_json::Value::String(value),_)=>value.clone(),
             (serde_json::Value::Null,_)=>format!("n/a ({})",metric["reason"].as_str().unwrap()),
-            (value,_)=>format!("n/a ({})",value["reason"].as_str().unwrap()),
+            (serde_json::Value::Number(value),_)=>value.to_string(),
+            (value,_)=>format!("n/a ({})",value["reason"].as_str().unwrap_or_else(||panic!("{id}: a structured value needs its own expectation: {value}"))),
         };
         assert!(shown.ends_with(&expected),"{shown} != {expected}");
         if expected.starts_with("n/a") {assert!(!shown.split_whitespace().any(|w|w=="0"),"unavailable must not read 0: {shown}");}

@@ -1375,16 +1375,34 @@ per-attempt token binding; launchers still set the environment explicitly.
 ## DG4b: Claude Code native session files (fixture certification)
 
 Owner decision DG4 supersedes the former Codex-only product scope. Adapter
-`claude-code`, interface `session_jsonl`, reads only execution homes retained
+`claude-code`, interface `session_jsonl`, reads execution homes retained
 by canonical attempts whose effective profile kind is `claude`. It discovers
 `<execution_home>/.claude/projects/<project>/*.jsonl`;
-there is no fallback to the operator's HOME and no live probe. A source's
+there is no worker fallback to the operator's HOME and no live probe. A source's
 reported absolute cwd is authoritative. Claude Code 2.1.286 replaces every
 non-alphanumeric character in the absolute cwd with `-` (including dots and
 underscores); this encoding is lossy. Discovery scans all project directories
 and never infers cwd from their names. Binding uses A1's
 home digest, worktree attempt, decision time and active/revoked/predates
 revision rules; harness kinds must agree. No guessed binding is possible.
+
+**Coordinator source (owner decision 2026-10-04).** For canonical projects
+configured with `coordinator_agent = "claude"`, a separate source reads exactly
+`<owner home>/.claude/projects/<encoded canonical project dir>/*.jsonl` using
+the encoding above. It never enumerates the owner's `projects` directory or
+opens any sibling project, credentials, settings, todos or other Claude file.
+Directory components and session files are opened read-only with no-follow;
+symlinks are refused. These sessions use the same Claude adapter, certification,
+privacy allowlist and shared byte budget as workers. Content remains forbidden,
+including prompts, message text, thinking and tool inputs/results. They have no
+attempt binding and count in `coordinator-scope-v2` only when the recorded cwd
+is the canonical project directory (contracts-accounting §10). Worker usage and
+M35 are unchanged. This source defaults on; the owner can stop reading it with
+`[telemetry] collect_coordinator_usage = false` in their `config.toml`.
+Previously collected metadata remains subject to ordinary retention.
+`doctor` reports enabled/disabled and the exact source directory, path only.
+This extends source scope; it does not extend field certification or permit a
+live agent probe. E2E certification uses a synthetic owner home.
 
 The common reader applies the same byte budget, maximum line size, atomic
 cursor updates, incomplete-final-line wait, inode/truncation replay from zero,

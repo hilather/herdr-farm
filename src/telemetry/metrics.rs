@@ -279,12 +279,12 @@ pub fn text(report: &Value) -> String {
         other => other.to_string(),
     };
     let mut out = String::new();
-    // Every metric in the report, in id order (central and lane-provided alike);
-    // a metric's own `name` wins, else the central name.
+    // Every metric in registry order; a provider's own name wins.
     let Some(metrics) = report["metrics"].as_object() else { return out };
-    for (id, m) in metrics {
-        let id = id.as_str();
-        let name = m["name"].as_str().or_else(|| NAMES.iter().find(|(n, _)| *n == id).map(|(_, name)| *name)).unwrap_or("");
+    for registered in super::analytics::registry::METRICS {
+        let id = registered.id;
+        let Some(m) = metrics.get(id) else { continue };
+        let name = m["name"].as_str().unwrap_or(registered.name);
         match m["decisions"].as_array() {
             Some(list) if list.is_empty() => out += &format!("{id} {name} n/a (no_decisions)\n"),
             // M40: one line per decision and limit window, or per decision without windows.

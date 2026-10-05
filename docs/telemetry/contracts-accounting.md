@@ -1032,13 +1032,30 @@ observed.
 - *worker*: a rollout bound to a known canonical attempt;
 - *unattributed*: in a task worktree (`cwd_attempt`), ambiguous, or bound to
   an unknown attempt, but not bound to a known one;
-- *coordinator* (**`coordinator-scope-v1`**): Codex rollouts collected from
+- *coordinator* (**`coordinator-scope-v2`**): Claude Code sessions from the
+  exact owner coordinator source described below, or Codex rollouts collected from
   any scanned execution home (contracts §5), bound to no attempt and outside
   every task worktree, whose `session_meta.cwd` (stored home-prefixed) is the
   project directory: `coordinator.rs open` starts the coordinator agent in a
   pane at `project.canonical_dir()`, and nothing else in the product runs an
   agent there. Its guardian sessions (same cwd) are included;
 - otherwise *outside* the project (ignored).
+
+For a canonical project with `coordinator_agent = "claude"`, collection also
+reads exactly `<owner home>/.claude/projects/<encoded canonical project dir>/*.jsonl`.
+Claude Code's encoding replaces each non-ASCII-alphanumeric character with `-`.
+Only sessions whose recorded absolute cwd equals the canonical project directory
+enter the coordinator scope; they are bound to no attempt. This source shares
+the collection byte budget and the certified Claude Code metadata adapter.
+It follows no symlinks, including directory components. No other owner Claude
+project directory, credentials, settings or todos are opened. Only usage
+metadata is retained; message text, prompts, thinking and tool content remain
+forbidden. Collection defaults on (owner decision 2026-10-04); set
+`[telemetry] collect_coordinator_usage = false` in the owner's `config.toml` to
+stop reading this source. This does not erase previously collected metadata.
+`doctor` reports the switch and source directory (path only). Worker totals,
+M35 and worker figures are unchanged; M34, its coordinator subtotal, active
+worker-thread-hour cost and the cost view include these coordinator sessions.
 
 A priced amount is summed per currency (exact rationals, shown as exact
 decimals); currencies are never added (`mixed_currency`); an amount that would
@@ -1056,13 +1073,13 @@ running interval starts at or after it. Without a sidecar both metrics are
 `unavailable collection_not_run`, before any reprice `not_priced`.
 
 **M34 `coordinator_overhead`** (`M34.fleet-v1`, `scope:
-coordinator-scope-v1`, `allocation_rule: coordinator-allocation-v2`,
+coordinator-scope-v2`, `allocation_rule: coordinator-allocation-v2`,
 `excluded_from: [M35, per_arm_worker_figures]`). `value` = coordinator
 exclusive cost / total project lifecycle cost (coordinator + worker
 sessions), an exact rational. Reasons for `partial`: `coordinator_<gap>`,
 `worker_<gap>`, `unattributed_worker_usage`. With no session in the scope it
 is `unavailable coordinator_usage_not_observed`, never 0: a coordinator run
-by another agent kind (the default `coordinator_agent` is `claude`), or from
+by an unsupported agent kind, opted out of collection, or from
 an execution home that is not scanned, is not observed. Also:
 - `coordinator {sessions, estimate, coverage}` and
   `total_project_lifecycle_cost {estimate, worker_attempts, worker_coverage,

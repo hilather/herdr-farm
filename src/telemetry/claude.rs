@@ -1,5 +1,5 @@
 //! Claude Code native metadata adapter. All sources are isolated execution homes
-//! from canonical Claude attempts; no default owner home is ever discovered.
+//! from canonical Claude attempts, plus the explicitly scoped coordinator source.
 use super::*;
 
 pub const FIXTURE_VERSIONS: &[&str] = &["2.1.3", "2.1.286"];
@@ -188,4 +188,58 @@ fn apply(tx: &Transaction, ledger: &ingest::Ledger, at: u64, value: Value, key: 
     let tag = serde_json::from_slice::<Tag>(&line)?;
     anyhow::ensure!(record(tx, ledger, at, &tag, &line, key, home, worktrees, cursor, now, done, &mut None)?, "invalid Claude metadata mapping");
     Ok(())
+}
+
+/// Owner-approved coordinator boundary: compute one directory, never enumerate
+/// the owner's projects or inspect any other Claude files.
+pub(super) fn coordinator_source(project: &Path) -> Result<Option<(PathBuf, bool)>> {
+    let text = match std::fs::read_to_string(project.join("PROJECT.md")) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let Some(front) = text.strip_prefix("+++\n").and_then(|s| s.split_once("\n+++").map(|(f, _)| f)) else { return Ok(None) };
+    let settings: toml::Table = toml::from_str(front)?;
+    if settings.get("coordinator_agent").and_then(toml::Value::as_str).unwrap_or("claude") != "claude" { return Ok(None); }
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else { return Ok(None) };
+    let enabled = super::super::views::telemetry_switch(&crate::product_environment::config_dir_for_home(&home), "collect_coordinator_usage")?;
+    let project = std::fs::canonicalize(project)?;
+    let encoded: String = project.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    Ok(Some((home.join(".claude/projects").join(encoded), enabled)))
+}
+
+/// The enabled coordinator directory, only when it exists as a real directory:
+/// a project whose coordinator never ran has nothing to collect, so it must
+/// not become a telemetry source (and get a sidecar) by default.
+pub(super) fn coordinator_dir(project: &Path) -> Result<Option<PathBuf>> {
+    Ok(coordinator_source(project)?.filter(|(path, enabled)| *enabled && std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir())).map(|(path, _)| path))
+}
+
+/// Open every component relative to a pinned directory descriptor. Neither
+/// discovery nor tail reads follow symlinks, including intermediate directories.
+pub(super) fn open_scoped(path: &Path, directory: bool) -> std::io::Result<std::fs::File> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    if !path.is_absolute() || path.components().any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::CurDir)) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "absolute source path required"));
+    }
+    let mut parent = std::fs::File::open("/")?;
+    let parts: Vec<_> = path.components().filter_map(|c| match c { std::path::Component::Normal(s) => Some(s), _ => None }).collect();
+    for (i, part) in parts.iter().enumerate() {
+        let name = std::ffi::CString::new(part.as_encoded_bytes())?;
+        let flags = libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK
+            | if directory || i + 1 < parts.len() { libc::O_DIRECTORY } else { 0 };
+        // SAFETY: parent is live, name is NUL-terminated; the returned fd is owned.
+        let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags) };
+        if fd < 0 { return Err(std::io::Error::last_os_error()); }
+        parent = unsafe { std::fs::File::from_raw_fd(fd) };
+    }
+    Ok(parent)
+}
+
+pub(super) fn coordinator_files(root: &Path) -> Vec<PathBuf> {
+    use std::os::fd::AsRawFd;
+    let Ok(dir) = open_scoped(root, true) else { return Vec::new() };
+    let Ok(files) = std::fs::read_dir(format!("/proc/self/fd/{}", dir.as_raw_fd())) else { return Vec::new() };
+    files.flatten().filter(|f| f.file_type().is_ok_and(|t| t.is_file()) && f.path().extension().is_some_and(|s| s == "jsonl"))
+        .map(|f| root.join(f.file_name())).collect()
 }

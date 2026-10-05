@@ -2318,7 +2318,7 @@ fn coordinator_overhead_and_overlap_waste_from_accepted_reasons() {
     let fleet = fleet_after_reprice(&f);
     let m34 = &fleet["metrics"]["M34"];
     assert_eq!((&m34["value"], &m34["scope"], &m34["allocation_rule"]),
-        (&json!({"status": "unavailable", "reason": "coordinator_usage_not_observed"}), &json!("coordinator-scope-v1"), &json!("coordinator-allocation-v2")));
+        (&json!({"status": "unavailable", "reason": "coordinator_usage_not_observed"}), &json!("coordinator-scope-v2"), &json!("coordinator-allocation-v2")));
 
     // The coordinator: Codex at the project directory, from another scanned home, an hour into the run.
     let coordinator_at = f.decided - 3_600_000;
@@ -3121,4 +3121,20 @@ fn attempt_totals_include_only_native_separate_children() {
     let report = f.report();
     assert_eq!(report["metrics"]["M04"]["value"], "250/1", "legacy M04 counted every bound child: 300/1; attempt totals are 250/1");
     assert_eq!(report["metrics"]["M12"]["value"], "400");
+    assert_eq!(report["metrics"]["M05"]["value"], "250/1", "100 primary + 40 subagent + 10 guardian + 100 retry; excluded forks stay excluded");
+    assert_eq!(f.cli_args(&["query", "--metric", "M05", "--json"]).0["results"][0]["value"], "250/1");
+    assert!(f.text(&["report"]).contains("M05 tokens_per_accepted_task 250/1"));
+    let from = (f.decided + 1).to_string();
+    assert_eq!(f.cli_args(&["report", "--since", &from, "--json"]).0["metrics"]["M05"]["reason"], "empty_denominator");
+    // Extend the existing canonical fixture with a failed attempt lacking
+    // collected usage; exercise both CLI reads against its accepted task.
+    let db = rusqlite::Connection::open(f.project.join(".state/state.db")).unwrap();
+    db.execute("INSERT INTO attempts(id,task_id,revision,state,snapshot,reservation,termination_observed)
+        VALUES('missing-usage','work',1,'failed',NULL,'missing-usage-slot',1)", []).unwrap();
+    drop(db);
+    let incomplete = f.report();
+    assert_eq!(incomplete["metrics"]["M05"]["value"], json!({"status": "unavailable", "reason": "lifecycle_usage_incomplete"}));
+    assert_eq!(incomplete["metrics"]["M05"]["coverage"]["attempts_without_usage"]["not_bound"], 1);
+    assert_eq!(f.cli_args(&["query", "--metric", "M05", "--json"]).0["results"][0]["reason"], "lifecycle_usage_incomplete");
+
 }
