@@ -25,8 +25,9 @@ fn command_card(attempt: &str, output: &str) -> Result<String> {
         .filter(|p| p.file_name().is_some_and(|n| n == ".state")).and_then(Path::parent) else { return Ok(String::new()); };
     let root = project.parent().context("worker project has no root")?;
     let slug = project.file_name().and_then(|n| n.to_str()).context("worker project slug missing")?;
-    let command = format!("herdr-farm --root '{}' memory {slug}", root.display());
-    Ok(format!("\n## Worker command card\n\nSubmit: run the submission script above in your worktree; wait for `submission_id` before DONE.\nWrite report output: {output}/report.md (supporting artifacts: {output}/library/).\n```sh\n{command} attempt-brief --attempt {attempt}\n{command} attempt-input --attempt {attempt}\n{command} receipts --attempt {attempt}\n{command} update --attempt {attempt} --delivery DELIVERY_ID\n{command} propose --input PROPOSAL_JSON\n{command} ack --input ACK_JSON\n```\nReplace DELIVERY_ID, PROPOSAL_JSON and ACK_JSON with the delivery ID or your JSON file path.\nAcknowledge only after applying the update.\ndo not run `herdr-farm --help`; these are the only commands you need\n"))
+    let memory = format!("herdr-farm --root '{}' memory {slug}", root.display());
+    // Compact on purpose: it counts against the worker's input budget.
+    Ok(format!("\n## Worker commands\n\nSubmit with the script above and wait for `submission_id`. Report: {output}/report.md (artifacts: {output}/library/)\n```sh\nM=\"{memory}\"; A={attempt}\n$M attempt-brief --attempt $A; $M attempt-input --attempt $A; $M receipts --attempt $A\n$M update --attempt $A --delivery ID  # acknowledge after applying it\n$M propose --input FILE; $M ack --input FILE\n```\nThese are all the commands you need; do not run `herdr-farm --help`.\n"))
 }
 
 #[derive(Debug, Serialize)]

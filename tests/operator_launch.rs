@@ -514,8 +514,8 @@ fn launch_run_reserves_a_planning_task_for_each_kind_and_reruns_safely() {
         let command = format!("herdr-farm --root '{}' memory demo", lab.root.display());
         let output_directory = lab.project.join(".state/worker-output").join(&attempt);
         let output_path = output_directory.display();
-        let expected_card = format!("\n## Worker command card\n\nSubmit: run the submission script above in your worktree; wait for `submission_id` before DONE.\nWrite report output: {output_path}/report.md (supporting artifacts: {output_path}/library/).\n```sh\n{command} attempt-brief --attempt {attempt}\n{command} attempt-input --attempt {attempt}\n{command} receipts --attempt {attempt}\n{command} update --attempt {attempt} --delivery DELIVERY_ID\n{command} propose --input PROPOSAL_JSON\n{command} ack --input ACK_JSON\n```\nReplace DELIVERY_ID, PROPOSAL_JSON and ACK_JSON with the delivery ID or your JSON file path.\nAcknowledge only after applying the update.\ndo not run `herdr-farm --help`; these are the only commands you need\n");
-        assert_eq!(&brief_text[brief_text.rfind("\n## Worker command card").unwrap()..], expected_card);
+        let expected_card = format!("\n## Worker commands\n\nSubmit with the script above and wait for `submission_id`. Report: {output_path}/report.md (artifacts: {output_path}/library/)\n```sh\nM=\"{command}\"; A={attempt}\n$M attempt-brief --attempt $A; $M attempt-input --attempt $A; $M receipts --attempt $A\n$M update --attempt $A --delivery ID  # acknowledge after applying it\n$M propose --input FILE; $M ack --input FILE\n```\nThese are all the commands you need; do not run `herdr-farm --help`.\n");
+        assert_eq!(&brief_text[brief_text.rfind("\n## Worker commands").unwrap()..], expected_card);
         assert!(expected_card.lines().count() < 40);
         let branch = format!("worker-{task}");
         let followed = lab.follow_brief(&attempt, &output, &branch);
