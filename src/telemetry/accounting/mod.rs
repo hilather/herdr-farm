@@ -44,7 +44,8 @@ pub const MIGRATIONS: &[&str] = &[include_str!("../../../migrations/telemetry/ac
     include_str!("../../../migrations/telemetry/accounting/0020_otlp_devin.sql"),
     include_str!("../../../migrations/telemetry/accounting/0021_newer_cli_usage.sql"),
     include_str!("../../../migrations/telemetry/accounting/0022_spawn_not_fork.sql"),
-    include_str!("../../../migrations/telemetry/accounting/0023_concurrency_headroom.sql")];
+    include_str!("../../../migrations/telemetry/accounting/0023_concurrency_headroom.sql"),
+    include_str!("../../../migrations/telemetry/accounting/0024_claude_cache_tiers.sql")];
 
 /// `herdr-farm telemetry <slug> accounting ...`
 #[derive(clap::Subcommand)]
@@ -426,7 +427,7 @@ fn usage_metrics_with(project: &Path, since: Option<i64>, aggregates: bool) -> R
             (input, output, reasoning) = (input + n[0], output + n[4], reasoning + n[5]);
         }
     }
-    let reasoning = if certified.iter().any(|s| s.starts_with("claude-code:") || s.starts_with("otlp:claude-code:")) { unavailable("reasoning_tokens_not_reported") } else { json!(reasoning) };
+    let reasoning = if certified.iter().map(|s| crate::telemetry::sidecar::reasoning_missing(&db, s)).collect::<rusqlite::Result<Vec<_>>>()?.into_iter().any(|missing| missing) { unavailable("reasoning_tokens_not_reported") } else { json!(reasoning) };
     Ok(both(json!({"value": input, "coverage": coverage}), json!({"value": output, "reasoning_output_tokens": reasoning, "coverage": coverage})))
 }
 

@@ -207,7 +207,7 @@ fn usage_metrics(sidecar: Option<&Connection>, attempts: &[Attempt], since: Opti
             for (sum, value) in sums.iter_mut().zip(row) { *sum += value; }
         }
         metrics.insert("M08", metric("M08", json!({"value": sums[0], "coverage": coverage})));
-        let reasoning = if certified.iter().any(|s| s.starts_with("claude-code:") || s.starts_with("otlp:claude-code:")) { unavailable("reasoning_tokens_not_reported") } else { json!(sums[2]) };
+        let reasoning = if certified.iter().map(|s| crate::telemetry::sidecar::reasoning_missing(db, s)).collect::<rusqlite::Result<Vec<_>>>()?.into_iter().any(|missing| missing) { unavailable("reasoning_tokens_not_reported") } else { json!(sums[2]) };
         metrics.insert("M09", metric("M09", json!({"value": sums[1], "reasoning_output_tokens": reasoning, "coverage": coverage})));
         metrics.insert("M15", ratio("M15", sums[4] as usize, sums[3] as usize, json!({"coverage": coverage})));
     }

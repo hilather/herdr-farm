@@ -1754,3 +1754,23 @@ session projection, and the ledger is invalidated for replay. No retained table
 is added; existing OTLP/session retention and full-backup classifications apply.
 
 Accounting migration 21 also mirrors newer-version `schema_unrecognized` OTLP diagnostics as rejected usage with null counters. A valid sibling request cannot make that attempt appear completely covered.
+
+### TFIX-4 Claude cache-write tiers (accounting 23)
+
+`claude-code-v2` ledger entries preserve inclusive input and disjoint new input,
+cache read and cache write, plus optional `cache_write_5m_tokens` and
+`cache_write_1h_tokens`. Thinking tokens are a subset of output, never an
+additional priced category. A card with two `cache_write` rates tagged
+`cache_tier: "5m"` and `"1h"` prices each reported quantity separately and sums
+the exact amounts. Components include the two tier amounts and their combined
+`cache_write` amount. One cache-write rate, regardless of tier tag, continues
+to price the whole aggregate quantity. Transcripts without a valid split keep
+the aggregate quantity and single-rate behavior; multiple rates without a
+usable split report `cache_tier_unknown`. For example, input rate 3 per million
+implies provider tier rates 3.75 (5m, 1.25×) and 6 (1h, 2×), when supplied by
+the card; no prices are inferred from these multipliers.
+
+Migration 0024 adds columns to existing usage entries and invalidates the
+ledger for normal sync replay. Native-session retention and full-backup
+classification cover the columns; no retained table is added. Stored valuation
+revisions remain available as-of; reprice appends changed valuations.

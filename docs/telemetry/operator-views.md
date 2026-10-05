@@ -32,13 +32,13 @@ telemetry <slug> view <view> --drill <metric> [--bucket B] [--page-size N] [--cu
 | view | rows (metric: label) | extra section |
 |---|---|---|
 | `project` | M01 accepted tasks, M02 acceptance rate, M06 lead time p95, M07 attempt amplification, M36 integration conflict rate | — |
-| `models` | M15 effective model reported, M08/M09 tokens, M13 usage coverage, M41/M42 paired quality | M02 and M07 per requested agent (`agent_kind`); requested / reported / unknown model identity |
+| `models` | M15 effective model reported, M08/M09 tokens, M13 usage coverage, M41/M42 paired quality | M02 and M07 per profile (`profile`) and requested agent (`agent_kind`); requested / reported / unknown model identity |
 | `reviews` | M20–M23, M25 fix verified, M26 currently resolved, M27 reopen rate, M29 attribution coverage; proxies M45/M47/M48 labelled `[proxy]` | fixes: verified \| integrated \| currently resolved |
 | `cost` | M11 provider-billed spend, M12 estimated spend, M14 cost coverage, M04 cost per accepted task, M34, M37 | — |
 | `health` | M13, M15, M14, M29 coverage; M38–M40 services; M49 replay; M50 freshness | source watermarks (canonical head, sidecar streams, last collect, valuation revision) and per-family lag |
 
 Each view makes at most two query requests (its metrics; for `models` also
-M02/M07 `--by agent_kind`). The window flags pass through unchanged: lane
+M02/M07 `--by agent_kind` and `--by profile`). The window flags pass through unchanged: lane
 metrics are since-only, so `--to` makes them `n/a (window_end_unsupported)`.
 `--as-of` answers from analytics revisions (`n/a (no_revision_as_of)` for a
 cell never refreshed by then).
@@ -80,8 +80,7 @@ horizon plus censored) and **currently resolved** (M26). A reopened fix keeps
 its verification and integration and loses current resolution.
 
 Model identity: the requested agent is the dispatched profile's kind
-(`agent_kind` cells of the native metrics); the requested model *name* is not
-in the query service and reads `n/a (not_in_query_service)`; the reported
+(`agent_kind` cells of the native metrics); the profile cells show pinned model and effort from frozen configuration names; the reported
 effective model is M15's `reported of records`, the rest `unknown`. Hidden
 identities stay unknown.
 
@@ -156,7 +155,7 @@ demo · models view · window [-inf, +inf) · live
   M08 input tokens: n/a (no_certified_source) · basis lane_accounting · coverage unavailable · n=n/a · lag n/a (collection_not_run) · live
     M02 agent_kind=unknown: 2/3 (66.7%) · n=3
     M07 agent_kind=unknown: 5/2 (= 2.5 attempts per accepted task) · n=2
-  identity requested agent (profile kind): unknown 3 tasks; requested model name: n/a (not_in_query_service)
+  identity requested agent (profile kind): unknown 3 tasks
   identity reported effective model: n/a (no_certified_source)
 ```
 
@@ -231,8 +230,9 @@ prints `bucket denominator rows 3-3 of 3` and `task t4 failed`.
 - M50 is evaluated per recommendation (TM4.5): its health-view row reads
   `n/a (per_recommendation)` with basis `per_recommendation`; the value is in
   `telemetry <slug> recommend --role <class>` ([contracts-health.md](contracts-health.md)).
-- Requested model *names* and per-model usage are not in the query service
-  (`not_in_query_service`); TM4.4 comparisons own configuration-level evidence.
+- Profile cells show requested model names and effort from frozen pins;
+  TM4.4 comparisons retain configuration-level evidence. Per-model observed
+  usage is not a lifecycle dimension.
 - The `fleet` popup is a snapshot. The refreshing split pane
   (`telemetry <slug> watch`, action `fleet-watch`) and the workspace
   sections the popup prints after the views are TM4.8
@@ -276,6 +276,16 @@ proven never running by reserved/no-running lifecycle marks; they are not
 usage-loss alerts. Pre-log unbound attempts still count as missing. M04 and
 M05 show `partial subtotal/accepted (reason: N attempts without usage)` when
 coverage is incomplete, with the currency retained for priced cost values.
-M31 samples at running and just before termination as well as periodically;
-a missing pane at the end alone adds no gap, while real mid-run failures and
-long unsampled spans remain incomplete observations.
+M31 also samples once when an attempt reaches running, so short attempts are
+observed; real mid-run failures and long unsampled spans remain incomplete
+observations.
+
+### TFIX-4 profile identity
+
+The models view adds `by_profile` M02/M07 cells alongside `by_agent`.
+`pins` lists each profile's historical frozen configurations, including model
+and reasoning effort; multiple pins for one name remain visible. Missing pins
+stay unknown. `identity.requested_model_name` carries these configurations.
+`attempts --json` retains pinned `reasoning_effort` and separately reports
+`effort_observed` from accepted, non-quarantined native usage: one string,
+`mixed` with distinct values, or `unavailable effort_not_reported`.

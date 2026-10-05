@@ -47,6 +47,11 @@ fn project_attempts(project: &Path, selected: Option<&std::collections::BTreeSet
     if let Some(sidecar) = super::sidecar::read(project)? {
         let children = super::sidecar::child_index(&sidecar)?;
         for record in &mut records {
+            let efforts = sidecar.prepare_cached("SELECT DISTINCT u.effort FROM codex_usage u JOIN rollout_sources s ON s.path_digest=u.path_digest WHERE s.attempt_id=?1 AND s.binding='bound' AND u.accepted=1 AND u.effort IS NOT NULL AND NOT EXISTS(SELECT 1 FROM codex_quarantine q WHERE q.session_id=u.session_id AND q.ordinal=u.ordinal) ORDER BY u.effort")?
+                .query_map([record["attempt_id"].as_str().unwrap_or_default()], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            record["effort_observed"] = match efforts.as_slice() { [effort] => json!(effort), [] => status("unavailable", "effort_not_reported"), _ => json!({"status": "mixed", "values": efforts}) };
+        }
+        for record in &mut records {
             if record["usage"]["reason"] != "collection_not_run" && !sidecar.query_row(
                 "SELECT EXISTS(SELECT 1 FROM rollout_sources WHERE attempt_id=?1 AND originator LIKE 'otlp:%' AND binding='bound')",
                 [record["attempt_id"].as_str().unwrap_or_default()], |r| r.get::<_, bool>(0))? { continue; }
@@ -168,6 +173,7 @@ fn record(db: &Connection, version: u32, attempt: &str, task: &str, state: &str,
     Ok(json!({
         "accepted": accepted, "active_ms": active, "attempt_id": attempt,
         "profile": identity.0, "agent_kind": identity.1, "model": identity.2, "reasoning_effort": identity.3,
+        "effort_observed": status("unavailable", "effort_not_reported"),
         "attention": status("unavailable", "attention_not_collected"),
         "classification": classification, "configuration_id": configuration, "integration": integration,
         "launching_unix_ms": at(launching, true), "queue_to_launch_ms": queue, "reserved_unix_ms": at(reserved, true),

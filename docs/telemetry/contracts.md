@@ -807,3 +807,8 @@ Accounting stream **v23**, `migrations/telemetry/accounting/0023_concurrency_hea
 invalidates cached M40 dispatch answers and fleet lifecycle snapshots for
 `M35.fanout-v2` / `M40.quota-windows-v2` (registry v7). No new tables or
 retention/backup classes; see contracts-accounting.md §5 and §10.
+
+Accounting stream **v24**, `migrations/telemetry/accounting/0024_claude_cache_tiers.sql`,
+adds Claude 5-minute and 1-hour cache-write quantities to `usage_entries` and
+invalidates accounting for the Claude mapping v2 (ingest migration 0014). The new
+columns follow the existing usage-entry retention and backup classes.

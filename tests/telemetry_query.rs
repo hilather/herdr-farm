@@ -276,7 +276,7 @@ fn terminal_cohort_keeps_failed_and_cancelled_tasks() {
     let ids: Vec<&str> = drill["rows"].as_array().unwrap().iter().map(|r| r["id"].as_str().unwrap()).collect();
     assert_eq!(ids, ["c", "c0", "f", "s"], "failed and cancelled tasks are drillable members of T");
     assert_eq!(drill["rows"][2], json!({"entity": "task", "id": "f", "disposition": "failed", "terminal_unix_ms": 1700, "assigned_unix_ms": 1100, "attempts": 1,
-        "route": "none", "agent_kind": "unknown", "task_class": "unclassified"}));
+        "route": "none", "agent_kind": "unknown", "profile": "unknown", "task_class": "unclassified"}));
 
     // Doc 10 §3 shape: M02 = 1/3 and M07 = 3/1 over [1000, 2000); c0 has no terminal time.
     let w = p.query(&["--metric", "M02", "--from", "1000", "--to", "2000"]);

@@ -1444,14 +1444,14 @@ and are included in sidecar backups and backup row inventories. Accounting
 Usage is counted once per `message.id`, even when an API response spans
 several assistant lines or is seen in another file. The first usage-bearing
 line owns the observation; its same-offset replay dedupes or quarantines a
-changed payload. `claude-code-v1` defines total input as native `input_tokens`
+changed payload. `claude-code-v2` (previously v1) defines total input as native `input_tokens`
 + `cache_read_input_tokens` + `cache_creation_input_tokens`; new input is the
 native input alone. Total tokens add output. The shared `codex_usage` table
 is a legacy storage name, not adapter provenance; ledger source and entry ids
-identify Claude. Reasoning breakdown is unreported (the compatibility counter
-is zero in the normalized ledger and must not be interpreted as measured
-thinking usage; public attempt and M09 reasoning totals are explicitly
-`unavailable: reasoning_tokens_not_reported` when Claude is included).
+identify Claude. Mapping v2 records thinking tokens when reported in
+`output_tokens_details.thinking_tokens`; absent counters keep the compatibility
+zero in the ledger and the public `reasoning_tokens_not_reported` mask.
+Top-level observed effort never replaces the frozen configuration pin.
 
 Tool calls populate the shared metadata tables by call id. Tool results
 provide M16 executions and M17 outcomes directly from `is_error`; missing
@@ -2819,3 +2819,32 @@ usage reason constraint through a row-preserving rebuild. Capture triggers and
 indexes are preserved; `codex_usage` retains its existing session retention and
 full-backup classification. No new table survives the migration and no canonical
 schema changes.
+
+### TFIX-4 Claude mapping v2 (ingest 14)
+
+Claude assistant lines map `message.usage.output_tokens_details.thinking_tokens`
+to `reasoning_output_tokens`, top-level `effort` to the usage record effort,
+and `message.usage.cache_creation.ephemeral_5m_input_tokens` /
+`ephemeral_1h_input_tokens` to separate cache-write quantities. Only complete,
+nonnegative, safe-integer splits summing to `cache_creation_input_tokens` are
+usable for tier pricing. Unknown nested key names remain drift evidence; text
+and thinking content remain forbidden. A missing thinking counter retains
+`reasoning_tokens_not_reported` in attempt usage and M09; reported zero is known.
+
+Mapping/normalization is `claude-code-v2`; Claude line envelope
+normalization version is 2. Ingest migration 0014 resets Claude collection
+offsets, message ordinal mappings, disposable usage/time rows and old usage
+quarantine before replay. It preserves source bindings and sanitized envelopes;
+older envelopes are superseded through normalization versioning. Run `collect`
+then `accounting sync` (normal collection and sync also perform upgrades) to
+re-derive retained sessions from their original files. Changed model, effort or
+usage at an ordinal after this rebuild still quarantines normally. Missing or
+retention-deleted files cannot be reconstructed from invented counters. Added
+columns inherit native-session retention and full-backup classification; no
+tables or owner-directory discovery are added.
+
+If an older logical stream inventory is restored over newer physical tables,
+the dispatcher retains optional Claude columns in indexed transaction-local
+TEMP tables while replaying older table rebuilds, then restores them. Already
+installed ingest-14 columns skip that mapping reset. No retained compatibility
+table or new retention class is introduced.

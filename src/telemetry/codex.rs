@@ -484,6 +484,10 @@ struct TaskStarted {
 }
 #[derive(Deserialize, Default)]
 struct Usage {
+    cache_write_5m_tokens: Option<Number>,
+    cache_write_1h_tokens: Option<Number>,
+    #[serde(default)]
+    reasoning_reported: bool,
     input_tokens: Option<Number>,
     cached_input_tokens: Option<Number>,
     cache_write_input_tokens: Option<Number>,
@@ -724,7 +728,13 @@ impl Usage {
             ("reasoning_output_tokens", &self.reasoning_output_tokens), ("total_tokens", &self.total_tokens)]
     }
     fn json(&self) -> Value {
-        Value::Object(self.fields().into_iter().map(|(k, v)| (k.to_owned(), v.clone().map_or(Value::Null, Value::Number))).collect())
+        let mut value = Value::Object(self.fields().into_iter().map(|(k, v)| (k.to_owned(), v.clone().map_or(Value::Null, Value::Number))).collect());
+        // Preserve other adapters' existing digest identities.
+        if self.reasoning_reported { value["reasoning_reported"] = json!(true); }
+        for (key, counter) in [("cache_write_5m_tokens", &self.cache_write_5m_tokens), ("cache_write_1h_tokens", &self.cache_write_1h_tokens)] {
+            if let Some(counter) = counter { value[key] = json!(counter); }
+        }
+        value
     }
     /// `[cache_write, cached, input, output, reasoning, total]` when all are integers in `0..=2^53`.
     fn counters(&self) -> Option<[i64; 6]> {
@@ -1130,7 +1140,8 @@ fn record(tx: &Transaction, ledger: &ingest::Ledger, at: u64, tag: &Tag, line: &
                 params![session, cursor.records], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
             // A4: the line time, outside the payload digest. The first stays; a
             // row stored before A4 gains it when its line is read again.
-            if first.as_ref().is_none_or(|(first, _)| *first == payload_digest) {
+            let same_payload = first.as_ref().is_none_or(|(first, _)| *first == payload_digest);
+            if same_payload {
                 tx.execute("INSERT OR IGNORE INTO codex_usage_times(session_id,ordinal,record_unix_ms) VALUES(?1,?2,?3)",
                     params![session, cursor.records, ms(tag.timestamp.as_deref())])?;
             }
@@ -1156,6 +1167,14 @@ fn record(tx: &Transaction, ledger: &ingest::Ledger, at: u64, tag: &Tag, line: &
                             c[0], c[1], c[2], c[3], c[4], c[5], reason.is_none(), reason, now])?;
                     done.records += 1;
                 }
+            }
+            if same_payload && (record.usage.reasoning_reported || record.usage.cache_write_5m_tokens.is_some() || record.usage.cache_write_1h_tokens.is_some()) {
+                let counter = |n: &Option<Number>| n.as_ref().and_then(Number::as_u64).filter(|v| *v <= MAX_SAFE).map(|v| v as i64);
+                let five = counter(&record.usage.cache_write_5m_tokens);
+                let hour = counter(&record.usage.cache_write_1h_tokens);
+                let split = five.zip(hour).filter(|(a,b)| a.checked_add(*b) == record.usage.cache_write_input_tokens.as_ref().and_then(Number::as_i64));
+                tx.execute("UPDATE codex_usage SET cache_write_5m_tokens=?3,cache_write_1h_tokens=?4,reasoning_reported=?5 WHERE session_id=?1 AND ordinal=?2 AND (cache_write_5m_tokens IS NOT ?3 OR cache_write_1h_tokens IS NOT ?4 OR reasoning_reported<>?5)",
+                    params![session, cursor.records, split.map(|s| s.0), split.map(|s| s.1), record.usage.reasoning_reported])?;
             }
             if let Some(thread) = record.thread_token_usage.filter(|_| certified(version)) {
                 tx.execute("UPDATE rollout_sources SET thread_usage=?2 WHERE path_digest=?1", params![key, thread.json().to_string()])?;

@@ -125,7 +125,7 @@ const TA: &[Cohort] = &[Cohort::Terminal, Cohort::Assignment];
 const A: &[Cohort] = &[Cohort::Activity];
 const AS: &[Cohort] = &[Cohort::Assignment];
 /// Bounded categorical dimensions of the native lifecycle definitions (doc 07 §1).
-pub const LIFECYCLE_DIMENSIONS: &[&str] = &["agent_kind", "route", "task_class"];
+pub const LIFECYCLE_DIMENSIONS: &[&str] = &["agent_kind", "profile", "route", "task_class"];
 /// Identities that belong in drill-down, never in a metric label.
 pub const HIGH_CARDINALITY: &[&str] = &["task_id", "attempt_id", "session_id", "invocation_id", "finding_id", "submission_id", "entry_id"];
 

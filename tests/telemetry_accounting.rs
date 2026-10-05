@@ -740,7 +740,7 @@ fn quota_runway_links_usage_and_preserves_previously_reported_null() {
         UPDATE accounting_fleet_snapshot SET body=json_remove(body,'$.accepted_tasks');
         UPDATE telemetry_streams SET version=22 WHERE stream='accounting';").unwrap();
     f.cli_args(&["accounting", "sync"]);
-    assert_eq!(f.cli_args(&["accounting", "status"]).0["version"], 23);
+    assert_eq!(f.cli_args(&["accounting", "status"]).0["version"], 24);
     assert_eq!(f.sidecar().query_row("SELECT json_type(body,'$.accepted_tasks') FROM accounting_fleet_snapshot", [], |r| r.get::<_, String>(0)).unwrap(), "object");
     assert_eq!(f.cli_args(&["accounting", "quota", "--json"]).0, quota);
     assert_eq!(f.report()["metrics"]["M40"]["decisions"], quota["metrics"]["M40"]["decisions"]);

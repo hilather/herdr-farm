@@ -3,10 +3,11 @@
 //! `herdr-farm telemetry <slug> view ...` and the fleet pane's view
 //! sections. Contract: docs/telemetry/operator-views.md.
 //!
-//! Every value is read through the TM4.1 query service
+//! Metric values are read through the TM4.1 query service
 //! (`super::analytics::query::{request, run}`), never from a store directly,
 //! so the CLI, its JSON and the pane show the query's own values. Each row
 //! carries its basis, coverage, sample size, observation lag and projection.
+//! Frozen profile/model/effort pins are supplemental configuration-name evidence.
 //! Read-only: nothing here writes, launches, releases budget or grants
 //! authority, and switching the views off (`[telemetry] views = false` in
 //! `config.toml`) touches none of collection, the ticker, admission or budgets.
@@ -178,9 +179,9 @@ fn query_args(metrics: Vec<String>, window: Window, by: Option<&str>) -> query::
 fn ask(project: &Path, args: &query::Args) -> Result<Value> { query::run(project, &query::request(args)?) }
 
 /// The query outputs a set of views needs: one request for every row metric,
-/// one for the per-agent cells. The pane asks for all five views at once, so
-/// it makes the same two requests a single CLI view makes.
-pub struct Answers { main: Value, by_agent: Option<Value>, configurations: Vec<Value> }
+/// one for the per-agent cells and one for the per-profile cells. The pane
+/// asks for all five views at once, sharing those same three requests.
+pub struct Answers { main: Value, by_agent: Option<Value>, by_profile: Option<Value>, configurations: Vec<Value> }
 
 pub fn answer(project: &Path, views: &[View], window: Window) -> Result<Answers> {
     let mut metrics: Vec<String> = Vec::new();
@@ -190,8 +191,9 @@ pub fn answer(project: &Path, views: &[View], window: Window) -> Result<Answers>
         for id in view.by_agent() { if !agents.iter().any(|m| m == id) { agents.push((*id).to_owned()); } }
     }
     let main = ask(project, &query_args(metrics, window, None))?;
+    let by_profile = if agents.is_empty() { None } else { Some(ask(project, &query_args(agents.clone(), window, Some("profile")))?) };
     let by_agent = if agents.is_empty() { None } else { Some(ask(project, &query_args(agents, window, Some("agent_kind")))?) };
-    Ok(Answers { main, by_agent, configurations: super::configuration_names::read(project)? })
+    Ok(Answers { main, by_agent, by_profile, configurations: super::configuration_names::read(project)? })
 }
 
 fn result<'a>(out: &'a Value, metric: &str) -> Option<&'a Value> {
@@ -211,7 +213,8 @@ pub fn body(view: View, slug: &str, answers: &Answers, window: Window) -> Value 
             let cells: Vec<Value> = answers.by_agent.iter().flat_map(|out| view.by_agent().iter().filter_map(move |id| result(out, id)))
                 .map(render::agent_cells).collect();
             out["by_agent"] = json!(cells);
-            out["identity"] = render::identity(result(&answers.main, "M15"), answers.by_agent.as_ref().and_then(|o| result(o, "M02")));
+            out["by_profile"] = json!(answers.by_profile.iter().flat_map(|o| view.by_agent().iter().filter_map(move |id| result(o, id))).map(|r| render::profile_cells(r, &answers.configurations)).collect::<Vec<_>>());
+            out["identity"] = render::identity(result(&answers.main, "M15"), answers.by_agent.as_ref().and_then(|o| result(o, "M02")), &answers.configurations);
         }
         View::Reviews => out["fixes"] = render::fixes(result(&answers.main, "M25"), result(&answers.main, "M27"), result(&answers.main, "M26")),
         View::Health => {
