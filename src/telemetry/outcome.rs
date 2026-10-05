@@ -50,6 +50,11 @@ fn project_attempts(project: &Path, selected: Option<&std::collections::BTreeSet
         if turn_table {
             for record in &mut records {
                 let attempt = record["attempt_id"].as_str().unwrap_or_default();
+                // Turn metadata exists only for Claude sessions; other agents' attempts get no
+                // turn fields rather than a misleading zero.
+                let claude: bool = sidecar.query_row("SELECT EXISTS(SELECT 1 FROM rollout_sources WHERE attempt_id=?1 AND binding='bound'
+                    AND session_id LIKE 'claude-code:%')", [attempt], |r| r.get(0))?;
+                if !claude { continue; }
                 let count: i64 = sidecar.query_row("SELECT count(*) FROM claude_turn_lines t WHERE is_prompt=1 AND session_id IN
                     (SELECT session_id FROM rollout_sources WHERE attempt_id=?1 AND binding='bound')", [attempt], |r| r.get(0))?;
                 let stops: std::collections::BTreeMap<String,i64> = sidecar.prepare("SELECT json_extract(metadata,'$.stop_reason'),count(*) FROM claude_turn_lines
