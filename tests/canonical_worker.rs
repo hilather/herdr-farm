@@ -645,12 +645,26 @@ fn an_operator_finishes_a_worker_that_never_submitted_and_the_result_lands_autom
 const SUBMITTING_EDITING_AGENT: &str = r#"
 use std::{fs, path::Path, process::Command, time::Duration};
 fn git(args: &[&str]) -> String {
-    let out = Command::new("/usr/bin/git").args(["-c", "user.name=worker", "-c", "user.email=worker@example.invalid"]).args(args).output().unwrap();
+    let out = Command::new("/usr/bin/git").args(args).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     String::from_utf8(out.stdout).unwrap().trim().to_owned()
 }
 fn main() {
     if std::env::args().nth(1).as_deref() == Some("--version") { println!("2.1.0 (Claude Code)"); return }
+    let spool = std::path::PathBuf::from(std::env::var("HERDR_FARM_SUBMISSION_SPOOL").unwrap());
+    let attempt = spool.file_name().unwrap().to_str().unwrap();
+    let output = std::path::PathBuf::from(std::env::var("HERDR_FARM_WORKER_OUTPUT").unwrap());
+    assert_eq!(output, spool.parent().unwrap().parent().unwrap().join("worker-output").join(attempt));
+    assert!(output.is_dir());
+    for (key, fallback, names) in [
+        ("user.name", format!("herdr-farm worker {attempt}"), ["GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME"]),
+        ("user.email", "worker@herdr-farm.invalid".into(), ["GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL"]),
+    ] {
+        let configured = Command::new("/usr/bin/git").args(["config", "--get", key]).output().unwrap();
+        let expected = if configured.status.success() { String::from_utf8(configured.stdout).unwrap().trim().to_owned() } else { fallback };
+        for name in names { assert_eq!(std::env::var(name).unwrap(), expected); }
+    }
+    fs::write(output.join("report.md"), "Worker environment and Git commit verified\n").unwrap();
     for index in 0..2 {
         if index == 1 { while !Path::new("resubmit").exists() { std::thread::sleep(Duration::from_millis(50)); } }
         fs::write("work.txt", format!("worker change {index}\n")).unwrap();
@@ -680,6 +694,10 @@ fn main() {
 
 fn editing_submission_lab(route: &str, policy: &str, verify: bool, integrate: bool) -> (Lab, AttemptId, PathBuf) {
     let mut lab = Lab::new("unknown_usage='allow_with_warning'\n");
+    if !integrate {
+        lab.git(&["config", "user.name", "Repository worker"]);
+        lab.git(&["config", "user.email", "repository@example.invalid"]);
+    }
     let (contract, base) = lab.install_work_contract_policy(route, policy);
     // Reservation freezes the executable digest. Supply attempt-specific data
     // through a fixture file instead of rebuilding the worker afterward.
@@ -918,9 +936,10 @@ fn ticker_does_not_dispatch_a_launch_cancelled_before_creation() {
 /// Replaces `resource_preparation_enforces_profile_budget_before_claim_or_external_effect`.
 #[test]
 fn profile_budgets_refuse_preparation_and_draft_before_any_approval() {
-    // The retained knowledge including Remember intake fits in 650 tokens;
+    // The retained knowledge including Remember intake and the worker command
+    // card fits in 800 tokens;
     // the complete brief with worktree framing does not.
-    let mut small = Lab::new("soft_input_tokens=650\nunknown_usage='allow_with_warning'");
+    let mut small = Lab::new("soft_input_tokens=800\nunknown_usage='allow_with_warning'");
     small.prepare_profile();
     let selection = small.selection("Retained instructions");
     let error = small.refused(&["launch", "demo", "draft", "--selection", selection.to_str().unwrap(), "--expected-head", &small.head().to_string()]);
@@ -1947,7 +1966,7 @@ fn an_isolated_worker_cannot_read_owner_secrets_or_lift_the_hiding_but_still_com
 const TAMPERING_AGENT: &str = r#"
 use std::{fs, path::Path, process::Command, time::Duration};
 fn git(args: &[&str]) -> String {
-    let out = Command::new("/usr/bin/git").args(["-c", "user.name=worker", "-c", "user.email=worker@example.invalid"]).args(args).output().unwrap();
+    let out = Command::new("/usr/bin/git").args(args).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     String::from_utf8(out.stdout).unwrap().trim().to_owned()
 }

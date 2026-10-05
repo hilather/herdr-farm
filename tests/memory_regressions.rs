@@ -640,3 +640,20 @@ fn refused_reviews_record_expiry_only_for_an_expired_authorization() {
     }).collect();
     assert_eq!(reasons, ["expired", "refused", "invalid_document"]);
 }
+
+#[test]
+fn worker_memory_without_root_reads_the_spool_project() {
+    let p = Project::new();
+    let worker_home = p.path("isolated-worker-home");
+    fs::create_dir_all(&worker_home).unwrap();
+    let spool = p.project.join(".state/spool/attempt-worker");
+    fs::create_dir_all(&spool).unwrap();
+    for name in ["HERDR_FARM_SUBMISSION_SPOOL", "HERDR_PROJECTS_SUBMISSION_SPOOL"] {
+        let out = Command::new(BIN).env_clear().env("HOME", &worker_home).env("PATH", "/usr/bin:/bin")
+            .env("HERDR_FARM_TEST_TIME_SCALE", include_str!("support/time-scale.txt").trim())
+            .env(name, &spool).args(["memory", "demo", "inspect"]).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let actual: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(actual, p.ok(&["memory", "demo", "inspect"]));
+    }
+}

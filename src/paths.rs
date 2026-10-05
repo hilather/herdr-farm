@@ -98,6 +98,17 @@ pub fn resolve_root(flag: Option<&Path>, env: &Env, config_dir: &Path) -> Result
     if let Some(var) = env.var("HERDR_FARM_ROOT") {
         return absolute(&env.expand_tilde(var));
     }
+    if let Some(spool) = env.var("HERDR_FARM_SUBMISSION_SPOOL") {
+        let spool = Path::new(spool);
+        if spool.is_absolute()
+            && spool.parent().is_some_and(|p| p.file_name().is_some_and(|n| n == "spool"))
+            && let Some(state) = spool.parent().and_then(Path::parent).filter(|p| p.file_name().is_some_and(|n| n == ".state"))
+            && let Some(root) = state.parent().and_then(Path::parent)
+        {
+            return absolute(root);
+        }
+        bail!("invalid worker submission spool root");
+    }
     let config_file = config_dir.join("config.toml");
     if let Some(text) = read_root_config(&config_file)? {
         let config: RootConfig = toml::from_str(&text)

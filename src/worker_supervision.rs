@@ -1180,6 +1180,7 @@ impl Isolation {
     /// skips missing paths), so submission fails closed. No other attempt's
     /// spool or output is writable to this agent.
     pub fn with_submission_spool(mut self, attempt: &str) -> Result<Self> {
+        use crate::execution_guard::GatedSpawn;
         ensure!(
             !attempt.is_empty()
                 && attempt.len() <= 128
@@ -1187,6 +1188,21 @@ impl Isolation {
                 && !attempt.starts_with('.'),
             "invalid attempt for the submission spool"
         );
+        if self.thread_path.is_none() {
+            for (key, fallback, names) in [
+                ("user.name", format!("herdr-farm worker {attempt}"), ["GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME"]),
+                ("user.email", "worker@herdr-farm.invalid".into(), ["GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL"]),
+            ] {
+                let configured = if let Some((_, common)) = self.git.first() {
+                    let result = std::process::Command::new("/usr/bin/git").arg("-C").arg(common)
+                        .args(["config", "--local", "--get", key]).env_remove("GIT_CONFIG_COUNT").output_gated()?;
+                    if result.status.success() { Some(String::from_utf8(result.stdout)?.trim_end_matches('\n').to_owned()) } else { None }
+                } else { None };
+                let value = configured.unwrap_or(fallback);
+                ensure!(!value.is_empty() && !value.chars().any(char::is_control), "invalid worker Git identity {key}");
+                self.thread_defaults.extend(names.map(|name| format!("{name}={value}")));
+            }
+        }
         let spool = format!("{}/.state/spool/{attempt}", self.project);
         let output = format!("{}/.state/worker-output/{attempt}", self.project);
         self.plan.extend([(spool.clone(), true), (output, true)]);
@@ -1275,7 +1291,7 @@ pub fn isolated_gated_command(
         "GIT_CONFIG_KEY_2=maintenance.auto".into(),
         "GIT_CONFIG_VALUE_2=false".into(),
     ]);
-    if isolation.thread_path.is_some() {
+    if isolation.thread_path.is_some() || isolation.spool.is_some() {
         args.extend(isolation.thread_defaults.iter().filter(|entry| {
             let name = entry.split_once('=').unwrap().0;
             !isolation.thread_env.iter().any(|value| value.split_once('=').is_some_and(|(override_name, _)| override_name == name))
@@ -1283,6 +1299,8 @@ pub fn isolated_gated_command(
     }
     args.extend_from_slice(&isolation.thread_env);
     if let Some(spool) = &isolation.spool {
+        let attempt = Path::new(spool).file_name().context("worker spool has no attempt")?.to_str().context("worker attempt is not UTF-8")?;
+        args.push(format!("HERDR_FARM_WORKER_OUTPUT={}/.state/worker-output/{attempt}", isolation.project));
         args.push(format!("{SUBMISSION_SPOOL_ENV}={spool}"));
         args.push(format!("HERDR_PROJECTS_SUBMISSION_SPOOL={spool}"));
     }
