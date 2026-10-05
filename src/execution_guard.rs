@@ -132,7 +132,8 @@ pub fn retry_open<T>(mut acquire: impl FnMut() -> Result<T>) -> Result<T> {
             Ok(guard) => return Ok(guard),
             Err(error) => {
                 let busy = error.chain().any(|cause|
-                    matches!(cause.downcast_ref::<std::fs::TryLockError>(), Some(std::fs::TryLockError::WouldBlock)));
+                    matches!(cause.downcast_ref::<std::fs::TryLockError>(), Some(std::fs::TryLockError::WouldBlock))
+                    || cause.downcast_ref::<std::io::Error>().is_some_and(|e| e.kind() == std::io::ErrorKind::WouldBlock));
                 let elapsed = started.elapsed();
                 if !busy || elapsed >= bound { return Err(error); }
                 if !notified && elapsed >= std::time::Duration::from_secs(2) {
