@@ -29,6 +29,14 @@ fn default_timeout() -> u64 {
 struct Verification {
     #[serde(default)]
     toolchains: BTreeMap<String, Toolchain>,
+    #[serde(default)]
+    defaults: BTreeMap<String, Defaults>,
+}
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Defaults {
+    #[serde(default)]
+    accept: Vec<String>,
 }
 #[derive(Default, Deserialize)]
 struct Config {
@@ -127,11 +135,10 @@ fn identity(path: &Path) -> Result<Identity> {
     })
 }
 /// Resolves only the external config path pinned by the project's migration.
-pub fn resolve(project: &Path, name: &str) -> Result<Resolved> {
-    let reference = crate::migration::status(project)?
-        .plan
-        .config
-        .context("project has no owner configuration")?;
+fn owner_config(project: &Path) -> Result<Option<Config>> {
+    let Some(reference) = crate::migration::status(project)?.plan.config else {
+        return Ok(None);
+    };
     let path = Path::new(&reference.path);
     let canonical = path.canonicalize()?;
     let meta = fs::metadata(&canonical)?;
@@ -142,7 +149,20 @@ pub fn resolve(project: &Path, name: &str) -> Result<Resolved> {
         "toolchains require external owner configuration"
     );
     let bytes = crate::migration::read_plan_file(path)?;
-    let config: Config = toml::from_str(std::str::from_utf8(&bytes)?)?;
+    Ok(Some(toml::from_str(std::str::from_utf8(&bytes)?)?))
+}
+
+/// Owner defaults use the same canonical path string as the safety table.
+pub fn default_accept(project: &Path) -> Result<Vec<String>> {
+    let Some(mut config) = owner_config(project)? else { return Ok(Vec::new()); };
+    let key = project.canonicalize()?.to_string_lossy().into_owned();
+    let defaults = config.verification.defaults.remove(&key).unwrap_or_default();
+    ensure!(defaults.accept.len() <= 4, "verification.defaults.{key:?}.accept allows at most 4 entries");
+    Ok(defaults.accept)
+}
+
+pub fn resolve(project: &Path, name: &str) -> Result<Resolved> {
+    let config = owner_config(project)?.context("project has no owner configuration")?;
     let toolchain = config
         .verification
         .toolchains

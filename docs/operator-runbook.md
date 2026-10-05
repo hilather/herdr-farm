@@ -443,6 +443,28 @@ the coordinator agent. Ask rules cover normal command forms, not hostile owner p
 see operations.md for wrapper rules and limits. Retain owner-request history in
 whole-project canonical backups; do not replay approved authority from telemetry.
 
+
+The owner can apply the real test command to every generated code launch:
+
+```toml
+[verification.defaults."/absolute/canonical/project/path"]
+accept = ["godot:./tools/run-tests.sh --headless"]
+```
+
+Use the same canonical project path key as `[safety."..."]` in the external
+owner config; project-local config cannot declare defaults. At most four
+commands are allowed, using the same quoted-argument syntax as `--accept`.
+Generated build/fix contracts with `--write` carry `accept-default-N` policies;
+plan, review, skeptic and `--contract-file` launches do not. Explicit `--accept`
+policies keep `accept-N` ids and replace identical defaults (same toolchain and
+parsed argv). `--no-default-accept` skips defaults for one launch. Launch output
+lists policy ids and, for acceptance commands, the toolchain and argv. The
+coordinator command list names configured defaults, or shows an `--accept`
+example when none are configured. Invalid defaults fail preflight with their
+owner-config entry. Outputs, defaults and explicit accepts together must fit
+32 policies for `verify_only` or six for `verify_then_integrate`; excessive
+counts fail before launch, with no truncation.
+
 For real project tests, declare `[verification.toolchains.NAME]` once in the
 owner's external `config.toml`, with absolute `paths`, validated `env`, optional
 `network` (default false) and `timeout_seconds` (default 600, maximum 3600).
@@ -452,8 +474,8 @@ The generated signed policy pins the toolchain and its dependencies. Tests run
 in the private checkout with read-only tools, private `/tmp` and loopback-only networking by
 default. Set `env = ["GODOT=/absolute/path/to/engine"]` and include the engine
 and required tools in `paths` to give the worker the same test environment.
-The worker receives those validated entries when `--accept` selects the
-toolchain; a launch without it receives none. Tool paths must be readable in
+The worker receives those validated entries when an explicit or default acceptance policy selects the
+toolchain; a launch without one receives none. Tool paths must be readable in
 the worker sandbox, outside hidden owner secrets and the projects root.
 Codex commands and acceptance checks can listen on their own private loopback;
 this grants no outbound access or access to host loopback services. Ignored caches are allowed; tracked or unignored changes fail acceptance.

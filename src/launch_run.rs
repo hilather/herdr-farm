@@ -42,6 +42,7 @@ pub struct Args {
     pub write: Vec<String>,
     pub output: Vec<String>,
     pub accept: Vec<String>,
+    pub no_default_accept: bool,
     pub deliverable: Option<String>,
     /// The task's instructions (appended to PROJECT.md in the retained brief).
     pub prompt_file: Option<PathBuf>,
@@ -164,12 +165,36 @@ fn contract_document(args: &Args, repository: &Path, head: u64, kind: &str, proj
         let mut policies = outputs.iter().enumerate().map(|(i, output)| {
             json!({"id":format!("output-{}", i + 1),"text":serde_json::to_string(&json!({"version":1,"checks":["/usr/bin/git","grep","--quiet","--no-index","-e",".","--",output]})).expect("JSON policy")})
         }).collect::<Vec<_>>();
+        let mut explicit = Vec::new();
         for (index, acceptance) in args.accept.iter().enumerate() {
             let (name, command) = acceptance.split_once(':').context("--accept must be TOOLCHAIN:COMMAND [ARGS]")?;
             let checks = split_command(command)?;
-            let text = herdr_farm::verification::toolchains::policy(project, name, checks)?;
+            let text = herdr_farm::verification::toolchains::policy(project, name, checks.clone())?;
+            explicit.push((name.to_owned(), checks));
             policies.push(json!({"id":format!("accept-{}", index + 1),"text":text}));
         }
+        let mut default_count = 0;
+        if !writes.is_empty() && !args.no_default_accept && args.review_of.is_none()
+            && args.role.as_deref().is_none_or(|role| matches!(role, "build" | "fix")) {
+            let key = project.canonicalize()?.to_string_lossy().into_owned();
+            for (index, acceptance) in herdr_farm::verification::toolchains::default_accept(project)?.iter().enumerate() {
+                let entry = format!("owner config verification.defaults.{key:?}.accept[{}]", index + 1);
+                let (name, checks, text) = (|| -> Result<_> {
+                    let (name, command) = acceptance.split_once(':').context("must be TOOLCHAIN:COMMAND [ARGS]")?;
+                    let checks = split_command(command)?;
+                    let text = herdr_farm::verification::toolchains::policy(project, name, checks.clone())?;
+                    Ok((name.to_owned(), checks, text))
+                })().with_context(|| entry)?;
+                if !explicit.contains(&(name, checks)) {
+                    policies.push(json!({"id":format!("accept-default-{}", index + 1),"text":text}));
+                    default_count += 1;
+                }
+            }
+        }
+        let limit = if args.integration_ref.is_some() { herdr_farm::integration::MAX_POLICIES } else { 32 };
+        ensure!(policies.len() <= limit,
+            "generated contract has {} acceptance policies ({} outputs + {} defaults + {} explicit accepts), exceeding the {} route limit of {limit}; reduce policies or use --no-default-accept",
+            policies.len(), outputs.len(), default_count, explicit.len(), if args.integration_ref.is_some() { "verify_then_integrate" } else { "verify_only" });
         json!({"version":3,"task_id":args.task,"profile_kind":kind,
             "scope":{"paths":writes.iter().map(|p| json!({"path":p,"access":"write"})).collect::<Vec<_>>()},
             "outputs":outputs.iter().map(|p| json!({"path":p,"kind":"git_file"})).collect::<Vec<_>>(),
@@ -663,6 +688,7 @@ pub fn run(ctx: &Ctx, slug: &str, mut args: Args) -> Result<Value> {
         };
         Ok(herdr_farm::store::owner_requests::contract_digest(document))
     })();
+    if let Err(error) = &request_digest { problems.push(format!("contract: {error:#}")); }
     if above_cap && let Ok(digest)=&request_digest
         && store.owner_cap_exemption(&args.task,digest,jiff::Timestamp::now().as_millisecond())? {
         problems.retain(|p|p!=&cap_refusal);
@@ -965,6 +991,15 @@ fn report(run: &Run, task: &str, profile: &VersionedReference, kind: &str, herdr
         eprintln!("launch run: attempt reserved; worker wall budget {worker_wall_seconds} seconds");
     }
     json!({
+        "acceptance_policies":contract["acceptance_policies"].as_array().map(|policies| policies.iter().map(|policy| {
+            let mut summary = json!({"id":policy["id"]});
+            if policy["id"].as_str().is_some_and(|id| id.starts_with("accept"))
+                && let Ok(text) = serde_json::from_str::<Value>(policy["text"].as_str().unwrap_or("")) {
+                summary["toolchain"] = text["toolchain"].clone();
+                summary["command"] = text["checks"].clone();
+            }
+            summary
+        }).collect::<Vec<_>>()),
         "worker_wall_seconds":worker_wall_seconds,
         "contract_digest":reference.map(|r| r.digest),
         "write_paths":contract["scope"]["paths"].as_array().map(|paths| paths.iter().filter(|p| p["access"] == "write").map(|p| p["path"].clone()).collect::<Vec<_>>()),
