@@ -329,7 +329,7 @@ impl Log {
     /// Count explicit error lines without retaining their text in telemetry.
     pub fn error(&self, text: &str) {
         let lower = text.to_ascii_lowercase();
-        let class = if lower.contains("lock contention") || lower.contains("locked") || lower.contains("database is busy") || lower.contains("acquire") && lower.contains("lock") { 0 }
+        let class = if lower.contains("lock contention") || lower.contains("locked") || lower.contains("database is busy") || lower.contains("owns lock") || lower.contains("would block") || lower.contains("acquire") && lower.contains("lock") { 0 }
             else if lower.contains("inventory") && (lower.contains("expired") || lower.contains("stale")) { 1 }
             else if lower.contains("ambiguous") || lower.contains("outcome unknown") { 2 }
             else if lower.contains("permanent") { 3 } else { 4 };
