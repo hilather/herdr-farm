@@ -5485,6 +5485,7 @@ fn fleet_text_matches_report_json() {
             (serde_json::Value::Number(value),_)=>value.to_string(),
             (value,_) if value["status"] == "partial" && value.get("denominator").is_some() => format!("partial {}/{} ({}: {} attempts without usage)",
                 value["priced_amount"].as_str().map(str::to_owned).unwrap_or_else(|| value["tokens"].to_string()), value["denominator"], value["reason"].as_str().unwrap(), value["attempts_without_usage"]),
+            (value,_) if ["M60","M61","M62","M64"].contains(&id.as_str()) && value.get("reason").is_none() => value.to_string(),
             (value,_)=>format!("n/a ({})",value["reason"].as_str().unwrap_or_else(||panic!("{id}: a structured value needs its own expectation: {value}"))),
         };
         assert!(shown.ends_with(&expected),"{shown} != {expected}");

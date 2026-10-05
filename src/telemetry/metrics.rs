@@ -281,6 +281,18 @@ pub fn structured_text(value: &Value) -> Option<String> {
         return Some(format!("partial {subtotal}/{} ({reason}{missing})", value["denominator"]));
     }
     if o.contains_key("reason") { return None; }
+    if o.contains_key("state_db") {
+        let sizes = ["state_db", "telemetry_db", "worktrees", "worker_output"].map(|name| {
+            let category = &value[name];
+            let last = category["samples"].as_array().and_then(|rows| rows.last());
+            let bytes = last.and_then(|row| row["bytes"].as_i64()).map_or_else(|| "n/a (scan_incomplete)".to_owned(), |bytes| bytes.to_string());
+            let growth = &category["growth_bytes_per_day"];
+            let growth = growth.as_str().map(str::to_owned).unwrap_or_else(|| format!("n/a ({})", growth["reason"].as_str().unwrap_or("unknown")));
+            format!("{name} bytes={bytes} growth_bytes_per_day={growth}")
+        });
+        return Some(sizes.join("; "));
+    }
+    if o.contains_key("median_ms") || o.contains_key("reserved_to_launching") || o.contains_key("launch_samples") || o.contains_key("small") { return Some(value.to_string()); }
     let issued = o.get("issued")?.as_u64()?;
     let accepted = &value["accepted"];
     Some(format!("issued {issued}, accepted {} {} ({} unknown), executed {}", accepted["count"], accepted["status"].as_str().unwrap_or("unknown"),

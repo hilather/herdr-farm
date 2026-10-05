@@ -865,3 +865,37 @@ fn compact_storage_upgrade_preserves_envelopes_lineage_and_pinned_answers() {
     assert!(verify["cells"].as_array().unwrap().iter().all(|c| c["stored_intact"] == true));
     assert_eq!(fs::read(f.project.join(".state/state.db")).unwrap(), state_before);
 }
+
+#[test]
+fn storage_samples_retention_backup_and_restore_preserve_tombstones() {
+    let f = Fixture::new();
+    f.cli("collect");
+    let at = unix_ms() - 100 * DAY;
+    herdr_farm::telemetry::operations::sample_storage(&f.project, at).unwrap();
+    assert_eq!(f.count("operation_storage_samples"),1);
+    let out = f.tmp.path().join("storage-backup");
+    let created = json_of(&f,&["backup","create","--out",out.to_str().unwrap()]);
+    assert!(created.is_object());
+    let due = plan(&f);
+    assert_eq!(class(&due,"sidecar.storage_samples")["eligible_count"],1);
+    json_of(&f,&["maintenance","apply","--confirm",due["plan_digest"].as_str().unwrap(),"--json"]);
+    assert_eq!(f.count("operation_storage_samples"),0);
+    // An explicit lab timestamp cannot resurrect pruned observations.
+    herdr_farm::telemetry::operations::sample_storage(&f.project,at).unwrap();
+    assert_eq!(f.count("operation_storage_samples"),0);
+    let restored = json_of(&f,&["backup","restore","--from",out.to_str().unwrap(),"--force"]);
+    assert_eq!(restored["tombstones"]["reapplied"]["sidecar.storage_samples"],1);
+    assert_eq!(f.count("operation_storage_samples"),0);
+    let fresh = unix_ms();
+    herdr_farm::telemetry::operations::sample_storage(&f.project,fresh).unwrap();
+    herdr_farm::telemetry::operations::sample_storage(&f.project,fresh+90*DAY+1).unwrap();
+    assert_eq!(f.count("operation_storage_samples"),1,"automatic 90-day bound");
+    let first = fresh+90*DAY+1;
+    f.sidecar().execute("WITH RECURSIVE hours(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM hours WHERE n<2159)
+        INSERT INTO operation_storage_samples SELECT ?1+n*3600000,1,1,1,1 FROM hours",[first]).unwrap();
+    herdr_farm::telemetry::operations::sample_storage(&f.project,first+2160*3_600_000).unwrap();
+    assert_eq!(f.count("operation_storage_samples"),2160,"hourly row cap also applies at the inclusive 90-day boundary");
+    assert_eq!(f.sidecar().query_row("SELECT min(sampled_unix_ms) FROM operation_storage_samples",[],|r|r.get::<_,i64>(0)).unwrap(),first+3_600_000);
+    assert_eq!(f.cli_args(&["query","--metric","M63","--json"]).0["results"][0]["detail"]["samples"],2160);
+
+}

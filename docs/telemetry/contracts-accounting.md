@@ -1869,3 +1869,12 @@ M57 uses the documented 272000-input-token long-context boundary; M58 samples
 the first primary request of each attempt. Current accounting sync is required
 for setup usage ownership; duplicate responses and resumed rollouts contribute
 once. These are metadata-only projections with no new stream or tables.
+
+### MET-NOW-B flow and operations
+
+M60 exposes the fleet's running/unknown interval semantics as a dedicated idle
+gap distribution, clipped to DG3 operating observations when present. M61–M64
+add launch phases, host load/outcome observations, hourly storage growth and
+rendered brief-size/outcome buckets. Their precise cohorts, ratios, percentile
+rule and absence reasons are in [contracts-analytics.md](contracts-analytics.md#met-now-b-flow-and-operations-registry-v8).
+These figures do not change M35's time-weighted concurrency or allocation rules.

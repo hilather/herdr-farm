@@ -904,3 +904,21 @@ Accounting stream **v25**, `migrations/telemetry/accounting/0025_cli_invocations
 adds `cli_invocations` and its timestamp index for product CLI metadata (§7).
 Retention/backup class: `sidecar.cli_invocations`; 90 days and 100,000 rows.
 See [contracts-accounting.md](contracts-accounting.md#product-cli-self-observation).
+
+### MET-NOW-B operations metadata
+
+Registry **v8** adds M60–M64 ([definitions and unavailable reasons](contracts-analytics.md#met-now-b-flow-and-operations-registry-v8)).
+Sidecar `operations` **v1**, `migrations/telemetry/operations/0001_samples.sql`,
+adds `operation_launch_load` and `operation_storage_samples`. Canonical SCHEMA
+and receipt formats are unchanged. The §7 allowlist adds only attempt ID,
+sample timestamp, one/five/fifteen-minute host load decimal strings, fixed
+absence reason, and four logical-byte counters. Briefs remain unread by these
+metrics; only existing `prompt_chars` is projected. Filesystem sampling reads
+metadata only, never file content and never follows symlinks.
+
+Retention/backup: `sidecar.launch_load` is non-replayable source metadata,
+retained with full sidecar backups. `sidecar.storage_samples` is bounded to
+90 days and 2160 newest hourly observations, classified for maintenance
+planning/apply and restore tombstone enforcement and counted in backup/restore
+loss reports. Derived metric revisions follow the existing analytics class.
+No native agent directories are added to collection scope.

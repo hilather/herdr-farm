@@ -216,6 +216,11 @@ pub const METRICS: &[Metric] = &[
     m!("M56", "reasoning_and_cache_share", Consumption, "ratio", [lane("analytics", "M56.v1", A, "attempt_decision")], "fixture", "tests/telemetry_stored_metrics.rs", None),
     m!("M57", "long_context_exposure", Consumption, "ratio", [lane("analytics", "M57.v1", A, "attempt_decision")], "fixture", "tests/telemetry_stored_metrics.rs", None),
     m!("M58", "fixed_overhead_per_attempt", Consumption, "tokens", [lane("analytics", "M58.v1", A, "attempt_decision")], "fixture", "tests/telemetry_stored_metrics.rs", None),
+    m!("M60", "idle_gap_distribution", Fleet, "milliseconds", [lane("operations", "M60.idle-v1", A, "running_intervals_clipped_to_observed_operating_time")], "fixture", "tests/telemetry_query.rs (MET-NOW-B)", None),
+    m!("M61", "launch_latency_by_phase", Lifecycle, "milliseconds", [lane("operations", "M61.launch-v1", A, "attempt_reserved_at_or_after_since")], "fixture", "tests/telemetry_query.rs (MET-NOW-B)", None),
+    m!("M62", "machine_load_at_launch", Fleet, "load_average", [lane("operations", "M62.load-v1", A, "attempt_reserved_or_verification_created_at_or_after_since")], "fixture", "tests/telemetry_query.rs (MET-NOW-B)", Some("descriptive association; missing launch samples explicit")),
+    m!("M63", "storage_growth", Fleet, "bytes_per_day", [lane("operations", "M63.storage-v1", A, "storage_sample_at_or_after_since")], "fixture", "tests/telemetry_query.rs (MET-NOW-B)", Some("logical regular-file bytes; at most hourly; 90 days and 2160 rows")),
+    m!("M64", "brief_size_vs_outcome", Lifecycle, "ratio", [lane("operations", "M64.brief-v1", A, "attempt_reserved_at_or_after_since")], "fixture", "tests/telemetry_query.rs (MET-NOW-B)", Some("descriptive; task may occur in multiple size buckets")),
     m!("flaky_tests", "newly_flaky_tests_proxy", Proxy, "tests", [lane("quality", "flaky_tests.proxy-v1", A, "ci_run")], "unavailable", QUALITY, Some("no_repeat_runs")),
     m!("verification_flip_rate", "verification_flip_rate", Proxy, "ratio", [lane("quality", "verification_flip_rate.v1", A, "verification_completed")], "fixture", "tests/telemetry_quality.rs (DG6)", Some("passive reruns only; accepted vs checks_failed; policy drill-down in quality flaky")),
 ];

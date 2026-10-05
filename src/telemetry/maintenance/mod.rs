@@ -36,6 +36,7 @@ const TERMINAL_TASK: [&str; 3] = ["succeeded", "failed", "cancelled"];
 
 pub const SESSIONS: &str = "sidecar.normalized_sessions";
 pub const ATTENTION: &str = "sidecar.attention_samples";
+pub const STORAGE: &str = "sidecar.storage_samples";
 pub const CLI: &str = "sidecar.cli_invocations";
 pub const HEALTH: &str = "sidecar.health_evaluations";
 pub const ANALYTICS: &str = "sidecar.analytics_revisions";
@@ -93,6 +94,10 @@ pub struct Class {
 
 /// `retention.v1`: doc 09's defaults, one row per sidecar table group and on-disk artefact.
 pub const CLASSES: &[Class] = &[
+    Class { id: "sidecar.launch_load", store: "telemetry.db", scope: "operation_launch_load", default_days: None, basis: "source_of_truth", destructive: true,
+        action: Action::Retain, age_from: "sampled_unix_ms", requires: "launch metadata cannot be replayed; retained in full sidecar backups" },
+    Class { id: STORAGE, store: "telemetry.db", scope: "operation_storage_samples", default_days: Some(90), basis: "source_of_truth", destructive: false,
+        action: Action::Prune, age_from: "sampled_unix_ms", requires: "capture also caps 90 days and 2160 rows; full backups; no content or paths" },
     Class { id: "sidecar.operating_intervals", store: "telemetry.db", scope: "operating_intervals, operating_clock, operating_gaps", default_days: None, basis: "source_of_truth", destructive: true,
         action: Action::Retain, age_from: "end_unix_ms", requires: "kept: ticker observations cannot be replayed; included in full sidecar backups" },
     Class { id: "sidecar.otlp", store: "telemetry.db", scope: "otlp_records, gemini_file_cursors", default_days: None, basis: "source_of_truth", destructive: true,
@@ -319,6 +324,7 @@ enum Target {
     Attention { attempt: String, before: i64 },
     Health { before: i64 },
     Cli { before: i64 },
+    Storage { before: i64 },
     Revision { revision: i64 },
     Comparison { revision: i64 },
     Tree(PathBuf),
@@ -398,6 +404,7 @@ pub fn plan(project: &Path, config_dir: &Path, now: i64, forget: &[String]) -> R
             (SESSIONS, Some(db)) => sessions(&ctx, db, forget)?,
             (ATTENTION, Some(db)) => attention(&ctx, db)?,
             (CLI, Some(db)) => cli(&ctx, db)?,
+            (STORAGE, Some(db)) => storage(&ctx, db)?,
             (HEALTH, Some(db)) => health(&ctx, db)?,
             (ANALYTICS, Some(db)) => analytics(&ctx, db)?,
             (QUARANTINE, _) => quarantines(&ctx)?,
@@ -486,6 +493,19 @@ fn attention(ctx: &Ctx, db: &Connection) -> Result<Found> {
         let item = Item { class: ATTENTION, key: key.clone(), tombs: vec![(Some(key), Some(before))], target: Target::Attention { attempt: attempt.clone(), before },
             detail: json!({"samples": samples}), reason: "retention_expired" };
         found.offer(ctx, item, &[attempt.as_str()]);
+    }
+    Ok(found)
+}
+
+fn storage(ctx: &Ctx, db: &Connection) -> Result<Found> {
+    let mut found = Found::default();
+    if !table(db, "operation_storage_samples")? { return Ok(found); }
+    let before = ctx.cutoff(STORAGE);
+    let rows: i64 = db.query_row("SELECT count(*) FROM operation_storage_samples WHERE sampled_unix_ms<?1", [before], |r| r.get(0))?;
+    if rows > 0 {
+        let item = Item { class: STORAGE, key: "samples_before_cutoff".into(), tombs: vec![(None, Some(before))], target: Target::Storage { before },
+            detail: json!({"samples": rows}), reason: "retention_expired" };
+        found.offer(ctx, item, &[]);
     }
     Ok(found)
 }
@@ -806,6 +826,10 @@ pub fn enforce(db: &mut Connection, tombstones: &Tombstones) -> Result<BTreeMap<
         }
         if n > 0 { out.insert(ATTENTION, n); }
     }
+    if let Some(&before) = tombstones.before.get(STORAGE) && table(&tx, "operation_storage_samples")? {
+        let n = tx.execute("DELETE FROM operation_storage_samples WHERE sampled_unix_ms<?1", [before])?;
+        if n > 0 { out.insert(STORAGE, n); }
+    }
     if let Some(&before) = tombstones.before.get(CLI) && table(&tx, "cli_invocations")? {
         let n = tx.execute("DELETE FROM cli_invocations WHERE recorded_unix_ms<?1", [before])?;
         if n > 0 { out.insert(CLI, n); }
@@ -918,6 +942,7 @@ pub fn apply(project: &Path, config_dir: &Path, confirm: Option<&str>, dry_run: 
                 sidecar.as_ref().context("the sidecar disappeared")?
                     .execute("DELETE FROM attention_samples WHERE attempt_id=?1 AND observed_unix_ms<?2", params![attempt, before])?;
             }
+            Target::Storage { before } => { sidecar.as_ref().context("the sidecar disappeared")?.execute("DELETE FROM operation_storage_samples WHERE sampled_unix_ms<?1", [before])?; }
             Target::Cli { before } => { sidecar.as_ref().context("the sidecar disappeared")?.execute("DELETE FROM cli_invocations WHERE recorded_unix_ms<?1", [before])?; }
             Target::Health { before } => { sidecar.as_ref().context("the sidecar disappeared")?.execute("DELETE FROM health_evaluations WHERE evaluated_unix_ms<?1", [before])?; }
             Target::Revision { revision } => {

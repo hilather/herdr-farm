@@ -10,11 +10,11 @@ nothing here writes `state.db`.
 
 ## 1. Metric registry (`analytics-registry.v8`)
 
-Version history: v8 adds bounded lifecycle `role` and M37.lineage-v2 (LINEAGE-1); M37.fleet-v1 remains absent as `definition_superseded`. v1 TM4.1; v2 adds `verification_flip_rate` (DG6, #198); v3 adds M30 `M30.submission-v1` (DG1, #202); v4 adds M10 `M10.v1` (DG2, #204); v5 adds M03 operating throughput (DG3); v6 adds M05 lifecycle tokens and specifies M19’s missing timed history; v7 adds M13 never-running exclusions, M04/M05 partial values and M31 lifecycle sampling, M35 attempt-time concurrency and M40 reported/merged quota windows, plus the bounded lifecycle `profile` dimension (TFIX-4, no definition change). Previous M13.slice-v1, M04.cost-v1, M05.tokens-v1, M31.attention-v1, M35.fanout-v1 and M40.quota-windows-v1 definitions remain only as absent (`definition_superseded`). v9 adds MET-NOW-A `M51.v1`–`M58.v1`.
+Version history: v8 adds bounded lifecycle `role` and M37.lineage-v2 (LINEAGE-1); M37.fleet-v1 remains absent as `definition_superseded`. v1 TM4.1; v2 adds `verification_flip_rate` (DG6, #198); v3 adds M30 `M30.submission-v1` (DG1, #202); v4 adds M10 `M10.v1` (DG2, #204); v5 adds M03 operating throughput (DG3); v6 adds M05 lifecycle tokens and specifies M19’s missing timed history; v7 adds M13 never-running exclusions, M04/M05 partial values and M31 lifecycle sampling, M35 attempt-time concurrency and M40 reported/merged quota windows, plus the bounded lifecycle `profile` dimension (TFIX-4, no definition change). Previous M13.slice-v1, M04.cost-v1, M05.tokens-v1, M31.attention-v1, M35.fanout-v1 and M40.quota-windows-v1 definitions remain only as absent (`definition_superseded`). v9 adds MET-NOW-A `M51.v1`–`M58.v1` and MET-NOW-B `M60`–`M64` (sections 8 and 9).
 
 `telemetry <slug> metrics registry [--json]` prints one declared table
 (`registry.rs`) of every metric `telemetry report` or `query` can name:
-M01–M58 and lane C's `flaky_tests` and `verification_flip_rate`. A change is a new registry version, never
+M01–M58, M60–M64 and lane C's `flaky_tests` and `verification_flip_rate`. A change is a new registry version, never
 an edit in place of a published definition. Per metric:
 
 | field | meaning |
@@ -478,3 +478,27 @@ in either order; only `/usr/bin/git` or `/bin/git`, and `/usr/bin/test` or
 or stress command that is not a recognized presence check makes the policy
 `command`. This is a conservative syntactic classification of retained signed
 policies, never another execution or a claim about test adequacy.
+
+## MET-NOW-B: flow and operations (registry v8)
+
+Registry v8 adds M60–M64, using the `operations` lane, activity cohorts and
+since-only windows. Query, report, exports and revision refresh share these
+producers. `--to`, dimensions and drill-down are unsupported; historical
+as-of queries use recorded analytics revisions. All values are descriptive
+metadata, never dispatch, acceptance or capacity authority.
+
+| ID / definition | Producer and value | Missing evidence |
+|---|---|---|
+| M60 `M60.idle-v1` / `idle_gap_distribution` | Complement of the union of half-open attempt running intervals, clipped to the union of observed operating intervals when an operating clock exists. Otherwise only the first-to-last known running span is observed. Adjacent idle pieces merge; pauses and observation gaps split them. `value` has count, nearest-rank median/p90 milliseconds and total milliseconds. Unknown activity spans (including the prefix before lifecycle logging when pre-log attempts exist) are excluded, make the value partial, and `coverage.unknown_ms` is explicit; open runs end at evaluation time. | `no_running_intervals`, `no_observed_operating_intervals`, `predates_lifecycle_log`. An observed span with no gap has count/total zero and null percentiles. |
+| M61 `M61.launch-v1` / `launch_latency_by_phase` | Attempts reserved at/after since (dispatch time fallback for pre-log attempts), excluding replay artefacts. Per-attempt decided→reserved, reserved→launching and launching→running milliseconds plus count/nearest-rank median/p90/total for each phase. `never_running` is terminal reserved attempts without running / attempts that ran or terminal reserved attempts; open launches remain `pending`. Recorded termination cause buckets give counts and shares of the same adjudicated denominator, using bounded enum metadata; missing cause is `cause_not_recorded`. | `no_attempts`, `launch_phases_not_recorded`; a summary without samples carries `no_phase_samples` and null total/percentiles; individual phases: `predates_lifecycle_log`, `phase_start_not_recorded`, `phase_end_not_recorded`, `invalid_phase_order`. Empty adjudicated denominator is null with `empty_denominator`. |
+| M62 `M62.load-v1` / `machine_load_at_launch` | First launch-start host load sample (1/5/15-minute decimal strings), joined to reached-running / never-running / pending outcome (pre-lifecycle history without a running mark is `unknown`, with null reached-running). The native resource adapter takes one bounded `/proc/loadavg` read before its creation request; recovery cannot overwrite it. Verification runs expose their existing verifier-owned one-minute sample and verdict, placed by run creation time. Report retains per-attempt/per-run observations and counts known launch/verification samples. | `load_samples_not_recorded` when neither source has known load; rows carry `launch_load_not_recorded`, `verification_load_not_recorded`, or `unreadable_or_invalid`. Load is host-wide, not attributed to this project. |
+| M63 `M63.storage-v1` / `storage_growth` | Ticker samples logical regular-file bytes of `.state/state.db`, `.state/telemetry.db`, `.state/worktrees` and `.state/worker-output`, at most once per actual hour (unscaled), bounded to 90 days and 2160 rows. Growth is `(last_bytes-first_bytes)*86400000/elapsed_ms`, exact unreduced bytes/day, including negative growth. `since` selects samples; it never invents a boundary sample. | `storage_not_sampled`; growth `insufficient_storage_samples` with fewer than two endpoints; `scan_incomplete` for unreadable or traversal-budget-exhausted endpoints. Missing directories are zero. Symlinks and special files are excluded, content is never read, each tree has a 100000-entry traversal budget. DB sizes exclude WAL/SHM; output snapshots are outside the live output category. |
+| M64 `M64.brief-v1` / `brief_size_vs_outcome` | Initial rendered brief `prompt_chars` from the canonical `runtime.worker_brief` operation, never prompt content. Small `<4000`, medium `[4000,16000)`, large `>=16000` characters. Per bucket: attempts, distinct tasks, accepted tasks (current authoritative receipt evidence), accepted tasks/tasks and attempts/tasks as exact unreduced ratios. A task with attempts in multiple buckets belongs to each; these are descriptive associations, not causal effects. | `brief_size_not_recorded` when no brief size is known, also an exclusion/coverage count; empty buckets have null ratios with `empty_denominator`. |
+
+Text report prints one named line per metric with its structured value, or
+`n/a (reason)`; per-attempt/run lineage stays in the JSON body. `operations`
+stream v1 is `migrations/telemetry/operations/0001_samples.sql`. Launch load
+writes are best effort to an existing current table with zero SQLite wait;
+absence or contention does not affect launch. Storage sampling never opts an
+untouched project into telemetry. Collection disabled at the ticker disables
+these ticker writes as well. No canonical schema or launch receipt changes.
