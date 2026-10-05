@@ -46,6 +46,7 @@ fn project_attempts(project: &Path, selected: Option<&std::collections::BTreeSet
     let mut records = records;
     if let Some(sidecar) = super::sidecar::read(project)? {
         let children = super::sidecar::child_index(&sidecar)?;
+        for record in &mut records { record["session"] = super::worker_sessions::attempt(&sidecar, &store, record)?; }
         let turn_table: bool = sidecar.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='claude_turn_lines')", [], |r| r.get(0))?;
         if turn_table {
             for record in &mut records {
@@ -191,6 +192,7 @@ fn record(db: &Connection, version: u32, attempt: &str, task: &str, state: &str,
     // Without a sidecar; `attempts` replaces it with the sidecar's answer.
     let usage = status("unavailable", if matches!(kind, Some("codex" | "claude" | "opencode")) { "collection_not_run" } else { "adapter_absent" });
     Ok(json!({
+        "session": {"status":"unavailable","reason":"collection_not_run","end_state":if submissions > 0 {"submitted"} else if state == "cancelled" {"stopped"} else {"unknown"}},
         "accepted": accepted, "active_ms": active, "attempt_id": attempt,
         "profile": identity.0, "agent_kind": identity.1, "model": identity.2, "reasoning_effort": identity.3,
         "effort_observed": status("unavailable", "effort_not_reported"),

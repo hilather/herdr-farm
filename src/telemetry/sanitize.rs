@@ -54,7 +54,7 @@ pub fn codex_allowlist(kind: &str) -> Option<Vec<(String, Class)>> {
             ("rate_limits.primary.window_minutes", Number), ("rate_limits.primary.resets_at", Number), ("rate_limits.secondary.used_percent", Number),
             ("rate_limits.secondary.window_minutes", Number), ("rate_limits.secondary.resets_at", Number), ("rate_limits.rate_limit_reached_type", Text)]).into_iter()
             .chain(usage("info.total_token_usage")).collect(),
-        "task_started" => fields(&[("turn_id", Id)]),
+        "task_started" => fields(&[("turn_id", Id), ("model_context_window", Number)]),
         "task_complete" => fields(&[("turn_id", Id), ("duration_ms", Number), ("time_to_first_token_ms", Number)]),
         // A6 tool/exec metadata (contracts-collection.md A6): `response_item`
         // tool calls and outputs by their payload type, never `input`,
@@ -64,7 +64,7 @@ pub fn codex_allowlist(kind: &str) -> Option<Vec<(String, Class)>> {
         "function_call" => fields(&[("call_id", Id), ("name", Tag), ("namespace", Tag), ("status", Tag), ("internal_chat_message_metadata_passthrough.turn_id", Id)]),
         "custom_tool_call_output" | "function_call_output" => fields(&[("call_id", Id)]),
         "item_completed" => fields(&[("thread_id", Id), ("turn_id", Id), ("item.type", Tag), ("item.id", Id), ("item.status", Tag), ("item.source", Tag),
-            ("item.exit_code", Number), ("item.duration.secs", Number), ("item.duration.nanos", Number),
+            ("item.changed_files", Number), ("item.exit_code", Number), ("item.duration.secs", Number), ("item.duration.nanos", Number),
             // A8 (contracts-collection.md A8): `McpToolCall` server and tool
             // names, hint and error flag (never `arguments` or `result.content`);
             // `SubAgentActivity` and `CollabAgentToolCall` ids (never

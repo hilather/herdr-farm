@@ -2865,3 +2865,49 @@ line byte offset. It belongs to `sidecar.normalized_sessions`, follows session
 retention/tombstones, and is included in full backups and row inventories.
 Claude offsets replay from zero; envelope normalization v3 supersedes v2.
 Workers and coordinators use the same mapping.
+
+
+## A10: Codex 0.159.x worker sessions (ingest 0016)
+
+The 0.159.3 record/key census supports metadata-only `FileChange`, `ImageView`
+and `UserMessage` items. Typed serde structs skip command text, output, paths,
+diffs and messages without retaining them. `changes` is traversed using
+`IgnoredAny`; only its array length survives as `item.changed_files`.
+Non-array changes are unknown (`NULL`), not zero. Image views contribute one
+item, never a path. UserMessage items contribute only source position/time for subsequent
+answer evidence. `task_started` adds `model_context_window` (positive integer).
+`CommandExecution.duration.{secs,nanos}` is also retained under neutral
+`codex_reported_exec_durations.reported_duration_*` aliases: 0.154 documented startup time, while the 0.159
+key census alone cannot certify run time. Existing startup fields are retained
+for compatibility; `collectors tools --json` exposes the neutral
+`reported_duration` beside `startup_duration`. M18 stays unavailable.
+
+Tables `codex_session_items`, `codex_session_turns`, `codex_session_clock` belong
+to `sidecar.normalized_sessions`, session retention/tombstones and full backup,
+including backup row inventories. The duration view reuses `codex_exec_items`
+retention/backup coverage and adds no duplicated retained rows. Legacy ingest table rebuilds temporarily
+drop and recreate this view inside the migration transaction. Migration 0016 resets native Codex offsets
+for replay when its physical tables are absent; restoring an older logical
+stream inventory over already-installed tables does not reset offsets or
+recover historical coverage gaps. First item/turn identities dedupe. Envelope normalization versions
+are 3 for `item_completed`, 2 for `task_started`, superseding old allowlists.
+No canonical tables, launch authority or discovery of owner data are added.
+
+`attempts --json` derives a session projection; `accounting tools --json`
+adds `sessions_summary` (end-state distribution, command failures by exit class
+and profile, lingering p50/p95, unanswered requests). Unknown collection is
+unavailable, not an observed zero. Negative exits and shell signal exits
+129–192 use class `signal` (shell encoding is inferred); 127 is `127_not_found`,
+1 and 2 are separate, and all remaining nonzero codes are `other_nonzero`.
+Async call output is an acknowledgement, never proof of an answer. A subsequent
+UserMessage or synchronous `request_user_input` output is answer evidence;
+this cannot prove that the user addressed every question in a bundled request.
+
+End-state precedence: submission, recorded cancellation/stop, an explicit
+wall-budget abort (`wall_budget` or `wall_budget_exceeded`), completed last
+turn for every bound session, unknown. Existing supervisor termination receipts
+record process exit without its exit status or wall-budget cause. Those exits
+cannot be labelled timed_out from elapsed time alone; without explicit reason
+they remain unknown (or ended_without_submission when the last turn completed).
+Synthetic fixtures exercise this distinction; wall-budget reasons are fixture
+coverage, not a live-certified 0.159.3 event shape.

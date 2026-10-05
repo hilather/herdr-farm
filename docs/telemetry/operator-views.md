@@ -289,3 +289,29 @@ stay unknown. `identity.requested_model_name` carries these configurations.
 `attempts --json` retains pinned `reasoning_effort` and separately reports
 `effort_observed` from accepted, non-quarantined native usage: one string,
 `mixed` with distinct values, or `unavailable effort_not_reported`.
+
+
+`attempts --json` includes a per-attempt `session` object from bound Codex
+rollouts. `status: observed` exposes `turns`, `commands`,
+`commands_exit_unknown`, `failed_commands`, `failed_commands_by_class`
+(`127_not_found`, `1`, `2`, `other_nonzero`, `signal`), `file_change_items`,
+`failed_file_change_items`, `image_views`, `user_input_requests`,
+`answered_user_input_requests`, `unanswered_user_input_requests`,
+`sub_agents_spawned`, `max_context_window_fill` (decimal string, or null when
+input/window evidence is missing), `lingering_ms`, and `end_state`.
+`answer_basis` states the subsequent-user-message/synchronous-output evidence.
+Missing metadata has `status: unavailable` and a reason, retaining any known
+canonical end state. This object contains no command, path, diff or message.
+
+`lingering_ms` is terminal lifecycle time minus the last session-record line
+time; open attempts, missing times and negative intervals yield null. It uses
+lifecycle marks, never collection time. End states are `submitted`, `stopped`,
+`timed_out` (explicit wall-budget abort), `ended_without_submission` (last turn
+completed in every bound session, even if the attempt remains running), and
+`unknown`. Existing process-exit receipts do not establish timeout causes.
+
+`accounting tools --json` adds `sessions_summary`: end-state distribution,
+command failures and shares by class and `by_profile`, lingering nearest-rank
+p50/p95 with sample count, and unanswered requests. Shares use numerator /
+denominator strings; an empty denominator is null. Summary status/coverage identifies unavailable or partial collection.
+Missing attempts are excluded from observed command/latency totals and remain in the end-state distribution.

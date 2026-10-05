@@ -670,7 +670,9 @@ pub fn read(project: &Path, db: &Connection) -> Result<Value> {
         };
         json!({"session_id": s.id, "attempt_ids": s.attempts, "tools": tools})
     }).collect();
-    Ok(json!({"sessions": sessions, "coverage": coverage, "metrics": computed(&list, &coverage)}))
+    let attempts = super::super::outcome::attempts(project)?;
+    let summary = super::super::worker_sessions::summary(attempts["attempts"].as_array().map_or(&[][..], Vec::as_slice));
+    Ok(json!({"sessions": sessions, "sessions_summary": summary, "coverage": coverage, "metrics": computed(&list, &coverage)}))
 }
 
 /// M16–M18 for `telemetry <slug> report` (sessions started in the window).
@@ -702,6 +704,7 @@ pub fn text(value: &Value) -> String {
         };
         out += &format!("session {} attempts={}: {detail}\n", s["session_id"].as_str().unwrap_or(""), attempts.join(","));
     }
+    out += &format!("worker sessions {}\n", value["sessions_summary"]);
     let m = &value["metrics"];
     let (m16, m17, m18) = (&m["M16"], &m["M17"], &m["M18"]);
     out += &match m16["value"]["issued"].as_u64() {

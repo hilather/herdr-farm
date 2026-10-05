@@ -442,7 +442,7 @@ const KINDS: [&str; 5] = ["session_meta", "turn_context", "token_usage_record", 
 /// A6 kinds (`response_item` and `event_msg` payload types), and A8's
 /// `turn_aborted`, read through typed allowlist structs only: never
 /// deserialized as a whole `Value`.
-const TYPED: [&str; 6] = ["custom_tool_call", "function_call", "custom_tool_call_output", "function_call_output", "item_completed", "turn_aborted"];
+const TYPED: [&str; 7] = ["custom_tool_call", "function_call", "custom_tool_call_output", "function_call_output", "item_completed", "turn_aborted", "task_started"];
 #[derive(Deserialize)]
 struct Tag {
     #[serde(rename = "type")]
@@ -476,9 +476,11 @@ struct TurnContext {
     model: Option<String>,
     effort: Option<String>,
 }
-/// `event_msg/task_started`: its turn id only, leniently (A7 turn tracking).
+/// `event_msg/task_started`: turn identity and context-window size only.
 #[derive(Deserialize)]
 struct TaskStarted {
+    #[serde(default)]
+    model_context_window: Lax,
     #[serde(default)]
     turn_id: Lax,
 }
@@ -668,6 +670,8 @@ struct ItemCompleted {
 }
 #[derive(Deserialize)]
 struct Item {
+    #[serde(default)]
+    changes: EntryCount,
     #[serde(rename = "type", default)]
     kind: Lax,
     #[serde(default)]
@@ -696,6 +700,34 @@ struct Item {
     sender_thread_id: Lax,
     #[serde(default)]
     receiver_thread_ids: LaxList,
+}
+/// Only the length survives; paths and diffs are skipped by serde.
+#[derive(Default)]
+struct EntryCount(Option<u64>);
+impl<'de> Deserialize<'de> for EntryCount {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        struct Counter;
+        impl<'de> serde::de::Visitor<'de> for Counter {
+            type Value = EntryCount;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { f.write_str("an array of changes") }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut a: A) -> std::result::Result<EntryCount, A::Error> {
+                let mut n = 0;
+                while a.next_element::<serde::de::IgnoredAny>()?.is_some() { n += 1; }
+                Ok(EntryCount(Some(n)))
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut a: A) -> std::result::Result<EntryCount, A::Error> {
+                while a.next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?.is_some() {}
+                Ok(EntryCount(None))
+            }
+            fn visit_str<E: serde::de::Error>(self, _: &str) -> std::result::Result<EntryCount, E> { Ok(EntryCount(None)) }
+            fn visit_bool<E: serde::de::Error>(self, _: bool) -> std::result::Result<EntryCount, E> { Ok(EntryCount(None)) }
+            fn visit_i64<E: serde::de::Error>(self, _: i64) -> std::result::Result<EntryCount, E> { Ok(EntryCount(None)) }
+            fn visit_u64<E: serde::de::Error>(self, _: u64) -> std::result::Result<EntryCount, E> { Ok(EntryCount(None)) }
+            fn visit_f64<E: serde::de::Error>(self, _: f64) -> std::result::Result<EntryCount, E> { Ok(EntryCount(None)) }
+            fn visit_unit<E: serde::de::Error>(self) -> std::result::Result<EntryCount, E> { Ok(EntryCount(None)) }
+        }
+        d.deserialize_any(Counter)
+    }
 }
 /// An MCP call's result: its error flag only, never `content`.
 #[derive(Deserialize)]
@@ -988,8 +1020,15 @@ fn tail_batch(db: &mut Connection, file: &Path, home: &str, worktrees: &str, all
             }
             continue;
         }
-        // Unknown kinds are skipped by type tag without reading further.
-        if !KINDS.contains(&kind.as_str()) { continue; }
+        // Unknown payloads are skipped; their line time advances the session clock.
+        if !KINDS.contains(&kind.as_str()) {
+            #[derive(Deserialize)]
+            struct TimeOnly { timestamp: Option<String> }
+            if let (Some((session, ..)), Ok(time)) = (&cursor.session, serde_json::from_slice::<TimeOnly>(&line)) {
+                tx.execute("UPDATE codex_session_clock SET last_record_unix_ms=?2 WHERE session_id=?1 AND (?2 IS NULL OR last_record_unix_ms IS NULL OR ?2>=last_record_unix_ms)", params![session, ms(time.timestamp.as_deref())])?;
+            }
+            continue;
+        }
         let first_meta = cursor.session.is_none();
         // A read kind whose typed fields do not parse yields no rows and no envelope.
         let Ok(tag) = serde_json::from_slice::<Tag>(&line) else {
@@ -1115,12 +1154,22 @@ fn record(tx: &Transaction, ledger: &ingest::Ledger, at: u64, tag: &Tag, line: &
                 return Ok(false);
             };
             (cursor.model, cursor.effort) = (payload.model, payload.effort);
-            cursor.open_turn(at, turn_id(payload.turn_id.0));
+            let turn = turn_id(payload.turn_id.0);
+            cursor.open_turn(at, turn.clone());
+            if let (Some((session, ..)), Some(turn)) = (&cursor.session, turn) {
+                tx.execute("INSERT OR IGNORE INTO codex_session_turns(session_id,turn_id,model_context_window) VALUES(?1,?2,NULL)", params![session, turn])?;
+            }
         }
-        // A7 turn tracking only; never quarantined (its envelope is built whole, as before).
+        // A10 turn identity/context-window metadata through a typed allowlist.
         (Some("event_msg"), Some("task_started")) => {
-            let started = serde_json::from_slice::<Envelope<TaskStarted>>(line).ok().map(|envelope| envelope.payload.turn_id.0);
-            cursor.open_turn(at, started.and_then(turn_id));
+            let Ok(Envelope { payload }) = serde_json::from_slice::<Envelope<TaskStarted>>(line) else { return Ok(false) };
+            let raw = json!({"turn_id": payload.turn_id.0, "model_context_window": payload.model_context_window.0});
+            cursor.open_turn(at, turn_id(raw["turn_id"].clone()));
+            if let (Some((session, ..)), Some(turn)) = (&cursor.session, turn_id(raw["turn_id"].clone())) {
+                let window = raw["model_context_window"].as_i64().filter(|n| *n > 0);
+                tx.execute("INSERT INTO codex_session_turns(session_id,turn_id,model_context_window) VALUES(?1,?2,?3) ON CONFLICT(session_id,turn_id) DO UPDATE SET model_context_window=excluded.model_context_window WHERE codex_session_turns.model_context_window IS NULL", params![session, turn, window])?;
+            }
+            *observed = Some(raw);
         }
         // Keyed by the rollout's own `session_meta.id`, never the record's
         // `session_id`: a guardian's records report its parent's (A5).
@@ -1256,9 +1305,12 @@ fn record(tx: &Transaction, ledger: &ingest::Ledger, at: u64, tag: &Tag, line: &
             let kind = item.as_ref().map_or(Value::Null, |i| i.kind.0.clone());
             // Each typed item keeps its own allowlisted fields; any other item only its type.
             let fields = match (item, kind.as_str()) {
-                (Some(item), Some(typed @ ("CommandExecution" | "McpToolCall" | "SubAgentActivity" | "CollabAgentToolCall"))) => {
+                (Some(item), Some(typed @ ("CommandExecution" | "McpToolCall" | "SubAgentActivity" | "CollabAgentToolCall" | "FileChange" | "ImageView" | "UserMessage"))) => {
                     let duration = item.duration.0.map_or(json!({"secs": null, "nanos": null}), |d| json!({"secs": d.secs.0, "nanos": d.nanos.0}));
                     match typed {
+                        "FileChange" => json!({"type": kind, "id": item.id.0, "status": item.status.0, "changed_files": item.changes.0}),
+                        "ImageView" => json!({"type": kind, "id": item.id.0}),
+                        "UserMessage" => json!({"type": kind}),
                         "CommandExecution" => json!({"type": kind, "id": item.id.0, "status": item.status.0, "source": item.source.0, "exit_code": item.exit_code.0,
                             "duration": duration}),
                         "McpToolCall" => json!({"type": kind, "id": item.id.0, "server": item.server.0, "tool": item.tool.0, "status": item.status.0,
@@ -1275,7 +1327,10 @@ fn record(tx: &Transaction, ledger: &ingest::Ledger, at: u64, tag: &Tag, line: &
             let text = |path: &str, class| kept(path, class).as_str().map(str::to_owned);
             let number = |path: &str| kept(path, sanitize::Class::Number).as_i64();
             let flag = |path: &str| kept(path, sanitize::Class::Bool).as_bool();
-            if let (Some((session, ..)), Some(item_id)) = (&cursor.session, text("item.id", sanitize::Class::Id)) {
+            // User messages retain a source position, never their native id or content.
+            let item_id = text("item.id", sanitize::Class::Id).or_else(||
+                (kind.as_str() == Some("UserMessage")).then(|| format!("user:{key}:{at}")));
+            if let (Some((session, ..)), Some(item_id)) = (&cursor.session, item_id) {
                 let (thread, turn, at) = (text("thread_id", sanitize::Class::Id), text("turn_id", sanitize::Class::Id), ms(tag.timestamp.as_deref()));
                 match kind.as_str() {
                     Some("CommandExecution") => {
@@ -1283,6 +1338,10 @@ fn record(tx: &Transaction, ledger: &ingest::Ledger, at: u64, tag: &Tag, line: &
                             startup_duration_nanos,completed_unix_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)", params![session, item_id, thread, turn,
                             text("item.status", sanitize::Class::Tag), text("item.source", sanitize::Class::Tag), number("item.exit_code"),
                             number("item.duration.secs"), number("item.duration.nanos"), at])?;
+                    }
+                    Some(typed @ ("FileChange" | "ImageView" | "UserMessage")) => {
+                        tx.execute("INSERT OR IGNORE INTO codex_session_items(session_id,item_id,item_type,status,changed_files,completed_unix_ms) VALUES(?1,?2,?3,?4,?5,?6)",
+                            params![session, item_id, typed, text("item.status", sanitize::Class::Tag), number("item.changed_files"), at])?;
                     }
                     // A8 (contracts-collection.md A8): an MCP call's metadata, never its arguments or result content.
                     Some("McpToolCall") => {
@@ -1321,6 +1380,14 @@ fn record(tx: &Transaction, ledger: &ingest::Ledger, at: u64, tag: &Tag, line: &
             *observed = Some(raw);
         }
         _ => {}
+    }
+    if let Some((session, ..)) = &cursor.session {
+        let ended = cursor.turn.as_ref().map(|turn| turn.completed && !turn.aborted);
+        let turn = cursor.turn.as_ref().and_then(|turn| turn.id.as_deref());
+        tx.execute("INSERT INTO codex_session_clock(session_id,last_record_unix_ms,last_turn_completed,last_turn_id) VALUES(?1,?2,coalesce(?3,0),?4)
+            ON CONFLICT(session_id) DO UPDATE SET last_record_unix_ms=excluded.last_record_unix_ms,
+            last_turn_id=excluded.last_turn_id,last_turn_completed=coalesce(?3,codex_session_clock.last_turn_completed)
+            WHERE ?2 IS NULL OR codex_session_clock.last_record_unix_ms IS NULL OR ?2>=codex_session_clock.last_record_unix_ms", params![session, ms(tag.timestamp.as_deref()), ended, turn])?;
     }
     Ok(true)
 }
