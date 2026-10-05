@@ -1,4 +1,4 @@
-//! The declared health-rule table `health-rules.v3`
+//! The declared health-rule table `health-rules.v4`
 //! (docs/telemetry/contracts-health.md §2). Each rule reads only through the
 //! TM4.1 query service (`analytics::query`) or a lane's own read path
 //! (`accounting quota|attention|entries|budget-shadow`, TM4.4 `compare`), and
@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-pub const VERSION: &str = "health-rules.v3";
+pub const VERSION: &str = "health-rules.v4";
 const MINUTE: i64 = 60_000;
 const HOUR: i64 = 60 * MINUTE;
 const DAY: i64 = 24 * HOUR;
@@ -40,6 +40,8 @@ impl State {
 pub enum Eval {
     /// Passive verification flips with canonical run evidence.
     VerificationFlaky,
+    /// Test removal flags observed in the last day.
+    TestWeakening,
     /// Query-service source watermark: time since the last collect.
     Collector,
     /// A ratio metric that should be complete (`n/d` below thresholds).
@@ -89,6 +91,9 @@ pub struct Rule {
 }
 
 pub const RULES: &[Rule] = &[
+    Rule { name: "test_weakening", family: "proxy", service: None, source: "lane:quality tests-net-removal.v1", eval: Eval::TestWeakening,
+        direction: Direction::Above, warn: 1, critical: i64::MAX, unit: "flagged_submissions", window_ms: Some(DAY), cooldown_ms: HOUR,
+        detail: "any first submission flagged by tests-net-removal.v1 in the last 24 hours warns" },
     Rule { name: "verification_flaky", family: "proxy", service: None, source: "lane:quality flaky", eval: Eval::VerificationFlaky,
         direction: Direction::Above, warn: 1, critical: i64::MAX, unit: "flipped_pairs", window_ms: Some(30 * DAY), cooldown_ms: HOUR,
         detail: "any accepted/checks_failed verdict flip for the same tree and policy in the last 30 days warns" },
@@ -289,6 +294,16 @@ pub fn evaluate(project: &Path, now: i64) -> Vec<Outcome> {
 fn evaluate_rule(ctx: &mut Ctx, rule: &'static Rule) -> Result<Vec<Outcome>> {
     let now = ctx.now;
     Ok(vec![match rule.eval {
+        Eval::TestWeakening => {
+            let from = now - rule.window_ms.unwrap_or(DAY);
+            let evidence = crate::telemetry::quality::weakening_window(ctx.project, from, now)?;
+            let metric = lane_metric(rule.source);
+            let window = json!({"from_unix_ms":from,"to_unix_ms":now,"semantics":"half_open","time_basis":"weakening_observation"});
+            if evidence["status"] == "unavailable" { return Ok(vec![unknown(rule, "collection_not_run", metric, window)]); }
+            let n = evidence["numerator"].as_i64().unwrap_or(0);
+            let state = if n > 0 { State::Warn } else if evidence["unknown"].as_i64().unwrap_or(0) > 0 { State::Unknown } else { State::Ok };
+            outcome(rule, state, vec![code(if n > 0 { "test_weakening_observed" } else if state == State::Unknown { "weakening_unavailable" } else { "none_observed" })], metric, window, evidence)
+        }
         Eval::VerificationFlaky => {
             let from = rule.window_ms.map(|w| now - w);
             let evidence = crate::telemetry::quality::flakes::report(ctx.project, from, Some(now))?;

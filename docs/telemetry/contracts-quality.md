@@ -533,3 +533,19 @@ attribution. Here `accepted` is the derived passing-observation value, not a
 canonical acceptance. Primary/stress/load entries do not add duplicate run
 exposure to the metric. Readers of older sidecars preserve their existing
 reports until explicit collection upgrades the stream.
+
+## 7. MET-NOW-A verification strength, density and weakening
+
+Analytics registry v8 adds M51 `verification_strength` (signed executable
+acceptance policies, command vs file-presence-only), M52
+`defect_density_by_setup` (the review lane's validated unique non-seeded
+findings per distinct reviewed candidate, by author profile and severity),
+and M54 `test_weakening_rate` (flagged / observed submissions from the existing
+`tests-net-removal.v1` signal). The quality collector continues to observe
+first candidates only; uncollected submissions are explicit exclusions.
+M54 remains a proxy and never changes verification or acceptance.
+[contracts-analytics.md §8](contracts-analytics.md#8-stored-quality-and-consumption-metrics-met-now-a)
+specifies windows, unavailable reasons and fixture certification evidence.
+Health rules v4 adds `test_weakening`: any flagged submission in the last
+24 hours warns; an observed zero resolves it, without critical escalation.
+All projections remain metadata-only and add no tables.

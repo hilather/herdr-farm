@@ -18,6 +18,7 @@ pub mod lifecycle;
 pub mod query;
 pub mod registry;
 pub mod store;
+mod stored_metrics;
 
 pub const STREAM: &str = "analytics";
 /// `include_str!` of `migrations/telemetry/analytics/`, in order; index + 1 is the stream version.
@@ -132,8 +133,8 @@ pub fn run(project: &Path, command: Command) -> Result<String> {
     Ok(serde_json::to_string_pretty(&value)? + "\n")
 }
 
-/// Lane hook: the query service adds no metric keys to `telemetry report`.
-pub fn metrics(_project: &Path, _since: Option<i64>) -> Result<BTreeMap<String, Value>> { Ok(BTreeMap::new()) }
+/// MET-NOW-A metrics derived from retained metadata, without new storage.
+pub fn metrics(project: &Path, since: Option<i64>) -> Result<BTreeMap<String, Value>> { stored_metrics::metrics(project, since) }
 
 /// Ticker telemetry pass: refresh tracked cells, rate-limited (`store::TICK_INTERVAL_MS`).
 pub fn tick(project: &Path, _budget: super::codex::Budget) -> Result<()> { store::tick(project) }

@@ -10,11 +10,11 @@ nothing here writes `state.db`.
 
 ## 1. Metric registry (`analytics-registry.v8`)
 
-Version history: v8 adds bounded lifecycle `role` and M37.lineage-v2 (LINEAGE-1); M37.fleet-v1 remains absent as `definition_superseded`. v1 TM4.1; v2 adds `verification_flip_rate` (DG6, #198); v3 adds M30 `M30.submission-v1` (DG1, #202); v4 adds M10 `M10.v1` (DG2, #204); v5 adds M03 operating throughput (DG3); v6 adds M05 lifecycle tokens and specifies M19’s missing timed history; v7 adds M13 never-running exclusions, M04/M05 partial values and M31 lifecycle sampling, M35 attempt-time concurrency and M40 reported/merged quota windows, plus the bounded lifecycle `profile` dimension (TFIX-4, no definition change). Previous M13.slice-v1, M04.cost-v1, M05.tokens-v1, M31.attention-v1, M35.fanout-v1 and M40.quota-windows-v1 definitions remain only as absent (`definition_superseded`).
+Version history: v8 adds bounded lifecycle `role` and M37.lineage-v2 (LINEAGE-1); M37.fleet-v1 remains absent as `definition_superseded`. v1 TM4.1; v2 adds `verification_flip_rate` (DG6, #198); v3 adds M30 `M30.submission-v1` (DG1, #202); v4 adds M10 `M10.v1` (DG2, #204); v5 adds M03 operating throughput (DG3); v6 adds M05 lifecycle tokens and specifies M19’s missing timed history; v7 adds M13 never-running exclusions, M04/M05 partial values and M31 lifecycle sampling, M35 attempt-time concurrency and M40 reported/merged quota windows, plus the bounded lifecycle `profile` dimension (TFIX-4, no definition change). Previous M13.slice-v1, M04.cost-v1, M05.tokens-v1, M31.attention-v1, M35.fanout-v1 and M40.quota-windows-v1 definitions remain only as absent (`definition_superseded`). v9 adds MET-NOW-A `M51.v1`–`M58.v1`.
 
 `telemetry <slug> metrics registry [--json]` prints one declared table
 (`registry.rs`) of every metric `telemetry report` or `query` can name:
-M01–M50 and lane C's `flaky_tests` and `verification_flip_rate`. A change is a new registry version, never
+M01–M58 and lane C's `flaky_tests` and `verification_flip_rate`. A change is a new registry version, never
 an edit in place of a published definition. Per metric:
 
 | field | meaning |
@@ -87,7 +87,7 @@ echo), query_unix_ms, results: [...], drill?}`. Each result:
 | `source_watermarks` | `canonical {events_head, lifecycle_digest, last_event_unix_ms}`; for lane definitions also `sidecar {streams, last_collect_unix_ms, codex_usage_rowid, valuation, rate_cards}` |
 | `event_cutoff_unix_ms`, `observation_cutoff_unix_ms` | latest occurrence time in the cohort; knowledge time (query time live, `recorded_unix_ms` as of) |
 | `lag_ms`, `lag_reason` | native: 0 (canonical read directly); lane: observation cutoff − last collect, or null with `collection_not_run`/`no_collect_recorded` |
-| `rate_card_revision` | priced metrics (M04, M12, M14, M24, M34, M37): `{valuation_revision, valuation_digest, rate_cards {count, digest}}` or unavailable (`not_priced`, `collection_not_run`); otherwise null |
+| `rate_card_revision` | priced metrics (M04, M12, M14, M24, M34, M37, M53): `{valuation_revision, valuation_digest, rate_cards {count, digest}}` or unavailable (`not_priced`, `collection_not_run`); otherwise null |
 | `certification`, `activation` | as the registry |
 | `as_of` | the requested knowledge time or sequence, as-of results only |
 
@@ -428,3 +428,53 @@ Schema 72 supplies event insertion times going forward. M19 remains unavailable:
 historical blocked intervals still lack complete timed history; no historical
 times are inferred. Lifecycle `--by role` uses immutable launch lineage and
 labels tasks without it `unknown`.
+
+## 8. Stored quality and consumption metrics (MET-NOW-A)
+
+Registry v8 adds `M51.v1`–`M58.v1`, all certification `fixture`, evidence
+`tests/telemetry_stored_metrics.rs`. The analytics lane produces them for
+`telemetry PROJECT report [--since MS]` and `query --metric M51,...,M58`.
+They use since-only activity windows; `--to` and `--by` retain the lane
+rejections (`window_end_unsupported`, `dimension_unsupported`). Setup cells
+are embedded as `by_profile`, using the lifecycle effective profile name
+(TFIX-4), with `unknown` when absent. Text reports print each profile,
+severity and currency cell. Ratios are exact unreduced strings; monetary
+ratios preserve decimal amounts without floating-point division. No metric
+adds stored rows, schemas, prompts, policy command text, filenames or diffs.
+Existing input generations invalidate cached projections; normal analytics
+refresh records derived aggregates under the existing retention/backup classes.
+
+| id / name | definition and window | unavailable / empty reasons |
+|---|---|---|
+| M51 `verification_strength` | Distinct submissions with accepted verifier evidence whose executed signed policy includes a command / distinct accepted submissions. Window by first acceptance. `by_profile`, `file_presence_only`, `policy_unavailable` accompany the project share. | `empty_denominator` (null); `acceptance_policy_unavailable` for missing, malformed or digest-mismatched policy evidence unless another executed policy proves a command. |
+| M52 `defect_density_by_setup` | M21's current validated unique non-seeded finding roots, windowed by discovery arrival, / distinct candidate submissions with completed reviews, windowed by completion. Repeated reviews of one candidate do not increase its denominator. Attribute findings and denominator to the candidate author's profile. Severity uses the discovery claim's owner-assigned `finding_severity.v1`; every severity cell shares the profile's reviewed denominator. | `no_reviews`; profile cells with no denominator use null `empty_denominator`. |
+| M53 `cost_per_validated_finding` | Latest published-rate attempt estimates (primary plus eligible children) for all attempts of tasks bound by `review_briefs`, including skeptical review tasks and unsuccessful attempts, / the same M21 finding count as M52. Window by attempt decision and discovery arrival. Sum once per eligible entry, separately per currency in `by_currency`; author and unrelated task spend stays outside. | `no_reviews`, `collection_not_run`, `not_priced` (or `cost`'s unavailable reason), `no_usage`, `no_priced_entries`; zero findings gives null `empty_denominator`. Missing review attempts or unpriced entries mark observed currency subtotals `partial: review_cost_incomplete`, never complete spend. |
+| M54 `test_weakening_rate` | Submissions flagged by `tests-net-removal.v1` / submissions with an observed clear or flagged quality signal. Window by submission creation. Existing collection observes first candidates only; later and uncollected candidates remain explicit exclusions, never inferred clear. Proxy, `source_trust=proxy_observed`. | `collection_not_run`, `no_observed_submissions`; observed empty population gives null `empty_denominator`. Exclusions: `not_collected` and stored `weakening_reason` (`repository_missing`, `git_unavailable`, `diff_failed`, `diff_unparseable`, or `weakening_unavailable`). |
+| M55 `subagent_token_share` | Native-linked child-session input plus output / primary plus child input plus output, per profile. Children follow the attempt usage `children` convention, including guardians and eligible forks; reasoning is already in output. | Common usage reasons below; `no_children` when eligible requests exist but no child usage. |
+| M56 `reasoning_and_cache_share` | Per profile `reasoning_share` = reasoning/output; `cache_share` = normalized cached input/inclusive input. Primary and eligible children contribute once. | Common usage reasons; `reasoning_tokens_not_reported` affects only the reasoning component; zero component denominators are null `empty_denominator`. |
+| M57 `long_context_exposure` | Input tokens in requests whose inclusive input exceeds the model's threshold / all eligible input tokens, per profile. Every model currently uses constant `LONG_CONTEXT_INPUT_TOKENS=272000`, the published long-context price boundary. Exactly 272000 is below the strict exposure cutoff. A later definition may configure model-specific thresholds. | Common usage reasons; zero input gives null `empty_denominator`. |
+| M58 `fixed_overhead_per_attempt` | Median inclusive input of each attempt's first primary request, per profile. Order primary sessions by session start then session identity, requests by ledger position. Children do not become startup samples. Exact arithmetic midpoint for an even sample count, including `.5`; value is a decimal string and `samples` gives attempt count. | Common usage reasons; no startup samples gives `no_usage`. |
+
+M55–M58 window by attempt decision (`--since` includes the selected attempts'
+full retained usage). Before collection: `collection_not_run`; before a
+current accounting sync: `accounting_sync_required`; no eligible normalized
+requests: `no_usage`. Counted delta ledger entries remove repeated responses,
+resume observations, losing OTLP surfaces and uncertified fork replay.
+Native graph ownership follows parent links, never a child's cwd. Excluded
+attempts/records remain in each profile's `excluded` and partial coverage:
+`not_bound`, `no_usage`, `quarantined`, `cli_version_uncertified`,
+`schema_unrecognized`, `records_not_accepted`, and the graph's linkage reasons
+(`parent_cycle`, `parent_not_collected`, `no_native_parent_evidence`,
+`inclusion_unknown`, `predates_collection`, `pending_reread`,
+`fork_replay_not_certified`). These shares describe observed eligible usage;
+partial coverage never claims complete attempt exposure.
+
+Policy classification reuses `ExecutionPolicy::parse` and checks the stored
+policy digest against executed verifier evidence. File-presence-only means
+all checks are recognized nonempty-file idioms (`/usr/bin/test -s FILE` or
+`git grep --quiet --no-index -e . -- FILE...`, allowing the first two flags
+in either order; only `/usr/bin/git` or `/bin/git`, and `/usr/bin/test` or
+`/bin/test`, are recognized), with no toolchain. A toolchain, another command or an executed named
+or stress command that is not a recognized presence check makes the policy
+`command`. This is a conservative syntactic classification of retained signed
+policies, never another execution or a claim about test adequacy.

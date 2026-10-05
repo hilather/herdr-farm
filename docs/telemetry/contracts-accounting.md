@@ -1855,3 +1855,17 @@ Explicit operator `attempt_supersessions` reasons take precedence, including
 are excluded from inferred supersession. All other M37 cost, window, coverage
 and denominator rules remain as in fleet-v1. Registry v8 records this change;
 M37.fleet-v1 is retained as an absent, superseded definition.
+
+## 18. MET-NOW-A setup consumption and review cost
+
+Analytics registry v8 exposes M53 and M55–M58 from this lane's existing
+normalized ledger, session graph and published-rate estimates. Definitions,
+windows, exact unavailable reasons and fixture evidence are in
+[contracts-analytics.md §8](contracts-analytics.md#8-stored-quality-and-consumption-metrics-met-now-a).
+M53 includes only tasks bound by canonical `review_briefs`, separately per
+currency, and reports incomplete spend explicitly. M55 includes native-linked
+children; M56 reports reasoning/output and cache/input per effective profile;
+M57 uses the documented 272000-input-token long-context boundary; M58 samples
+the first primary request of each attempt. Current accounting sync is required
+for setup usage ownership; duplicate responses and resumed rollouts contribute
+once. These are metadata-only projections with no new stream or tables.

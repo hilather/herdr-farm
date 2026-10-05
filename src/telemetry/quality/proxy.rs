@@ -152,3 +152,17 @@ fn signals(db: &Connection) -> rusqlite::Result<BTreeMap<String, Value>> {
             "tests_deleted_lines": r.get::<_, Option<i64>>(6)?, "tests_binary_files": r.get::<_, Option<i64>>(7)?, "weakening": r.get::<_, String>(8)?}))))?
         .collect()
 }
+
+/// Observation-time window for the advisory weakening alert: a newly collected
+/// flag must warn even when its candidate was submitted before the window.
+pub(super) fn weakening_window(project: &Path, from: i64, to: i64) -> Result<Value> {
+    let Some(db) = super::super::sidecar::read(project)? else {
+        return Ok(serde_json::json!({"status":"unavailable","reason":"collection_not_run"}));
+    };
+    if !has_table(&db)? { return Ok(serde_json::json!({"status":"unavailable","reason":"collection_not_run"})); }
+    let (flagged, observed, unknown): (i64, i64, i64) = db.query_row("SELECT
+        coalesce(sum(weakening='flagged'),0),coalesce(sum(weakening IN ('clear','flagged')),0),coalesce(sum(weakening='unavailable'),0)
+        FROM proxy_signals WHERE weakening_rule=?1 AND observed_unix_ms>=?2 AND observed_unix_ms<?3",
+        params![RULE, from, to], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    Ok(serde_json::json!({"numerator":flagged,"denominator":observed,"unknown":unknown,"weakening_rule":RULE,"source_trust":"proxy_observed"}))
+}

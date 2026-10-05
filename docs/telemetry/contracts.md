@@ -636,6 +636,11 @@ S6 refinements:
   decision without windows (`... <attempt> n/a (<reason>)`); the fleet pane
   shows the same lines. Unknown is `n/a (<reason>)`. Text is the default; `--json` prints the object above.
 
+MET-NOW-A adds registry v8 M51–M58 quality, cost and setup usage projections;
+see [contracts-analytics.md §8](contracts-analytics.md#8-stored-quality-and-consumption-metrics-met-now-a).
+They read existing signed-policy metadata, review findings, proxy flags and
+normalized usage. No schema/stream migration or new retention class is needed.
+
 ## 7. Privacy allowlist and excerpts
 
 Worker sessions (ingest 0016) add `task_started.model_context_window`
