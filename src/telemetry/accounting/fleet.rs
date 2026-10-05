@@ -1003,12 +1003,23 @@ pub fn supersede(project: &Path, request: crate::store::SupersessionRequest) -> 
 
 /// Metadata remains available before pricing; missing valuations stay explicit.
 pub fn coordinator_turns(project: &Path) -> Result<Value> {
+    let mut view = coordinator_turns_metadata(project)?;
+    view["metrics"] = json!(super::coordinator_metrics::metrics(project, None)?);
+    Ok(view)
+}
+
+pub(crate) fn coordinator_turns_metadata(project: &Path) -> Result<Value> {
     let Some(db) = crate::telemetry::sidecar::read(project)? else { return Ok(unavailable("collection_not_run")); };
     let dir = std::fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf()).to_string_lossy().into_owned();
     let redacted = crate::telemetry::sanitize::home_prefix(&dir);
     let ids = db.prepare("SELECT DISTINCT s.session_id FROM rollout_sources s WHERE s.session_id LIKE 'claude-code:%' AND s.cwd IN (?1,?2)
         AND NOT EXISTS(SELECT 1 FROM rollout_sources x WHERE x.session_id=s.session_id AND (x.binding!='unbound' OR x.cwd_attempt IS NOT NULL))
         ORDER BY s.session_id")?.query_map([dir,redacted], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    // Reports on worker-only projects must not price their entire ledger for
+    // an absent coordinator producer.
+    if ids.is_empty() {
+        return Ok(json!({"scope":COORDINATOR_SCOPE,"summary":super::claude_turns::summarize(&[])?,"sessions":[]}));
+    }
     let cost = super::cost::cost(&db,None,None)?;
     let sessions = ids.iter().map(|id| super::claude_turns::read(&db,id,&cost)).collect::<Result<Vec<_>>>()?;
     Ok(json!({"scope":COORDINATOR_SCOPE,"summary":super::claude_turns::summarize(&sessions)?,"sessions":sessions}))

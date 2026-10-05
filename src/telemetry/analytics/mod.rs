@@ -138,6 +138,7 @@ pub fn run(project: &Path, command: Command) -> Result<String> {
 pub fn metrics(project: &Path, since: Option<i64>) -> Result<BTreeMap<String, Value>> {
     let mut metrics = stored_metrics::metrics(project, since)?;
     metrics.extend(worker_metrics::metrics(project, since)?);
+    metrics.extend(crate::telemetry::accounting::coordinator_metrics::metrics(project, since)?);
     Ok(metrics)
 }
 

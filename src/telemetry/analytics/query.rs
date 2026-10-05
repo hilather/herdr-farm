@@ -328,6 +328,7 @@ impl<'a> Sources<'a> {
                         map
                     },
                     Provider::Lane("accounting") => crate::telemetry::accounting::metric_group_uncached(self.project, group, since, self.use_aggregates)?,
+                    Provider::Lane("analytics") if group == "coordinator" => crate::telemetry::accounting::coordinator_metrics::metrics(self.project, since)?,
                     Provider::Lane("analytics") if group == "worker" => super::worker_metrics::metrics(self.project, since)?,
                     Provider::Lane("analytics") => super::stored_metrics::metrics(self.project, since)?,
                     Provider::Lane(stream) => match crate::telemetry::LANES.iter().find(|l| l.stream == stream) {

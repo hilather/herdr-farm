@@ -121,13 +121,14 @@ fn nd(m: &Value) -> (Value, Value, Value) { (m["numerator"].clone(), m["denomina
 fn registry_declares_every_metric_and_gates_families() {
     let p = Planted::new();
     let registry = p.json(&["metrics", "registry", "--json"]);
-    assert_eq!(registry["registry"], "analytics-registry.v10");
+    assert_eq!(registry["registry"], "analytics-registry.v11");
     assert_eq!(registry["rejected_cohorts"], json!({"completed_task": "ambiguous_cohort"}));
     let metrics = registry["metrics"].as_array().unwrap();
     let ids: Vec<&str> = metrics.iter().map(|m| m["id"].as_str().unwrap()).collect();
     let mut expected: Vec<String> = (1..=58).map(|n| format!("M{n:02}")).collect();
     expected.extend((60..=69).map(|n| format!("M{n}")));
     expected.extend((70..=77).map(|n| format!("M{n}")));
+    expected.extend((80..=87).map(|n| format!("M{n}")));
     expected.push("flaky_tests".into());
     expected.push("verification_flip_rate".into());
     expected.sort();

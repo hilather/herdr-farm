@@ -643,6 +643,13 @@ normalized usage. No schema/stream migration or new retention class is needed.
 
 ## 7. Privacy allowlist and excerpts
 
+MET-COORD-1 (registry v11) adds M80–M87 from coordinator request counters,
+turn-origin/prompt-source enums, tool names, call/result times, canonical
+lifecycle and event times. M88–M89 remain reserved. Owner identification uses
+only the existing metadata tags, never message content. No additional stored
+fields or schema changes. Definitions and fixture evidence are in
+[contracts-accounting.md](contracts-accounting.md#coordinator-and-owner-experience-met-coord-1).
+
 MET-REWORK-1 (registry v10): M65–M69 derive rework, escaped findings, lead time
 and waste from schema 72 launch lineage, lifecycle and receipt timestamps,
 review triage and accounting estimates. These are metadata-only projections

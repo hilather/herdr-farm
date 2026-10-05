@@ -30,6 +30,7 @@ pub(super) fn read(db: &Connection, session: &str, cost: &Value) -> Result<Value
     let mut turns = Vec::<Value>::new();
     let (mut queued, mut background) = (false, false);
     let mut messages = BTreeSet::new();
+    let mut question_calls = BTreeSet::new();
     let mut request_contexts = BTreeMap::<String, i64>::new();
     for (time, prompt, text) in rows {
         let p: Value = serde_json::from_str(&text)?;
@@ -40,7 +41,7 @@ pub(super) fn read(db: &Connection, session: &str, cost: &Value) -> Result<Value
             let previous_end = turns.last().and_then(|t| t["ended_unix_ms"].as_i64());
             turns.push(json!({"session_id":session,"turn":turns.len()+1,"trigger_class":trigger(&p,queued,background),
                 "started_unix_ms":time,"ended_unix_ms":time,"requests":0,"context_tokens_max":0,"context_tokens_sum":0,
-                "cache_write_5m_tokens":0,"cache_write_1h_tokens":0,"tool_calls":0,"ask_user_question_wait_ms":0,
+                "request_samples":{},"questions":[],"cache_write_5m_tokens":0,"cache_write_1h_tokens":0,"tool_calls":0,"ask_user_question_wait_ms":0,
                 "wall_duration_ms":null,"cost_by_currency":{},"unpriced_requests":0,"stop_reasons":{},
                 "idle_gap_ms":time.zip(previous_end).map(|(a,b)| (a-b).max(0)),"full_context_cache_rewrite":false}));
             queued = false; background = false;
@@ -55,8 +56,11 @@ pub(super) fn read(db: &Connection, session: &str, cost: &Value) -> Result<Value
         let tools = p["tool_use_ids"].as_array().map_or(0, Vec::len);
         t["tool_calls"] = json!(t["tool_calls"].as_u64().unwrap_or(0)+tools as u64);
         for call in p["tool_use_ids"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+            let question: bool = db.query_row("SELECT name='AskUserQuestion' FROM codex_tool_calls WHERE session_id=?1 AND call_id=?2", [session,call], |r| r.get(0)).unwrap_or(false);
             let wait: Option<i64> = db.query_row("SELECT CASE WHEN name='AskUserQuestion' THEN max(0,output_unix_ms-called_unix_ms) END FROM codex_tool_calls WHERE session_id=?1 AND call_id=?2",
                 [session,call], |r| r.get(0)).unwrap_or(None);
+            t["ended_with_question"] = json!(question);
+            if question && question_calls.insert(call.to_owned()) { t["questions"].as_array_mut().unwrap().push(json!({"call_id":call,"called_unix_ms":time,"answer_wait_ms":wait})); }
             t["ask_user_question_wait_ms"] = json!(t["ask_user_question_wait_ms"].as_i64().unwrap_or(0)+wait.unwrap_or(0));
         }
         if p["line_type"] != "assistant" { continue; }
@@ -69,7 +73,16 @@ pub(super) fn read(db: &Connection, session: &str, cost: &Value) -> Result<Value
         let request = p["request_id"].as_str().unwrap_or(id).to_owned();
         let previous = request_contexts.insert(request.clone(), context).unwrap_or(0);
         let maximum = previous.max(context);
-        request_contexts.insert(request, maximum);
+        request_contexts.insert(request.clone(), maximum);
+        let rewrite = counters[1] == 0 && counters[2] > 0;
+        if t["request_samples"][&request].is_null() {
+            t["request_samples"][&request] = json!({"session_id":session,"request_id":request,"recorded_unix_ms":time,
+                "context_tokens":maximum,"rewrite":rewrite,"valuations":[],"idle_gap_ms":t["idle_gap_ms"]});
+        }
+        let sample = &mut t["request_samples"][&request];
+        sample["context_tokens"] = json!(maximum);
+        sample["rewrite"] = json!(rewrite || sample["rewrite"] == true);
+        sample["valuations"].as_array_mut().unwrap().push(json!(entries.get(id).and_then(|e| valuations.get(e.as_str()))));
         t["requests"] = json!(request_contexts.len());
         t["context_tokens_max"] = json!(t["context_tokens_max"].as_i64().unwrap_or(0).max(context));
         t["context_tokens_sum"] = json!(t["context_tokens_sum"].as_i64().unwrap_or(0).checked_add(maximum-previous).ok_or_else(|| anyhow::anyhow!("turn context sum overflow"))?);
