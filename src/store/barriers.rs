@@ -2066,7 +2066,7 @@ pub(super) mod tests {
         let hash = format!("{:x}", Sha256::digest(payload.as_bytes()));
         db.execute("INSERT INTO attempts VALUES(?1,?2,1,'reserved',NULL,?3,?4)", params![record.attempt.as_str(),record.inputs.task.as_str(),format!("worker:{}",record.attempt.as_str()),terminated])?;
         db.execute("INSERT INTO operations VALUES(?1,?2,'runtime.launch',?3,1,?4,?5,?6,1000,?1)", params![record.operation.as_str(),record.inputs.task.as_str(),record.inputs.binding,payload,hash,record.inputs.task_revision+1])?;
-        db.execute("INSERT INTO attempt_inputs(attempt_id,operation_id,payload,payload_hash) VALUES(?1,?2,?3,?4)", params![record.attempt.as_str(),record.operation.as_str(),payload,hash])?;
+        db.execute("INSERT INTO attempt_inputs VALUES(?1,?2,?3,?4)", params![record.attempt.as_str(),record.operation.as_str(),payload,hash])?;
         Ok(record)
     }
 

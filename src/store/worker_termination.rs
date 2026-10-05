@@ -36,7 +36,7 @@ impl SqliteStore {
         super::approvals::validate_historical_consumption(&tx,&record,Some(budget))?;
         let cancelled=tx.query_row("SELECT EXISTS(SELECT 1 FROM attempt_cancellations WHERE attempt_id=?1)",[id.as_str()],|row|row.get(0))?;
         let completion=completion_requested(&tx,id)?;
-        let wall_expired=wall_expired(&tx,id,jiff::Timestamp::now().as_millisecond())?;
+        let wall_expired=wall_expired(&tx,&record,jiff::Timestamp::now().as_millisecond())?;
         let mut query=tx.prepare("SELECT sequence,kind,entity,revision,payload_version,payload FROM events WHERE entity=?1 AND (kind GLOB 'runtime.launch_*' OR kind IN ('runtime.worktrees_creation','runtime.worktrees_ready')) ORDER BY sequence")?;
         let mut rows=query.query([record.operation.as_str()])?;
         let mut events=Vec::new();
@@ -192,7 +192,7 @@ impl SqliteStore {
         let cancelled:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM attempt_cancellations WHERE attempt_id=?1)",[attempt.id.as_str()],|row|row.get(0))?;
         // Cancellation overrides a completion request; either names the cause.
         let completion=!cancelled&&completion_requested(&tx,&attempt.id)?;
-        let cause=if cancelled {WorkerTerminationCause::Cancellation} else if completion {WorkerTerminationCause::Completion} else if wall_expired(&tx,&attempt.id,receipt.observed_unix_ms)? {WorkerTerminationCause::TimedOut} else {WorkerTerminationCause::ProcessExit};
+        let cause=if cancelled {WorkerTerminationCause::Cancellation} else if completion {WorkerTerminationCause::Completion} else if wall_expired(&tx,&record,receipt.observed_unix_ms)? {WorkerTerminationCause::TimedOut} else {WorkerTerminationCause::ProcessExit};
         if receipt.cause != cause {
             return Err(StoreError::Conflict);
         }
@@ -637,13 +637,14 @@ impl SqliteStore {
     }
 }
 
-// The pre-effect creation time is retained by SQLite and survives config edits.
-// Only verified quiescence can turn this elapsed budget into a terminal receipt.
-fn wall_expired(db: &Connection, attempt: &AttemptId, observed_ms: i64) -> Result<bool> {
-    let schema: u32 = db.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if schema < 73 { return Ok(false); }
-    Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM attempt_inputs i JOIN events e ON e.entity=i.operation_id JOIN event_times t ON t.sequence=e.sequence
-        WHERE i.attempt_id=?1 AND e.kind='runtime.launch_creation' AND i.max_wall_seconds IS NOT NULL
-        AND t.recorded_unix_ms + i.max_wall_seconds * 1000 <= ?2)",
-        params![attempt.as_str(), observed_ms], |row| row.get(0))?)
+// Use the same frozen definition and validation as the launch wrapper. Historical
+// definitions that cannot be read do not establish a wall budget.
+fn wall_expired(db: &Connection, record: &AttemptInputRecord, observed_ms: i64) -> Result<bool> {
+    let Some(profile) = record.inputs.effective_profile.as_ref() else { return Ok(false); };
+    let Ok(definition) = crate::profile_config::frozen_definition(profile) else { return Ok(false); };
+    let Ok(wall) = definition.validate_gated_preparation(0) else { return Ok(false); };
+    Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM events e JOIN event_times t ON t.sequence=e.sequence
+        WHERE e.entity=?1 AND e.kind='runtime.launch_creation'
+        AND t.recorded_unix_ms + ?2 * 1000 <= ?3)",
+        params![record.operation.as_str(), integer(wall)?, observed_ms], |row| row.get(0))?)
 }

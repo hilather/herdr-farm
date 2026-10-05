@@ -86,7 +86,7 @@ fn stop_snapshot_finalizes_without_source_in_foreground_and_queued_paths() {
         raw.execute_batch("DROP TRIGGER attempt_inputs_effective_profile;").unwrap();
         raw.execute("INSERT INTO attempts VALUES(?1,?2,1,'cancelled',NULL,?1,1)",rusqlite::params![attempt.as_str(),old.task.as_ref().unwrap().as_str()]).unwrap();
         raw.execute("INSERT INTO operations VALUES(?1,?2,'runtime.launch',?3,1,?4,?5,?6,0,?1)",rusqlite::params![launch.as_str(),old.task.as_ref().unwrap().as_str(),old.target,body,digest(body.as_bytes()),record.inputs.task_revision+1]).unwrap();
-        raw.execute("INSERT INTO attempt_inputs(attempt_id,operation_id,payload,payload_hash) VALUES(?1,?2,?3,?4)",rusqlite::params![attempt.as_str(),launch.as_str(),body,digest(body.as_bytes())]).unwrap();raw.execute_batch(&trigger).unwrap();
+        raw.execute("INSERT INTO attempt_inputs VALUES(?1,?2,?3,?4)",rusqlite::params![attempt.as_str(),launch.as_str(),body,digest(body.as_bytes())]).unwrap();raw.execute_batch(&trigger).unwrap();
         let payload=serde_json::to_string(binding).unwrap();raw.execute("UPDATE runtime_bindings SET payload=?2,payload_hash=?3 WHERE id=?1",rusqlite::params![binding.id,payload,digest(payload.as_bytes())]).unwrap();
         let report=digest(b"preserved report");let artifact=digest(&[0,255,3]);
         let manifest=herdr_farm::worktree_preservation::OutputManifest{version:1,attempt:attempt.clone(),source:source.clone(),entries:vec![

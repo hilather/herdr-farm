@@ -561,9 +561,11 @@ commits preservation and termination. Later passes retry; a ticker restart also
 reconstructs this work. No fresh launch approval is needed to record an existing end.
 
 Successful recording logs `termination recording succeeded`, changes an unrequested
-attempt to Failed, blocks its task and releases capacity. Schema 73 records
+attempt to Failed, blocks its task and releases capacity. Schema 72 uses the
+attempt’s frozen profile to record
 `timed_out` for proven exits observed after the retained creation-time wall budget;
 this describes an elapsed budget, not an observed timeout exit code. Earlier or
-historical exits record `process_exit`. The coordinator receives the usual
+historical exits with unreadable frozen definitions record `process_exit`. The
+coordinator receives the usual
 `attempt.ended_without_submission` inbox notice exactly once when no result was
 submitted. Cancellation and accepted completion keep their usual causes.

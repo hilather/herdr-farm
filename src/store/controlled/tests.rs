@@ -328,7 +328,7 @@ fn remaining_snapshot_readers_charge_join_and_nested_json_before_copy() {
         let payload=format!("[{}0]","0,".repeat(1_100_000));
         if table=="attempt_inputs" {
             launch_neighbors(&raw);
-            raw.execute("INSERT INTO attempt_inputs(attempt_id,operation_id,payload,payload_hash) VALUES('attempt-a','launch-a',?1,'')",[&payload]).unwrap();
+            raw.execute("INSERT INTO attempt_inputs VALUES('attempt-a','launch-a',?1,'')",[&payload]).unwrap();
         } else {
             raw.execute("INSERT INTO approval_grants VALUES('grant',?1,'')",[&payload]).unwrap();
         }
@@ -354,7 +354,7 @@ fn approval_read_does_not_double_count_already_budgeted_inputs() {
     raw.execute("INSERT INTO tasks(id,revision,state,title) VALUES('a',1,'draft','')",[]).unwrap();
     raw.execute("INSERT INTO attempts(id,task_id,revision,state,snapshot,reservation,termination_observed) VALUES(?1,'a',1,'reserved',NULL,'slot',0)",[&attempt]).unwrap();
     raw.execute("INSERT INTO operations(id,task_id,kind,target,payload_version,payload,payload_hash,expected_revision,due_unix_ms,idempotency_key) VALUES(?1,'a','runtime.launch','task:a',1,?2,?3,4,0,?1)",params![&operation,&payload,&hash]).unwrap();
-    raw.execute("INSERT INTO attempt_inputs(attempt_id,operation_id,payload,payload_hash) VALUES(?1,?2,?3,?4)",params![&attempt,&operation,&payload,&hash]).unwrap();
+    raw.execute("INSERT INTO attempt_inputs VALUES(?1,?2,?3,?4)",params![&attempt,&operation,&payload,&hash]).unwrap();
     drop(raw);
     let expected=SqliteStore::open(&path).unwrap().read_snapshot(None).unwrap();
     // The byte budget is under test, not the clock: decoding and hashing these

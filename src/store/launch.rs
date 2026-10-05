@@ -85,16 +85,6 @@ pub(super) fn record_creation(tx: &Connection, claim: &Claim, prepared: &Prepare
             "creation already prepared; reconcile without replay",
         ));
     }
-    let schema: u32 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if schema >= 73 {
-        let profile = record.inputs.effective_profile.as_ref().ok_or(StoreError::Conflict)?;
-        let definition = crate::profile_config::frozen_definition(profile)
-            .map_err(|_| invalid("worker wall budget configuration changed"))?;
-        let wall = definition.budget.and_then(|budget| budget.max_wall_seconds)
-            .ok_or_else(|| invalid("worker wall budget missing"))?;
-        tx.execute("UPDATE attempt_inputs SET max_wall_seconds=?2 WHERE attempt_id=?1",
-            params![intent.attempt.as_str(), integer(wall)?])?;
-    }
     event(
         tx,
         "runtime.launch_creation",

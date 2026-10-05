@@ -2861,15 +2861,20 @@ fn idle_worker_notice_restarts_stretch_and_deduplicates_within_a_ticker() {
 /// Failed observations remain retryable, including across ticker restart.
 #[test]
 fn wall_budget_termination_retries_contention_and_notifies_once() {
-    wall_budget_termination(true);
+    wall_budget_termination(true, false);
 }
 
 #[test]
 fn wall_budget_termination_without_contention() {
-    wall_budget_termination(false);
+    wall_budget_termination(false, false);
 }
 
-fn wall_budget_termination(contended: bool) {
+#[test]
+fn wall_budget_termination_with_changed_frozen_definition_keeps_process_exit() {
+    wall_budget_termination(false, true);
+}
+
+fn wall_budget_termination(contended: bool, change_definition: bool) {
     let mut lab = Lab::new("unknown_usage='allow_with_warning'");
     let config = lab.path(".config/herdr-farm/config.toml");
     fs::write(&config, fs::read_to_string(&config).unwrap().replace("max_wall_seconds=600", "max_wall_seconds=15")).unwrap();
@@ -2878,6 +2883,9 @@ fn wall_budget_termination(contended: bool) {
     lab.serve();
     let mut ticker = lab.spawn();
     lab.wait(&mut ticker, 60, &|| lab.attempt(&attempt).state == AttemptState::Running);
+    if change_definition {
+        fs::write(&config, fs::read_to_string(&config).unwrap().replace("max_wall_seconds=15", "max_wall_seconds=600")).unwrap();
+    }
     if contended {
         let deadline = Instant::now() + Duration::from_secs(10);
         let guard = loop {
@@ -2907,7 +2915,7 @@ fn wall_budget_termination(contended: bool) {
     assert!(!ended.retains_capacity());
     let events = lab.events("runtime.worker_terminated");
     assert_eq!(events.len(), 1);
-    assert_eq!(events[0].payload["cause"], "timed_out");
+    assert_eq!(events[0].payload["cause"], if change_definition { "process_exit" } else { "timed_out" });
     let notices = lab.ok(&["inbox", "list", "demo"]);
     assert_eq!(notices.as_array().unwrap().iter().filter(|item| item["content"]["kind"] == "attempt.ended_without_submission").count(), 1, "{notices}");
     let log = fs::read_to_string(lab.path("root/.ticker.log")).unwrap();

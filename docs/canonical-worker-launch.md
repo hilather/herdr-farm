@@ -1029,7 +1029,7 @@ commands resolve the projects root from `HERDR_FARM_SUBMISSION_SPOOL` (or its
 legacy alias), so memory commands reach the canonical project from an isolated
 home. This resolution does not grant any additional write authority.
 
-## Wall-budget termination and contention (schema 73)
+## Wall-budget termination and contention (schema 72)
 
 The namespace `timeout` includes gate waiting and kills the worker at the approved
 profile wall budget. No agent or terminal disappearance alone releases capacity.
@@ -1037,12 +1037,13 @@ Termination reconciliation reopens both retained supervisor incarnations; ESRCH,
 a different pidfs incarnation, or a signalled pidfd proves the original process
 ended. Inaccessible observations remain unresolved.
 
-Migration 0073 retains `attempt_inputs.max_wall_seconds` at the one-use creation
-boundary. A proven unrequested exit observed after the creation time plus this
-budget records `timed_out`; this is an elapsed-budget classification, not a
+The existing attempt-input frozen profile supplies the wall budget through
+`frozen_definition` and the launch wrapper’s `validate_gated_preparation`. A proven
+unrequested exit observed after the creation time plus this budget records `timed_out`; this is an elapsed-budget classification, not a
 captured timeout exit status. Earlier exits remain `process_exit`. Historical
-attempts without the retained budget keep `process_exit`. Cancellation and
-completion requests retain precedence. Later profile edits cannot erase the budget.
+attempts whose frozen definition cannot be read or validated keep `process_exit`.
+Cancellation and completion requests retain precedence. No budget is inferred
+when the frozen configuration is unavailable or changed.
 
 The ticker derives termination hints from `termination_observed=0` on every pass,
 including while paused. Lock contention records no completion or permanent failure;
