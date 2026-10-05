@@ -1774,3 +1774,27 @@ Migration 0024 adds columns to existing usage entries and invalidates the
 ledger for normal sync replay. Native-session retention and full-backup
 classification cover the columns; no retained table is added. Stored valuation
 revisions remain available as-of; reprice appends changed valuations.
+
+## Product CLI self-observation
+
+`herdr-farm telemetry <slug> accounting cli` prints read-only JSON with
+`callers` totals and `commands` detail grouped by caller and fixed clap
+command path. Each group contains `invocations`, `help_share`, `error_share`
+(runtime errors plus usage errors divided by all invocations),
+`p50_duration_ms`, and `p95_duration_ms`. Shares are exact numerator/denominator
+strings, following telemetry JSON conventions. Percentiles use nearest rank over
+the retained observations, including help/error/version calls. There are no
+registry metrics yet. An absent sidecar reports `collection_not_run`; an
+older accounting schema reports `stream_upgrade_required`. The view itself
+is captured after its output is computed, so appears on the next read. Read-only
+refers to the projection; CLI self-observation can append metadata afterward.
+Because observations have timestamps and are included in backups, a restore
+after further CLI calls can require `--force` under the existing newer-sidecar
+safety check.
+
+Accounting migration 0025 stores only the §7 allowlist in contracts.md.
+Observation is best effort: contention, old/absent sidecars, full worker
+spools and terminated CLI processes can lose samples. Worker samples are
+untrusted reports, with validated command names and forced worker labels;
+they cannot grant authority. The bounded metadata table follows
+`sidecar.cli_invocations` retention and full telemetry backup.

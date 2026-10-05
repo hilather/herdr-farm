@@ -20,6 +20,8 @@ pub mod quota;
 pub mod tools;
 pub(crate) mod otlp;
 
+pub mod cli_invocations;
+
 pub const STREAM: &str = "accounting";
 /// `include_str!` of `migrations/telemetry/accounting/`, in order; index + 1 is the stream version.
 pub const MIGRATIONS: &[&str] = &[include_str!("../../../migrations/telemetry/accounting/0001_usage_ledger.sql"),
@@ -45,11 +47,14 @@ pub const MIGRATIONS: &[&str] = &[include_str!("../../../migrations/telemetry/ac
     include_str!("../../../migrations/telemetry/accounting/0021_newer_cli_usage.sql"),
     include_str!("../../../migrations/telemetry/accounting/0022_spawn_not_fork.sql"),
     include_str!("../../../migrations/telemetry/accounting/0023_concurrency_headroom.sql"),
-    include_str!("../../../migrations/telemetry/accounting/0024_claude_cache_tiers.sql")];
+    include_str!("../../../migrations/telemetry/accounting/0024_claude_cache_tiers.sql"),
+    include_str!("../../../migrations/telemetry/accounting/0025_cli_invocations.sql")];
 
 /// `herdr-farm telemetry <slug> accounting ...`
 #[derive(clap::Subcommand)]
 pub enum Command {
+    /// Product CLI invocations by caller and fixed command path. Read-only JSON.
+    Cli,
     /// Stream version of this lane's sidecar tables. Read-only.
     Status,
     /// Sync changed sessions and quota accounts; rebuild after invalidation. Writes only the sidecar.
@@ -190,6 +195,7 @@ fn unavailable(reason: &str) -> Value {
 /// The command's stdout.
 pub fn run(project: &Path, command: Command) -> Result<String> {
     let value = match command {
+        Command::Cli => cli_invocations::read(project)?,
         Command::Status => {
             let mut value = super::sidecar::status(project, STREAM)?;
             if value["version"] == MIGRATIONS.len() && let Some(db) = super::sidecar::read(project)? && let Some(status) = ledger::status(&db)? {

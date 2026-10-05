@@ -123,6 +123,7 @@ sidecar.otlp_attempt_tokens retain - source_of_truth destructive
 secret.otlp_tokens external_lifecycle - source_of_truth destructive
 sidecar.normalized_sessions prune 90d derivable_from_native_source destructive
 sidecar.attention_samples prune 90d source_of_truth destructive
+sidecar.cli_invocations prune 90d source_of_truth
 sidecar.health_evaluations prune 90d derivable
 sidecar.analytics_revisions prune 365d derivable
 sidecar.derived_projections follows_sources - derivable
@@ -162,6 +163,7 @@ plan retention.v1 demo items=1 destructive=1 digest=sha256:<digest>
 sidecar.normalized_sessions 90d destructive: eligible=1 blocked=0 held=0
   delete session:00000000-0000-4000-8000-00000000c0de
 sidecar.attention_samples 90d destructive: eligible=0 blocked=0 held=0
+sidecar.cli_invocations 90d: eligible=0 blocked=0 held=0
 sidecar.health_evaluations 90d: eligible=0 blocked=0 held=0
 sidecar.analytics_revisions 365d: eligible=0 blocked=0 held=0
 artefact.git_quarantine 7d destructive: eligible=0 blocked=0 held=0
@@ -204,6 +206,7 @@ plan retention.v1 demo items=0 destructive=0 digest=sha256:<digest>
 sidecar.normalized_sessions 90d destructive: eligible=0 blocked=0 held=1
   held session:00000000-0000-4000-8000-00000000c0de (hold-1)
 sidecar.attention_samples 90d destructive: eligible=0 blocked=0 held=0
+sidecar.cli_invocations 90d: eligible=0 blocked=0 held=0
 sidecar.health_evaluations 90d: eligible=0 blocked=0 held=0
 sidecar.analytics_revisions 365d: eligible=0 blocked=0 held=0
 artefact.git_quarantine 7d destructive: eligible=0 blocked=0 held=0
@@ -395,13 +398,13 @@ $ herdr-farm telemetry demo backup verify --from <tmp>/backup-2026-09-30
 
 <!-- transcript: restore -->
 ```text
-$ herdr-farm telemetry demo backup restore --from <tmp>/backup-2026-09-30
+$ herdr-farm telemetry demo backup restore --from <tmp>/backup-2026-09-30 --force
 {
   "backup_created_unix_ms": <unix_ms>,
   "backup_id": "sha256:<digest>",
   "budget": "restore is analytics-only: no canonical budget, usage or quality acceptance is written or re-fed from it",
   "canonical_written": false,
-  "forced": false,
+  "forced": true,
   "incarnation": "sha256:<digest>",
   "next": [
     "telemetry <slug> collect (refreshes bindings from canonical state; restored native identities dedupe)",
@@ -409,7 +412,20 @@ $ herdr-farm telemetry demo backup restore --from <tmp>/backup-2026-09-30
     "telemetry <slug> analytics refresh"
   ],
   "orphans": 0,
-  "replaced_newer": null,
+  "replaced_newer": {
+    "live_watermark_unix_ms": <unix_ms>,
+    "not_recoverable": {
+      "attention_samples": 0,
+      "cli_invocations": 8,
+      "fx_tables": 0,
+      "operating_clock": 0,
+      "operating_gaps": 0,
+      "operating_intervals": 0,
+      "provider_charges": 0,
+      "rate_cards": 0,
+      "valuation_revisions": 0
+    }
+  },
   "restore_id": "sha256:<digest>",
   "restored_unix_ms": <unix_ms>,
   "rows": {
@@ -419,6 +435,7 @@ $ herdr-farm telemetry demo backup restore --from <tmp>/backup-2026-09-30
     "attention_samples": 0,
     "claude_messages": 0,
     "claude_tool_results": 0,
+    "cli_invocations": 3,
     "codex_usage": 0,
     "fx_tables": 0,
     "gemini_file_cursors": 0,

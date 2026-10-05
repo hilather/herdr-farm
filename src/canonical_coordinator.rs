@@ -901,3 +901,11 @@ pub fn surface(ctx: &Ctx, slug: &str) -> Result<String> {
         commands(&ctx.root, slug)?
     ))
 }
+
+/// Classify only the journal's canonical pane; no runtime or server calls.
+pub(crate) fn caller_is_coordinator(project: &Path) -> bool {
+    let Some(pane) = std::env::var_os("HERDR_PANE_ID") else { return false };
+    paths::read_control_text(&project.join(".state/canonical-coordinator.json"), 64 * 1024)
+        .ok().flatten().and_then(|text| read_journal(&text).ok())
+        .is_some_and(|journal| !journal.route.pane_id.is_empty() && pane == journal.route.pane_id.as_str())
+}

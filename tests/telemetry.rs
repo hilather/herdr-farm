@@ -484,22 +484,28 @@ fn fleet_pane(f: &Fixture) -> String {
     String::from_utf8(out.stdout).unwrap()
 }
 
-/// Contracts §0 read-only opens: `attempts`, `usage`, `report` and the fleet
-/// pane write nothing under `.state`, with or without a live sidecar writer.
+/// Projection reads preserve canonical/native state, while CLI observation
+/// appends only metadata. A busy sidecar writer still lets reads proceed.
 #[test]
-fn reads_leave_state_untouched() {
+fn reads_preserve_state_and_projections_while_observing_cli() {
     let f = Fixture::new();
     let path = f.rollout(&f.home, SID, &["head.jsonl"], &f.worktree(), f.decided + 1_000, "0.154.0");
     f.cli("collect");
     let state = f.project.join(".state");
+    let usage_before=f.usage();
     let before = tree(&state);
+    let observed_before=f.count("cli_invocations");
     assert!(!before.iter().any(|(p, ..)| p.to_string_lossy().ends_with("-wal") || p.to_string_lossy().ends_with("-shm")), "{before:?}");
     f.cli_args(&["attempts", "--json"]);
     f.cli_args(&["usage", "--json"]);
     f.report();
     let pane = fleet_pane(&f);
     assert!(pane.contains("M08 input_tokens 1000\n"), "{pane}");
-    assert_eq!(tree(&state), before, "no reader writes or creates a file");
+    assert_eq!(f.usage(),usage_before,"projection reads preserve native usage");
+    assert_eq!(f.count("cli_invocations"),observed_before+3);
+    let without_sidecar=|tree:Vec<(PathBuf,u64,std::time::SystemTime)>|tree.into_iter().filter(|(path, ..)|!path.ends_with("telemetry.db")).collect::<Vec<_>>();
+    assert_eq!(without_sidecar(tree(&state)),without_sidecar(before.clone()),"canonical and other state files stay untouched");
+    assert_eq!(names(&state),before.into_iter().map(|(path, ..)|path).collect::<Vec<_>>(),"read completion creates no persistent side file");
 
     // A live writer (the ticker) keeps the sidecar's WAL open: readers see its
     // committed frames through the existing `-shm` and still create nothing.
@@ -510,6 +516,8 @@ fn reads_leave_state_untouched() {
     let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
     std::io::Write::write_all(&mut file, tail.replace("@SID@", SID).replace("@CWD@", &f.worktree()).replace("@TS@", &ts).as_bytes()).unwrap();
     f.cli("collect");
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let observed=writer.query_row("SELECT count(*) FROM cli_invocations",[],|r|r.get::<_,i64>(0)).unwrap();
     let live = names(&state);
     assert!(live.iter().any(|p| p.ends_with("telemetry.db-wal")), "{live:?}");
     assert_eq!(metric(&f.report(), "M08")["value"], 1500, "the WAL's committed frames are read");
@@ -518,6 +526,8 @@ fn reads_leave_state_untouched() {
     let pane = fleet_pane(&f);
     assert!(pane.contains("M08 input_tokens 1500\n"), "{pane}");
     assert_eq!(names(&state), live);
+    assert_eq!(writer.query_row("SELECT count(*) FROM cli_invocations",[],|r|r.get::<_,i64>(0)).unwrap(),observed,"busy self-observation is skipped");
+    writer.execute_batch("ROLLBACK").unwrap();
     drop(writer);
 }
 
@@ -567,7 +577,10 @@ fn sidecar_streams_upgrade_v2_store() {
     assert_eq!(f.cli_args(&["usage", "--json"]).1, v2, "usage is byte-identical after the upgrade");
     assert_eq!(metric(&f.report(), "M08")["value"], 1000);
     assert_eq!(f.cli_args(&["accounting", "status"]).0["stream"], "accounting");
-    assert_eq!(tree(&state), before, "reads of an upgraded sidecar create no file");
+    let after=tree(&state);
+    assert_eq!(after.iter().map(|(path, ..)|path).collect::<Vec<_>>(),before.iter().map(|(path, ..)|path).collect::<Vec<_>>(),"reads of an upgraded sidecar create no persistent file");
+    assert_eq!(after.into_iter().filter(|(path, ..)|!path.ends_with("telemetry.db")).collect::<Vec<_>>(),
+        before.into_iter().filter(|(path, ..)|!path.ends_with("telemetry.db")).collect::<Vec<_>>(),"only self-observation may update the upgraded sidecar");
 
     f.sidecar().execute("INSERT OR REPLACE INTO telemetry_streams(stream,version) VALUES('accounting',99)", []).unwrap();
     for args in [&["usage"][..], &["report", "--json"], &["collect"]] {
