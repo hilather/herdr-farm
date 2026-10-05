@@ -556,7 +556,16 @@ pub(crate) fn render_knowledge_snapshot_budgeted(project: &Path, id: &str, db: &
 /// Render launch knowledge solely from sealed attempt inputs and retained bytes.
 /// This does not launch a worker or turn profile probes into execution authority.
 pub fn render_attempt_knowledge(project:&Path,attempt:&str)->Result<serde_json::Value> {
-    let _guard=super::mutation_guard(project)?;
+    // An inspection command: wait briefly while a ticker effect holds the
+    // project lock instead of failing at once; other errors are immediate.
+    let deadline=std::time::Instant::now()+std::time::Duration::from_secs(10);
+    let _guard=loop {
+        match super::mutation_guard(project) {
+            Ok(guard)=>break guard,
+            Err(error) if std::time::Instant::now()<deadline && format!("{error:#}").contains("would block")=>std::thread::sleep(std::time::Duration::from_millis(50)),
+            Err(error)=>return Err(error),
+        }
+    };
     let mut db=migration::open_active(project)?;
     render_attempt_knowledge_held(project,attempt,&mut db)
 }

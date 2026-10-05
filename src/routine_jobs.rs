@@ -52,9 +52,12 @@ pub fn request(project:&Path,operation:&OperationId,revision:u64)->Result<Reques
 enum Entry {Pending{identity:Identity,operation:OperationId,ticket:crate::executor::Ticket},Cooldown{until:Instant,last:OperationId}}
 /// Volatile tickets only: durable eligibility and all claim/effect decisions
 /// remain in the store service. Restart never infers success from a lost ticket.
-pub struct Queue {executor:Arc<crate::executor::Executor>,entries:BTreeMap<PathBuf,Entry>,last_project:Option<PathBuf>,unknown:bool}
+pub struct Queue {executor:Arc<crate::executor::Executor>,entries:BTreeMap<PathBuf,Entry>,last_project:Option<PathBuf>,unknown:bool,passed:Vec<String>}
 impl Queue {
-    pub fn new(executor:Arc<crate::executor::Executor>)->Self {Self{executor,entries:BTreeMap::new(),last_project:None,unknown:false}}
+    pub fn new(executor:Arc<crate::executor::Executor>)->Self {Self{executor,entries:BTreeMap::new(),last_project:None,unknown:false,passed:Vec::new()}}
+    /// Projects whose turn passed to another project in the last admission, with
+    /// why (diagnostic: admission skips a project with nothing admissible).
+    pub fn take_passed(&mut self)->Vec<String> {std::mem::take(&mut self.passed)}
     pub fn drain(&mut self)->Vec<String> {
         let mut errors=Vec::new();let now=Instant::now();
         self.entries.retain(|path,entry| {
@@ -94,31 +97,49 @@ impl Queue {
         if let Some(last)=&self.last_project {
             let first=paths.iter().position(|path|path>last).unwrap_or(0);paths.rotate_left(first);
         }
+        let mut passed=Vec::new();
         for path in paths {
-            if !allowed(&path){continue;}
-            if let Err(error)=self.admit(&path){errors.push(format!("{}: routine admission: {error:#}",path.display()));}
-            if self.pending(){break;}
+            if !allowed(&path){passed.push((path,"an observation of it is pending"));continue;}
+            match self.admit(&path) {
+                Ok(None)=>{}
+                Ok(Some(reason))=>passed.push((path,reason)),
+                Err(error)=>{errors.push(format!("{}: routine admission: {error:#}",path.display()));passed.push((path,"its admission failed"));}
+            }
+            if self.pending(){
+                let admitted=self.last_project.clone().unwrap_or_default();
+                // Only a turn that went to another project is a pass.
+                for (skipped,reason) in passed.drain(..).filter(|(p,_)|*p!=admitted) {
+                    self.passed.push(format!("{}: routine admission passed its turn ({reason}); admitted {}",skipped.display(),admitted.display()));
+                }
+                break;
+            }
         }
         self.unknown=!errors.is_empty();errors
     }
-    fn admit(&mut self,project:&Path)->Result<()> {
-        if !cfg!(target_os="linux") {return Ok(());}
+    /// `Ok(None)` when admitted (or already pending); `Ok(Some(reason))` when
+    /// this project had nothing admissible now.
+    fn admit(&mut self,project:&Path)->Result<Option<&'static str>> {
+        if !cfg!(target_os="linux") {return Ok(Some("routines need Linux"));}
         // A ticker owns one root. Never prequeue its next routine: the full
         // project pass must offer exclusive effects a turn between routines.
-        if self.pending() {return Ok(());}
+        if self.pending() {return Ok(None);}
         let path=project.canonicalize()?;
         let last=match self.entries.get(&path) {
-            Some(Entry::Pending{..})=>return Ok(()),
-            Some(Entry::Cooldown{until,..}) if Instant::now()<*until=>return Ok(()),
+            Some(Entry::Pending{..})=>return Ok(None),
+            Some(Entry::Cooldown{until,..}) if Instant::now()<*until=>return Ok(Some("it is cooling down after a failure")),
             Some(Entry::Cooldown{last,..})=>Some(last.clone()),None=>None,
         };
         ensure!(self.entries.contains_key(&path)||self.entries.len()<128,"routine admission inventory is full");
         let mut budget=herdr_farm::store::identity_inventory::Budget::new(2*1024*1024,1024,Instant::now()+Duration::from_millis(100),Default::default())?;
-        let Some(hint)=herdr_farm::migration::read_routine_execution_hint(&path,&mut budget,last.as_ref(),jiff::Timestamp::now().as_millisecond())? else{return Ok(());};
+        let Some(hint)=herdr_farm::migration::read_routine_execution_hint(&path,&mut budget,last.as_ref(),jiff::Timestamp::now().as_millisecond())? else{
+            // Nothing to pass when no routine is queued at all.
+            let mut budget=herdr_farm::store::identity_inventory::Budget::new(2*1024*1024,1024,Instant::now()+Duration::from_millis(100),Default::default())?;
+            return Ok(herdr_farm::migration::read_routine_queued(&path,&mut budget)?.then_some("its queued routine is not ready yet"));
+        };
         let work=request(&path,&hint.operation,hint.delivery_revision)?;let identity=work.identity.clone();
         let ticket=self.executor.submit(work)?;
         self.last_project=Some(path.clone());
-        self.entries.insert(path,Entry::Pending{identity,operation:hint.operation,ticket});Ok(())
+        self.entries.insert(path,Entry::Pending{identity,operation:hint.operation,ticket});Ok(None)
     }
 }
 impl Drop for Queue {
@@ -236,6 +257,38 @@ mod tests {
         let s=runtime::snapshot(&path).unwrap();assert!(s.deliveries.iter().all(|d|d.attempts==0&&d.state==DeliveryState::Pending));
         runtime::set_state(&path,s.head,s.control.unwrap().revision,herdr_farm::domain::ProjectState::Paused,&world.ctx().config_dir.join("config.toml")).unwrap();
         queue.entries.clear();queue.admit(&path).unwrap();assert!(!queue.pending());assert!(!path.join("a-marker").exists()&&!path.join("b-marker").exists());assert!(pool.stop(Duration::from_secs(2)));
+    }
+    #[cfg(target_os="linux")]
+    #[test]
+    fn a_turn_passes_only_for_a_project_with_queued_but_unready_routines() {
+        // Order two projects so `first` is tried before `second`.
+        fn order(queue:&mut Queue,first:&Path,second:&Path) {
+            let (a,b)=(first.canonicalize().unwrap(),second.canonicalize().unwrap());
+            queue.last_project=if a<b {None} else {Some(b)};
+        }
+        let pool=Arc::new(Executor::new(Limits::default(),Arc::new(JobRunner{inner:Arc::new(Forbidden)})).unwrap());
+        // Queued but not ready: a paused project keeps its pending routine.
+        let(world,waiting)=crate::canonical_controller::tests::routine_fixture(&[("w",b"true",1000)]);
+        routines::schedule(&waiting,"w",runtime::snapshot(&waiting).unwrap().head).unwrap();
+        let s=runtime::snapshot(&waiting).unwrap();
+        runtime::set_state(&waiting,s.head,s.control.unwrap().revision,herdr_farm::domain::ProjectState::Paused,&world.ctx().config_dir.join("config.toml")).unwrap();
+        let(_ready_world,ready,_)=fixture(b"true",1000);
+        let mut queue=Queue::new(pool.clone());order(&mut queue,&waiting,&ready);
+        assert!(queue.admit_projects([waiting.clone(),ready.clone()]).is_empty());
+        assert!(queue.pending());
+        let passed=queue.take_passed();
+        assert_eq!(passed.len(),1,"{passed:?}");
+        assert!(passed[0].starts_with(&format!("{}: routine admission passed its turn (its queued routine is not ready yet); admitted {}",
+            waiting.canonicalize().unwrap().display(),ready.canonicalize().unwrap().display())),"{passed:?}");
+        assert!(queue.take_passed().is_empty(),"passes are reported once");
+        // Nothing queued: skipping an idle project is not a pass.
+        let(_idle_world,idle)=crate::canonical_controller::tests::routine_fixture(&[("i",b"true",1000)]);
+        let(_next_world,next,_)=fixture(b"true",1000);
+        let mut queue=Queue::new(pool.clone());order(&mut queue,&idle,&next);
+        assert!(queue.admit_projects([idle.clone(),next.clone()]).is_empty());
+        assert!(queue.pending());
+        assert!(queue.take_passed().is_empty());
+        assert!(pool.stop(Duration::from_secs(5)));
     }
     #[cfg(target_os="linux")]
     #[test]

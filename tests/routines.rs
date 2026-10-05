@@ -105,10 +105,17 @@ fn routines_of_two_projects_run_alternately_and_once_each() {
     ticker.wait_for("all four routines", || ["first", "second"].iter().all(|slug| receipts(&root.project(slug)) == 2));
     let runs: Vec<String> = fs::read_to_string(&order).unwrap().lines().map(str::to_owned).collect();
     assert_eq!(runs.len(), 4, "{runs:?}");
-    // Admission skips a project whose hint read fails or is not ready, so a
-    // repeat needs its cause: show the ticker's admission log with it.
-    assert!(runs.windows(2).all(|pair| pair[0] != pair[1]), "a project ran twice in a row: {runs:?}\nticker log:\n{}",
-        fs::read_to_string(root.path("root/.ticker.log")).unwrap_or_default());
+    // Admission alternates, but passes over a project with nothing admissible
+    // right now (no ready routine, an observation in flight). A repeat is
+    // fair only when the ticker logged the other project passing its turn.
+    let log = fs::read_to_string(root.path("root/.ticker.log")).unwrap_or_default();
+    for pair in runs.windows(2).filter(|pair| pair[0] == pair[1]) {
+        let other = if pair[0] == "first" { "second" } else { "first" };
+        let passed = log.lines().filter(|l| l.contains("routine admission passed its turn")
+            && l.contains(&format!("/{other}: ")) && l.trim_end().ends_with(&format!("/{}", pair[0]))).count();
+        let repeats = runs.windows(2).filter(|p| p[0] == p[1] && p[0] == pair[0]).count();
+        assert!(passed >= repeats, "{} ran twice in a row without {other} passing its turn: {runs:?}\nticker log:\n{log}", pair[0]);
+    }
     for slug in ["first", "second"] {
         let snapshot = runtime::snapshot(&root.project(slug)).unwrap();
         assert!(snapshot.deliveries.iter().all(|d| d.attempts == 1), "{:?}", snapshot.deliveries);

@@ -147,6 +147,14 @@ pub(crate) fn read_with_launches(path:&Path,publication:&Publication,budget:&mut
 /// validation remain the routine worker's responsibility.
 #[derive(Debug)]
 pub struct RoutineExecutionHint {pub operation:OperationId,pub delivery_revision:u64}
+/// Whether any routine run is queued (a pending `routine.run` delivery, due
+/// or not). Admission uses it to tell "not ready yet" from "nothing to run".
+pub(crate) fn read_routine_queued(path:&Path,publication:&Publication,budget:&mut Budget)->Result<bool> {
+    super::identity_inventory::read_published(path,publication,budget,|tx,_budget|{
+        let version:u32=tx.query_row("PRAGMA user_version",[],|r|r.get(0))?;if version<16{return Ok(false);}
+        Ok(tx.query_row("SELECT EXISTS(SELECT 1 FROM operation_delivery d JOIN operations o ON o.id=d.operation_id WHERE d.state='pending' AND o.kind='routine.run')",[],|r|r.get(0))?)
+    })
+}
 pub(crate) fn read_routine(path:&Path,publication:&Publication,budget:&mut Budget,last:Option<&OperationId>,now:i64)->Result<Option<RoutineExecutionHint>> {
     super::delivery::now_check(now)?;
     super::identity_inventory::read_published(path,publication,budget,|tx,budget|{

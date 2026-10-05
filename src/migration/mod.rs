@@ -715,7 +715,7 @@ pub(crate) fn publish_control_marker(project:&Path,db:&SqliteStore)->Result<()> 
 
 mod identity_inventory;
 pub(crate) use identity_inventory::publish_control_marker_controlled;
-pub use identity_inventory::{open_active_controlled,open_active_scoped,read_identity_inventory,read_launch_target_inventory,read_worktree_inventory,read_observation_head,read_controller_effect_hint,read_controller_dispatch_hint,read_routine_execution_hint};
+pub use identity_inventory::{open_active_controlled,open_active_scoped,read_identity_inventory,read_routine_queued,read_launch_target_inventory,read_worktree_inventory,read_observation_head,read_controller_effect_hint,read_controller_dispatch_hint,read_routine_execution_hint};
 
 pub(crate) use identity_inventory::read_worktree_operation;
 
