@@ -577,7 +577,7 @@ fn schema_72_records_new_event_times_without_inventing_history() {
     p.migrate();
     let path = p.project.join(".state/state.db");
     let raw = rusqlite::Connection::open(&path).unwrap();
-    raw.execute_batch("DROP TRIGGER events_record_time; DROP TABLE event_times; DROP TABLE task_lineage; DROP TABLE worker_idle_stretches;
+    raw.execute_batch("DROP TRIGGER events_record_time; DROP TABLE event_times; DROP TABLE task_lineage;
         UPDATE store_meta SET schema_version=71; PRAGMA user_version=71;").unwrap();
     let old_head: i64 = raw.query_row("SELECT coalesce(max(sequence),0) FROM events", [], |r| r.get(0)).unwrap();
     assert!(old_head > 0);

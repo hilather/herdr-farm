@@ -2581,7 +2581,7 @@ fn fix_launch_upgrade_preserves_manual_repairs_and_allows_one_attempt_to_fix_two
         // Reconstruct schema 69's uniqueness guarantees on the populated input
         // store. All other columns and guards of these tables are unchanged.
         let db = rusqlite::Connection::open(&path).unwrap();
-        db.execute_batch("DROP TRIGGER events_record_time; DROP TABLE event_times; DROP TABLE task_lineage; DROP TABLE worker_idle_stretches;
+        db.execute_batch("DROP TRIGGER events_record_time; DROP TABLE event_times; DROP TABLE task_lineage;
             DROP TABLE result_memory_decisions; DROP TABLE result_memory_candidates;
             DROP TABLE fix_launch_findings; DROP TABLE fix_launches;
             CREATE UNIQUE INDEX legacy_repair_attempt ON repair_attempts(attempt_id);

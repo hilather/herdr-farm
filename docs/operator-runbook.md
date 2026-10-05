@@ -523,12 +523,13 @@ home. This resolution does not grant any additional write authority.
 (Herdr keeps a finished turn marked `done` until focus). Verified visible prompt
 readiness is still required; `working` and `blocked` panes are refused.
 
-Upgrade existing canonical stores to schema 73 (`upgrade-store <slug>`) to enable idle
-stretch tracking. The ticker delivers `attempt.worker_idle` to the canonical inbox when a running
+Idle stretch tracking uses ticker memory on canonical schema 72. The ticker delivers `attempt.worker_idle` to the canonical inbox when a running
 worker stays idle/done for ten minutes without a submission or observed
 termination. The threshold uses the shared test time scale in isolated labs.
 The worker continues running. One notice is delivered per observed idle stretch,
-even across ticker restarts; working or blocked observations break the stretch.
+keyed by attempt id and revision; working or blocked observations break the stretch.
+After a ticker restart the idle stretch starts again, so at most one extra notice
+can be delivered for the same stretch per restart. Stable inbox ids deduplicate delivery retries.
 Unavailable observations defer notices and do not rearm an already delivered one. Inspect the attempt and nudge, stop or relaunch as appropriate, then
 mark the inbox item done. An inbox acknowledgment alone does not reset a stretch.
 

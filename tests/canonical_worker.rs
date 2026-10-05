@@ -2818,7 +2818,7 @@ fn attention_mid_run_failure_remains_incomplete_at_termination() {
 }
 
 #[test]
-fn idle_worker_notice_survives_restart_and_is_once_per_stretch() {
+fn idle_worker_notice_restarts_stretch_and_deduplicates_within_a_ticker() {
     let mut lab = Lab::new("unknown_usage='allow_with_warning'");
     let (_, attempt) = lab.reserve("Retained instructions");
     lab.serve();
@@ -2827,6 +2827,15 @@ fn idle_worker_notice_survives_restart_and_is_once_per_stretch() {
     let notices = || lab.state().inbox.into_iter().filter(|i| i.content.kind == "attempt.worker_idle").collect::<Vec<_>>();
     let mut ticker = lab.spawn();
     lab.wait(&mut ticker, 60, &|| notices().len() == 1);
+    lab.ok(&["inbox", "done", "demo", &notices()[0].content.id]);
+    // Observe another 30 completed passes (15 scaled seconds) without rearming.
+    let metrics = lab.path("root/.ticker-metrics.json");
+    let mut last = fs::metadata(&metrics).unwrap().ino();
+    for _ in 0..30 {
+        lab.wait(&mut ticker, 60, &|| fs::metadata(&metrics).unwrap().ino() != last);
+        last = fs::metadata(&metrics).unwrap().ino();
+        assert_eq!(notices().len(), 1);
+    }
     lab.stop(ticker);
     lab.run_quiet(3);
     let first = notices();
@@ -2834,12 +2843,15 @@ fn idle_worker_notice_survives_restart_and_is_once_per_stretch() {
     assert!(first[0].content.summary.contains(attempt.as_str()));
     assert!(!lab.attempt(&attempt).termination_observed);
     assert_eq!(lab.attempt(&attempt).state, AttemptState::Running);
-    fs::write(lab.path("lab/agent-status"), "working").unwrap();
-    lab.run_quiet(2);
-    fs::write(lab.path("lab/agent-status"), "idle").unwrap();
+    // A restart begins a new stretch even though the worker stayed idle.
     let mut ticker = lab.spawn();
     lab.wait(&mut ticker, 60, &|| notices().len() == 2);
+    fs::write(lab.path("lab/agent-status"), "working").unwrap();
+    let observed = lab.count("agent.list");
+    lab.wait(&mut ticker, 60, &|| lab.count("agent.list") >= observed + 3);
+    fs::write(lab.path("lab/agent-status"), "idle").unwrap();
+    lab.wait(&mut ticker, 60, &|| notices().len() == 3);
     lab.stop(ticker);
     lab.run_quiet(2);
-    assert_eq!(notices().len(), 2);
+    assert_eq!(notices().len(), 3);
 }

@@ -155,10 +155,19 @@ pub fn plan(ctx:&Ctx,project:&Path)->Result<herdr_farm::reconcile::plan::Recover
     herdr_farm::reconcile::plan::build(&snapshot,&batch,jiff::Timestamp::now().as_millisecond(),config.digest.as_deref())
 }
 
-/// Idle is advisory, never termination evidence. Use the same exact route and
-/// retained socket incarnation as reconciliation before starting an idle stretch.
-pub fn worker_attention(ctx: &Ctx, project: &Path) -> Result<()> {
+/// Per-attempt ticker hint; deliberately discarded on restart.
+#[derive(Default)]
+pub struct IdleStretch {
+    since: Option<i64>,
+    generation: u64,
+    notified: bool,
+}
+
+/// Idle is advisory, never termination evidence. Verify the exact route and
+/// retained socket incarnation before starting an idle stretch.
+pub fn worker_attention(ctx: &Ctx, project: &Path, stretches: &mut BTreeMap<(String, u64), IdleStretch>) -> Result<()> {
     let snapshot = runtime::snapshot(project)?;
+    stretches.retain(|(id, revision), _| snapshot.attempts.iter().any(|a| a.id.as_str() == id && a.revision == *revision && a.state == herdr_farm::domain::AttemptState::Running && !a.termination_observed));
     let mut sessions = BTreeMap::new();
     for attempt in snapshot.attempts.iter().filter(|a| a.retains_capacity() && a.state == herdr_farm::domain::AttemptState::Running) {
         let ownership = snapshot.ownership.iter().find(|o| o.attempt.as_ref() == Some(&attempt.id));
@@ -185,7 +194,20 @@ pub fn worker_attention(ctx: &Ctx, project: &Path) -> Result<()> {
                 })
             } else { None }
         } else { None };
-        migration::open_active(project)?.observe_worker_idle(snapshot.head, &attempt.id, attempt.revision, idle, jiff::Timestamp::now().as_millisecond())?;
+        let now = jiff::Timestamp::now().as_millisecond();
+        let stretch = stretches.entry((attempt.id.as_str().into(), attempt.revision)).or_default();
+        if idle == Some(false) {
+            stretch.since = None;
+            stretch.notified = false;
+        } else if idle == Some(true) && stretch.since.is_none() {
+            stretch.generation = stretch.generation.saturating_add(1);
+            stretch.since = Some(now);
+        }
+        let threshold = herdr_farm::timing::pass(Duration::from_secs(600)).as_millis() as i64;
+        if idle == Some(true) && !stretch.notified && stretch.since.is_some_and(|since| now - since >= threshold) {
+            migration::open_active(project)?.notify_worker_idle(snapshot.head, &attempt.id, attempt.revision, stretch.since.unwrap(), now)?;
+            stretch.notified = true;
+        }
     }
     Ok(())
 }
