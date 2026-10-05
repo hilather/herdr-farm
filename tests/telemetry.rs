@@ -899,6 +899,15 @@ fn worker_session_counts_end_states_and_privacy() {
     for record in records { writeln!(file,"{record}").unwrap(); }
     drop(file);
     f.cli("collect");
+    f.cli("collect"); // A fresh CLI process must not repeat the notice.
+    let canonical = herdr_farm::store::SqliteStore::open(&f.project.join(".state/state.db")).unwrap();
+    let notices = canonical.unseen_inbox().unwrap();
+    let questions: Vec<_> = notices.iter().filter(|i| i.content.kind == "attempt.worker_question").collect();
+    assert_eq!(questions.len(), 1);
+    assert!(questions[0].content.summary.contains(&f.attempt));
+    assert!(questions[0].content.summary.contains("request_user_input_async"));
+    assert!(questions[0].content.body.is_empty());
+    assert!(!serde_json::to_string(&notices).unwrap().contains("SESSION_SECRET"));
     let a=f.cli_args(&["attempts","--json"]).0;
     let s=&a["attempts"][0]["session"];
     assert_eq!(s["turns"],1);

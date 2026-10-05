@@ -322,16 +322,31 @@ fn herdr_server(run: &mut Run, herdr: &Path, task: &str, existing: Option<&Path>
     for part in ["", "home", "runtime"] {
         fs::DirBuilder::new().recursive(true).mode(0o700).create(directory.join(part))?;
     }
+    // Reuse the persisted socket even if this invocation's runtime directory
+    // changed. Never overwrite the only recovery record for a live old server.
+    let old_record: Value = fs::read(directory.join(SERVER_RECORD)).ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or(Value::Null);
+    if let (Some(pid), Some(socket)) = (old_record["pid"].as_i64(), old_record["socket"].as_str()) {
+        let socket = PathBuf::from(socket);
+        if pid > 1 && pid <= i32::MAX as i64 && is_our_server(pid as i32, &socket) {
+            if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
+                run.skipped("herdr_server", json!({"socket":socket}));
+                return Ok(socket);
+            }
+            // Preserve its only recovery record. Explicit retirement applies
+            // the attempt-retention fence before a later run can replace it.
+            bail!("recorded private Herdr server is still running but unreachable; run launch {} stop --task {task} before retrying", run.slug);
+        }
+    }
     // The socket lives in a short private directory (sun_path is 108 bytes);
     // logs and configuration stay beside the run.
     let socket = herdr_farm::short_socket::stable(&directory)?.join("s");
     herdr_farm::short_socket::check_length(&socket)?;
     if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
+        ensure!(directory.join(SERVER_RECORD).is_file(), "private server socket has no recovery record; inspect before relaunching");
         run.skipped("herdr_server", json!({"socket":socket}));
         return Ok(socket);
     }
-    let old_record: Value = fs::read(directory.join(SERVER_RECORD)).ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or(Value::Null);
     close_viewer(run.ctx, &old_record);
     let _ = fs::remove_file(&socket);
     fs::write(
@@ -360,7 +375,7 @@ fn herdr_server(run: &mut Run, herdr: &Path, task: &str, existing: Option<&Path>
         .context("Herdr server could not be started")?;
     // The record `launch stop` and the ticker's sweep use to find (and prove
     // they have found) this server again.
-    fs::write(directory.join(SERVER_RECORD), serde_json::to_vec_pretty(&json!({"pid":child.id(),"socket":socket}))?)?;
+    fs::write(directory.join(SERVER_RECORD), serde_json::to_vec_pretty(&json!({"pid":child.id(),"socket":socket,"project":run.slug,"task":task}))?)?;
     let deadline = Instant::now() + Duration::from_secs(20);
     while std::os::unix::net::UnixStream::connect(&socket).is_err() {
         ensure!(Instant::now() < deadline, "Herdr server did not open {} (see server.log beside it)", socket.display());
@@ -995,9 +1010,30 @@ pub fn stop(ctx: &Ctx, slug: &str, task: &str, force: bool) -> Result<Value> {
         return Ok(json!({"task":task,"stopped":false,"reason":"no dedicated Herdr server is recorded for this task"}));
     };
     let record_value: Value = serde_json::from_str(&text).context("server record is unreadable")?;
+    if let Some(project) = record_value["project"].as_str() {
+        ensure!(project == slug && record_value["task"].as_str() == Some(task), "private server record belongs to another project/task");
+    }
+    // Historical directory names concatenate slug and task with a hyphen.
+    // Protect every possible project/task interpretation before retiring one.
+    if !force {
+        let name = format!("{slug}-{task}");
+        for other in crate::project::list_slugs(&ctx.root).into_iter().filter(|other| other != slug) {
+            if let Some(other_task) = name.strip_prefix(&format!("{other}-")) {
+                let other_snapshot = runtime::snapshot(&ctx.root.join(&other))?;
+                ensure!(!other_snapshot.attempts.iter().any(|a| a.task.as_str() == other_task && a.retains_capacity()), "private server may belong to an active attempt in project {other}");
+            }
+        }
+    }
+    // Fence launch preparation as well as reservation: its server is created
+    // before its attempt exists, and must not be swept mid-launch.
+    let launch_guard = fs::File::open(project.join(".state/state.db"))?;
+    launch_guard.try_lock().context("launch preparation or memory adoption is in progress; retry server retirement")?;
+    let _guard = herdr_farm::execution_guard::ProjectGuard::acquire(&project)?;
     let snapshot = runtime::snapshot(&project)?;
-    let held = snapshot.tasks.iter().find(|t| t.id == task_id).and_then(|t| t.active_attempt.as_ref())
-        .and_then(|id| snapshot.attempts.iter().find(|a| &a.id == id)).filter(|a| a.retains_capacity());
+    let server_socket = record_value["socket"].as_str();
+    let held = snapshot.attempts.iter().find(|a| a.retains_capacity() && (a.task == task_id ||
+        snapshot.ownership.iter().any(|o| o.attempt.as_ref() == Some(&a.id) &&
+            snapshot.runtime_bindings.iter().any(|b| b.id == o.binding && Some(b.identity.socket.as_str()) == server_socket))));
     if let (Some(attempt), false) = (held, force) {
         bail!("attempt {} of task {task} still holds its worker; stop it first (or pass --force)", attempt.id.as_str());
     }
@@ -1006,18 +1042,22 @@ pub fn stop(ctx: &Ctx, slug: &str, task: &str, force: bool) -> Result<Value> {
         fs::remove_file(&record)?;
         return Ok(json!({"task":task,"stopped":false,"reason":"operator-managed server left running"}));
     }
-    let pid = record_value["pid"].as_i64().context("server record has no pid")? as i32;
+    let pid = i32::try_from(record_value["pid"].as_i64().context("server record has no pid")?).context("server pid is out of range")?;
     let socket = PathBuf::from(record_value["socket"].as_str().context("server record has no socket")?);
     let mut stopped = false;
     if pid > 1 && is_our_server(pid, &socket) {
-        signal(pid, libc::SIGTERM);
+        ensure!(signal(pid, libc::SIGTERM) || !is_our_server(pid, &socket), "could not signal private Herdr server; retain its recovery record");
         let until = Instant::now() + Duration::from_secs(5);
         while Path::new(&format!("/proc/{pid}")).exists() && is_our_server(pid, &socket) && Instant::now() < until {
             std::thread::sleep(Duration::from_millis(50));
         }
         if is_our_server(pid, &socket) {
-            signal(pid, libc::SIGKILL);
-            std::thread::sleep(Duration::from_millis(100));
+            ensure!(signal(pid, libc::SIGKILL) || !is_our_server(pid, &socket), "could not kill private Herdr server; retain its recovery record");
+            let until = Instant::now() + Duration::from_secs(2);
+            while is_our_server(pid, &socket) && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            ensure!(!is_our_server(pid, &socket), "private Herdr server is still running; retain its recovery record");
         }
         stopped = true;
     }
@@ -1046,9 +1086,9 @@ pub fn sweep_servers(ctx: &Ctx, slug: &str) -> Vec<String> {
         }
         let Ok(project) = ctx.root.join(slug).canonicalize() else { continue };
         let Ok(snapshot) = runtime::snapshot(&project) else { continue };
-        let Some(record) = snapshot.tasks.iter().find(|t| t.id.as_str() == task) else { continue };
-        // A task that never reserved an attempt has not used its server yet.
-        if record.active_attempt.is_some() || !snapshot.attempts.iter().any(|a| a.task.as_str() == task) {
+        // Attempt retention is authoritative even if the task pointer changed.
+        // Orphaned and never-reserved private servers have no worker to retain.
+        if snapshot.attempts.iter().any(|a| a.task.as_str() == task && a.retains_capacity()) {
             continue;
         }
         match stop(ctx, slug, task, false) {

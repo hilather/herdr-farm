@@ -553,10 +553,17 @@ fn ticker_stops_the_dedicated_herdr_server_of_a_finished_task() {
     // While the attempt holds its worker nothing is stopped.
     lab.wait(&mut ticker, 60, &|| lab.count("agent.list") >= 3);
     assert!(server.try_wait().unwrap().is_none() && socket.exists());
+    let server_record = fs::read(dir.join("server.json")).unwrap();
+    fs::remove_file(dir.join("server.json")).unwrap();
     // The operator cancels the attempt; the ticker proves the worker's termination and then the server goes.
     let running = lab.attempt(&attempt);
     lab.ok_live(&|| ["task", "demo", "cancel-attempt", attempt.as_str(), "--expected-revision", &running.revision.to_string(), "--expected-head", &lab.head().to_string(), "--reason", "finished"].map(String::from).to_vec());
     lab.wait(&mut ticker, 60, &|| lab.attempt(&attempt).termination_observed);
+    lab.stop(ticker);
+    assert!(server.try_wait().unwrap().is_none());
+    fs::write(dir.join("server.json"), server_record).unwrap();
+    // A fresh ticker has no in-memory knowledge of this ended launch.
+    let ticker = lab.spawn();
     let until = Instant::now() + Duration::from_secs(15);
     while server.try_wait().unwrap().is_none() {
         assert!(Instant::now() < until, "the ticker never stopped the finished task's server: {}", fs::read_to_string(lab.path("root/.ticker.log")).unwrap_or_default());
@@ -2808,4 +2815,31 @@ fn attention_mid_run_failure_remains_incomplete_at_termination() {
     let m31 = lab.ok(&["telemetry", "demo", "report", "--json"])["metrics"]["M31"].clone();
     assert_eq!(m31["value"], json!({"status": "unavailable", "reason": "incomplete_observation"}));
     assert_eq!(m31["coverage"]["with_gaps"], 1);
+}
+
+#[test]
+fn idle_worker_notice_survives_restart_and_is_once_per_stretch() {
+    let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+    let (_, attempt) = lab.reserve("Retained instructions");
+    lab.serve();
+    lab.run_until(100, &|| lab.attempt(&attempt).state == AttemptState::Running);
+    fs::write(lab.path("lab/agent-status"), "done").unwrap();
+    let notices = || lab.state().inbox.into_iter().filter(|i| i.content.kind == "attempt.worker_idle").collect::<Vec<_>>();
+    let mut ticker = lab.spawn();
+    lab.wait(&mut ticker, 60, &|| notices().len() == 1);
+    lab.stop(ticker);
+    lab.run_quiet(3);
+    let first = notices();
+    assert_eq!(first.len(), 1);
+    assert!(first[0].content.summary.contains(attempt.as_str()));
+    assert!(!lab.attempt(&attempt).termination_observed);
+    assert_eq!(lab.attempt(&attempt).state, AttemptState::Running);
+    fs::write(lab.path("lab/agent-status"), "working").unwrap();
+    lab.run_quiet(2);
+    fs::write(lab.path("lab/agent-status"), "idle").unwrap();
+    let mut ticker = lab.spawn();
+    lab.wait(&mut ticker, 60, &|| notices().len() == 2);
+    lab.stop(ticker);
+    lab.run_quiet(2);
+    assert_eq!(notices().len(), 2);
 }

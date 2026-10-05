@@ -516,3 +516,24 @@ or merge. With no explicit root flag or root environment override, worker CLI
 commands resolve the projects root from `HERDR_FARM_SUBMISSION_SPOOL` (or its
 legacy alias), so memory commands reach the canonical project from an isolated
 home. This resolution does not grant any additional write authority.
+
+### Coordinator and worker attention
+
+`open <slug> --reprime` accepts a coordinator pane marked `idle` or `done`
+(Herdr keeps a finished turn marked `done` until focus). Verified visible prompt
+readiness is still required; `working` and `blocked` panes are refused.
+
+Upgrade existing canonical stores to schema 73 (`upgrade-store <slug>`) to enable idle
+stretch tracking. The ticker delivers `attempt.worker_idle` to the canonical inbox when a running
+worker stays idle/done for ten minutes without a submission or observed
+termination. The threshold uses the shared test time scale in isolated labs.
+The worker continues running. One notice is delivered per observed idle stretch,
+even across ticker restarts; working or blocked observations break the stretch.
+Unavailable observations defer notices and do not rearm an already delivered one. Inspect the attempt and nudge, stop or relaunch as appropriate, then
+mark the inbox item done. An inbox acknowledgment alone does not reset a stretch.
+
+Collection delivers `attempt.worker_question` for a bound Codex worker session's
+`request_user_input` or `request_user_input_async` call, once per native call.
+It names the attempt and tool only; question/argument text is never retained or
+forwarded. Isolated workers cannot get owner answers. Ask the worker to state
+assumptions in its report, or explicitly intervene through the normal workflow.

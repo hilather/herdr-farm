@@ -222,3 +222,45 @@ pub(super) fn ended_notice(db: &Connection, attempt: &Attempt) -> Result<()> {
     }
     Ok(())
 }
+
+impl SqliteStore {
+    /// Advisory idle observation for an exact attempt revision. Busy breaks
+    /// the stretch; unknown defers notices without rearming a delivered one.
+    pub fn observe_worker_idle(&mut self, expected_head: u64, attempt: &AttemptId, revision: u64, idle: Option<bool>, now: i64) -> Result<bool> {
+        super::delivery::now_check(now)?;
+        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        check_schema(&tx)?;
+        if head(&tx)? != expected_head { return Err(StoreError::Conflict); }
+        let current = read_attempt(&tx, attempt)?;
+        if current.revision != revision { return Err(StoreError::Conflict); }
+        let submitted: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM result_submissions WHERE attempt_id=?1)", [attempt.as_str()], |r| r.get(0))?;
+        let idle = if current.state == AttemptState::Running && !current.termination_observed && !submitted { idle } else { Some(false) };
+        let old: Option<(i64, Option<i64>, i64, bool)> = tx.query_row("SELECT generation,idle_since_ms,observed_ms,notified FROM worker_idle_stretches WHERE attempt_id=?1", [attempt.as_str()], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
+        let (mut generation, mut since, observed, mut notified) = old.unwrap_or((0,None,0,false));
+        if now < observed { return Err(StoreError::Conflict); }
+        if idle == Some(false) { since = None; notified = false; }
+        else if idle == Some(true) && since.is_none() { generation += 1; since = Some(now); notified = false; }
+        let threshold = crate::timing::pass(std::time::Duration::from_secs(600)).as_millis() as i64;
+        let due = idle == Some(true) && since.is_some_and(|since| now - since >= threshold) && !notified;
+        if due {
+            let minutes = (now - since.unwrap()) / 60_000;
+            let content = InboxContent { id: format!("worker-idle-{}-{generation}", attempt.as_str()), kind: "attempt.worker_idle".into(), subject: current.task.as_str().into(), created: jiff::Timestamp::from_millisecond(now).map_err(|e| StoreError::Invalid(e.to_string()))?.to_string(), summary: format!("attempt {}: worker idle for {minutes} min without submitting", attempt.as_str()), body: String::new() };
+            insert(&tx, &InboxItem { revision: 1, content: content.clone(), seen: false, done: false })?;
+            tx.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES('inbox.delivered',?1,1,1,?2)", params![content.id,serde_json::to_string(&content).map_err(|e| StoreError::Invalid(e.to_string()))?])?;
+            notified = true;
+        }
+        tx.execute("INSERT INTO worker_idle_stretches VALUES(?1,?2,?3,?4,?5) ON CONFLICT(attempt_id) DO UPDATE SET generation=excluded.generation,idle_since_ms=excluded.idle_since_ms,observed_ms=excluded.observed_ms,notified=excluded.notified", params![attempt.as_str(),generation,since,now,notified])?;
+        tx.commit()?;
+        Ok(due)
+    }
+
+    /// Metadata-only question notice. Stable native call identity deduplicates
+    /// collectors and restarts; argument/question text is never accepted here.
+    pub fn notify_worker_question(&mut self, attempt: &AttemptId, session: &str, call: &str, tool: &str, now: i64) -> Result<crate::domain::ReminderOutcome> {
+        super::delivery::now_check(now)?;
+        if !matches!(tool,"request_user_input"|"request_user_input_async") || session.is_empty() || call.is_empty() { return Err(StoreError::Invalid("invalid question metadata".into())); }
+        let current = read_attempt(&self.connection, attempt)?;
+        let content = InboxContent { id: format!("worker-question-{:x}", Sha256::digest(format!("{}\0{session}\0{call}",attempt.as_str()).as_bytes())), kind: "attempt.worker_question".into(), subject: current.task.as_str().into(), created: String::new(), summary: format!("attempt {}: worker called {tool}; user questions are not answered in isolated workers; inspect or nudge the worker to state assumptions",attempt.as_str()), body: String::new() };
+        self.deliver_stable_notice(self.current_head()?, &content, now)
+    }
+}

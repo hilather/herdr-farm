@@ -154,3 +154,38 @@ pub fn plan(ctx:&Ctx,project:&Path)->Result<herdr_farm::reconcile::plan::Recover
     ensure!(migration::config_reference(Path::new(&config.path))?==config,"config changed during recovery planning");
     herdr_farm::reconcile::plan::build(&snapshot,&batch,jiff::Timestamp::now().as_millisecond(),config.digest.as_deref())
 }
+
+/// Idle is advisory, never termination evidence. Use the same exact route and
+/// retained socket incarnation as reconciliation before starting an idle stretch.
+pub fn worker_attention(ctx: &Ctx, project: &Path) -> Result<()> {
+    let snapshot = runtime::snapshot(project)?;
+    let mut sessions = BTreeMap::new();
+    for attempt in snapshot.attempts.iter().filter(|a| a.retains_capacity() && a.state == herdr_farm::domain::AttemptState::Running) {
+        let ownership = snapshot.ownership.iter().find(|o| o.attempt.as_ref() == Some(&attempt.id));
+        let binding = ownership.and_then(|o| snapshot.runtime_bindings.iter().find(|b| b.id == o.binding && b.revision == o.binding_revision));
+        let idle = if let Some(binding) = binding {
+            let identity = &binding.identity;
+            let key = (identity.socket.clone(), identity.machine.clone());
+            let state = sessions.entry(key).or_insert_with(|| {
+                let before = resource_identity(Path::new(&identity.socket), true);
+                let base = Herdr::new(ctx.env.herdr_bin(), &identity.socket, ctx.runner);
+                let h = base.on_machine(&identity.machine);
+                let state = h.pane_list().and_then(|panes| h.agent_list().map(|agents| (panes, agents))).map_err(|_| "session unavailable".into());
+                let after = resource_identity(Path::new(&identity.socket), true);
+                if before.is_none() || before != after { (None, Err("session changed".into())) } else { (after, state) }
+            });
+            let owned = snapshot.ownership.iter().find(|o| o.binding == binding.id && o.binding_revision == binding.revision);
+            let (pane, present) = pane_state(identity, &state.1);
+            let verified = pane == State::Present && present && owned.is_some_and(|o| o.session == state.0 && o.agent.as_ref().is_some_and(|expected| state.1.as_ref().is_ok_and(|(_,agents)| agents.iter().any(|a| a.pane_id == identity.pane_id && a.agent == expected.kind && a.name == expected.name))));
+            if verified {
+                state.1.as_ref().ok().and_then(|(_,agents)| agents.iter().find(|a| a.pane_id == identity.pane_id)).and_then(|a| match a.agent_status.as_str() {
+                    "idle" | "done" => Some(true),
+                    "working" | "blocked" => Some(false),
+                    _ => None,
+                })
+            } else { None }
+        } else { None };
+        migration::open_active(project)?.observe_worker_idle(snapshot.head, &attempt.id, attempt.revision, idle, jiff::Timestamp::now().as_millisecond())?;
+    }
+    Ok(())
+}

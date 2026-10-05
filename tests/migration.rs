@@ -577,13 +577,13 @@ fn schema_72_records_new_event_times_without_inventing_history() {
     p.migrate();
     let path = p.project.join(".state/state.db");
     let raw = rusqlite::Connection::open(&path).unwrap();
-    raw.execute_batch("DROP TRIGGER events_record_time; DROP TABLE event_times; DROP TABLE task_lineage;
+    raw.execute_batch("DROP TRIGGER events_record_time; DROP TABLE event_times; DROP TABLE task_lineage; DROP TABLE worker_idle_stretches;
         UPDATE store_meta SET schema_version=71; PRAGMA user_version=71;").unwrap();
     let old_head: i64 = raw.query_row("SELECT coalesce(max(sequence),0) FROM events", [], |r| r.get(0)).unwrap();
     assert!(old_head > 0);
     let before = jiff::Timestamp::now().as_millisecond();
     p.ok(&["migration","demo","upgrade-store"]);
-    assert_eq!(raw.query_row("PRAGMA user_version",[],|r|r.get::<_,i64>(0)).unwrap(),72);
+    assert_eq!(raw.query_row("PRAGMA user_version",[],|r|r.get::<_,i64>(0)).unwrap(),i64::from(herdr_farm::store::SCHEMA));
     assert_eq!(raw.query_row("SELECT count(*) FROM event_times WHERE sequence<=?1",[old_head],|r|r.get::<_,i64>(0)).unwrap(),0);
     p.ok(&["task","demo","add","timed-work","--title","Timed work","--expected-head",&p.head()]);
     let after = jiff::Timestamp::now().as_millisecond();
