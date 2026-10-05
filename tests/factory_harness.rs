@@ -1382,6 +1382,7 @@ fn cancelled_before_launch_is_censored_not_zero() {
         "attention": {"reason": "attention_not_collected", "status": "unavailable"},
         "classification": {"band": "small", "class": "code", "classification_id": classification},
         "configuration_id": sha256_id(&sim_configuration("1.0.0")),
+        "effort_observed": {"reason": "effort_not_reported", "status": "unavailable"},
         "integration": {"state": "not_applicable"},
         "launching_unix_ms": null,
         "queue_to_launch_ms": {"reason": "cancelled", "status": "censored"},

@@ -3340,6 +3340,7 @@ fn outcome_success_path() {
         // min(1,8) + 2 x 1 uncertain (trailing-slash scope) + 1 verify_then_integrate = 4.
         "classification":{"band":"medium","class":"code","classification_id":classification},
         "configuration_id":configuration,
+        "effort_observed":{"reason":"effort_not_reported","status":"unavailable"},
         "integration":{"state":"integrated"},
         "launching_unix_ms":marks[1].2,
         "queue_to_launch_ms":marks[1].2-marks[0].2,
