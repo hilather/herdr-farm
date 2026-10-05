@@ -3347,6 +3347,7 @@ fn outcome_success_path() {
         "reserved_unix_ms":marks[0].2,
         "result":{"candidate_oid":a_candidate,"created_unix_ms":submitted_ms,"state":"submitted","submission_id":a,"submissions":1},
         "running_unix_ms":marks[2].2,
+        "session":{"end_state":"submitted","reason":"session_metadata_not_collected","status":"unavailable"},
         "task_id":"a",
         "terminal_state":"completed",
         "terminal_unix_ms":marks[3].2,

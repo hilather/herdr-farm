@@ -648,7 +648,9 @@ pub fn tick(ctx: &Ctx, log: &Log, memory: &mut Memory) -> bool {
                 // pass retries it.
                 let cause = error.root_cause().to_string();
                 if matches!(cause.as_str(), "live copy cancelled" | "identity inventory cancelled or expired")
-                    || error.chain().any(|e| matches!(e.downcast_ref::<herdr_farm::store::StoreError>(), Some(herdr_farm::store::StoreError::Cancelled))) { return; }
+                    || error.chain().any(|e| matches!(e.downcast_ref::<herdr_farm::store::StoreError>(),
+                        Some(herdr_farm::store::StoreError::Cancelled)) || matches!(e.downcast_ref::<herdr_farm::store::StoreError>(),
+                        Some(herdr_farm::store::StoreError::Io(message)) if message == "interrupted")) { return; }
                 let slug = std::path::Path::new(&identity.project).file_name().unwrap_or_default().to_string_lossy();
                 let attempt = identity.operation.trim_start_matches("tokens:attempt:");
                 log.line(&format!("{slug}: attempt token {attempt}: {error:#}"));
