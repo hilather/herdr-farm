@@ -100,6 +100,7 @@ impl SqliteStore {
         if version<=68 {tx.execute_batch(include_str!("../../migrations/0069_owner_requests.sql"))?;}
         if version<=69 {super::fix_launch::migrate(&tx)?;}
         if version<=70 {tx.execute_batch(include_str!("../../migrations/0071_result_memory.sql"))?;}
+        if version<=71 {tx.execute_batch(include_str!("../../migrations/0072_event_times_lineage.sql"))?;}
         tx.commit()?;
         Ok(())
     }

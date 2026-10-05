@@ -4,7 +4,7 @@ use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
 use std::{fmt, fs::OpenOptions, os::unix::fs::OpenOptionsExt, path::Path, time::Duration};
 
-pub const SCHEMA: u32 = 71;
+pub const SCHEMA: u32 = 72;
 const APPLICATION: u32 = 1_213_222_994;
 pub const MIN_SQLITE: i32 = 3_053_004;
 pub const MIN_SQLITE_VERSION: &str = "3.53.4";
@@ -176,6 +176,7 @@ impl SqliteStore {
             tx.execute_batch(include_str!("../../migrations/0069_owner_requests.sql"))?;
             fix_launch::migrate(&tx)?;
             tx.execute_batch(include_str!("../../migrations/0071_result_memory.sql"))?;
+            tx.execute_batch(include_str!("../../migrations/0072_event_times_lineage.sql"))?;
             tx.commit()?;
         }
         // Persist the initial directory entry as well as SQLite's own commit.
@@ -612,6 +613,7 @@ mod review_authority;
 pub use review_authority::{PreparedReviewAcceptance,PreparedReviewAuthority,PreparedReviewRevocation,ReviewAcceptance,ReviewAuthorityInstall,review_authority_state};
 mod review_launch;
 mod fix_launch;
+mod lineage;
 mod assignment_policy;
 pub use assignment_policy::{AssignmentSettings,PreparedAssignmentAuthority,PreparedAssignmentRevocation,assignment_state};
 pub use review_launch::{ReviewBrief,ReviewBriefBinding,ReviewVisibility,review_visibility};

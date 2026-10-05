@@ -33,7 +33,7 @@ const TERMINAL: [&str; 4] = ["completed", "failed", "cancelled", "lost"];
 const MAX_TVD: (i128, i128) = (1, 10);
 const UNCLASSIFIED: &str = "unclassified";
 const NAMES: [(&str, &str, &str); 4] = [("M34", "coordinator_overhead", "M34.fleet-v1"), ("M35", "fan_out_efficiency", "M35.fanout-v2"),
-    ("M36", "integration_conflict_rate", "M36.integration-v1"), ("M37", "overlap_waste_share", "M37.fleet-v1")];
+    ("M36", "integration_conflict_rate", "M36.integration-v1"), ("M37", "overlap_waste_share", "M37.lineage-v2")];
 
 /// An exact rational, always reduced with a positive denominator.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -778,15 +778,21 @@ const BUCKETS: [&str; 5] = ["sibling_changed_same_area", "duplicate_effort", "ot
 /// lifecycle cost. Unexplained abandonment (cancelled or lost, no reason) is
 /// its own bucket; an attempt that ran without observed usage makes it partial.
 fn m37(db: &Connection, f: Option<&Fleet>, usage: &std::result::Result<Vec<Session>, &'static str>, since: Option<i64>) -> Result<Value> {
-    let mut body = json!({"reason_source": "attempt_supersessions (canonical 0060, owner-recorded)", "numerator_reason": "sibling_changed_same_area",
+    let mut body = json!({"reason_source": "attempt_supersessions (0060) and task_lineage (0072)", "numerator_reason": "sibling_changed_same_area",
         "basis": super::cost::BASIS});
     if !table(db, "attempt_supersessions")? {
         body["value"] = unavailable("supersession_reason_not_recorded");
         body["missing"] = json!(["accepted_supersession_reason"]);
         return Ok(body);
     }
-    let reasons: BTreeMap<String, String> = db.prepare("SELECT attempt_id,reason FROM attempt_supersessions")?.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+    let mut reasons: BTreeMap<String, String> = db.prepare("SELECT attempt_id,reason FROM attempt_supersessions")?.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
+    // Explicit operator reasons take precedence; task lineage never rewrites them.
+    if table(db, "task_lineage")? {
+        let ended: Vec<String> = db.prepare("SELECT DISTINCT a.id FROM task_lineage l JOIN attempts a ON a.task_id=l.supersedes_task WHERE a.state IN ('completed','failed','cancelled','lost')")?
+            .query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+        for attempt in ended { reasons.entry(attempt).or_insert_with(|| "sibling_changed_same_area".into()); }
+    }
     let states: BTreeMap<String, String> = db.prepare("SELECT id,state FROM attempts")?.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
     let mut recorded = BTreeMap::<&str, usize>::new();
     for reason in reasons.values() { *recorded.entry(reason.as_str()).or_default() += 1; }

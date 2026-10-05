@@ -120,6 +120,9 @@ fn attention(report: &Value, records: &mut [Value]) -> anyhow::Result<()> {
 }
 
 fn record(db: &Connection, version: u32, attempt: &str, task: &str, state: &str, kind: Option<&str>, home: Option<&str>) -> rusqlite::Result<Value> {
+    let lineage = if version >= 72 {
+        db.query_row("SELECT work_item,role,supersedes_task FROM task_lineage WHERE task_id=?1", [task], |r| Ok(json!({"work_item": r.get::<_,String>(0)?, "role": r.get::<_,String>(1)?, "supersedes": r.get::<_,Option<String>>(2)?}))).optional()?
+    } else { None }.unwrap_or_else(|| status("unavailable", "lineage_not_recorded"));
     let identity = db.query_row("SELECT json_extract(i.payload,'$.inputs.effective_profile.name'), json_extract(i.payload,'$.inputs.effective_profile.kind'), json_extract(n.report,'$.evidence.interaction.pinned.model'), json_extract(n.report,'$.evidence.interaction.pinned.reasoning_effort') FROM attempt_inputs i LEFT JOIN native_profiles n ON n.profile_digest=json_extract(i.payload,'$.inputs.profile.digest') WHERE i.attempt_id=?1", [attempt], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, Option<String>>(3)?))).optional()?.unwrap_or_default();
     let predates_decision = status("unavailable", "predates_dispatch_log");
     let decision = if version >= 50 {
@@ -201,7 +204,7 @@ fn record(db: &Connection, version: u32, attempt: &str, task: &str, state: &str,
         "launching_unix_ms": at(launching, true), "queue_to_launch_ms": queue, "reserved_unix_ms": at(reserved, true),
         "result": result, "running_unix_ms": at(running, true), "task_id": task,
         "terminal_state": if terminal { state } else { "open" }, "terminal_unix_ms": at(terminal_ms, terminal),
-        "usage": usage, "verification": verification,
+        "usage": usage, "verification": verification, "lineage": lineage,
     }))
 }
 

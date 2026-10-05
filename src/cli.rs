@@ -167,6 +167,12 @@ enum LaunchCommand {
         #[arg(long, conflicts_with_all=["fixes_review", "fixes"])] review_of: Option<String>,
         /// Fix every claim in the review task's completed receipt.
         #[arg(long)] fixes_review: Option<String>,
+        /// Stable identity shared by every task for this piece of work
+        #[arg(long)] work_item: Option<String>,
+        /// Task role in the work item
+        #[arg(long, value_parser=["build","fix","review","skeptic","recheck","merge","plan","other"])] role: Option<String>,
+        /// Same-work-item task replaced by this task
+        #[arg(long)] supersedes: Option<String>,
         /// Fix a pending claim reference or validated canonical finding (repeatable).
         #[arg(long)] fixes: Vec<String>,
         #[arg(long, requires="review_of", default_value="code", value_parser=["code", "skeptical", "test", "security", "architecture"])] review_kind: String,
@@ -1384,8 +1390,8 @@ pub fn run(#[cfg(feature="state-store")] capture: &mut crate::cli_invocation::Ca
             let value=match command {
                 LaunchCommand::Draft { selection, expected_head, validity_seconds } =>
                     serde_json::to_value(herdr_farm::launch_preparation::draft(&project,&load(&selection)?,expected_head,std::time::Duration::from_secs(validity_seconds),deadline,Default::default())?)?,
-                LaunchCommand::Run { task, profile, repository, sign_with, validity_seconds, title, plan_output, review_of, fixes_review, fixes, review_kind, review_scope, write, output, accept, deliverable, prompt_file, contract_file, integration_ref, base, max_active_workers, herdr_socket, prepare_only } =>
-                    crate::launch_run::run(&ctx, &slug, crate::launch_run::Args { task, profile, repository, sign_with, validity_seconds, title, plan_output, review_of, fixes_review, fixes, review_kind, review_scope, write, output, accept, deliverable, prompt_file, contract_file, integration_ref, base, max_active_workers, herdr_socket, prepare_only })?,
+                LaunchCommand::Run { task, profile, repository, sign_with, validity_seconds, title, plan_output, review_of, fixes_review, work_item, role, supersedes, fixes, review_kind, review_scope, write, output, accept, deliverable, prompt_file, contract_file, integration_ref, base, max_active_workers, herdr_socket, prepare_only } =>
+                    crate::launch_run::run(&ctx, &slug, crate::launch_run::Args { task, profile, repository, sign_with, validity_seconds, title, plan_output, review_of, fixes_review, work_item, role, supersedes, fixes, review_kind, review_scope, write, output, accept, deliverable, prompt_file, contract_file, integration_ref, base, max_active_workers, herdr_socket, prepare_only })?,
                 LaunchCommand::View { task } => crate::launch_run::view(&ctx, &slug, &task)?,
                 LaunchCommand::Stop { task, force } => crate::launch_run::stop(&ctx, &slug, &task, force)?,
                 LaunchCommand::Reserve { selection, approval_digest, expected_head } => {

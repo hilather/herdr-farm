@@ -1165,7 +1165,8 @@ an execution home that is not scanned, is not observed. Also:
   now (by definition active time so far), so it grows with the read time
   while an attempt is open.
 
-**M37 `overlap_waste_share`** (`M37.fleet-v1`). The producer is the owner's
+**M37 `overlap_waste_share`** (`M37.lineage-v2`). Producers are immutable task
+launch supersessions (0072, described below) and the owner's
 **accepted supersession reason**, canonical migration **0060**
 (`attempt_supersessions`, store schema 60): one append-only row per ended
 attempt (`completed`, `failed`, `cancelled`, `lost`; a trigger refuses any
@@ -1191,7 +1192,8 @@ worktree, or HOME a recorded worker execution home).
 every attempt with a worker session in the window, plus every attempt that
 ran in it (without usage: `usage_not_observed`). Each attempt is in one
 bucket: its recorded reason (`sibling_changed_same_area`,
-`duplicate_effort`, `other`), else `unexplained_abandonment` when it is
+`duplicate_effort`, `other`), else `sibling_changed_same_area` for an ended
+attempt of a task named by launch supersession, else `unexplained_abandonment` when it is
 `cancelled` or `lost`, else `not_superseded`. `buckets {name: {attempts,
 estimate}}`, `records` (count per reason), `total_lifecycle_cost {attempts,
 estimate, coverage, unattributed_sessions}`. Only
@@ -1832,3 +1834,24 @@ not proof that their output was useless.
 
 `attempts --json` exposes worker prompt count as `turns` and reported assistant
 `stop_reasons` counts. These do not enter worker token totals or M35.
+
+### Launch lineage and work items (0072, LINEAGE-1)
+
+`telemetry PROJECT accounting work-items [--json]` is read-only. Each work item
+reports task ids grouped by role, attempts and their lifecycle launch/terminal
+times, fix rounds (number of fix tasks), distinct superseded task ids, and
+elapsed milliseconds from first launch to last observed terminal mark. An open
+attempt censors the duration; absent marks remain null. These times use the
+existing Rust-written lifecycle log, never a join to SQLite event times. Spend
+sums attempt published-rate estimates using decimal arithmetic; missing cost
+is unavailable or partial, never zero, and currencies are never added together.
+Tasks without launch lineage are counted separately, not inferred into work items.
+
+M37.lineage-v2 additionally counts ended attempts of tasks named by a
+`task_lineage.supersedes_task` as overlap waste (`sibling_changed_same_area`).
+Each attempt is counted once regardless of multiple replacements or chains.
+Explicit operator `attempt_supersessions` reasons take precedence, including
+`duplicate_effort` and `other`; those rows remain unchanged. Active attempts
+are excluded from inferred supersession. All other M37 cost, window, coverage
+and denominator rules remain as in fleet-v1. Registry v8 records this change;
+M37.fleet-v1 is retained as an absent, superseded definition.

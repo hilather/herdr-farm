@@ -487,3 +487,13 @@ the owner's own words; the owner's session records both as `operator:cli` with
 `operator_owner.v1`, without distinguishing who acted. Review M22 and M25 as
 well as M28 after triage; merge/reset and broader review decisions stay the owner's. See
 [review launch contracts](telemetry/contracts-review.md) §13.
+
+Launch lineage: reuse one `--work-item WORK` for every build, review, fix and
+recheck of the same piece of work. Reviews and fixes inherit the target's work
+item unless explicitly overridden. Use `--role recheck` for a recheck; normal
+launches derive `build`, `plan`, `review`, `skeptic` or `fix` from their flags.
+When recreating a task under a new id, pass `--work-item WORK --supersedes OLD_TASK`;
+the old task must have no active attempt. Lineage is frozen before the first
+attempt and retained outside the signed execution contract. Inspect it with
+`telemetry PROJECT attempts --json` and
+`telemetry PROJECT accounting work-items --json`.

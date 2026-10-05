@@ -474,6 +474,10 @@ fn launch_run_reserves_a_planning_task_for_each_kind_and_reruns_safely() {
         let before = herdr_farm::runtime::snapshot(&lab.project).unwrap();
         let report = lab.ok(&args);
         let after = herdr_farm::runtime::snapshot(&lab.project).unwrap();
+        let lineage = lab.ok(&["telemetry","demo","attempts","--json"]);
+        let row = lineage["attempts"].as_array().unwrap().iter().find(|a| a["task_id"]==task).unwrap();
+        assert_eq!(row["lineage"],serde_json::json!({"work_item":task,"role":"plan","supersedes":null}));
+
         assert_eq!(after.control, before.control, "adding a resource-free binding keeps the epoch and active control");
         let binding = after.runtime_bindings.iter().find(|b| b.task.as_ref().is_some_and(|id| id.as_str() == task)).unwrap();
         assert!(after.observations.iter().any(|o| o.binding == binding.id && o.binding_revision == binding.revision
@@ -1435,6 +1439,70 @@ fn launch_run_records_reviews_and_skeptical_yield_and_refuses_without_writes() {
     let report = lab.ok(&["telemetry", "demo", "review", "report"]);
     assert_eq!(report["metrics"]["M28"]["denominator"], 1);
     assert_eq!(report["metrics"]["M28"]["value"], "1/1");
+    let attempts = lab.ok(&["telemetry", "demo", "attempts", "--json"]);
+    for (task, role) in [("author","build"),("review","review"),("skeptic","skeptic")] {
+        let row = attempts["attempts"].as_array().unwrap().iter().find(|a| a["task_id"] == task).unwrap();
+        assert_eq!(row["lineage"], serde_json::json!({"work_item":"author","role":role,"supersedes":null}));
+    }
+    let cancel = |attempt: &str| {
+        let state = herdr_farm::runtime::snapshot(&lab.project).unwrap();
+        let row = state.attempts.iter().find(|a| a.id.as_str()==attempt).unwrap();
+        let result = lab.ok(&["task","demo","cancel-attempt",attempt,"--expected-revision",&row.revision.to_string(),"--expected-head",&state.head.to_string(),"--reason","isolated fixture worker never started"]);
+        assert_eq!(result["released"],true,"{result}");
+    };
+    for row in attempts["attempts"].as_array().unwrap() { cancel(row["attempt_id"].as_str().unwrap()); }
+    let fix = |task: &str, reference: &str| -> Vec<String> {
+        ["launch","demo","run","--task",task,"--profile","codex-sol","--repository",lab.repo.to_str().unwrap(),
+            "--fixes",reference,"--write","src/","--output","src/lib.rs","--sign-with",lab.key.to_str().unwrap(),"--herdr-socket",socket.to_str().unwrap()]
+            .into_iter().map(str::to_owned).collect()
+    };
+    let mut first_args = fix("fix-1","finding:first");
+    let selector = first_args.iter().position(|a| a=="--fixes").unwrap();
+    first_args[selector] = "--fixes-review".into();
+    first_args[selector+1] = "review".into();
+    let first = lab.ok(&first_args.iter().map(String::as_str).collect::<Vec<_>>());
+    let mut replacement = author_args.to_vec();
+    let task_arg = replacement.iter().position(|a| *a == "author").unwrap();
+    replacement[task_arg] = "author-new";
+    replacement.extend(["--work-item","author","--supersedes","fix-1"]);
+    assert!(lab.fail(&replacement).contains("active attempt"));
+    let delivered = lab.follow_brief(first["attempt"].as_str().unwrap(),"src/lib.rs","fix-one-result");
+    assert!(delivered.status.success(),"{}",String::from_utf8_lossy(&delivered.stderr));
+    cancel(first["attempt"].as_str().unwrap());
+    let second_args = fix("fix-2","finding:new");
+    let second = lab.ok(&second_args.iter().map(String::as_str).collect::<Vec<_>>());
+    let delivered = lab.follow_brief(second["attempt"].as_str().unwrap(),"src/lib.rs","fix-two-result");
+    assert!(delivered.status.success(),"{}",String::from_utf8_lossy(&delivered.stderr));
+    cancel(second["attempt"].as_str().unwrap());
+    let last = replacement.len()-1;
+    replacement[last] = "author";
+    let recreated = lab.ok(&replacement);
+    let attempts = lab.ok(&["telemetry","demo","attempts","--json"]);
+    for task in ["fix-1","fix-2"] {
+        let row = attempts["attempts"].as_array().unwrap().iter().find(|a| a["task_id"]==task).unwrap();
+        assert_eq!(row["lineage"],serde_json::json!({"work_item":"author","role":"fix","supersedes":null}));
+    }
+    let row = attempts["attempts"].as_array().unwrap().iter().find(|a| a["attempt_id"]==recreated["attempt"]).unwrap();
+    assert_eq!(row["lineage"],serde_json::json!({"work_item":"author","role":"build","supersedes":"author"}));
+    let detail = lab.ok(&["telemetry","demo","accounting","work-items","--json"]);
+    assert_eq!(detail["work_items"].as_array().unwrap().len(),1);
+    let work = &detail["work_items"][0];
+    assert_eq!(work["fix_rounds"],2);
+    assert_eq!(work["superseded_count"],1);
+    assert_eq!(work["attempt_count"],6);
+    assert_eq!(work["tasks_by_role"]["fix"],serde_json::json!(["fix-1","fix-2"]));
+    let query = lab.ok(&["telemetry","demo","query","--metric","M07","--cohort","assignment_cohort","--by","role","--json"]);
+    let cells = query["results"][0]["cells"].as_array().unwrap();
+    assert!(cells.iter().any(|c| c["dimension"]["role"]=="fix"));
+    assert!(cells.iter().any(|c| c["dimension"]["role"]=="review"));
+    let raw = rusqlite::Connection::open(lab.project.join(".state/state.db")).unwrap();
+    assert!(raw.execute("UPDATE task_lineage SET role='other'",[]).is_err());
+    assert!(raw.execute("DELETE FROM task_lineage",[]).is_err());
+    let mut changed_lineage = replacement.clone();
+    changed_lineage.extend(["--role","other"]);
+    assert!(lab.fail(&changed_lineage).contains("lineage must be set before the task's first attempt"));
+    let fleet = lab.ok(&["telemetry","demo","accounting","fleet","--json"]);
+    assert_eq!(fleet["metrics"]["M37"]["records"]["sibling_changed_same_area"],1);
     let changed = launch("review", "absent", "code", "claude-sonnet");
     let before = herdr_farm::runtime::snapshot(&lab.project).unwrap();
     assert!(lab.fail(&changed.iter().map(String::as_str).collect::<Vec<_>>()).contains("already bound"));

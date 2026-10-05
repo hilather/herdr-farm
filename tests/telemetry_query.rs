@@ -121,7 +121,7 @@ fn nd(m: &Value) -> (Value, Value, Value) { (m["numerator"].clone(), m["denomina
 fn registry_declares_every_metric_and_gates_families() {
     let p = Planted::new();
     let registry = p.json(&["metrics", "registry", "--json"]);
-    assert_eq!(registry["registry"], "analytics-registry.v7");
+    assert_eq!(registry["registry"], "analytics-registry.v8");
     assert_eq!(registry["rejected_cohorts"], json!({"completed_task": "ambiguous_cohort"}));
     let metrics = registry["metrics"].as_array().unwrap();
     let ids: Vec<&str> = metrics.iter().map(|m| m["id"].as_str().unwrap()).collect();
@@ -140,7 +140,7 @@ fn registry_declares_every_metric_and_gates_families() {
     assert_eq!(report["metrics"]["M19"]["reason"], "blocked_intervals_not_recorded");
     assert_eq!(p.query(&["--metric", "M19"])["reason"], "blocked_intervals_not_recorded");
     let get = |id: &str| metrics.iter().find(|m| m["id"] == id).unwrap().clone();
-    for (id, current, previous) in [("M04", "M04.cost-v2", "M04.cost-v1"), ("M05", "M05.tokens-v2", "M05.tokens-v1"), ("M13", "M13.slice-v2", "M13.slice-v1"), ("M31", "M31.attention-v2", "M31.attention-v1"), ("M35", "M35.fanout-v2", "M35.fanout-v1"), ("M40", "M40.quota-windows-v2", "M40.quota-windows-v1")] {
+    for (id, current, previous) in [("M04", "M04.cost-v2", "M04.cost-v1"), ("M05", "M05.tokens-v2", "M05.tokens-v1"), ("M13", "M13.slice-v2", "M13.slice-v1"), ("M31", "M31.attention-v2", "M31.attention-v1"), ("M35", "M35.fanout-v2", "M35.fanout-v1"), ("M40", "M40.quota-windows-v2", "M40.quota-windows-v1"), ("M37", "M37.lineage-v2", "M37.fleet-v1")] {
         assert_eq!(get(id)["versions"][0]["definition"], current);
         assert_eq!(get(id)["versions"][1]["definition"], previous);
         assert_eq!(get(id)["versions"][1]["provider"]["kind"], "absent");
@@ -276,7 +276,7 @@ fn terminal_cohort_keeps_failed_and_cancelled_tasks() {
     let ids: Vec<&str> = drill["rows"].as_array().unwrap().iter().map(|r| r["id"].as_str().unwrap()).collect();
     assert_eq!(ids, ["c", "c0", "f", "s"], "failed and cancelled tasks are drillable members of T");
     assert_eq!(drill["rows"][2], json!({"entity": "task", "id": "f", "disposition": "failed", "terminal_unix_ms": 1700, "assigned_unix_ms": 1100, "attempts": 1,
-        "route": "none", "agent_kind": "unknown", "profile": "unknown", "task_class": "unclassified"}));
+        "route": "none", "agent_kind": "unknown", "profile": "unknown", "task_class": "unclassified", "role": "unknown"}));
 
     // Doc 10 §3 shape: M02 = 1/3 and M07 = 3/1 over [1000, 2000); c0 has no terminal time.
     let w = p.query(&["--metric", "M02", "--from", "1000", "--to", "2000"]);

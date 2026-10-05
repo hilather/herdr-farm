@@ -568,3 +568,30 @@ fn plan_freshness_separates_sources_from_live_observations() {
     assert_eq!(p.ok(&["migration", "demo", "status"])["phase"], "active");
     assert!(migration::open_active(&p.project).unwrap().imported_sources().unwrap().iter().any(|source| source.path == ".state/coordinator.json"));
 }
+
+/// Upgrade preserves unknown historical times and starts clock capture only
+/// for subsequently committed events, through the owner's CLI.
+#[test]
+fn schema_72_records_new_event_times_without_inventing_history() {
+    let p = Project::new("pause");
+    p.migrate();
+    let path = p.project.join(".state/state.db");
+    let raw = rusqlite::Connection::open(&path).unwrap();
+    raw.execute_batch("DROP TRIGGER events_record_time; DROP TABLE event_times; DROP TABLE task_lineage;
+        UPDATE store_meta SET schema_version=71; PRAGMA user_version=71;").unwrap();
+    let old_head: i64 = raw.query_row("SELECT coalesce(max(sequence),0) FROM events", [], |r| r.get(0)).unwrap();
+    assert!(old_head > 0);
+    let before = jiff::Timestamp::now().as_millisecond();
+    p.ok(&["migration","demo","upgrade-store"]);
+    assert_eq!(raw.query_row("PRAGMA user_version",[],|r|r.get::<_,i64>(0)).unwrap(),72);
+    assert_eq!(raw.query_row("SELECT count(*) FROM event_times WHERE sequence<=?1",[old_head],|r|r.get::<_,i64>(0)).unwrap(),0);
+    p.ok(&["task","demo","add","timed-work","--title","Timed work","--expected-head",&p.head()]);
+    let after = jiff::Timestamp::now().as_millisecond();
+    let (count,min,max): (i64,i64,i64) = raw.query_row("SELECT count(*),min(recorded_unix_ms),max(recorded_unix_ms) FROM event_times WHERE sequence>?1",[old_head],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+    assert!(count>0);
+    assert!((before-1000..=after+1000).contains(&min));
+    assert!((before-1000..=after+1000).contains(&max));
+    assert_eq!(raw.query_row("SELECT count(*) FROM events e LEFT JOIN event_times t USING(sequence) WHERE e.sequence>?1 AND t.sequence IS NULL",[old_head],|r|r.get::<_,i64>(0)).unwrap(),0);
+    assert!(raw.execute("UPDATE event_times SET recorded_unix_ms=0",[]).is_err());
+    assert!(raw.execute("DELETE FROM event_times",[]).is_err());
+}

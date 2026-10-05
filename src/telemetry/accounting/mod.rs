@@ -56,6 +56,8 @@ pub const MIGRATIONS: &[&str] = &[include_str!("../../../migrations/telemetry/ac
 pub enum Command {
     /// Product CLI invocations by caller and fixed command path. Read-only JSON.
     Cli,
+    /// Work-item roles, fix rounds, supersessions, lifecycle duration and spend. Read-only.
+    WorkItems { #[arg(long)] json: bool },
     /// Stream version of this lane's sidecar tables. Read-only.
     Status,
     /// Claude coordinator turn metadata and costs, printed as JSON. Read-only.
@@ -291,6 +293,11 @@ pub fn run(project: &Path, command: Command) -> Result<String> {
             value
         }
         Command::Coordinator => fleet::coordinator_turns(project)?,
+        Command::WorkItems { json } => {
+            let value = work_items::read(project)?;
+            if !json { return Ok(work_items::text(&value)); }
+            value
+        }
         Command::Fleet { json, window_minutes } => {
             let value = fleet::read(project, window_minutes)?;
             if !json { return Ok(fleet::text(&value) + &super::configuration_names::project_text(project)?); }
@@ -486,3 +493,5 @@ fn tick_once(project: &Path, budget: super::codex::Budget) -> Result<Value> {
     }
     Ok(Value::Null)
 }
+
+mod work_items;
