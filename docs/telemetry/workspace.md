@@ -205,7 +205,8 @@ never read the whole store snapshot. Live Running/AwaitingInput attempts may
 publish. Cleanup is offered only for this ticker's successfully published
 bindings, until 300 seconds after their last publish. The in-process map holds
 at most 256 bindings, evicting the oldest publish. Successful erase or an absent
-pane removes the entry. After restart this map is empty: leftover decorations
+pane removes the entry. A missing dedicated server socket is an absent pane
+and removes the publish hint without an error or repeated cleanup retries. After restart this map is empty: leftover decorations
 expire by native TTL, the accepted residual also used for unreachable panes. Each
 project offers at most 16 attempt jobs per tick, rotating through attempts;
 these offers never evict other queue entries. Advisory jobs share bounded

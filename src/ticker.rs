@@ -640,10 +640,17 @@ pub fn tick(ctx: &Ctx, log: &Log, memory: &mut Memory) -> bool {
         }
         // Advisory tickets never occupy an effect/observation turn. The executor
         // holds them until the just-admitted canonical batch has fully drained.
-        memory.attempt_token_tickets.retain(|ticket| match ticket.try_recv() {
-            Ok(None) => true,
-            Ok(Some(completion)) => { if let Err(error)=completion.result {log.line(&format!("attempt token: {error:#}"));} false },
-            Err(error) => {log.line(&format!("attempt token: {error:#}"));false}
+        memory.attempt_token_tickets.retain(|(identity, ticket)| {
+            let log_error = |error: &anyhow::Error| {
+                let slug = std::path::Path::new(&identity.project).file_name().unwrap_or_default().to_string_lossy();
+                let attempt = identity.operation.trim_start_matches("tokens:attempt:");
+                log.line(&format!("{slug}: attempt token {attempt}: {error:#}"));
+            };
+            match ticket.try_recv() {
+                Ok(None) => true,
+                Ok(Some(completion)) => { if let Err(error) = completion.result { log_error(&error); } false },
+                Err(error) => { log_error(&error); false },
+            }
         });
         if !memory.copy_jobs.as_ref().is_some_and(|q|q.pending()||q.canonical_work_pending())
             && !memory.routine_jobs.as_ref().is_some_and(|q|q.pending())
@@ -652,7 +659,8 @@ pub fn tick(ctx: &Ctx, log: &Log, memory: &mut Memory) -> bool {
                 let control=crate::source_tree::Control{deadline:Instant::now()+Duration::from_secs(5),cancellation:Default::default()};
                 match crate::attempt_token_jobs::requests(&ctx.root.join(slug),&control,&memory.attempt_tokens) {
                     Ok(requests)=>if let Some(queue)=memory.copy_jobs.as_ref() {for request in requests {
-                        match queue.submit_advisory(request) {Ok(ticket)=>memory.attempt_token_tickets.push(ticket),Err(error) if error.to_string().contains("executor queue is full")=>{},Err(error)=>log.line(&format!("{slug}: attempt token admission: {error:#}"))}
+                        let identity = request.identity.clone();
+                        match queue.submit_advisory(request) {Ok(ticket)=>memory.attempt_token_tickets.push((identity, ticket)),Err(error) if error.to_string().contains("executor queue is full")=>{},Err(error)=>log.line(&format!("{slug}: attempt token admission: {error:#}"))}
                     }},
                     Err(error)=>log.line(&format!("{slug}: attempt token admission: {error:#}"))
                 }

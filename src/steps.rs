@@ -143,7 +143,7 @@ pub struct Memory {
     #[cfg(feature="state-store")]
     pub attempt_tokens:std::sync::Arc<std::sync::Mutex<crate::attempt_token_jobs::Hints>>,
     #[cfg(feature="state-store")]
-    pub attempt_token_tickets:Vec<crate::executor::Ticket>,
+    pub attempt_token_tickets:Vec<(crate::executor::Identity, crate::executor::Ticket)>,
     #[cfg(feature="state-store")]
     pub routine_jobs:Option<crate::routine_jobs::Queue>,
     #[cfg(feature="state-store")]

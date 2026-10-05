@@ -2420,6 +2420,45 @@ fn canonical_attempt_sidebar_clears_after_termination_in_an_active_project() {
     lab.stop(ticker);
 }
 
+/// Both running bindings publish, and a retired missing server is harmless
+/// across subsequent passes in the same ticker process.
+#[test]
+fn concurrent_attempt_tokens_publish_and_missing_retired_server_stays_quiet() {
+    let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+    lab.ok(&["scheduler", "demo", "policy", "--max-active-workers", "2", "--max-attempts-per-task", "3", "--expected-revision", &lab.state().scheduler.unwrap().policy.revision.to_string(), "--expected-head", &lab.head().to_string()]);
+    lab.ok(&["task", "demo", "add", "next", "--title", "next", "--expected-head", &lab.head().to_string()]);
+    lab.ok(&["task", "demo", "queue", "next", "--input-file", lab.path("queue.json").to_str().unwrap(), "--expected-revision", "1", "--expected-head", &lab.head().to_string()]);
+    fs::create_dir(lab.path("next-server")).unwrap();
+    let socket = lab.path("next-server/native.sock");
+    let id = TaskId::new("next").unwrap();
+    let revision = lab.state().tasks.iter().find(|t| t.id == id).unwrap().revision;
+    let route = RuntimeRoute { socket: socket.display().to_string(), cwd: lab.repo.canonicalize().unwrap().display().to_string(), ..Default::default() };
+    let binding = runtime::create_binding(&lab.project, Some(&id), Some(revision), lab.head(), &route).unwrap().binding.id;
+    lab.resume();
+    let (_, first) = lab.reserve("First instructions");
+    let selection = lab.selection_for("next", &binding, "Second instructions");
+    let (_, second) = lab.reserve_selection(&selection);
+    lab.serve();
+    let mut server = Ticker(Command::new("/usr/bin/python3").args(["-c", SERVER]).arg(&socket).spawn().unwrap());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !socket.exists() { assert!(Instant::now() < deadline); std::thread::sleep(Duration::from_millis(10)); }
+    let second_metadata = || fs::read_to_string(lab.path("next-server/requests")).unwrap_or_default().lines().filter_map(|line| serde_json::from_str::<Value>(line).ok()).any(|v| v["method"] == "pane.report_metadata" && v["params"]["tokens"]["telemetry"] == "claude ○");
+    let mut ticker = lab.spawn();
+    lab.wait(&mut ticker, 120, &|| lab.attempt(&first).state == AttemptState::Running && lab.attempt(&second).state == AttemptState::Running && second_metadata() && lab.requests().iter().any(|(m,p)| m == "pane.report_metadata" && p["tokens"]["telemetry"] == "claude ○"));
+    lab.ok_live(&|| { let a = lab.attempt(&second); ["task", "demo", "cancel-attempt", second.as_str(), "--expected-revision", &a.revision.to_string(), "--expected-head", &lab.head().to_string(), "--reason", "missing server cleanup"].map(String::from).to_vec() });
+    lab.wait(&mut ticker, 90, &|| lab.attempt(&second).termination_observed);
+    server.0.kill().unwrap();
+    server.0.wait().unwrap();
+    fs::remove_file(&socket).unwrap();
+    for _ in 0..3 {
+        let observed = lab.state().observations.iter().map(|o| o.observed_unix_ms).max().unwrap();
+        lab.wait(&mut ticker, 90, &|| lab.state().observations.iter().any(|o| o.observed_unix_ms > observed));
+    }
+    lab.stop(ticker);
+    let log = fs::read_to_string(lab.path("root/.ticker.log")).unwrap_or_default();
+    assert!(!log.contains("attempt token binding changed") && !log.contains("attempt token: No such file") && !log.contains(&format!("attempt token {}:", second.as_str())), "{log}");
+}
+
 /// A restarted ticker must not discover historical cleanup work, even when
 /// a cancelled worker's retained pane is still present.
 #[test]

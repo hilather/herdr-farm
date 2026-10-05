@@ -153,9 +153,9 @@ fn quota_window(sidecar: &rusqlite::Connection, remaining: &str, resets: i64, la
 // Outages and missing data: unknown with a reason, never ok, never a zero
 
 /// Drive complete foreground ticker passes over a temporary canonical project.
-/// Age only the operator evaluation fixture to exercise the 300 s boundary.
+/// Default evaluation, interval, retention recovery and owner opt-out via the CLI.
 #[test]
-fn ticker_health_requires_operator_opt_in_obeys_interval_and_never_notifies() {
+fn ticker_health_evaluates_by_default_obeys_interval_and_never_notifies() {
     use std::time::{Duration, Instant};
     let p = Planted::new();
     p.sidecar_created();
@@ -192,21 +192,21 @@ fn ticker_health_requires_operator_opt_in_obeys_interval_and_never_notifies() {
     };
     let pass = || pass_until(&|| true);
 
-    pass();
-    assert_eq!(evaluations(), (0, 0, 0));
-    assert_eq!(p.alerts()["last_evaluated_unix_ms"], Value::Null);
+    pass_until(&|| evaluations().2 >= 1);
+    assert_eq!(evaluations(), (1, 0, 1));
+    assert!(p.alerts()["last_evaluated_unix_ms"].is_i64());
 
     // A 20-minute-old collection is above the 15-minute warning threshold, below one hour.
     let now = unix_ms();
     p.sidecar().execute("INSERT INTO collect_offsets(path_digest,device,inode,byte_offset,records,rate_limits,model,effort,updated_unix_ms) VALUES('ticker-source',1,1,0,0,0,NULL,NULL,?1)", [now - 20 * MINUTE]).unwrap();
     assert_eq!(p.evaluate()["recorded"], true);
-    assert_eq!(evaluations(), (1, 1, 0));
+    assert_eq!(evaluations(), (2, 1, 1));
     assert_eq!(open_alert(&p.alerts(), "collector_stale").unwrap()["occurrences"], 1);
     // No health interval override exists. Seed an elapsed operator evaluation,
     // without waiting five minutes or changing the production clock.
     p.sidecar().execute("UPDATE health_evaluations SET evaluated_unix_ms=?1", [now - 300_001]).unwrap();
-    pass_until(&|| evaluations().2 >= 1);
-    assert_eq!(evaluations(), (2, 1, 1));
+    pass_until(&|| evaluations().2 >= 2);
+    assert_eq!(evaluations(), (3, 1, 2));
     let first_tick = p.alerts();
     assert!(first_tick["last_evaluated_unix_ms"].as_i64().unwrap() >= now);
     let alert = open_alert(&first_tick, "collector_stale").unwrap();
@@ -214,8 +214,17 @@ fn ticker_health_requires_operator_opt_in_obeys_interval_and_never_notifies() {
 
     pass();
     assert!(unix_ms() - first_tick["last_evaluated_unix_ms"].as_i64().unwrap() < 300_000);
-    assert_eq!(evaluations(), (2, 1, 1));
+    assert_eq!(evaluations(), (3, 1, 2));
     assert_eq!(p.alerts(), first_tick);
+    assert_eq!(inbox(), before_inbox);
+    p.sidecar().execute("DELETE FROM health_evaluations", []).unwrap();
+    fs::create_dir_all(p.config_dir()).unwrap();
+    fs::write(p.config_dir().join("config.toml"), "[telemetry]\nhealth_evaluation = false\n").unwrap();
+    pass();
+    assert_eq!(evaluations(), (0, 0, 0));
+    fs::write(p.config_dir().join("config.toml"), "[telemetry]\nhealth_evaluation = true\n").unwrap();
+    pass_until(&|| evaluations().2 == 1);
+    assert_eq!(evaluations(), (1, 0, 1));
     assert_eq!(inbox(), before_inbox);
 }
 

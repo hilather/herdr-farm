@@ -143,5 +143,5 @@ pub fn run_recommend(project: &Path, args: &recommend::Args) -> Result<String> {
 pub fn metrics(_project: &Path, _since: Option<i64>) -> Result<BTreeMap<String, Value>> { Ok(BTreeMap::new()) }
 
 /// Ticker telemetry pass: evaluate at most once per `store::TICK_INTERVAL_MS`,
-/// only after an operator's first `health evaluate`. Never notifies.
+/// enabled by default unless the owner disables health_evaluation. Never notifies.
 pub fn tick(project: &Path, _budget: super::codex::Budget) -> Result<()> { store::tick(project) }
