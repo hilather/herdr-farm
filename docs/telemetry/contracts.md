@@ -929,3 +929,8 @@ inbox retention and backups. Restarting the ticker restarts the idle stretch and
 can deliver at most one extra notice for that stretch per restart.
 Worker question notices use existing bound `codex_tool_calls` metadata and
 canonical inbox rows, with no question text or new sidecar table.
+
+Worker termination derives wall budgets from the existing attempt-input frozen
+profile using launch-wrapper validation; no canonical or sidecar migration is
+needed. Unreadable historical frozen definitions retain `process_exit`. Existing
+attempt-input authority retention and full backup/restore classification apply.

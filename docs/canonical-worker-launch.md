@@ -1028,3 +1028,28 @@ or merge. With no explicit root flag or root environment override, worker CLI
 commands resolve the projects root from `HERDR_FARM_SUBMISSION_SPOOL` (or its
 legacy alias), so memory commands reach the canonical project from an isolated
 home. This resolution does not grant any additional write authority.
+
+## Wall-budget termination and contention (schema 72)
+
+The namespace `timeout` includes gate waiting and kills the worker at the approved
+profile wall budget. No agent or terminal disappearance alone releases capacity.
+Termination reconciliation reopens both retained supervisor incarnations; ESRCH,
+a different pidfs incarnation, or a signalled pidfd proves the original process
+ended. Inaccessible observations remain unresolved.
+
+The existing attempt-input frozen profile supplies the wall budget through
+`frozen_definition` and the launch wrapper’s `validate_gated_preparation`. A proven
+unrequested exit observed after the creation time plus this budget records `timed_out`; this is an elapsed-budget classification, not a
+captured timeout exit status. Earlier exits remain `process_exit`. Historical
+attempts whose frozen definition cannot be read or validated keep `process_exit`.
+Cancellation and completion requests retain precedence. No budget is inferred
+when the frozen configuration is unavailable or changed.
+
+The ticker derives termination hints from `termination_observed=0` on every pass,
+including while paused. Lock contention records no completion or permanent failure;
+the queue retains pending work and retries. Pending live-process observations also
+remain pending rather than being reported as completed jobs. Restart reconstructs
+hints from the store and the exact retained supervisor identities. The successful
+transaction records quiescence, preservation, terminal attempt state, capacity
+release and the usual coordinator ended notice atomically, making replay idempotent.
+The ticker logs project and attempt on contention deferral and successful recording.

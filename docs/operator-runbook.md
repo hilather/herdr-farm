@@ -549,3 +549,23 @@ Per-pass attention, idle/question notice delivery and private-server retirement
 use hot-path store opens. They do not run the whole-store integrity check or
 classify its result; the ticker's periodic background integrity check owns that
 check and pauses admission and effects on corruption.
+
+## Worker wall budgets under contention
+
+A worker's approved wall budget includes its gate wait. The native timeout ends
+its process independently of the ticker. If recording the end cannot acquire the
+execution barrier, `.ticker.log` names the project and attempt with
+`termination recording deferred by contention; retry`. The attempt retains
+capacity until the ticker proves both recorded supervisor processes ended and
+commits preservation and termination. Later passes retry; a ticker restart also
+reconstructs this work. No fresh launch approval is needed to record an existing end.
+
+Successful recording logs `termination recording succeeded`, changes an unrequested
+attempt to Failed, blocks its task and releases capacity. Schema 72 uses the
+attempt’s frozen profile to record
+`timed_out` for proven exits observed after the retained creation-time wall budget;
+this describes an elapsed budget, not an observed timeout exit code. Earlier or
+historical exits with unreadable frozen definitions record `process_exit`. The
+coordinator receives the usual
+`attempt.ended_without_submission` inbox notice exactly once when no result was
+submitted. Cancellation and accepted completion keep their usual causes.

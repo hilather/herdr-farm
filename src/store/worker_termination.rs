@@ -16,6 +16,7 @@ pub(crate) struct TerminationWorker {
     pub cancelled:bool,
     /// An operator or automatic completion request: stop the worker without failing its task.
     pub completion:bool,
+    pub wall_expired:bool,
 }
 impl SqliteStore {
     pub(super) fn termination_selection(&mut self,id:&AttemptId,expected:u64,budget:&read_budget::ReadBudget)->Result<TerminationSelection> {
@@ -23,8 +24,10 @@ impl SqliteStore {
         let tx=self.connection.transaction()?;
         let head=head(&tx)?;
         let attempt=read_attempt_with_budget(&tx,id,Some(budget))?;
-        if attempt.revision!=expected {return Err(StoreError::Conflict);}
+        // A queued observation can outlive another observer's successful commit.
+        // Terminal replay is read-only; stop retrying even with its old revision.
         if attempt.termination_observed {return Ok(TerminationSelection{head,attempt,worker:None});}
+        if attempt.revision!=expected {return Err(StoreError::Conflict);}
         let record=super::reservations::read_attempt_input(&tx,id.as_str(),Some(budget))?;
         let task=read_task_with_budget(&tx,attempt.task.as_str(),Some(budget))?;
         let binding=super::runtime::read_binding(&tx,&record.inputs.binding,Some(budget))?.ok_or(StoreError::Conflict)?;
@@ -33,6 +36,7 @@ impl SqliteStore {
         super::approvals::validate_historical_consumption(&tx,&record,Some(budget))?;
         let cancelled=tx.query_row("SELECT EXISTS(SELECT 1 FROM attempt_cancellations WHERE attempt_id=?1)",[id.as_str()],|row|row.get(0))?;
         let completion=completion_requested(&tx,id)?;
+        let wall_expired=wall_expired(&tx,&record,jiff::Timestamp::now().as_millisecond())?;
         let mut query=tx.prepare("SELECT sequence,kind,entity,revision,payload_version,payload FROM events WHERE entity=?1 AND (kind GLOB 'runtime.launch_*' OR kind IN ('runtime.worktrees_creation','runtime.worktrees_ready')) ORDER BY sequence")?;
         let mut rows=query.query([record.operation.as_str()])?;
         let mut events=Vec::new();
@@ -42,7 +46,7 @@ impl SqliteStore {
             events.push(Event{sequence:row.get(0)?,kind:row.get(1)?,entity:row.get(2)?,revision:row.get(3)?,payload_version:row.get(4)?,payload:serde_json::from_str(&payload).map_err(|e|StoreError::Corrupt(e.to_string()))?});
         }
         budget.check()?;
-        Ok(TerminationSelection{head,attempt,worker:Some(TerminationWorker{record,task,binding,owner,delivery,events,cancelled,completion})})
+        Ok(TerminationSelection{head,attempt,worker:Some(TerminationWorker{record,task,binding,owner,delivery,events,cancelled,completion,wall_expired})})
     }
 }
 
@@ -188,7 +192,7 @@ impl SqliteStore {
         let cancelled:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM attempt_cancellations WHERE attempt_id=?1)",[attempt.id.as_str()],|row|row.get(0))?;
         // Cancellation overrides a completion request; either names the cause.
         let completion=!cancelled&&completion_requested(&tx,&attempt.id)?;
-        let cause=if cancelled {WorkerTerminationCause::Cancellation} else if completion {WorkerTerminationCause::Completion} else {WorkerTerminationCause::ProcessExit};
+        let cause=if cancelled {WorkerTerminationCause::Cancellation} else if completion {WorkerTerminationCause::Completion} else if wall_expired(&tx,&record,receipt.observed_unix_ms)? {WorkerTerminationCause::TimedOut} else {WorkerTerminationCause::ProcessExit};
         if receipt.cause != cause {
             return Err(StoreError::Conflict);
         }
@@ -631,4 +635,16 @@ impl SqliteStore {
         // retries until new canonical evidence arrives.
         Ok((scheduled,(!refusals.is_empty()).then(||refusals.join("; "))))
     }
+}
+
+// Use the same frozen definition and validation as the launch wrapper. Historical
+// definitions that cannot be read do not establish a wall budget.
+fn wall_expired(db: &Connection, record: &AttemptInputRecord, observed_ms: i64) -> Result<bool> {
+    let Some(profile) = record.inputs.effective_profile.as_ref() else { return Ok(false); };
+    let Ok(definition) = crate::profile_config::frozen_definition(profile) else { return Ok(false); };
+    let Ok(wall) = definition.validate_gated_preparation(0) else { return Ok(false); };
+    Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM events e JOIN event_times t ON t.sequence=e.sequence
+        WHERE e.entity=?1 AND e.kind='runtime.launch_creation'
+        AND t.recorded_unix_ms + ?2 * 1000 <= ?3)",
+        params![record.operation.as_str(), integer(wall)?, observed_ms], |row| row.get(0))?)
 }

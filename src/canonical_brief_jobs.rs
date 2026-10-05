@@ -167,13 +167,23 @@ impl Runner for JobRunner {
         } else if let Some(attempt) = input.termination {
             #[cfg(target_os = "linux")]
             {
-                herdr_farm::canonical_worker::reconcile_termination(
-                    &input.project,
-                    &attempt,
-                    input.revision,
-                    deadline,
-                    cancellation,
-                )?;
+                match herdr_farm::canonical_worker::reconcile_termination(
+                    &input.project, &attempt, input.revision, deadline, cancellation,
+                ) {
+                    Ok(Some(_)) => return Ok(Output {
+                        code: Some(0), elapsed: entered.elapsed(),
+                        stdout: format!("{} attempt {}: termination recording succeeded", input.project.display(), attempt.as_str()),
+                        ..Output::default()
+                    }),
+                    Ok(None) => {},
+                    Err(error) => {
+                        let contended = error.chain().any(|cause| matches!(cause.downcast_ref::<std::fs::TryLockError>(), Some(std::fs::TryLockError::WouldBlock)));
+                        if contended {
+                            return Err(error.context(format!("attempt {}: termination recording deferred by contention; retry", attempt.as_str())));
+                        }
+                        return Err(error);
+                    }
+                }
             }
             #[cfg(not(target_os = "linux"))]
             {

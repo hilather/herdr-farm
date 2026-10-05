@@ -17,7 +17,7 @@ fn failure_delay(identity:&Identity)->Duration {
     else {crate::timing::job_retry()}
 }
 struct Entry {work:Option<Request>,resources:Vec<Resource>,not_before:Instant,touched:Instant,last:u64,needed:bool}
-struct Pending {key:Key,identity:Identity,ticket:crate::executor::Ticket,resources:Vec<Resource>}
+struct Pending {key:Key,identity:Identity,work:Request,ticket:crate::executor::Ticket,resources:Vec<Resource>}
 pub struct Queue {executor:Arc<crate::executor::Executor>,entries:BTreeMap<Key,Entry>,pending:Option<Pending>,pending_sets:BTreeMap<Key,Pending>,sequence:u64,cursor:crate::fair_admission::Cursor,
     #[cfg(all(feature="state-store",target_os="linux"))]
     verifier:Option<crate::canonical_verification_jobs::VerifierLane>}
@@ -31,10 +31,10 @@ fn is_exclusive(identity:&Identity)->bool {
     #[cfg(not(feature="state-store"))]
     {let _=identity;false}
 }
-fn completion_of(ticket:&crate::executor::Ticket,identity:&Identity)->Option<Result<()>> {
+fn completion_of(ticket:&crate::executor::Ticket,identity:&Identity)->Option<Result<String>> {
     match ticket.try_recv() {
         Ok(None)=>None,
-        Ok(Some(completion))=>Some(if completion.identity!=*identity {Err(anyhow::anyhow!("background completion identity mismatch"))} else {completion.result.and_then(|o|{ensure!(o.success(),"background worker failed");Ok(())})}),
+        Ok(Some(completion))=>Some(if completion.identity!=*identity {Err(anyhow::anyhow!("background completion identity mismatch"))} else {completion.result.and_then(|o|{ensure!(o.success(),"background worker failed");Ok(o.stdout)})}),
         Err(error)=>Some(Err(error)),
     }
 }
@@ -192,14 +192,30 @@ impl Queue {
         }
         errors
     }
-    fn settle(&mut self,pending:Pending,result:Result<()>)->Vec<String> {
+    fn settle(&mut self,pending:Pending,result:Result<String>)->Vec<String> {
         let now=Instant::now();
         // Recovery/termination observations may find no new evidence. Poll them
         // at idle cadence instead of competing with every launch stage.
         // Attempt-token workers own suffix cadence; a change can publish on
         // the next tick instead of waiting for thread-token cooldown.
-        if let Some(entry)=self.entries.get_mut(&pending.key) {entry.not_before=now+if result.is_err()||pending.identity.operation=="notification"||(pending.identity.operation.starts_with("tokens:")&&!pending.identity.operation.starts_with("tokens:attempt:")){failure_delay(&pending.identity)}else if pending.identity.operation.starts_with("canonical-worker:terminate-")||pending.identity.operation.starts_with("canonical-worker:recover:"){crate::timing::worker_recovery_retry()}else{Duration::ZERO};entry.touched=now;entry.needed=result.is_err();}
-        result.err().map(|e|format!("{} {}: background queue: {e:#}",pending.key.0,pending.key.1)).into_iter().collect()
+        if let Some(entry)=self.entries.get_mut(&pending.key) {entry.not_before=now+if result.is_err()||pending.identity.operation=="notification"||(pending.identity.operation.starts_with("tokens:")&&!pending.identity.operation.starts_with("tokens:attempt:")){failure_delay(&pending.identity)}else if pending.identity.operation.starts_with("canonical-worker:terminate-")||pending.identity.operation.starts_with("canonical-worker:recover:"){crate::timing::worker_recovery_retry()}else{Duration::ZERO};entry.touched=now;entry.needed=result.is_err() || (pending.identity.operation.starts_with("canonical-worker:terminate-") && result.as_ref().is_ok_and(String::is_empty));}
+        // Keep the observation itself, not only a needed bit. Otherwise a failed
+        // job has no executable retry until a later inventory happens to offer
+        // this attempt again. These requests only observe retained authority.
+        if pending.identity.operation.starts_with("canonical-worker:terminate-")
+            && (result.is_err() || result.as_ref().is_ok_and(String::is_empty))
+            && let Some(entry) = self.entries.get_mut(&pending.key)
+        {
+            let mut work = pending.work;
+            work.deadline = now + work.command.timeout;
+            work.command.deadline = Some(work.deadline);
+            entry.work = Some(work);
+        }
+        match result {
+            Ok(line) if pending.identity.operation.starts_with("canonical-worker:terminate-") && !line.is_empty() => vec![line],
+            Ok(_) => Vec::new(),
+            Err(error) => vec![format!("{} {}: background queue: {error:#}", pending.key.0, pending.key.1)],
+        }
     }
     #[cfg(any(test,not(feature="state-store")))]
     pub fn admit(&mut self)->Vec<String> {
@@ -233,10 +249,10 @@ impl Queue {
             let identity=work.identity.clone();let resources=entry.resources.clone();
             (work,identity,resources)
         };
-        match self.executor.submit(work) {
+        match self.executor.submit(work.clone()) {
             Ok(ticket)=>{
                 let entry=self.entries.get_mut(key).unwrap();entry.work=None;entry.last=next;self.sequence=next;self.cursor.accepted(key);
-                let pending=Pending{key:key.clone(),identity,ticket,resources};
+                let pending=Pending{key:key.clone(),identity,work,ticket,resources};
                 if declared {self.pending_sets.insert(key.clone(),pending);} else {self.pending=Some(pending);}
                 true
             },
