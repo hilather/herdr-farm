@@ -171,7 +171,7 @@ fn prepare_codex(home: &Path, pins: &Pins, trusted: &[String]) -> Result<()> {
     };
     // Set on every launch: a value left in the home by an earlier run must not
     // widen what the worker may do.
-    for (key, value) in [("approval_policy", "never"), ("sandbox_mode", "workspace-write")] {
+    for (key, value) in [("approval_policy", "never"), ("default_permissions", "herdr-farm-worker")] {
         table.insert(key.into(), value.into());
     }
     table.insert("check_for_update_on_startup".into(), false.into());
@@ -181,9 +181,16 @@ fn prepare_codex(home: &Path, pins: &Pins, trusted: &[String]) -> Result<()> {
     if let Some(effort) = &pins.reasoning_effort {
         table.insert("model_reasoning_effort".into(), effort.clone().into());
     }
-    let workspace = table.entry("sandbox_workspace_write").or_insert_with(|| toml::Table::new().into());
-    let workspace = workspace.as_table_mut().context("invalid Codex sandbox_workspace_write table")?;
-    workspace.insert("network_access".into(), false.into());
+    table.remove("sandbox_mode");
+    table.remove("sandbox_workspace_write");
+    let features = table.entry("features").or_insert_with(|| toml::Table::new().into());
+    features.as_table_mut().context("invalid Codex features table")?.insert("network_proxy".into(), true.into());
+    let permissions = table.entry("permissions").or_insert_with(|| toml::Table::new().into());
+    let permissions = permissions.as_table_mut().context("invalid Codex permissions table")?;
+    // Replace the entire owned profile, including stale domains or binding grants.
+    permissions.insert("herdr-farm-worker".into(), toml::from_str::<toml::Table>(
+        "extends = ':workspace'\n[network]\nenabled = true\nmode = 'limited'\n"
+    )?.into());
     let projects = table.entry("projects").or_insert_with(|| toml::Table::new().into());
     let projects = projects.as_table_mut().context("invalid Codex projects table")?;
     for directory in trusted {

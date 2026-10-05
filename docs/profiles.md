@@ -210,7 +210,7 @@ unknown_usage = "allow_with_warning"
 
 | Kind | File in the execution home | What is written |
 | --- | --- | --- |
-| `codex` | `.codex/config.toml` | `model`, `model_reasoning_effort`, `approval_policy = "never"`, `sandbox_mode = "workspace-write"`, `sandbox_workspace_write.network_access = false`, `check_for_update_on_startup = false` (the last four only when absent), and `[projects."<dir>"] trust_level = "trusted"` |
+| `codex` | `.codex/config.toml` | `model`, `model_reasoning_effort`, `approval_policy = "never"`, `default_permissions = "herdr-farm-worker"`, `features.network_proxy = true`, a `:workspace` permission profile with network `enabled = true`, `mode = "limited"`, `check_for_update_on_startup = false` (set on every launch), and `[projects."<dir>"] trust_level = "trusted"` |
 | `claude` | `.claude/settings.json` | `model`, `effortLevel`, `permissions.defaultMode = "acceptEdits"` (when absent), `permissions.allow` of `Bash`, `Read`, `Edit`, `Write`, `Glob`, `Grep`, `permissions.additionalDirectories` (the attempt's spool, output and Git directories), `env.DISABLE_AUTOUPDATER = "1"` |
 | `claude` | `.claude.json` | `hasCompletedOnboarding`, `theme` (when absent) and `projects."<dir>".hasTrustDialogAccepted` |
 
@@ -316,13 +316,31 @@ kinds get the same treatment as they become launchable.
 Preparation writes the agent's own configuration in the execution home on every launch
 and **sets** the keys it owns, replacing whatever an earlier run (or the agent itself)
 left there: Claude's `permissions.defaultMode = "acceptEdits"`, `DISABLE_AUTOUPDATER`
-and `hasCompletedOnboarding`; Codex's `approval_policy = "never"`, `sandbox_mode =
-"workspace-write"`, `sandbox_workspace_write.network_access = false` and
+and `hasCompletedOnboarding`; Codex's `approval_policy = "never"`, `default_permissions =
+"herdr-farm-worker"`, `features.network_proxy = true` and
 `check_for_update_on_startup = false`; the model and effort pins; trust for exactly the
 attempt's directories. (A home whose `settings.json` already said `defaultMode = "auto"`
 used to keep it, because the value was only filled in when absent: the worker ran in
 auto mode.) Unrelated settings are preserved. There is no per-profile mode override
 yet; the profile's intended mode is the one written.
+
+Codex preparation replaces the owned `[permissions.herdr-farm-worker]` profile
+on every launch: `extends = ":workspace"`, network `enabled = true` and
+`mode = "limited"`. It removes stale `sandbox_mode` and
+`sandbox_workspace_write` settings. The network proxy feature is essential:
+without it, enabled networking would allow outbound access. No `domains` or
+`allow_local_binding` grants are written. Commands can listen and connect on
+loopback inside their private network namespace; host loopback services, DNS,
+direct outbound traffic and proxied outbound requests remain unavailable.
+The agent itself retains the provider connectivity needed to work.
+
+Attempt writable roots stay on argv as an inline table under
+`-c permissions.herdr-farm-worker.filesystem`, mapping each exact existing
+`agent_writable_roots` path to `"write"`. Concurrent attempts sharing a profile
+home cannot overwrite each other's roots. Creation, gate release and process
+start observation derive the same arguments from retained launch events.
+Native interaction verification prepares the same permission profile.
+See the [Codex configuration reference](https://developers.openai.com/codex/config-reference).
 
 ### Filesystem isolation
 

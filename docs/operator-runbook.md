@@ -440,8 +440,14 @@ owner's external `config.toml`, with absolute `paths`, validated `env`, optional
 A code launch can then add repeatable
 `--accept 'NAME:./tools/run-tests.sh --headless'` alongside `--write` and `--output`.
 The generated signed policy pins the toolchain and its dependencies. Tests run
-in the private checkout with read-only tools, private `/tmp` and no network by
-default. Ignored caches are allowed; tracked or unignored changes fail acceptance.
+in the private checkout with read-only tools, private `/tmp` and loopback-only networking by
+default. Set `env = ["GODOT=/absolute/path/to/engine"]` and include the engine
+and required tools in `paths` to give the worker the same test environment.
+The worker receives those validated entries when `--accept` selects the
+toolchain; a launch without it receives none. Tool paths must be readable in
+the worker sandbox, outside hidden owner secrets and the projects root.
+Codex commands and acceptance checks can listen on their own private loopback;
+this grants no outbound access or access to host loopback services. Ignored caches are allowed; tracked or unignored changes fail acceptance.
 After an intended toolchain update, sign a new contract revision. See
 [acceptance toolchains](factory/verified-results.md#owner-declared-acceptance-toolchains)
 for manual policy preparation, evidence and timeout details.

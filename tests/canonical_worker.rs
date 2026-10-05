@@ -1640,7 +1640,7 @@ const CODEX_AGENT: &str = r#"
 use std::{fs, process::Command};
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.first().map(String::as_str) == Some("--version") { println!("codex-cli 0.154.0"); return }
+    if args.first().map(String::as_str) == Some("--version") { println!("codex-cli 0.159.3"); return }
     let mut report: String = args.iter().map(|a| format!("arg {a}\n")).collect();
     let mut overrides = Vec::new();
     let mut i = 0;
@@ -1650,7 +1650,7 @@ fn main() {
         for (name, set) in [("control", vec![CONTROL.to_owned()]), ("product", overrides.clone())] {
             fs::write(name, "x\n").unwrap();
             let mut command = Command::new(REAL_CODEX);
-            command.args(["sandbox", "-c", "sandbox_mode=\"workspace-write\""]);
+            command.arg("sandbox");
             for o in &set { command.args(["-c", o]); }
             command.args(["--", "/bin/sh", "-c", &format!("git add {name} && git -c user.name=w -c user.email=w@example.invalid commit -qm {name} && echo COMMITTED")]);
             let out = match command.output() { Ok(out) => format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)), Err(e) => e.to_string() };
@@ -1665,14 +1665,14 @@ fn main() {
 "#;
 
 /// F-commit (certificate-live.md §2.2): an isolated Codex attempt gets, before
-/// its profile's own arguments, one `-c sandbox_workspace_write.writable_roots`
+/// its profile's own arguments, one `-c permissions.herdr-farm-worker.filesystem`
 /// override naming the Git common directory, the worktree's administrative
 /// directory `<common>/worktrees/<id>` (Codex binds a linked worktree's gitdir
 /// read-only unless it is a writable root itself), its spool and its output
 /// directory; the start observation still identifies the agent (it runs), and
 /// the product binary's directory leads the agent's PATH.
 ///
-/// With `HP_CODEX_SANDBOX_BIN` naming a real Codex 0.154.0 binary, the worker
+/// With `HP_CODEX_SANDBOX_BIN` naming a real Codex 0.159.3 binary, the worker
 /// also commits through Codex's own `workspace-write` sandbox inside the
 /// product sandbox, no model call: with only the common directory writable
 /// (the live run's configuration) Git fails on the administrative
@@ -1684,7 +1684,7 @@ fn an_isolated_codex_worker_commits_through_codex_workspace_write_sandbox() {
     let mut lab = Lab::of_kind("codex", "unknown_usage='allow_with_warning'", |repo| repo.to_owned());
     let real = std::env::var("HP_CODEX_SANDBOX_BIN").unwrap_or_default();
     let common = lab.repo.canonicalize().unwrap().join(".git");
-    let control = format!("sandbox_workspace_write.writable_roots=[{:?}]", common.to_str().unwrap());
+    let control = format!("permissions.herdr-farm-worker.filesystem={{ {:?} = \"write\" }}", common.to_str().unwrap());
     lab.build_agent(&format!("{CODEX_AGENT}\nconst REAL_CODEX: &str = {real:?};\nconst CONTROL: &str = {control:?};\n"));
     let base = lab.git(&["rev-parse", "HEAD"]);
     let (_, attempt) = lab.reserve("Retained instructions");
@@ -1700,7 +1700,12 @@ fn an_isolated_codex_worker_commits_through_codex_workspace_write_sandbox() {
     let roots = [common.display().to_string(), gitdir.clone(), format!("{}/.state/spool/{}", project.display(), attempt.as_str()),
         format!("{}/.state/worker-output/{}", project.display(), attempt.as_str())];
     let args: Vec<&str> = report.lines().filter_map(|l| l.strip_prefix("arg ")).collect();
-    assert_eq!(args, ["-c".to_owned(), format!("sandbox_workspace_write.writable_roots={}", serde_json::to_string(&roots).unwrap())], "{report}");
+    assert_eq!(args.len(), 2, "{report}");
+    assert_eq!(args[0], "-c");
+    let settings: toml::Value = toml::from_str(args[1]).unwrap();
+    let grants = settings["permissions"]["herdr-farm-worker"]["filesystem"].as_table().unwrap();
+    assert_eq!(grants.len(), roots.len());
+    for root in roots { assert_eq!(grants[&root].as_str(), Some("write"), "{report}"); }
     let product = std::path::Path::new(BIN).canonicalize().unwrap();
     assert!(report.contains(&format!("\npath {}:/usr/bin:/bin\n", product.parent().unwrap().display())), "{report}");
     if real.is_empty() { return; }
