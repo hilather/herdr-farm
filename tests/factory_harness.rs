@@ -1385,6 +1385,7 @@ fn cancelled_before_launch_is_censored_not_zero() {
         "effort_observed": {"reason": "effort_not_reported", "status": "unavailable"},
         "integration": {"state": "not_applicable"},
         "launching_unix_ms": null,
+        "lineage": {"reason": "lineage_not_recorded", "status": "unavailable"},
         "queue_to_launch_ms": {"reason": "cancelled", "status": "censored"},
         "reserved_unix_ms": marks[0].2,
         "result": {"state": "not_submitted"},

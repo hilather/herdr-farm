@@ -559,9 +559,13 @@ pub fn run(ctx: &Ctx, slug: &str, mut args: Args) -> Result<Value> {
         if let Some(task) = runtime::snapshot(&project)?.tasks.iter().find(|t| t.id.as_str() == args.task) { context.push_str(&task.title); }
         migration::open_active(&project)?.check_review_run(&args.task, args.review_of.as_deref().unwrap(), &args.review_kind, &args.review_scope, &args.profile, &context)?;
     }
-    let lineage_store = &mut migration::open_active(&project)?;
-    let work_item = lineage_store.resolve_launch_work_item(&args.task, args.work_item.as_deref(), args.review_of.as_deref().or(args.fixes_review.as_deref()), &args.fixes)?;
-    lineage_store.check_task_lineage(&args.task, &work_item, &role, args.supersedes.as_deref())?;
+    // Like the other preflight checks, hold the store only for this check.
+    let work_item = {
+        let mut store = migration::open_active(&project)?;
+        let work_item = store.resolve_launch_work_item(&args.task, args.work_item.as_deref(), args.review_of.as_deref().or(args.fixes_review.as_deref()), &args.fixes)?;
+        store.check_task_lineage(&args.task, &work_item, &role, args.supersedes.as_deref())?;
+        work_item
+    };
     args.work_item = Some(work_item);
     args.role = Some(role);
     migration::open_active(&project)?.check_fix_run(&args.task, args.fixes_review.as_deref(), &args.fixes, &args.profile)?;

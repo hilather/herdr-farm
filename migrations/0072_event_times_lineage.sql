@@ -1,7 +1,7 @@
 -- Informational SQLite wall-clock times; sequence remains the event order.
 -- Historical events deliberately receive no inferred timestamp.
 CREATE TABLE event_times (
-    sequence INTEGER PRIMARY KEY REFERENCES events(sequence),
+    sequence INTEGER PRIMARY KEY,
     recorded_unix_ms INTEGER NOT NULL
 ) STRICT;
 CREATE TRIGGER events_record_time AFTER INSERT ON events

@@ -1188,9 +1188,13 @@ fn recommendations_and_notices_change_no_canonical_state_and_no_dispatch() {
 
     // Only the inbox (and its `inbox.*` events) changed, by exactly the one notice.
     let after = dump(&store);
+    // The recorded times of those `inbox.*` events are excluded with them.
+    let inbox_sequences: Vec<String> = after.iter().filter(|(t, _)| t == "events").flat_map(|(_, rows)| rows.iter())
+        .filter(|r| r.contains("'inbox.")).map(|r| r.split('|').next().unwrap_or_default().to_owned()).collect();
     let without_inbox = |tables: &[(String, Vec<String>)]| -> Vec<(String, Vec<String>)> {
         tables.iter().filter(|(t, _)| t != "inbox_items").map(|(t, rows)| (t.clone(), match t.as_str() {
             "events" => rows.iter().filter(|r| !r.contains("'inbox.")).cloned().collect(),
+            "event_times" => rows.iter().filter(|r| !inbox_sequences.iter().any(|s| r.split('|').next() == Some(s.as_str()))).cloned().collect(),
             // The events sequence counter: it moves with the inbox event, checked below.
             "sqlite_sequence" => rows.iter().filter(|r| !r.starts_with("'events'|")).cloned().collect(),
             _ => rows.clone(),
