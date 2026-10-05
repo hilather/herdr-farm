@@ -511,6 +511,12 @@ fn launch_run_reserves_a_planning_task_for_each_kind_and_reruns_safely() {
         // it records one submission bound to this attempt's contract.
         let brief_text = lab.ok(&["memory", "demo", "attempt-brief", "--attempt", &attempt])["text"].as_str().unwrap().to_owned();
         assert!(brief_text.contains("herdr-farm --root") && brief_text.contains("submission_id") && brief_text.contains("result demo submit"), "{brief_text}");
+        let command = format!("herdr-farm --root '{}' memory demo", lab.root.display());
+        let output_directory = lab.project.join(".state/worker-output").join(&attempt);
+        let output_path = output_directory.display();
+        let expected_card = format!("\n## Worker command card\n\nSubmit: run the submission script above in your worktree; wait for `submission_id` before DONE.\nWrite report output: {output_path}/report.md (supporting artifacts: {output_path}/library/).\n```sh\n{command} attempt-brief --attempt {attempt}\n{command} attempt-input --attempt {attempt}\n{command} receipts --attempt {attempt}\n{command} update --attempt {attempt} --delivery DELIVERY_ID\n{command} propose --input PROPOSAL_JSON\n{command} ack --input ACK_JSON\n```\nReplace DELIVERY_ID, PROPOSAL_JSON and ACK_JSON with the delivery ID or your JSON file path.\nAcknowledge only after applying the update.\ndo not run `herdr-farm --help`; these are the only commands you need\n");
+        assert_eq!(&brief_text[brief_text.rfind("\n## Worker command card").unwrap()..], expected_card);
+        assert!(expected_card.lines().count() < 40);
         let branch = format!("worker-{task}");
         let followed = lab.follow_brief(&attempt, &output, &branch);
         assert!(followed.status.success() && String::from_utf8_lossy(&followed.stdout).contains("submission_id"), "{}{}", String::from_utf8_lossy(&followed.stdout), String::from_utf8_lossy(&followed.stderr));
@@ -883,7 +889,7 @@ fn code_launch_reserves_under_concurrent_writes_and_submits_all_scoped_changes()
     fs::write(&prompt, "Implement the code and its tests.").unwrap();
     let socket = lab.socket_inode_once("code.sock");
     let args = ["launch", "demo", "run", "--task", "code", "--profile", "codex-sol", "--repository", lab.repo.to_str().unwrap(),
-        "--accept", "shell:./tools/run-tests.sh --headless 'quoted argument'", "--accept", "shell:/bin/sh ./tools/other-tests.sh", "--write", "./src//", "--write", "tests/", "--output", "src/lib.rs", "--prompt-file", prompt.to_str().unwrap(),
+        "--accept", "shell:./tools/run-tests.sh --headless 'quoted argument'", "--accept", "shell:/bin/sh ./tools/other-tests.sh", "--write", "./src//", "--write", "tests/", "--write", "unused/", "--output", "src/lib.rs", "--prompt-file", prompt.to_str().unwrap(),
         "--sign-with", lab.key.to_str().unwrap(), "--herdr-socket", socket.to_str().unwrap()];
     let report = std::thread::scope(|scope| {
         let writer = scope.spawn(|| {
@@ -901,11 +907,11 @@ fn code_launch_reserves_under_concurrent_writes_and_submits_all_scoped_changes()
     });
     assert!(herdr_farm::runtime::snapshot(&lab.project).unwrap().tasks.iter().any(|t| t.id.as_str().starts_with("other-")));
     let attempt = report["attempt"].as_str().unwrap();
-    assert_eq!(report["write_paths"], serde_json::json!(["src/", "tests/"]));
+    assert_eq!(report["write_paths"], serde_json::json!(["src/", "tests/", "unused/"]));
     assert_eq!(report["outputs"], serde_json::json!(["src/lib.rs"]));
     let shown = lab.ok(&["task", "demo", "show", "code"]);
     let contract = &shown["contract"];
-    assert_eq!(contract["scope"]["paths"], serde_json::json!([{"path":"src/","access":"write"},{"path":"tests/","access":"write"}]));
+    assert_eq!(contract["scope"]["paths"], serde_json::json!([{"path":"src/","access":"write"},{"path":"tests/","access":"write"},{"path":"unused/","access":"write"}]));
     assert_eq!(contract["outputs"], serde_json::json!([{"path":"src/lib.rs","kind":"git_file"}]));
     assert_eq!(contract["acceptance_policies"].as_array().unwrap().len(), 3);
     assert_eq!(contract["acceptance_policies"][0]["id"], "output-1");
@@ -951,6 +957,7 @@ fn code_launch_reserves_under_concurrent_writes_and_submits_all_scoped_changes()
     let missing = submit();
     assert!(!missing.status.success() && String::from_utf8_lossy(&missing.stderr).contains("declared output missing: src/lib.rs"));
     fs::write(worktree.join("src/lib.rs"), "Content\n").unwrap();
+    assert!(!worktree.join("unused").exists());
     let submitted = submit();
     assert!(submitted.status.success(), "{}", String::from_utf8_lossy(&submitted.stderr));
     assert!(String::from_utf8_lossy(&submitted.stdout).contains("submission_id"));

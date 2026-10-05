@@ -497,3 +497,22 @@ the old task must have no active attempt. Lineage is frozen before the first
 attempt and retained outside the signed execution contract. Inspect it with
 `telemetry PROJECT attempts --json` and
 `telemetry PROJECT accounting work-items --json`.
+
+### Worker command card and environment
+
+Rendered worker briefs end with a compact command card: the submission script
+above it, canonical memory commands with the projects root, project slug and
+attempt filled in, and the literal report and library output paths. Workers do
+not need to explore `herdr-farm --help`. Submission skips unused declared write
+paths that do not exist, while staging tracked deletions and still requiring all
+declared outputs.
+
+The isolated worker environment sets `HERDR_FARM_WORKER_OUTPUT` to its writable
+attempt output directory and supplies `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`,
+`GIT_COMMITTER_NAME` and `GIT_COMMITTER_EMAIL`. Repository identity wins;
+otherwise the identity is `herdr-farm worker <attempt>` with email
+`worker@herdr-farm.invalid`. No global Git configuration is required to commit
+or merge. With no explicit root flag or root environment override, worker CLI
+commands resolve the projects root from `HERDR_FARM_SUBMISSION_SPOOL` (or its
+legacy alias), so memory commands reach the canonical project from an isolated
+home. This resolution does not grant any additional write authority.

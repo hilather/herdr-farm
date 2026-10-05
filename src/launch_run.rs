@@ -236,7 +236,10 @@ fn finish_instructions(root: &Path, slug: &str, contract: &Value, reference: &Ve
     for output in &outputs {
         script.push_str(&format!("[ -f '{output}' ] || {{ echo 'declared output missing: {output}' >&2; exit 1; }}\n"));
     }
-    script.push_str(&format!("git add -A --{}\n", writes.iter().map(|p| format!(" '{p}'")).collect::<String>()));
+    for path in &writes {
+        // Include tracked deletions even when the declared path is now absent.
+        script.push_str(&format!("if [ -e '{path}' ] || [ -L '{path}' ] || [ -n \"$(git ls-files -- '{path}')\" ]; then git add -A -- '{path}'; fi\n"));
+    }
     script.push_str("git -c user.name=worker -c user.email=worker@invalid commit -q -m 'Deliverable' || true\n");
     script.push_str(&format!("git -c core.quotePath=false diff --name-only --no-renames '{base}' HEAD | check_scope\ncandidate=$(git rev-parse HEAD)\n[ \"$candidate\" != '{base}' ] || {{ echo 'nothing is committed: write the deliverable first' >&2; exit 1; }}\n"));
     let mut manifest = Vec::new();
