@@ -8,13 +8,13 @@ are [contracts.md](contracts.md) §0. Code: `src/telemetry/analytics/`
 (TM4.3). Telemetry never grants launch, changes budgets or accepts results;
 nothing here writes `state.db`.
 
-## 1. Metric registry (`analytics-registry.v9`)
+## 1. Metric registry (`analytics-registry.v10`)
 
-Version history: v8 adds bounded lifecycle `role` and M37.lineage-v2 (LINEAGE-1); M37.fleet-v1 remains absent as `definition_superseded`. v1 TM4.1; v2 adds `verification_flip_rate` (DG6, #198); v3 adds M30 `M30.submission-v1` (DG1, #202); v4 adds M10 `M10.v1` (DG2, #204); v5 adds M03 operating throughput (DG3); v6 adds M05 lifecycle tokens and specifies M19’s missing timed history; v7 adds M13 never-running exclusions, M04/M05 partial values and M31 lifecycle sampling, M35 attempt-time concurrency and M40 reported/merged quota windows, plus the bounded lifecycle `profile` dimension (TFIX-4, no definition change). Previous M13.slice-v1, M04.cost-v1, M05.tokens-v1, M31.attention-v1, M35.fanout-v1 and M40.quota-windows-v1 definitions remain only as absent (`definition_superseded`). v9 adds MET-NOW-A `M51.v1`–`M58.v1` and MET-NOW-B `M60`–`M64` (sections 8 and 9).
+Version history: v10 adds MET-REWORK-1 M65–M69 (section 10). v8 adds bounded lifecycle `role` and M37.lineage-v2 (LINEAGE-1); M37.fleet-v1 remains absent as `definition_superseded`. v1 TM4.1; v2 adds `verification_flip_rate` (DG6, #198); v3 adds M30 `M30.submission-v1` (DG1, #202); v4 adds M10 `M10.v1` (DG2, #204); v5 adds M03 operating throughput (DG3); v6 adds M05 lifecycle tokens and specifies M19’s missing timed history; v7 adds M13 never-running exclusions, M04/M05 partial values and M31 lifecycle sampling, M35 attempt-time concurrency and M40 reported/merged quota windows, plus the bounded lifecycle `profile` dimension (TFIX-4, no definition change). Previous M13.slice-v1, M04.cost-v1, M05.tokens-v1, M31.attention-v1, M35.fanout-v1 and M40.quota-windows-v1 definitions remain only as absent (`definition_superseded`). v9 adds MET-NOW-A `M51.v1`–`M58.v1` and MET-NOW-B `M60`–`M64` (sections 8 and 9).
 
 `telemetry <slug> metrics registry [--json]` prints one declared table
 (`registry.rs`) of every metric `telemetry report` or `query` can name:
-M01–M58, M60–M64 and lane C's `flaky_tests` and `verification_flip_rate`. A change is a new registry version, never
+M01–M58, M60–M69 and lane C's `flaky_tests` and `verification_flip_rate`. A change is a new registry version, never
 an edit in place of a published definition. Per metric:
 
 | field | meaning |
@@ -87,7 +87,7 @@ echo), query_unix_ms, results: [...], drill?}`. Each result:
 | `source_watermarks` | `canonical {events_head, lifecycle_digest, last_event_unix_ms}`; for lane definitions also `sidecar {streams, last_collect_unix_ms, codex_usage_rowid, valuation, rate_cards}` |
 | `event_cutoff_unix_ms`, `observation_cutoff_unix_ms` | latest occurrence time in the cohort; knowledge time (query time live, `recorded_unix_ms` as of) |
 | `lag_ms`, `lag_reason` | native: 0 (canonical read directly); lane: observation cutoff − last collect, or null with `collection_not_run`/`no_collect_recorded` |
-| `rate_card_revision` | priced metrics (M04, M12, M14, M24, M34, M37, M53): `{valuation_revision, valuation_digest, rate_cards {count, digest}}` or unavailable (`not_priced`, `collection_not_run`); otherwise null |
+| `rate_card_revision` | priced metrics (M04, M12, M14, M24, M34, M37, M53, M66, M69): `{valuation_revision, valuation_digest, rate_cards {count, digest}}` or unavailable (`not_priced`, `collection_not_run`); otherwise null |
 | `certification`, `activation` | as the registry |
 | `as_of` | the requested knowledge time or sequence, as-of results only |
 
@@ -502,3 +502,49 @@ writes are best effort to an existing current table with zero SQLite wait;
 absence or contention does not affect launch. Storage sampling never opts an
 untouched project into telemetry. Collection disabled at the ticker disables
 these ticker writes as well. No canonical schema or launch receipt changes.
+
+## 10. Work-item rework and delivery (MET-REWORK-1)
+
+Registry v10 adds fixture-certified `M65.v1`–`M69.v1`, evidence
+`tests/telemetry_rework.rs`. The analytics lane reads canonical schema 72
+launch lineage, verification/integration receipts, lifecycle marks, review triage
+and the accounting lane's published-rate estimates. No new schema or producer
+process is required. This is metadata only (contracts §7); work-item and task
+identities are never metric labels.
+
+The activity cohort includes work items whose **first launch** is at or after
+`--since` (`query --from`); it includes their entire observed chain, including
+later attempts. These are since-only definitions: `--to`, horizons and query
+`--by` are unsupported. The report and query detail contain the profile and
+currency breakdowns described below. Launch means the earliest launching or
+running lifecycle mark, not reservation or SQLite insertion time. No lineage
+is inferred for historical tasks: `excluded.lineage_not_recorded` counts them;
+without any recorded work item all five values are unavailable with
+`lineage_not_recorded`. Missing launches are `launch_time_unknown`, earlier
+work items are `outside_window`.
+
+| id | name | definition |
+|---|---|---|
+| M65 | rounds_to_green | Distinct fix tasks launched no later than the candidate creation time of the first independently accepted build/fix submission; median, nearest-rank p90 and max, overall and by the first build launch's effective profile. Every required policy must have an accepted verification receipt; empty/unknown policy sets never imply green. |
+| M66 | rework_cost_share | Fix, recheck and repeat review spend / all spend in cohort work items, exact decimal ratios per currency and per effective attempt profile. A repeat review/skeptic task launches after another task of the same lineage role has a terminal mark; initial concurrent reviews are excluded from the numerator. |
+| M67 | escaped_defects | Current validated, unique, non-seeded review findings discovered strictly after the work item's first build/fix acceptance, counted once by their canonical discovery claim. Count and exact findings / accepted work items ratio; owner resets and duplicate merges restate the count. The finding targets the work item through its review opportunity, never title matching. |
+| M68 | work_item_lead_time | First launch to first recorded build/fix integration, otherwise last terminal lifecycle mark when all attempts have terminal marks; median and nearest-rank p90 in milliseconds (max also provided). Open or missing terminal tails remain censored. |
+| M69 | waste_share | Spend on failed/cancelled attempts or attempts of explicitly superseded tasks / all spend, separately per currency. Union membership prevents double counting; lost attempts are not assumed failed. |
+
+Text reports include `M66 rework_cost_share profile=PROFILE currency=CODE n/d`
+and `M67 escaped_defects count=N n/d`, alongside the aggregate currency rows
+and M65/M68 distribution objects.
+
+M65 excludes unfinished/unverified work items as `not_yet_green`; M68 excludes
+open/unknown tails as `open_or_terminal_time_unknown`. A distribution with no
+samples is unavailable `no_samples`; even medians use the arithmetic midpoint
+and retain half units exactly. M67's empty denominator is null with
+`empty_denominator`. Spend never mixes currencies or uses floating point;
+zero denominators are null with `empty_denominator`, absent estimates yield
+`cost_not_observed`, and incomplete cost yields `work_item_cost_incomplete`
+partial currency cells retaining observed numerator and denominator subtotals.
+Missing complete costs are counted as `attempts_without_complete_cost`.
+Missing profiles use `unknown`. Pricing revisions are exposed for M66/M69;
+rate cards remain fixture-only estimates, not provider charges. Analytics
+refresh/rebuild and as-of revisions retain the same bodies and invalidate on
+canonical or sidecar input changes, including owner triage corrections.

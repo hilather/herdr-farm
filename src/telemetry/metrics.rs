@@ -292,7 +292,7 @@ pub fn structured_text(value: &Value) -> Option<String> {
         });
         return Some(sizes.join("; "));
     }
-    if o.contains_key("median_ms") || o.contains_key("reserved_to_launching") || o.contains_key("launch_samples") || o.contains_key("small") { return Some(value.to_string()); }
+    if o.contains_key("median") || o.contains_key("median_ms") || o.contains_key("reserved_to_launching") || o.contains_key("launch_samples") || o.contains_key("small") { return Some(value.to_string()); }
     let issued = o.get("issued")?.as_u64()?;
     let accepted = &value["accepted"];
     Some(format!("issued {issued}, accepted {} {} ({} unknown), executed {}", accepted["count"], accepted["status"].as_str().unwrap_or("unknown"),
@@ -323,6 +323,10 @@ pub fn text(report: &Value) -> String {
                     for component in ["reasoning_share", "cache_share"] {
                         out += &format!("{id} {name} {dimension}={label} {component} {}\n", show(&cell[component]));
                     }
+                } else if id == "M66" && dimension == "profile" && cell["by_currency"].as_object().is_some_and(|currencies| !currencies.is_empty()) {
+                    for (currency, amount) in cell["by_currency"].as_object().into_iter().flatten() {
+                        out += &format!("{id} {name} profile={label} currency={currency} {}\n", show(amount));
+                    }
                 } else {
                     out += &format!("{id} {name} {dimension}={label} {}\n", show(cell));
                     for (severity, value) in cell["by_severity"].as_object().into_iter().flatten() {
@@ -346,6 +350,7 @@ pub fn text(report: &Value) -> String {
                     out += &format!("{id} {name} {attempt} {} {} {value}\n", w["limit_id"].as_str().unwrap_or(""), w["window_kind"].as_str().unwrap_or(""));
                 }
             },
+            None if id == "M67" && m.get("count").is_some() => out += &format!("{id} {name} count={} {}\n", m["count"], show(m)),
             None => out += &format!("{id} {name} {}\n", show(m)),
         }
     }

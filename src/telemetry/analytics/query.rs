@@ -18,7 +18,7 @@ pub const MAX_PAGE: u32 = 500;
 /// Most dimension cells one result may carry (doc 08 §4 bounded complexity).
 pub const MAX_CELLS: usize = 64;
 /// Priced metrics: they carry the valuation (rate card) revision they read.
-const PRICED: [&str; 7] = ["M04", "M12", "M14", "M24", "M34", "M37", "M53"];
+const PRICED: [&str; 9] = ["M04", "M12", "M14", "M24", "M34", "M37", "M53", "M66", "M69"];
 
 /// `herdr-farm telemetry <slug> report`: central slice metrics, then every
 /// lane's (`super::super::LANES`, a lane key replacing a central one).

@@ -643,6 +643,13 @@ normalized usage. No schema/stream migration or new retention class is needed.
 
 ## 7. Privacy allowlist and excerpts
 
+MET-REWORK-1 (registry v10): M65–M69 derive rework, escaped findings, lead time
+and waste from schema 72 launch lineage, lifecycle and receipt timestamps,
+review triage and accounting estimates. These are metadata-only projections
+under §7; no prompt, source or transcript text is read for this producer, and
+no storage schema changes. Definitions and fixture evidence:
+[contracts-analytics.md §10](contracts-analytics.md#10-work-item-rework-and-delivery-met-rework-1).
+
 Worker sessions (ingest 0016) add `task_started.model_context_window`
 (positive integer); `FileChange` item id/status and `changed_files` (the count
 of `changes` array entries, never their values); `ImageView` item id/count

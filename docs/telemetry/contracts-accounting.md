@@ -1878,3 +1878,18 @@ add launch phases, host load/outcome observations, hourly storage growth and
 rendered brief-size/outcome buckets. Their precise cohorts, ratios, percentile
 rule and absence reasons are in [contracts-analytics.md](contracts-analytics.md#met-now-b-flow-and-operations-registry-v9).
 These figures do not change M35's time-weighted concurrency or allocation rules.
+
+## 19. Work-item rework and waste (MET-REWORK-1)
+
+Registry v10 M65–M69 use LINEAGE-1 work items and the existing work-item
+reader's lifecycle and exact spend metadata. Each attempt now also exposes
+`cost_coverage`, so mixed currencies cannot hide unpriced entries. M66 sums
+fix, recheck and repeat review spend; M69 sums the union of failed/cancelled
+attempts and attempts belonging to explicitly superseded tasks. Both retain
+per-currency decimal numerator/denominator subtotals and missing-cost counts;
+M66 also groups by effective attempt profile. No canonical or sidecar schema
+change, retention classification or backup change is needed. Full window,
+acceptance, discovery, censoring and unavailable contracts are in
+[contracts-analytics.md §10](contracts-analytics.md#10-work-item-rework-and-delivery-met-rework-1).
+Evidence: `tests/telemetry_rework.rs` exercises CLI collection, pricing,
+report/query, review validation/reset and aggregate refresh/rebuild.

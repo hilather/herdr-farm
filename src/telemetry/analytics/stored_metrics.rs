@@ -67,6 +67,7 @@ pub(super) fn metrics(project: &Path, since: Option<i64>) -> Result<BTreeMap<Str
     );
     out.insert("M54".into(), weakening(&db, side.as_deref(), since)?);
     out.extend(consumption(side.as_deref(), &attempts, since)?);
+    out.extend(crate::telemetry::accounting::work_metrics::metrics(project, since)?);
     for (id, body) in &mut out {
         body["definition"] = json!(format!("{id}.v1"));
         body["name"] = json!(
