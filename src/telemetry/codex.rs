@@ -264,7 +264,7 @@ fn digest(bytes: &[u8]) -> String {
 /// explicitly scoped owner coordinator source. Full collection still validates and
 /// binds the same canonical inputs; this probe only avoids empty worker turns.
 pub fn collection_configured(project: &Path) -> Result<bool> {
-    if claude::coordinator_source(project)?.is_some_and(|(_, enabled)| enabled) { return Ok(true); }
+    if claude::coordinator_dir(project)?.is_some() { return Ok(true); }
     let db=super::read_only_nowait(&project.join(".state/state.db"))?;
     let table=|name:&str|db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",[name],|r|r.get::<_,bool>(0));
     if table("attempt_inputs")? && db.query_row("SELECT EXISTS(SELECT 1 FROM attempt_inputs
@@ -282,7 +282,7 @@ pub fn collection_configured(project: &Path) -> Result<bool> {
 /// `create` false: a project without Codex homes gets no sidecar.
 pub fn collect(project: &Path, budget: Budget, create: bool) -> Result<Option<Collected>> {
     let (attempts, mut homes) = canonical(project)?;
-    let coordinator = claude::coordinator_source(project)?.filter(|(_, enabled)| *enabled).map(|(path, _)| path);
+    let coordinator = claude::coordinator_dir(project)?;
     // A separate source root prevents worker discovery in the owner home.
     if let Some(path) = &coordinator { homes.push(path.display().to_string()); }
     super::gemini::collect(project, budget, &attempts)?;

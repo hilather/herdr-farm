@@ -208,6 +208,13 @@ pub(super) fn coordinator_source(project: &Path) -> Result<Option<(PathBuf, bool
     Ok(Some((home.join(".claude/projects").join(encoded), enabled)))
 }
 
+/// The enabled coordinator directory, only when it exists as a real directory:
+/// a project whose coordinator never ran has nothing to collect, so it must
+/// not become a telemetry source (and get a sidecar) by default.
+pub(super) fn coordinator_dir(project: &Path) -> Result<Option<PathBuf>> {
+    Ok(coordinator_source(project)?.filter(|(path, enabled)| *enabled && std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir())).map(|(path, _)| path))
+}
+
 /// Open every component relative to a pinned directory descriptor. Neither
 /// discovery nor tail reads follow symlinks, including intermediate directories.
 pub(super) fn open_scoped(path: &Path, directory: bool) -> std::io::Result<std::fs::File> {
