@@ -1785,8 +1785,7 @@ command path. Each group contains `invocations`, `help_share`, `error_share`
 (runtime errors plus usage errors divided by all invocations),
 `p50_duration_ms`, and `p95_duration_ms`. Shares are exact numerator/denominator
 strings, following telemetry JSON conventions. Percentiles use nearest rank over
-the retained observations, including help/error/version calls. There are no
-registry metrics yet. An absent sidecar reports `collection_not_run`; an
+the retained observations, including help/error/version calls. Registry v10 adds M73/M74 from these retained observations. An absent sidecar reports `collection_not_run`; an
 older accounting schema reports `stream_upgrade_required`. The view itself
 is captured after its output is computed, so appears on the next read. Read-only
 refers to the projection; CLI self-observation can append metadata afterward.
@@ -1893,3 +1892,14 @@ acceptance, discovery, censoring and unavailable contracts are in
 [contracts-analytics.md §10](contracts-analytics.md#10-work-item-rework-and-delivery-met-rework-1).
 Evidence: `tests/telemetry_rework.rs` exercises CLI collection, pricing,
 report/query, review validation/reset and aggregate refresh/rebuild.
+
+### MET-WORKER-1 metadata projections
+
+Registry v10 adds fixture-certified M70–M77 from the existing A10 worker
+session summaries and CLI-SELF-1 invocation rows, with no new collected leaves,
+tables or retention classes. Report and query expose end states, lingering
+latency, command failures, help and error friction, unanswered requests,
+context fill and coordinator reaction latency. The full definitions and
+unavailable reasons are in [contracts-analytics.md](contracts-analytics.md#met-worker-1-worker-and-command-friction-registry-v10).
+M78–M79 remain reserved until definitions are supplied. No prompts, commands,
+arguments, answers or result message contents enter these metrics.

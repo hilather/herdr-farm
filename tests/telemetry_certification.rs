@@ -809,7 +809,8 @@ fn killed_collectors_partial_lines_and_outages_replay_identically() {
     let recovery: String = f.sidecar().query_row("SELECT recovery FROM coverage_gaps WHERE reason='final_event_missing'", [], |r| r.get(0)).unwrap();
     assert_eq!(recovery, "recovered");
     let views = |f: &Fixture| (f.cli_args(&["usage", "--json"]).1, f.cli_args(&["accounting", "entries"]).1, f.cli_args(&["accounting", "sessions"]).1,
-        without(&f.report()["metrics"], &[]));
+        // CLI observations describe the replay commands themselves, not rollouts.
+        without(&f.report()["metrics"], &["M73", "M74"]));
     let resumed = views(&f);
 
     // The sidecar deleted and rebuilt from the rollouts: identical derived views.

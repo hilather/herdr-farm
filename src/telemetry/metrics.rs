@@ -303,7 +303,7 @@ pub fn structured_text(value: &Value) -> Option<String> {
 pub fn text(report: &Value) -> String {
     let show = |m: &Value| match &m["value"] {
         Value::Null => format!("n/a ({})", m["reason"].as_str().unwrap_or("unknown")),
-        Value::Object(o) => structured_text(&m["value"]).unwrap_or_else(|| format!("n/a ({})", o.get("reason").and_then(Value::as_str).unwrap_or("unknown"))),
+        Value::Object(o) => structured_text(&m["value"]).unwrap_or_else(|| o.get("reason").and_then(Value::as_str).map_or_else(|| serde_json::to_string(o).unwrap_or_default(), |reason| format!("n/a ({reason})"))),
         Value::String(s) => s.clone(),
         other => other.to_string(),
     };
@@ -314,6 +314,17 @@ pub fn text(report: &Value) -> String {
         let id = registered.id;
         let Some(m) = metrics.get(id) else { continue };
         let name = m["name"].as_str().unwrap_or(registered.name);
+        let show_metric = |cell: &Value| {
+            let mut text = show(cell);
+            if matches!(id, "M70" | "M71" | "M72" | "M73" | "M74" | "M75" | "M76" | "M77") {
+                if cell["value"].get("samples").is_some() { text = cell["value"].to_string(); }
+                for key in ["over_10_min", "commands", "failed_commands", "exit_unknown", "unanswered", "missing_samples", "over_80_percent", "by_class", "by_caller", "top_command_paths"] {
+                    if let Some(value) = cell.get(key) { text += &format!(" {key}={value}"); }
+                }
+                if cell["status"] == "partial" { text += &format!(" partial:{}", cell["reason"].as_str().unwrap_or("unknown")); }
+            }
+            text
+        };
         for w in m["not_reported"].as_array().into_iter().flatten() {
             out += &format!("limit {} {} {} n/a ({})\n", w["account"].as_str().unwrap_or(""), w["limit_id"].as_str().unwrap_or(""), w["window_kind"].as_str().unwrap_or(""), w["reason"].as_str().unwrap_or("not_reported"));
         }
@@ -328,7 +339,7 @@ pub fn text(report: &Value) -> String {
                         out += &format!("{id} {name} profile={label} currency={currency} {}\n", show(amount));
                     }
                 } else {
-                    out += &format!("{id} {name} {dimension}={label} {}\n", show(cell));
+                    out += &format!("{id} {name} {dimension}={label} {}\n", show_metric(cell));
                     for (severity, value) in cell["by_severity"].as_object().into_iter().flatten() {
                         out += &format!("{id} {name} {dimension}={label} severity={severity} {}\n", show(value));
                     }
@@ -350,8 +361,8 @@ pub fn text(report: &Value) -> String {
                     out += &format!("{id} {name} {attempt} {} {} {value}\n", w["limit_id"].as_str().unwrap_or(""), w["window_kind"].as_str().unwrap_or(""));
                 }
             },
-            None if id == "M67" && m.get("count").is_some() => out += &format!("{id} {name} count={} {}\n", m["count"], show(m)),
-            None => out += &format!("{id} {name} {}\n", show(m)),
+            None if id == "M67" && m.get("count").is_some() => out += &format!("{id} {name} count={} {}\n", m["count"], show_metric(m)),
+            None => out += &format!("{id} {name} {}\n", show_metric(m)),
         }
     }
     for a in report["after_termination"].as_array().into_iter().flatten() {

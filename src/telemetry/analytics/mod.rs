@@ -19,6 +19,7 @@ pub mod query;
 pub mod registry;
 pub mod store;
 mod stored_metrics;
+mod worker_metrics;
 
 pub const STREAM: &str = "analytics";
 /// `include_str!` of `migrations/telemetry/analytics/`, in order; index + 1 is the stream version.
@@ -47,7 +48,7 @@ pub enum Command {
     /// Stream version of this lane's sidecar tables. Read-only.
     Status,
     /// Evaluate tracked cells whose inputs changed (first run: every active metric's
-    /// default cell), retain clock-dependent evaluation, and append changed revisions. Writes only the sidecar.
+    /// default cell except CLI self-observation), retain clock-dependent evaluation, and append changed revisions. Writes only the sidecar.
     Refresh {
         /// Also track this cell: a metric or definition, with the query flags below.
         #[arg(long)]
@@ -134,7 +135,11 @@ pub fn run(project: &Path, command: Command) -> Result<String> {
 }
 
 /// MET-NOW-A metrics derived from retained metadata, without new storage.
-pub fn metrics(project: &Path, since: Option<i64>) -> Result<BTreeMap<String, Value>> { stored_metrics::metrics(project, since) }
+pub fn metrics(project: &Path, since: Option<i64>) -> Result<BTreeMap<String, Value>> {
+    let mut metrics = stored_metrics::metrics(project, since)?;
+    metrics.extend(worker_metrics::metrics(project, since)?);
+    Ok(metrics)
+}
 
 /// Ticker telemetry pass: refresh tracked cells, rate-limited (`store::TICK_INTERVAL_MS`).
 pub fn tick(project: &Path, _budget: super::codex::Budget) -> Result<()> { store::tick(project) }

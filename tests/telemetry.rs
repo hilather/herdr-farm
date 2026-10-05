@@ -917,6 +917,19 @@ fn worker_session_counts_end_states_and_privacy() {
     assert_eq!(s["file_change_items"],2); assert_eq!(s["failed_file_change_items"],1); assert_eq!(s["image_views"],1);
     assert_eq!(s["unanswered_user_input_requests"],1); assert_eq!(s["sub_agents_spawned"],1);
     assert_eq!(s["max_context_window_fill"],"0.5"); assert_eq!(s["end_state"],"ended_without_submission");
+    let metrics=f.report()["metrics"].clone();
+    assert_eq!(metrics["M70"]["value"]["ended_without_submission"],1);
+    assert_eq!(metrics["M72"]["value"],"6/7");
+    assert_eq!(metrics["M72"]["by_class"]["signal"]["value"],"2/7");
+    assert_eq!(metrics["M72"]["by_profile"]["codex"]["value"],"6/7");
+    assert_eq!(metrics["M75"]["value"],"1/1");
+    assert_eq!(metrics["M75"]["per_attempt"][&f.attempt],1);
+    assert_eq!(metrics["M76"]["value"],json!({"samples":1,"p50":"0.5","p95":"0.5"}));
+    assert_eq!(metrics["M76"]["over_80_percent"]["value"],"0/1");
+    assert_eq!(metrics["M71"]["value"]["reason"],"session_end_or_terminal_time_missing");
+    assert_eq!(metrics["M77"]["value"]["reason"],"coordinator_cli_invocations_missing");
+    let query=f.cli_args(&["query","--metric","M70,M72,M75,M76","--json"]).0;
+    assert_eq!(query["results"].as_array().unwrap().len(),4);
     let db=f.sidecar();
     assert_eq!(db.query_row("SELECT changed_files FROM codex_session_items WHERE item_id='files-1'",[],|r|r.get::<_,i64>(0)).unwrap(),2);
     assert_eq!(db.query_row("SELECT reported_duration_secs,reported_duration_nanos FROM codex_reported_exec_durations WHERE item_id='cmd-0'",[],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?))).unwrap(),(3,4));
@@ -931,6 +944,10 @@ fn worker_session_counts_end_states_and_privacy() {
     writeln!(file,"{}",json!({"type":"event_msg","timestamp":ts(4000),"payload":{"type":"item_completed","item":{"type":"UserMessage","id":"answer-1","content":"SESSION_SECRET_ANSWER"}}})).unwrap();
     drop(file); f.cli("collect");
     assert_eq!(f.cli_args(&["attempts","--json"]).0["attempts"][0]["session"]["unanswered_user_input_requests"],0);
+    let mut file=fs::OpenOptions::new().append(true).open(&path).unwrap();
+    writeln!(file,"{}",json!({"type":"token_usage_record","timestamp":ts(4500),"payload":{"turn_id":"turn-1","response_id":"fill-high","usage":{"input_tokens":1800,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":1,"reasoning_output_tokens":0,"total_tokens":1801}}})).unwrap();
+    drop(file); f.cli("collect");
+    assert_eq!(f.report()["metrics"]["M76"]["over_80_percent"]["value"],"1/1");
     // A later started turn defeats the earlier completed turn.
     let mut file=fs::OpenOptions::new().append(true).open(&path).unwrap();
     writeln!(file,"{}",json!({"type":"event_msg","timestamp":ts(5000),"payload":{"type":"task_started","turn_id":"turn-2"}})).unwrap();
@@ -956,6 +973,13 @@ fn worker_session_counts_end_states_and_privacy() {
     assert_eq!(a["attempts"][0]["session"]["lingering_ms"],3000);
     let summary=f.cli_args(&["accounting","tools","--json"]).0;
     assert_eq!(summary["sessions_summary"]["lingering_ms"],json!({"samples":1,"p50":3000,"p95":3000}));
+    let metrics=f.report()["metrics"].clone();
+    assert_eq!(metrics["M71"]["value"],json!({"samples":1,"p50":"3000","p95":"3000"}));
+    assert_eq!(metrics["M71"]["over_10_min"],0);
+    assert!(f.text(&["report"]).contains("over_10_min=0"));
+    assert_eq!(metrics["M70"]["value"]["stopped"],1);
+    assert_eq!(metrics["M75"]["value"],"0/1");
+
     f.cli("collect"); // Replay/append collection keeps exact counts.
     assert_eq!(f.cli_args(&["attempts","--json"]).0["attempts"][0]["session"]["commands"],7);
     // Public reads do not migrate a pre-0016 sidecar. Collect replays it.
@@ -970,4 +994,51 @@ fn worker_session_counts_end_states_and_privacy() {
     for name in ["telemetry.db","telemetry.db-wal","telemetry.db-shm"] {
         if let Ok(bytes)=fs::read(f.project.join(".state").join(name)) { assert!(!bytes.windows(b"SESSION_SECRET".len()).any(|w|w==b"SESSION_SECRET"),"{name}"); }
     }
+}
+
+#[test]
+fn worker_friction_metrics_cli_fixture_and_unavailable_reasons() {
+    use serde_json::json;
+    let f=Fixture::new();
+    let empty=f.report()["metrics"].clone();
+    for id in ["M71","M72","M75","M76"] {
+        assert_eq!(empty[id]["value"]["reason"],"session_metadata_not_collected");
+    }
+    assert_eq!(empty["M73"]["value"]["reason"],"cli_invocations_not_collected");
+    assert_eq!(f.cli_args(&["query","--metric","M70","--json"]).0["results"][0]["status"],"partial");
+    f.cli("collect");
+    let db=f.sidecar();
+    db.execute("DELETE FROM cli_invocations",[]).unwrap();
+    let now=jiff::Timestamp::now().as_millisecond();
+    for (id,caller,path,outcome,delta) in [("w1","worker","task list","help",0),("w2","worker","task list","error",1),("c1","coordinator","inbox list","ok",2),("o1","operator","task list","usage_error",3)] {
+        db.execute("INSERT INTO cli_invocations VALUES(?1,?2,?3,0,10,'demo',?4,'local',?5)",rusqlite::params![id,path,outcome,caller,now+delta]).unwrap();
+    }
+    // A fixture delivery receives its timestamp through the real schema-72 trigger.
+    let state=rusqlite::Connection::open(f.project.join(".state/state.db")).unwrap();
+    state.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES('inbox.delivered','fixture-result',1,1,?1)",[json!({"id":"worker-result-fixture"}).to_string()]).unwrap();
+    // CLI timestamps follow the actual schema-72 event time with deterministic deltas.
+    let delivered:i64=state.query_row("SELECT recorded_unix_ms FROM event_times ORDER BY sequence DESC LIMIT 1",[],|r|r.get(0)).unwrap();
+    db.execute("UPDATE cli_invocations SET recorded_unix_ms=?1 WHERE invocation_id='c1'",[delivered+1200]).unwrap();
+    let m=f.report()["metrics"].clone();
+    assert_eq!(m["M73"]["value"],"1/4");
+    assert_eq!(m["M73"]["by_caller"]["worker"]["value"],"1/2");
+    assert_eq!(m["M74"]["value"],"2/4");
+    assert_eq!(m["M74"]["by_caller"]["operator"]["value"],"1/1");
+    assert_eq!(m["M74"]["top_command_paths"][0],json!({"command_path":"task list","errors":2,"share":{"value":"2/3","numerator":2,"denominator":3}}));
+    assert_eq!(m["M77"]["value"],json!({"samples":1,"p50":"1200","p90":"1200","unmatched_notices":0}));
+    let text=f.text(&["report"]);
+    assert!(text.contains("by_caller={") && text.contains("top_command_paths=["));
+    let registry=f.cli_args(&["metrics","registry","--json"]).0;
+    assert_eq!(registry["registry"],"analytics-registry.v10");
+    db.execute("DELETE FROM cli_invocations",[]).unwrap();
+    assert_eq!(f.report()["metrics"]["M73"]["value"]["reason"],"no_cli_invocations");
+    state.execute_batch("DROP TRIGGER events_record_time; DROP TABLE event_times").unwrap();
+    assert_eq!(f.report()["metrics"]["M77"]["value"]["reason"],"event_times_not_recorded");
+
+    let refresh=f.cli_args(&["analytics","refresh"]).0;
+    assert!(refresh["appended"].as_array().unwrap().iter().all(|row|row["cell"]["metric"]!="M73" && row["cell"]["metric"]!="M74"));
+    let explicit=f.cli_args(&["analytics","refresh","--metric","M73"]).0;
+    assert!(explicit["appended"].as_array().unwrap().iter().any(|row|row["cell"]["metric"]=="M73"));
+    let text=f.text(&["report"]);
+    for name in ["worker_end_states","lingering_time","failed_command_share","help_lookup_share","command_friction","unanswered_worker_questions","context_window_fill","coordinator_reaction_time"] { assert!(text.contains(name),"{text}"); }
 }

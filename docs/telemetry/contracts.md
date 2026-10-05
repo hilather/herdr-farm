@@ -941,3 +941,15 @@ Worker termination derives wall budgets from the existing attempt-input frozen
 profile using launch-wrapper validation; no canonical or sidecar migration is
 needed. Unreadable historical frozen definitions retain `process_exit`. Existing
 attempt-input authority retention and full backup/restore classification apply.
+
+
+### MET-WORKER-1 metadata projections
+
+Registry v10 adds fixture-certified M70–M77 from the existing A10 worker
+session summaries and CLI-SELF-1 invocation rows, with no new collected leaves,
+tables or retention classes. Report and query expose end states, lingering
+latency, command failures, help and error friction, unanswered requests,
+context fill and coordinator reaction latency. The full definitions and
+unavailable reasons are in [contracts-analytics.md](contracts-analytics.md#met-worker-1-worker-and-command-friction-registry-v10).
+M78–M79 remain reserved until definitions are supplied. No prompts, commands,
+arguments, answers or result message contents enter these metrics.

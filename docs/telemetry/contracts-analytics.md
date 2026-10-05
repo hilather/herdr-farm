@@ -10,11 +10,11 @@ nothing here writes `state.db`.
 
 ## 1. Metric registry (`analytics-registry.v10`)
 
-Version history: v10 adds MET-REWORK-1 M65–M69 (section 10). v8 adds bounded lifecycle `role` and M37.lineage-v2 (LINEAGE-1); M37.fleet-v1 remains absent as `definition_superseded`. v1 TM4.1; v2 adds `verification_flip_rate` (DG6, #198); v3 adds M30 `M30.submission-v1` (DG1, #202); v4 adds M10 `M10.v1` (DG2, #204); v5 adds M03 operating throughput (DG3); v6 adds M05 lifecycle tokens and specifies M19’s missing timed history; v7 adds M13 never-running exclusions, M04/M05 partial values and M31 lifecycle sampling, M35 attempt-time concurrency and M40 reported/merged quota windows, plus the bounded lifecycle `profile` dimension (TFIX-4, no definition change). Previous M13.slice-v1, M04.cost-v1, M05.tokens-v1, M31.attention-v1, M35.fanout-v1 and M40.quota-windows-v1 definitions remain only as absent (`definition_superseded`). v9 adds MET-NOW-A `M51.v1`–`M58.v1` and MET-NOW-B `M60`–`M64` (sections 8 and 9).
+Version history: v10 adds MET-REWORK-1 M65–M69 (section 10) and MET-WORKER-1 M70–M77; M78–M79 are reserved pending definitions. v8 adds bounded lifecycle `role` and M37.lineage-v2 (LINEAGE-1); M37.fleet-v1 remains absent as `definition_superseded`. v1 TM4.1; v2 adds `verification_flip_rate` (DG6, #198); v3 adds M30 `M30.submission-v1` (DG1, #202); v4 adds M10 `M10.v1` (DG2, #204); v5 adds M03 operating throughput (DG3); v6 adds M05 lifecycle tokens and specifies M19’s missing timed history; v7 adds M13 never-running exclusions, M04/M05 partial values and M31 lifecycle sampling, M35 attempt-time concurrency and M40 reported/merged quota windows, plus the bounded lifecycle `profile` dimension (TFIX-4, no definition change). Previous M13.slice-v1, M04.cost-v1, M05.tokens-v1, M31.attention-v1, M35.fanout-v1 and M40.quota-windows-v1 definitions remain only as absent (`definition_superseded`). v9 adds MET-NOW-A `M51.v1`–`M58.v1` and MET-NOW-B `M60`–`M64` (sections 8 and 9).
 
 `telemetry <slug> metrics registry [--json]` prints one declared table
 (`registry.rs`) of every metric `telemetry report` or `query` can name:
-M01–M58, M60–M69 and lane C's `flaky_tests` and `verification_flip_rate`. A change is a new registry version, never
+M01–M58, M60–M69, M70–M77 and lane C's `flaky_tests` and `verification_flip_rate`. A change is a new registry version, never
 an edit in place of a published definition. Per metric:
 
 | field | meaning |
@@ -292,7 +292,7 @@ Commands (writes only this stream's tables; needs an existing sidecar, else
 
 - `analytics refresh [--metric M --cohort --from --to --horizon-ms --by]`:
   evaluates tracked cells whose inputs changed (first run: every active metric's
-  default cell). Clock-dependent cells always evaluate. Providers share pinned
+  default cell except the self-observing M73/M74). Clock-dependent cells always evaluate. Providers share pinned
   canonical and sidecar read snapshots. Serialized revisions are committed in
   short immediate transactions after rechecking the live input generations;
   `deferred` lists cells whose inputs changed during evaluation, leaving them
@@ -548,3 +548,41 @@ Missing profiles use `unknown`. Pricing revisions are exposed for M66/M69;
 rate cards remain fixture-only estimates, not provider charges. Analytics
 refresh/rebuild and as-of revisions retain the same bodies and invalidate on
 canonical or sidecar input changes, including owner triage corrections.
+
+
+## MET-WORKER-1: worker and command friction (registry v10)
+
+All definitions are `.v1`, fixture certified, metadata only, and read at query
+or report time from existing stores. No schema or retention changes. M78–M79
+are reserved: the owner card assigns M70–M79 but specifies eight metrics.
+Worker cohorts use attempt reservation time at or after `--since`; CLI cohorts
+use invocation time, additionally bounded by the CLI 90-day retention window.
+M77 uses notice delivery time. Per-profile output applies to worker metrics;
+CLI caller labels cannot be joined to worker profiles without guessing.
+
+| ID / report name | Definition | Missing evidence |
+| --- | --- | --- |
+| M70 worker_end_states | Five end-state counts, including unknown; uses the A10 precedence. | Coverage counts accompany metadata-free canonical end states. |
+| M71 lingering_time | Last session record to terminal mark, nearest-rank median/p95 in ms; count strictly over 600000 ms. Negative/open/missing times excluded and counted. | session_end_or_terminal_time_missing |
+| M72 failed_command_share | Failed exec items / all exec items; same denominator for exit classes 1, 2, 127_not_found, other_nonzero, signal. Unknown exits counted separately and mark partial coverage. | empty_denominator; exit_code_unknown |
+| M73 help_lookup_share | Help / retained invocations, overall and by worker/coordinator/operator/plugin/ticker. | cli_invocations_not_collected; no_cli_invocations; empty_denominator |
+| M74 command_friction | Error plus usage_error / retained invocations, by caller; ten command paths ranked by error count, ties by path. | Same as M73. |
+| M75 unanswered_worker_questions | Unanswered request_user_input* calls / observed attempts, plus exact per-attempt counts. Async output alone is not an answer. | session_metadata_not_collected |
+| M76 context_window_fill | Per-attempt maximum input/context-window ratio, nearest-rank median/p95 and fraction strictly over 0.8. | context_window_or_input_tokens_missing |
+| M77 coordinator_reaction_time | Each inbox.delivered event with worker-result- id to first coordinator CLI timestamp at or after delivery; median/p90 ms. A CLI may follow multiple notices. | event_times_not_recorded; coordinator_cli_invocations_missing; worker_result_delivery_times_missing; notice_time_or_next_cli_missing |
+
+Worker metrics carry observed/unavailable attempt coverage, and partial status
+when coverage is incomplete. Unobserved worker quantities use
+session_metadata_not_collected rather than zero. Sample distributions include
+sample counts; empty ratios have null value and empty_denominator. Decimal
+quantiles are strings. Canonical events without schema-72 times are never
+assigned inferred times. M77 unmatched notices are counted, not zero-duration
+samples. CLI self-observation is best effort and reports may append their own
+invocation after the projection; worker-reported observations remain untrusted.
+The worker provider cache group depends on the clock for retention expiry as
+well as canonical and sidecar input generations; other analytics caches retain
+their existing behavior. M73/M74 are live report/query metrics and are excluded
+from default aggregate tracking: analytics commands observe themselves, so
+tracking these metrics would make an otherwise unchanged rebuild verification
+differ after every command. `analytics refresh --metric M73` (or M74) explicitly
+opts into revision tracking, including these subsequent invocation changes.
