@@ -1004,6 +1004,12 @@ but not yet reserved an attempt. Relaunch also reuses the persisted live socket 
 runtime directory changed, and refuses to overwrite a live server record until
 the retention fence permits stopping it. Operator-managed servers remain running.
 
+The sweep reads a read-only canonical snapshot without a whole-store integrity
+check. Idle monitoring likewise uses persisted pane observations, leaving pane
+probes and the durable response to unexplained loss to reconciliation. A missing
+pane without proven termination pauses admission and requires reconciliation;
+it never makes a capacity-retaining attempt's server eligible for retirement.
+
 ### Worker command card and environment
 
 Rendered worker briefs end with a compact command card: the submission script

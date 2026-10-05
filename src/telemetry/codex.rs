@@ -366,7 +366,7 @@ pub fn collect(project: &Path, budget: Budget, create: bool) -> Result<Option<Co
     let questions: Vec<(String,String,String,String)> = db.prepare("SELECT DISTINCT s.attempt_id,c.session_id,c.call_id,c.name FROM codex_tool_calls c JOIN rollout_sources s USING(session_id) WHERE s.binding='bound' AND s.attempt_id IS NOT NULL AND c.name IN ('request_user_input','request_user_input_async')")?
         .query_map([], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?.collect::<rusqlite::Result<_>>()?;
     if !questions.is_empty() {
-        let mut canonical = crate::store::SqliteStore::open(&project.join(".state/state.db"))?;
+        let mut canonical = crate::store::SqliteStore::open_scoped(&project.join(".state/state.db"))?;
         for (attempt,session,call,tool) in questions {
             canonical.notify_worker_question(&crate::domain::AttemptId::new(attempt).map_err(anyhow::Error::msg)?, &session, &call, &tool, jiff::Timestamp::now().as_millisecond())?;
         }

@@ -526,7 +526,13 @@ readiness is still required; `working` and `blocked` panes are refused.
 Idle stretch tracking uses ticker memory on canonical schema 72. The ticker delivers `attempt.worker_idle` to the canonical inbox when a running
 worker stays idle/done for ten minutes without a submission or observed
 termination. The threshold uses the shared test time scale in isolated labs.
-The worker continues running. One notice is delivered per observed idle stretch,
+The worker continues running. Idle monitoring uses the latest persisted
+reconciliation observation for pane presence and checks the agent against the
+retained socket and agent identities; it does not issue additional pane probes.
+An absent or unverified pane defers advisory notices. Unexplained pane loss is
+still reconciled to a paused project with reconciliation required, retaining
+ownership and worker capacity until termination is proven. One notice is delivered
+per observed idle stretch,
 keyed by attempt id and revision; working or blocked observations break the stretch.
 After a ticker restart the idle stretch starts again, so at most one extra notice
 can be delivered for the same stretch per restart. Stable inbox ids deduplicate delivery retries.
@@ -538,3 +544,8 @@ Collection delivers `attempt.worker_question` for a bound Codex worker session's
 It names the attempt and tool only; question/argument text is never retained or
 forwarded. Isolated workers cannot get owner answers. Ask the worker to state
 assumptions in its report, or explicitly intervene through the normal workflow.
+
+Per-pass attention, idle/question notice delivery and private-server retirement
+use hot-path store opens. They do not run the whole-store integrity check or
+classify its result; the ticker's periodic background integrity check owns that
+check and pauses admission and effects on corruption.

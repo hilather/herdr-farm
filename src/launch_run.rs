@@ -1019,7 +1019,7 @@ pub fn stop(ctx: &Ctx, slug: &str, task: &str, force: bool) -> Result<Value> {
         let name = format!("{slug}-{task}");
         for other in crate::project::list_slugs(&ctx.root).into_iter().filter(|other| other != slug) {
             if let Some(other_task) = name.strip_prefix(&format!("{other}-")) {
-                let other_snapshot = runtime::snapshot(&ctx.root.join(&other))?;
+                let other_snapshot = migration::open_active_read_only(&ctx.root.join(&other))?.read_snapshot(None)?;
                 ensure!(!other_snapshot.attempts.iter().any(|a| a.task.as_str() == other_task && a.retains_capacity()), "private server may belong to an active attempt in project {other}");
             }
         }
@@ -1029,7 +1029,7 @@ pub fn stop(ctx: &Ctx, slug: &str, task: &str, force: bool) -> Result<Value> {
     let launch_guard = fs::File::open(project.join(".state/state.db"))?;
     launch_guard.try_lock().context("launch preparation or memory adoption is in progress; retry server retirement")?;
     let _guard = herdr_farm::execution_guard::ProjectGuard::acquire(&project)?;
-    let snapshot = runtime::snapshot(&project)?;
+    let snapshot = migration::open_active_read_only(&project)?.read_snapshot(None)?;
     let server_socket = record_value["socket"].as_str();
     let held = snapshot.attempts.iter().find(|a| a.retains_capacity() && (a.task == task_id ||
         snapshot.ownership.iter().any(|o| o.attempt.as_ref() == Some(&a.id) &&
@@ -1085,7 +1085,7 @@ pub fn sweep_servers(ctx: &Ctx, slug: &str) -> Vec<String> {
             continue;
         }
         let Ok(project) = ctx.root.join(slug).canonicalize() else { continue };
-        let Ok(snapshot) = runtime::snapshot(&project) else { continue };
+        let Ok(snapshot) = migration::open_active_read_only(&project).and_then(|mut db| db.read_snapshot(None).map_err(Into::into)) else { continue };
         // Attempt retention is authoritative even if the task pointer changed.
         // Orphaned and never-reserved private servers have no worker to retain.
         if snapshot.attempts.iter().any(|a| a.task.as_str() == task && a.retains_capacity()) {

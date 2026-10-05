@@ -1154,6 +1154,7 @@ fn a_proven_worker_end_keeps_the_project_admitted_but_an_unexplained_pane_loss_p
     assert_eq!((control.state, control.reconciliation_required), (ProjectState::Paused, true));
     assert!(state.ownership.iter().any(|o| o.binding == lab.binding && o.attempt.as_ref() == Some(&attempt)));
     assert!(lab.events("runtime.relinquished").is_empty());
+    assert!(state.inbox.iter().all(|item| item.content.kind != "attempt.worker_idle"));
     let live = lab.attempt(&attempt);
     assert!(live.retains_capacity() && !live.termination_observed);
 }
