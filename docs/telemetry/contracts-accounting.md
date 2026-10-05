@@ -1941,3 +1941,14 @@ unavailable reasons. Metadata remains readable before pricing. These are
 observational fixture metrics, not claims about owner intent or productivity.
 No migration, retention class or backup classification changes are required;
 all inputs already belong to existing canonical and accounting classes.
+
+## MET-LAUNCH-1 metadata projections
+
+Registry v11 M90–M95 are defined in [analytics contracts §12](contracts-analytics.md#12-met-launch-1-launch-reliability-and-miscellaneous-metadata-registry-v11).
+Operations stream v2 attaches bounded local task/attempt identifiers and a
+force flag to existing accounting CLI invocations; no arguments, memory
+text or log text enter telemetry. CLI retention also removes target rows.
+M93 uses canonical lifecycle wall-time unions, M94 exact published-rate
+attempt spend per submitted changed line, and M95 canonical proposal,
+consumer-snapshot and Remember counts. Missing evidence remains unavailable.
+Accounting stream and canonical schema versions are unchanged.

@@ -129,6 +129,7 @@ fn registry_declares_every_metric_and_gates_families() {
     expected.extend((60..=69).map(|n| format!("M{n}")));
     expected.extend((70..=77).map(|n| format!("M{n}")));
     expected.extend((80..=87).map(|n| format!("M{n}")));
+    expected.extend((90..=95).map(|n| format!("M{n}")));
     expected.push("flaky_tests".into());
     expected.push("verification_flip_rate".into());
     expected.sort();

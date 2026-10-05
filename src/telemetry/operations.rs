@@ -5,7 +5,8 @@ use serde_json::{Value, json};
 use std::{collections::{BTreeMap, BTreeSet}, io::Read, path::Path};
 
 pub const STREAM: &str = "operations";
-pub const MIGRATIONS: &[&str] = &[include_str!("../../migrations/telemetry/operations/0001_samples.sql")];
+pub const MIGRATIONS: &[&str] = &[include_str!("../../migrations/telemetry/operations/0001_samples.sql"), include_str!("../../migrations/telemetry/operations/0002_launch_metrics.sql")];
+pub mod launch;
 const HOUR_MS: i64 = 3_600_000;
 const DAY_MS: i64 = 86_400_000;
 pub const STORAGE_ROWS: i64 = 2160; // 90 days at hourly cadence

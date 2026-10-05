@@ -50,6 +50,8 @@ column named in `age_from`).
 | Class | Store | Default | Basis | Action |
 | --- | --- | --- | --- | --- |
 | `sidecar.normalized_sessions` | `telemetry.db`, per native session: `muse_events`, `muse_parents`, `claude_messages`, `claude_tool_results`, `opencode_messages`, `opencode_tools`, `codex_*`, `rollout_*`, `collect_offsets`, `codex_tool_sources`, `source_bindings`, `source_observations`, `ingest_quarantine`, `coverage_gaps`, `source_cursors`, `usage_entries`, `usage_dispositions`, `model_segments`, `quota_window_observations`, `session_graph_nodes` | 90 d | derivable from the native rollout (tombstoned: never again) | prune, destructive |
+| `sidecar.ticker_errors` | `operation_ticker_errors` | producer caps 90 d / 100000 passes | source of truth; root-wide classes/counts | retain; full sidecar backup |
+| `sidecar.submission_diff` | `operation_submission_diff` | no TTL | source of truth; aggregate verifier counts | retain; full sidecar backup |
 | `sidecar.operating_intervals` | `operating_intervals`, `operating_clock`, `operating_gaps` | no TTL | source of truth (ticker observations) | retain; full sidecar backup |
 | `sidecar.attention_samples` | `attention_samples` | 90 d | source of truth (sampled live, R4) | prune, destructive |
 | `sidecar.health_evaluations` | `health_evaluations` | 90 d | derivable | prune |
@@ -118,6 +120,8 @@ may only be shortened.
 $ herdr-farm telemetry demo maintenance classes
 retention.v1
 sidecar.launch_load retain - source_of_truth destructive
+sidecar.ticker_errors retain - source_of_truth destructive
+sidecar.submission_diff retain - source_of_truth destructive
 sidecar.storage_samples prune 90d source_of_truth
 sidecar.operating_intervals retain - source_of_truth destructive
 sidecar.otlp retain - source_of_truth destructive
@@ -456,8 +460,11 @@ $ herdr-farm telemetry demo backup restore --from <tmp>/backup-2026-09-30 --forc
     "operating_clock": 0,
     "operating_gaps": 0,
     "operating_intervals": 0,
+    "operation_cli_targets": 0,
     "operation_launch_load": 0,
     "operation_storage_samples": 0,
+    "operation_submission_diff": 0,
+    "operation_ticker_errors": 0,
     "otlp_attempt_tokens": 0,
     "otlp_records": 0,
     "provider_charges": 0,

@@ -242,6 +242,12 @@ pub const METRICS: &[Metric] = &[
     m!("M85", "permission_prompts_shown", Attention, "prompts", [lane("analytics", "M85.v1", A, "coordinator_turn_start")], "fixture", "tests/telemetry_claude.rs", Some("metadata only; missing times explicit")),
     m!("M86", "unattended_stretch", Fleet, "milliseconds", [lane("analytics", "M86.v1", A, "coordinator_turn_start")], "fixture", "tests/telemetry_claude.rs", Some("metadata only; missing times explicit")),
     m!("M87", "friction_index", Attention, "ratio", [lane("analytics", "M87.v1", A, "coordinator_turn_start")], "fixture", "tests/telemetry_claude.rs", Some("metadata only; missing times explicit")),
+    m!("M90", "launch_success_rate", Lifecycle, "ratio", [lane("analytics", "M90.v1", A, "cli_invocation_time")], "fixture", "tests/telemetry_launch.rs", Some("metadata only")),
+    m!("M91", "stuck_attempt_interventions", Attention, "interventions", [lane("analytics", "M91.v1", A, "cli_invocation_time")], "fixture", "tests/telemetry_launch.rs", Some("metadata only")),
+    m!("M92", "ticker_error_rate", Fleet, "errors_per_hour", [lane("analytics", "M92.v1", A, "ticker_pass_time")], "fixture", "tests/telemetry_launch.rs", Some("metadata only")),
+    m!("M93", "work_item_time_breakdown", Lifecycle, "milliseconds", [lane("analytics", "M93.v1", A, "work_item_first_reservation")], "fixture", "tests/telemetry_launch.rs", Some("metadata only")),
+    m!("M94", "diff_size", Cost, "lines", [lane("analytics", "M94.v1", A, "submission_time")], "fixture", "tests/telemetry_launch.rs", Some("metadata only")),
+    m!("M95", "memory_use", Consumption, "facts", [lane("analytics", "M95.v1", A, "proposal_or_brief_delivery_time")], "fixture", "tests/telemetry_launch.rs", Some("metadata only")),
     m!("flaky_tests", "newly_flaky_tests_proxy", Proxy, "tests", [lane("quality", "flaky_tests.proxy-v1", A, "ci_run")], "unavailable", QUALITY, Some("no_repeat_runs")),
     m!("verification_flip_rate", "verification_flip_rate", Proxy, "ratio", [lane("quality", "verification_flip_rate.v1", A, "verification_completed")], "fixture", "tests/telemetry_quality.rs (DG6)", Some("passive reruns only; accepted vs checks_failed; policy drill-down in quality flaky")),
 ];

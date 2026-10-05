@@ -18,7 +18,7 @@ pub const MAX_PAGE: u32 = 500;
 /// Most dimension cells one result may carry (doc 08 §4 bounded complexity).
 pub const MAX_CELLS: usize = 64;
 /// Priced metrics: they carry the valuation (rate card) revision they read.
-const PRICED: [&str; 9] = ["M04", "M12", "M14", "M24", "M34", "M37", "M53", "M66", "M69"];
+const PRICED: [&str; 10] = ["M04", "M12", "M14", "M24", "M34", "M37", "M53", "M66", "M69", "M94"];
 
 /// `herdr-farm telemetry <slug> report`: central slice metrics, then every
 /// lane's (`super::super::LANES`, a lane key replacing a central one).
@@ -329,6 +329,7 @@ impl<'a> Sources<'a> {
                     },
                     Provider::Lane("accounting") => crate::telemetry::accounting::metric_group_uncached(self.project, group, since, self.use_aggregates)?,
                     Provider::Lane("analytics") if group == "coordinator" => crate::telemetry::accounting::coordinator_metrics::metrics(self.project, since)?,
+                    Provider::Lane("analytics") if group == "launch" => super::launch_metrics::metrics(self.project, since)?,
                     Provider::Lane("analytics") if group == "worker" => super::worker_metrics::metrics(self.project, since)?,
                     Provider::Lane("analytics") => super::stored_metrics::metrics(self.project, since)?,
                     Provider::Lane(stream) => match crate::telemetry::LANES.iter().find(|l| l.stream == stream) {

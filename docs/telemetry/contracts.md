@@ -960,3 +960,14 @@ context fill and coordinator reaction latency. The full definitions and
 unavailable reasons are in [contracts-analytics.md](contracts-analytics.md#met-worker-1-worker-and-command-friction-registry-v10).
 M78–M79 remain reserved until definitions are supplied. No prompts, commands,
 arguments, answers or result message contents enter these metrics.
+
+### MET-LAUNCH-1 launch metadata
+
+Registry **v11**, M90–M95, fixture certification; M96–M99 reserved.
+Sidecar operations **v2**, `migrations/telemetry/operations/0002_launch_metrics.sql`:
+CLI target identifiers/force metadata, bounded ticker class counters and
+whole-submission verifier numstat counts. See [analytics §12](contracts-analytics.md#12-met-launch-1-launch-reliability-and-miscellaneous-metadata-registry-v11)
+and [accounting](contracts-accounting.md#met-launch-1-metadata-projections).
+New tables are classified in telemetry maintenance and included in full
+sidecar backups. No canonical schema change. Existing verifier metadata
+retains counts when a sidecar was absent at verification time.

@@ -53,6 +53,7 @@ pub struct Capture {
     started: Instant,
     project: Option<PathBuf>,
     row: Option<Invocation>,
+    target: (Option<String>, Option<String>, bool),
 }
 
 impl Capture {
@@ -93,6 +94,7 @@ impl Capture {
                 started,
                 project: None,
                 row: None,
+                target: (None, None, false),
             };
         };
         let root = matches
@@ -121,6 +123,7 @@ impl Capture {
                 started,
                 project: None,
                 row: None,
+                target: (None, None, false),
             };
         }
         let project = slug.as_ref().and_then(|slug| {
@@ -165,9 +168,15 @@ impl Capture {
             "{:x}",
             Sha256::digest(format!("{}:{}", std::process::id(), stamp.as_nanos()))
         );
+        let target_id = |name: &str| current.try_get_one::<String>(name).ok().flatten()
+            .filter(|s| !s.is_empty() && s.len() <= 256 && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))).cloned();
+        let target = if matches!(path.as_str(), "launch run" | "launch stop" | "task cancel-attempt") {
+            (target_id("task"), target_id("attempt"), current.try_get_one::<bool>("force").ok().flatten().copied().unwrap_or(false))
+        } else { (None, None, false) };
         Self {
             started,
             project,
+            target,
             row: Some(Invocation {
                 invocation_id: id,
                 command_path: path,
@@ -197,7 +206,11 @@ impl Capture {
             return;
         }
         if let Some(project) = &self.project {
-            let _ = cli_invocations::write(project, &[row]);
+            let targeted = matches!(row.command_path.as_str(), "launch run" | "launch stop" | "task cancel-attempt");
+            let invocation = row.invocation_id.clone();
+            if cli_invocations::write(project, &[row]).is_ok() && targeted {
+                let _ = herdr_farm::telemetry::operations::launch::cli_target(project, &invocation, self.target.0.as_deref(), self.target.1.as_deref(), self.target.2);
+            }
         }
     }
 }

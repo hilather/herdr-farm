@@ -195,3 +195,24 @@ pub(super) fn changed_paths(checkout: &Path, base: &str, candidate: &str) -> Res
     if paths.len() > 10_000 { bail!("candidate scope diff exceeds 10000 files"); }
     Ok(paths)
 }
+
+/// Aggregate the whole submitted range in the isolated verification checkout.
+/// RealRunner bounds capture and routes spawning through GatedSpawn.
+pub(super) fn diff_counts(checkout: &Path, base: &str, candidate: &str) -> Option<(i64,i64,i64)> {
+    let output = run(checkout, &["diff".into(), "--numstat".into(), "-z".into(),
+        "--no-renames".into(), "--no-ext-diff".into(), "--no-textconv".into(),
+        "--end-of-options".into(), base.into(), candidate.into(), "--".into()], Some(checkout)).ok()?;
+    if !output.success() || output.stdout_truncated || (!output.stdout_bytes.is_empty() && output.stdout_bytes.last() != Some(&0)) { return None; }
+    let mut counts = (0i64,0i64,0i64);
+    for row in output.stdout_bytes.split(|b| *b == 0).filter(|r| !r.is_empty()) {
+        let mut fields = row.splitn(3, |b| *b == b'\t');
+        let a = fields.next()?; let d = fields.next()?; fields.next()?;
+        if a == b"-" && d == b"-" { counts.2 = counts.2.checked_add(1)?; }
+        else {
+            let a = std::str::from_utf8(a).ok()?.parse::<i64>().ok().filter(|n| *n >= 0)?;
+            let d = std::str::from_utf8(d).ok()?.parse::<i64>().ok().filter(|n| *n >= 0)?;
+            counts.0 = counts.0.checked_add(a)?; counts.1 = counts.1.checked_add(d)?;
+        }
+    }
+    Some(counts)
+}

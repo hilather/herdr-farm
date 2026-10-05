@@ -10,11 +10,11 @@ nothing here writes `state.db`.
 
 ## 1. Metric registry (`analytics-registry.v11`)
 
-Version history: v11 adds MET-COORD-1 M80–M87 (contracts-accounting.md); M88–M89 reserved. v10 adds MET-REWORK-1 M65–M69 (section 10) and MET-WORKER-1 M70–M77; M78–M79 are reserved pending definitions. v8 adds bounded lifecycle `role` and M37.lineage-v2 (LINEAGE-1); M37.fleet-v1 remains absent as `definition_superseded`. v1 TM4.1; v2 adds `verification_flip_rate` (DG6, #198); v3 adds M30 `M30.submission-v1` (DG1, #202); v4 adds M10 `M10.v1` (DG2, #204); v5 adds M03 operating throughput (DG3); v6 adds M05 lifecycle tokens and specifies M19’s missing timed history; v7 adds M13 never-running exclusions, M04/M05 partial values and M31 lifecycle sampling, M35 attempt-time concurrency and M40 reported/merged quota windows, plus the bounded lifecycle `profile` dimension (TFIX-4, no definition change). Previous M13.slice-v1, M04.cost-v1, M05.tokens-v1, M31.attention-v1, M35.fanout-v1 and M40.quota-windows-v1 definitions remain only as absent (`definition_superseded`). v9 adds MET-NOW-A `M51.v1`–`M58.v1` and MET-NOW-B `M60`–`M64` (sections 8 and 9).
+Version history: v11 adds MET-COORD-1 M80–M87 (contracts-accounting.md; M88–M89 reserved) and MET-LAUNCH-1 M90–M95 (section 12; M96–M99 reserved). v10 adds MET-REWORK-1 M65–M69 (section 10) and MET-WORKER-1 M70–M77; M78–M79 are reserved pending definitions. v8 adds bounded lifecycle `role` and M37.lineage-v2 (LINEAGE-1); M37.fleet-v1 remains absent as `definition_superseded`. v1 TM4.1; v2 adds `verification_flip_rate` (DG6, #198); v3 adds M30 `M30.submission-v1` (DG1, #202); v4 adds M10 `M10.v1` (DG2, #204); v5 adds M03 operating throughput (DG3); v6 adds M05 lifecycle tokens and specifies M19’s missing timed history; v7 adds M13 never-running exclusions, M04/M05 partial values and M31 lifecycle sampling, M35 attempt-time concurrency and M40 reported/merged quota windows, plus the bounded lifecycle `profile` dimension (TFIX-4, no definition change). Previous M13.slice-v1, M04.cost-v1, M05.tokens-v1, M31.attention-v1, M35.fanout-v1 and M40.quota-windows-v1 definitions remain only as absent (`definition_superseded`). v9 adds MET-NOW-A `M51.v1`–`M58.v1` and MET-NOW-B `M60`–`M64` (sections 8 and 9).
 
 `telemetry <slug> metrics registry [--json]` prints one declared table
 (`registry.rs`) of every metric `telemetry report` or `query` can name:
-M01–M58, M60–M69, M70–M77 and lane C's `flaky_tests` and `verification_flip_rate`. A change is a new registry version, never
+M01–M58, M60–M69, M70–M77, M80–M87, M90–M95 and lane C's `flaky_tests` and `verification_flip_rate`. A change is a new registry version, never
 an edit in place of a published definition. Per metric:
 
 | field | meaning |
@@ -87,7 +87,7 @@ echo), query_unix_ms, results: [...], drill?}`. Each result:
 | `source_watermarks` | `canonical {events_head, lifecycle_digest, last_event_unix_ms}`; for lane definitions also `sidecar {streams, last_collect_unix_ms, codex_usage_rowid, valuation, rate_cards}` |
 | `event_cutoff_unix_ms`, `observation_cutoff_unix_ms` | latest occurrence time in the cohort; knowledge time (query time live, `recorded_unix_ms` as of) |
 | `lag_ms`, `lag_reason` | native: 0 (canonical read directly); lane: observation cutoff − last collect, or null with `collection_not_run`/`no_collect_recorded` |
-| `rate_card_revision` | priced metrics (M04, M12, M14, M24, M34, M37, M53, M66, M69): `{valuation_revision, valuation_digest, rate_cards {count, digest}}` or unavailable (`not_priced`, `collection_not_run`); otherwise null |
+| `rate_card_revision` | priced metrics (M04, M12, M14, M24, M34, M37, M53, M66, M69, M94): `{valuation_revision, valuation_digest, rate_cards {count, digest}}` or unavailable (`not_priced`, `collection_not_run`); otherwise null |
 | `certification`, `activation` | as the registry |
 | `as_of` | the requested knowledge time or sequence, as-of results only |
 
@@ -586,3 +586,43 @@ from default aggregate tracking: analytics commands observe themselves, so
 tracking these metrics would make an otherwise unchanged rebuild verification
 differ after every command. `analytics refresh --metric M73` (or M74) explicitly
 opts into revision tracking, including these subsequent invocation changes.
+
+## 12. MET-LAUNCH-1 launch reliability and miscellaneous metadata (registry v11)
+
+M90–M95 use definitions `M90.v1`–`M95.v1`, certification **fixture**,
+activity-window cohorts and since-only windows. M96–M99 are reserved, with
+no invented metric definitions. Report, query, export and revisions share
+these descriptive projections; none influences admission or acceptance.
+No canonical migration or SCHEMA bump is needed.
+
+| ID | Definition and time basis |
+|---|---|
+| M90 `launch_success_rate` | Operator/coordinator `launch run` invocations (excluding help/version/usage errors), placed by invocation start. Numerator: invocations whose task reaches running after that start and before the next retained invocation for that task, or whose existing attempt is still running at invocation start (idempotent launch). Denominator: launches attempted, including command failures. `by_task` includes launches and tries at/before the task's first running mark. CLI exit success alone is never running evidence. |
+| M91 `stuck_attempt_interventions` | Operator/coordinator `task cancel-attempt` and `launch stop --force` invocations, including failed interventions, by UTC day and attempt. Forced stop is attributed to the task's latest reservation at invocation start. |
+| M92 `ticker_error_rate` | Counts of explicitly logged ticker errors per UTC hour bucket, by `lock_contention`, `expired_inventory`, `ambiguous_outcome`, `permanent_failure`, `other`. Fixed saturating ticker counters are drained once each pass and replicated to existing sidecars. Values are root-wide: never sum across projects. Background errors enter the next completed pass. No log text is stored. Partial hours, missing pass prefixes/gaps and observation endpoints are explicit; zero-wait write contention can leave unobserved passes, which make coverage partial (`ticker_passes_not_observed`); no unobserved hour is assumed zero. |
+| M93 `work_item_time_breakdown` | Items placed by first reservation across lineage tasks. Complete closed items partition first reservation→last terminal wall time into running, launch overhead and gaps between attempts. Interval unions handle parallel attempts; running takes priority over launch overhead. Never-running closed attempts retain total and running/gap observations but make launch overhead and its share unavailable (`never_running_attempt`); known launch overhead stays a subtotal. `worker_attempt_ms` separately sums running attempt durations. Shares are exact unreduced milliseconds/elapsed ratios. |
+| M94 `diff_size` | Every submission placed by submission time; whole-range numstat in the disposable verification checkout, with rename folding disabled, no external diff or text conversion. Paths and diff text are discarded. Added/removed counts are retained in verifier metadata and, when present, the sidecar. Binary files make coverage partial. Profile cost/changed-line ratios divide exact single-currency priced cost of distinct submission attempts by their known submitted changed lines (an attempt's cost counted once across its submissions). Missing/binary ranges suppress the ratio. |
+| M95 `memory_use` | Proposals placed by proposal time, accepted by promotion and rejected by final rejection or failed validation, excluding promoted proposals. Acknowledged `runtime.worker_brief_delivered` receipts placed by observed delivery time count facts delivered and the snapshot's `omitted_optional_count` as `omitted_for_budget`; receipts are deduplicated by operation. Consumer bindings without a receipt are prepared snapshots, never delivered facts; no receipts gives `no_brief_delivery_samples`. Remember sections count canonical distinct attempt/content candidates placed by submission time; legacy file-backed Remember intake is explicitly unavailable. Only aggregate counts leave the stores. |
+
+Unavailable reasons: M90/M91 `launch_invocations_not_collected`; M90
+`launch_target_not_recorded` (partial attribution), `empty_denominator`;
+M91 `intervention_attempt_unknown` (partial); M92
+`ticker_errors_not_observed`, `ticker_passes_not_observed`; M93 `no_work_item_time_samples`,
+`open_work_item`, `lifecycle_time_missing`, `never_running_attempt`, `work_item_time_incomplete`, `lineage_not_recorded`, `empty_denominator` for zero
+elapsed shares; M94 `no_submissions`, `submission_diff_not_observed`,
+`diff_unavailable`, `binary_lines_unknown`, `diff_coverage_incomplete`,
+`cost_not_observed`, `empty_denominator`; M95 `memory_history_not_recorded`,
+`brief_delivery_history_not_recorded`, `no_brief_delivery_samples`, `remember_history_not_recorded`,
+`legacy_remember_not_observed`. Missing times, absent collection and binary
+line counts are never replaced with zero. Retained CLI history covers at
+most 90 days/100000 invocations, so retries are observed-history counts.
+
+Operations stream v2 adds `operation_cli_targets` (local typed task/attempt
+IDs and force flag, tied to CLI retention), `operation_ticker_errors`
+(90 days/100000 passes) and `operation_submission_diff` (lifetime counts).
+Writers use existing sidecars only and zero SQLite wait. Telemetry disabled
+by `HERDR_FARM_TELEMETRY_COLLECT_SECS=0` suppresses ticker samples. New
+sidecars/upgrades arise from normal explicit collection, never launch alone.
+Full telemetry backups include all three tables. Targets cascade with CLI
+row pruning and are orphan-pruned by capture. Retention classes declare
+CLI targets with CLI history and retained ticker/diff metadata separately.

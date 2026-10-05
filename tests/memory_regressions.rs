@@ -107,10 +107,13 @@ impl Project {
     }
     /// Owner-signed approval through `memory review`; returns the decision id.
     fn review(&self, id: &str, key: &str, receipt: &Value) -> String {
+        self.review_as(id, key, receipt, "approve")
+    }
+    fn review_as(&self, id: &str, key: &str, receipt: &Value, decision: &str) -> String {
         let head = self.head();
         let review = json!({"version":1,"project_store":self.store,"authority":authority::policy_reference(&self.project).unwrap(),
             "expected_head":head,"expires_unix_ms":jiff::Timestamp::now().as_millisecond()+60_000,"proposal_digest":receipt["payload_digest"],
-            "record_keys":[key],"review":{"schema_version":1,"proposal_id":id,"decision":"approve","reason":"reviewed"}});
+            "record_keys":[key],"review":{"schema_version":1,"proposal_id":id,"decision":decision,"reason":"reviewed"}});
         let (doc, sig) = self.sign(&format!("{id}-review.json"), &serde_json::to_vec(&review).unwrap(), authority::MEMORY_REVIEW_NAMESPACE);
         self.ok(&["memory", "demo", "review", "--proposal", id, "--decision-file", doc.to_str().unwrap(), "--signature", sig.to_str().unwrap(), "--expected-head", &head.to_string()])["id"]
             .as_str().unwrap().into()
@@ -191,6 +194,16 @@ fn reviewed_proposals_keep_their_bytes_through_gc_recheck_hard_rules_and_replay(
     assert_eq!(p.head(), head);
     assert_eq!(p.expected("ops.fact"), fact);
     assert_eq!(p.record("ops.fact").unwrap()["is_hard"], true);
+    // Telemetry counts authoritative outcomes, including promotion replay once.
+    let rejected = p.propose("proposal-reject", "writer", &snapshot, "ops.other", &p.ingest(b"rejected claim"), json!({}));
+    p.review_as("proposal-reject", "ops.other", &rejected, "reject");
+    let metric = p.ok(&["telemetry","demo","query","--metric","M95","--json"]);
+    let use_counts = &metric["results"][0]["value"];
+    assert_eq!(use_counts["candidates_proposed"],3);
+    assert_eq!(use_counts["candidates_accepted"],1);
+    assert_eq!(use_counts["candidates_rejected"],1);
+    assert_eq!(use_counts["remember_sections_written"],0);
+
 }
 
 /// Worker snapshots re-evaluate policy (a new hard rule is mandatory, not a
@@ -606,6 +619,14 @@ fn memory_changes_reach_the_coordinator_and_only_the_live_worker_that_consumed_t
     assert!(deliveries.iter().filter(|d| d["snapshot_id"] == coordinator.as_str()).all(|d| d["subscriber"].as_str().unwrap().starts_with("coordinator:") && d["task_id"].is_null()), "{deliveries:?}");
     assert!(to(unused.id.as_str()).is_empty(), "a snapshot no attempt used received a delivery");
     assert_eq!(runtime::snapshot(&p.project).unwrap().attempts.len(), attempts, "routing created an attempt");
+    let metric = p.ok(&["telemetry","demo","query","--metric","M95","--json"]);
+    let counts = &metric["results"][0]["value"];
+    assert_eq!(counts["candidates_proposed"],8);
+    assert_eq!(counts["candidates_accepted"],8);
+    assert_eq!(counts["briefs"]["facts_delivered"]["reason"],"no_brief_delivery_samples");
+    assert_eq!(counts["briefs"]["prepared_without_delivery"],4);
+    assert_eq!(counts["briefs"]["omitted_for_budget"]["reason"],"no_brief_delivery_samples");
+
 }
 
 /// Replaces `delegation_expiry_reason_does_not_classify_authority_mismatch_as_expired`.

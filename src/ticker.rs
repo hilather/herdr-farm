@@ -84,7 +84,7 @@ fn snapshot_metrics(metrics: &crate::executor::Metrics) -> ExecutorMetrics {
 fn publish_executor_metrics(root: &Path, log: &Log, memory: &Memory) {
     let Some(reads) = memory.pr_reads.as_ref() else { return };
     if let Err(error) = write_metrics_file(root, &snapshot_metrics(&reads.metrics())) {
-        log.line(&format!("executor metrics: {error:#}"));
+        log.error(&format!("executor metrics: {error:#}"));
     }
 }
 
@@ -324,7 +324,18 @@ pub struct Log {
     path: PathBuf,
 }
 
+static ERROR_COUNTS: std::sync::Mutex<[u64;5]> = std::sync::Mutex::new([0;5]);
 impl Log {
+    /// Count explicit error lines without retaining their text in telemetry.
+    pub fn error(&self, text: &str) {
+        let lower = text.to_ascii_lowercase();
+        let class = if lower.contains("lock contention") || lower.contains("locked") || lower.contains("database is busy") || lower.contains("acquire") && lower.contains("lock") { 0 }
+            else if lower.contains("inventory") && (lower.contains("expired") || lower.contains("stale")) { 1 }
+            else if lower.contains("ambiguous") || lower.contains("outcome unknown") { 2 }
+            else if lower.contains("permanent") { 3 } else { 4 };
+        if let Ok(mut counts) = ERROR_COUNTS.lock() { counts[class] = counts[class].saturating_add(1); }
+        self.line(text);
+    }
     pub fn line(&self, text: &str) {
         let Ok(mut file) = File::options().create(true).append(true).open(&self.path) else {
             return;
@@ -418,7 +429,7 @@ pub fn run_passes(ctx: &Ctx, passes: Option<u64>) -> Result<()> {
                 if !herdr_farm::submission_spool::pending(&dir) {continue;}
                 match herdr_farm::submission_spool::ingest_with_cli_paths(&dir, crate::cli_invocation::paths()) {
                     Ok(lines)=>for line in lines {log.line(&format!("{slug}: {line}"));},
-                    Err(error)=>log.line(&format!("{slug}: submission spool: {error:#}")),
+                    Err(error)=>log.error(&format!("{slug}: submission spool: {error:#}")),
                 }
             }
             std::thread::sleep(crate::timing::wake_poll().min(wake.saturating_duration_since(Instant::now())));
@@ -499,12 +510,12 @@ pub fn tick(ctx: &Ctx, log: &Log, memory: &mut Memory) -> bool {
     if let Some(queue)=memory.copy_jobs.as_mut() {
         #[cfg(feature="state-store")]
         let exclusive=queue.pending_exclusive_root();
-        for error in queue.drain(){log.line(&error);}
+        for error in queue.drain(){log.error(&error);}
         #[cfg(feature="state-store")]
         if exclusive&&!queue.pending(){memory.canonical_maintenance_turn=true;}
     }
     #[cfg(feature="state-store")]
-    if let Some(queue)=memory.routine_jobs.as_mut() {for error in queue.drain(){log.line(&error);}}
+    if let Some(queue)=memory.routine_jobs.as_mut() {for error in queue.drain(){log.error(&error);}}
     let mut reachable = Vec::new();
     #[cfg(feature="state-store")]
     let mut canonical = Vec::new();
@@ -530,7 +541,7 @@ pub fn tick(ctx: &Ctx, log: &Log, memory: &mut Memory) -> bool {
                 }
                 Ok(())
             })();
-            if let Err(error)=recovered {log.line(&format!("{slug}: coordinator prime recovery: {error:#}"));continue;}
+            if let Err(error)=recovered {log.error(&format!("{slug}: coordinator prime recovery: {error:#}"));continue;}
             let recovered=(||->Result<()> {
                 let state=steps::try_load_state(&project)?;
                 if state.notification_claim.as_ref().is_some_and(|c|c.phase==herdr_farm::notification_claim::Phase::Pending)
@@ -539,30 +550,30 @@ pub fn tick(ctx: &Ctx, log: &Log, memory: &mut Memory) -> bool {
                     crate::coordinator_jobs::recover_notification(&project,&guard)?;
                 }Ok(())
             })();
-            if let Err(error)=recovered{log.line(&format!("{slug}: notification recovery: {error:#}"));continue;}
+            if let Err(error)=recovered{log.error(&format!("{slug}: notification recovery: {error:#}"));continue;}
             let (threads,diagnostics)=thread::list_with_diagnostics(&project);
-            for error in diagnostics {log.line(&format!("{slug}: {error}"));}
+            for error in diagnostics {log.error(&format!("{slug}: {error}"));}
             if threads.iter().any(|t|t.launch_claim.as_ref().is_some_and(|claim|claim.phase==thread::launch_delivery::Phase::Pending||!claim.notified)) {
                 let recovered=(||->Result<()> {let guard=herdr_farm::execution_guard::ProjectGuard::acquire(&project.dir())?;thread::launch_delivery::recover(&project,&guard)})();
-                if let Err(error)=recovered {log.line(&format!("{slug}: launch recovery: {error:#}"));continue;}
+                if let Err(error)=recovered {log.error(&format!("{slug}: launch recovery: {error:#}"));continue;}
             }
             if threads.iter().any(|t|t.prompt_claim.as_ref().is_some_and(|claim|claim.phase==thread::prompt_delivery::Phase::Pending||!claim.notified)) {
                 let recovered=(||->Result<()> {let guard=herdr_farm::execution_guard::ProjectGuard::acquire(&project.dir())?;thread::prompt_delivery::recover(&project,&guard)})();
-                if let Err(error)=recovered {log.line(&format!("{slug}: brief recovery: {error:#}"));continue;}
+                if let Err(error)=recovered {log.error(&format!("{slug}: brief recovery: {error:#}"));continue;}
             }
             for t in &threads {
                 if let Some(intent)=&t.pending_final_copy {
-                    if let Err(error)=queue.offer_final(ctx,&project,t,None,intent.purpose.clone(),intent.operation.clone()){log.line(&format!("{slug}: final-copy recovery: {error:#}"));}
+                    if let Err(error)=queue.offer_final(ctx,&project,t,None,intent.purpose.clone(),intent.operation.clone()){log.error(&format!("{slug}: final-copy recovery: {error:#}"));}
                 }
             }
             for t in threads.iter().filter(|t|t.pending_live_copy.is_some()) {
-                if let Err(error)=queue.offer(ctx,&project,t,None){log.line(&format!("{slug}: copy recovery: {error:#}"));}
+                if let Err(error)=queue.offer(ctx,&project,t,None){log.error(&format!("{slug}: copy recovery: {error:#}"));}
             }
         }
         match tick_cheap_reports(ctx, &project,memory.local_reports.as_mut(),memory.copy_jobs.as_mut(),memory.local_observations.as_mut()) {
             Ok(Some(seen)) => reachable.push((project, seen)),
             Ok(None) => {}
-            Err(error) => log.line(&format!("{slug}: {error:#}")),
+            Err(error) => log.error(&format!("{slug}: {error:#}")),
         }
     }
     if !reachable.is_empty() {
@@ -571,7 +582,7 @@ pub fn tick(ctx: &Ctx, log: &Log, memory: &mut Memory) -> bool {
     }
     for (project, seen) in &reachable {
         for error in tick_slow(ctx, project, seen, memory) {
-            log.line(&format!("{}: {error:#}", project.slug));
+            log.error(&format!("{}: {error:#}", project.slug));
         }
     }
     let any_reachable = !reachable.is_empty();
@@ -585,7 +596,7 @@ pub fn tick(ctx: &Ctx, log: &Log, memory: &mut Memory) -> bool {
                 Ok(result)=>{
                     memory.canonical_effects_unknown|=result.unknown_effects;any_reachable|=result.reachable||result.scheduled_work;
                     if let Some(line)=result.admission_log {log.line(&line);}
-                    if let Some(error)=result.operation_error {log.line(&format!("{slug}: canonical operation: {error}"));}
+                    if let Some(error)=result.operation_error {log.error(&format!("{slug}: canonical operation: {error}"));}
                 }
                 Err(error)=>{
                     if let Some(store)=error.downcast_ref::<herdr_farm::store::StoreError>() {
@@ -594,7 +605,7 @@ pub fn tick(ctx: &Ctx, log: &Log, memory: &mut Memory) -> bool {
                             log.line(&herdr_farm::watchdog::admission_log_line(reason,None,0));
                         }
                     }
-                    memory.canonical_effects_unknown=true;log.line(&format!("{slug}: canonical controller: {error:#}"));
+                    memory.canonical_effects_unknown=true;log.error(&format!("{slug}: canonical controller: {error:#}"));
                 }
             }
             // Isolated workers submit through their attempt's spool: ingest
@@ -602,7 +613,7 @@ pub fn tick(ctx: &Ctx, log: &Log, memory: &mut Memory) -> bool {
             #[cfg(target_os="linux")]
             match herdr_farm::submission_spool::ingest_with_cli_paths(&ctx.root.join(slug), crate::cli_invocation::paths()) {
                 Ok(lines)=>for line in lines {log.line(&format!("{slug}: {line}"));},
-                Err(error)=>log.line(&format!("{slug}: submission spool: {error:#}")),
+                Err(error)=>log.error(&format!("{slug}: submission spool: {error:#}")),
             }
             // A dedicated Herdr server `launch run` started goes away with its
             // task's worker.
@@ -613,7 +624,7 @@ pub fn tick(ctx: &Ctx, log: &Log, memory: &mut Memory) -> bool {
             // inbox files). Failures log and retry next tick; a failed
             // delivery never consumes the reminder cap.
             if let Err(error) = crate::memory_review::ingest_all(&ctx.root.join(slug)) {
-                log.line(&format!("{slug}: memory-review ingest: {error:#}"));
+                log.error(&format!("{slug}: memory-review ingest: {error:#}"));
             }
             // Delivery takes project ownership (the shared root); like the
             // controller services it waits while a root-exclusive effect runs.
@@ -624,23 +635,23 @@ pub fn tick(ctx: &Ctx, log: &Log, memory: &mut Memory) -> bool {
                             log.line(&format!("{slug}: memory-review reminder delivered: {item}"));
                         }
                     }
-                    Err(error) => log.line(&format!("{slug}: memory-review remind: {error:#}")),
+                    Err(error) => log.error(&format!("{slug}: memory-review remind: {error:#}")),
                 }
             }
             if let Err(error) = crate::reconcile_live::worker_attention(ctx, &ctx.root.join(slug), memory.worker_idle.entry(slug.clone()).or_default()) {
-                log.line(&format!("{slug}: worker attention: {error:#}"));
+                log.error(&format!("{slug}: worker attention: {error:#}"));
             }
             integrity_pass(ctx,log,slug);
         }
         admit_background(ctx,log,memory,canonical.iter().map(|slug|ctx.root.join(slug)).collect());
-        if let Some(reads)=memory.local_reports.as_mut(){for error in reads.admit(){log.line(&error);}}
-        if let Some(reads)=memory.local_observations.as_mut(){for error in reads.admit(){log.line(&error);}}
+        if let Some(reads)=memory.local_reports.as_mut(){for error in reads.admit(){log.error(&error);}}
+        if let Some(reads)=memory.local_observations.as_mut(){for error in reads.admit(){log.error(&error);}}
         if let Some(reads)=memory.canonical_observations.as_mut(){
             // These probes hold shared root ownership. Drain their batch before
             // an exclusive worker effect, and do not replenish under that effect.
             // A completed exclusive effect gives maintenance the next batch.
             let blocked=memory.copy_jobs.as_ref().is_some_and(|q|q.pending_exclusive_root()||(!memory.canonical_maintenance_turn&&q.offered_exclusive_root()));
-            for error in reads.admit_where(|project|!blocked&&!memory.copy_jobs.as_ref().is_some_and(|q|q.pending_project(project))&&!memory.routine_jobs.as_ref().is_some_and(|q|q.pending_project(project))){log.line(&error);}
+            for error in reads.admit_where(|project|!blocked&&!memory.copy_jobs.as_ref().is_some_and(|q|q.pending_project(project))&&!memory.routine_jobs.as_ref().is_some_and(|q|q.pending_project(project))){log.error(&error);}
         }
         // Advisory tickets never occupy an effect/observation turn. The executor
         // holds them until the just-admitted canonical batch has fully drained.
@@ -656,7 +667,7 @@ pub fn tick(ctx: &Ctx, log: &Log, memory: &mut Memory) -> bool {
                         Some(herdr_farm::store::StoreError::Io(message)) if message == "interrupted")) { return; }
                 let slug = std::path::Path::new(&identity.project).file_name().unwrap_or_default().to_string_lossy();
                 let attempt = identity.operation.trim_start_matches("tokens:attempt:");
-                log.line(&format!("{slug}: attempt token {attempt}: {error:#}"));
+                log.error(&format!("{slug}: attempt token {attempt}: {error:#}"));
             };
             match ticket.try_recv() {
                 Ok(None) => true,
@@ -672,9 +683,9 @@ pub fn tick(ctx: &Ctx, log: &Log, memory: &mut Memory) -> bool {
                 match crate::attempt_token_jobs::requests(&ctx.root.join(slug),&control,&memory.attempt_tokens) {
                     Ok(requests)=>if let Some(queue)=memory.copy_jobs.as_ref() {for request in requests {
                         let identity = request.identity.clone();
-                        match queue.submit_advisory(request) {Ok(ticket)=>memory.attempt_token_tickets.push((identity, ticket)),Err(error) if error.to_string().contains("executor queue is full")=>{},Err(error)=>log.line(&format!("{slug}: attempt token admission: {error:#}"))}
+                        match queue.submit_advisory(request) {Ok(ticket)=>memory.attempt_token_tickets.push((identity, ticket)),Err(error) if error.to_string().contains("executor queue is full")=>{},Err(error)=>log.error(&format!("{slug}: attempt token admission: {error:#}"))}
                     }},
-                    Err(error)=>log.line(&format!("{slug}: attempt token admission: {error:#}"))
+                    Err(error)=>log.error(&format!("{slug}: attempt token admission: {error:#}"))
                 }
             }
         }
@@ -682,14 +693,23 @@ pub fn tick(ctx: &Ctx, log: &Log, memory: &mut Memory) -> bool {
         any_reachable|=memory.routine_jobs.as_ref().is_some_and(|q|q.pending());
         any_reachable|=memory.copy_jobs.as_ref().is_some_and(|q|q.pending()||q.offered());
         publish_executor_metrics(&ctx.root,log,memory);
-        telemetry_pass(ctx,log,&format!("{}:{}",std::process::id(),memory.started.as_nanosecond()));
+        let session = format!("{}:{}",std::process::id(),memory.started.as_nanosecond());
+        let counts = ERROR_COUNTS.lock().map(|mut c| std::mem::take(&mut *c)).unwrap_or([0;5]);
+        let collect_secs = ctx.env.var("HERDR_FARM_TELEMETRY_COLLECT_SECS").and_then(|v|v.parse::<u64>().ok()).unwrap_or(crate::timing::TELEMETRY_COLLECT_SECS);
+        if collect_secs > 0 {
+            let at = jiff::Timestamp::now().as_millisecond();
+            for slug in project::list_slugs(&ctx.root) {
+                let _ = herdr_farm::telemetry::operations::launch::ticker_errors(&ctx.root.join(slug), &session, memory.tick, at, counts);
+            }
+        }
+        telemetry_pass(ctx,log,&session);
         return any_reachable;
     }
     #[cfg(not(feature="state-store"))]
     {
         admit_background(ctx,log,memory,Vec::new());
-        if let Some(reads)=memory.local_reports.as_mut(){for error in reads.admit(){log.line(&error);}}
-        if let Some(reads)=memory.local_observations.as_mut(){for error in reads.admit(){log.line(&error);}}
+        if let Some(reads)=memory.local_reports.as_mut(){for error in reads.admit(){log.error(&error);}}
+        if let Some(reads)=memory.local_observations.as_mut(){for error in reads.admit(){log.error(&error);}}
         let reachable=any_reachable||memory.copy_jobs.as_ref().is_some_and(|q|q.pending()||q.offered());
         publish_executor_metrics(&ctx.root,log,memory);
         reachable
@@ -776,7 +796,7 @@ fn telemetry_pass(ctx:&Ctx,log:&Log,session:&str) {
                 if native {Ok(true)} else {herdr_farm::telemetry::otlp::configured(&project,&ctx.config_dir)}
             }) {
                 Ok(configured)=>configured,
-                Err(error)=>{log.line(&format!("{slug}: telemetry sources: {error:#}"));false},
+                Err(error)=>{log.error(&format!("{slug}: telemetry sources: {error:#}"));false},
             };
             if configured {collections.push((slug,project,existing,collected));}
         }
@@ -790,27 +810,27 @@ fn telemetry_pass(ctx:&Ctx,log:&Log,session:&str) {
     let pass=std::thread::Builder::new().name("telemetry-pass".into()).spawn(move||{
         herdr_farm::telemetry::background::idle_priority(|warning|line.line(warning));
         for (slug,project) in &observations {
-            if let Err(error)=operating::observe_project(project,&session,crate::timing::tick().as_millis() as i64) {line.line(&format!("{slug}: operating observation: {error:#}"));}
+            if let Err(error)=operating::observe_project(project,&session,crate::timing::tick().as_millis() as i64) {line.error(&format!("{slug}: operating observation: {error:#}"));}
         }
         let Some((slug,project,existing,_))=due else {return};
-        if let Err(error)=herdr_farm::telemetry::otlp::start_configured(&project,&otlp_config) {line.line(&format!("{slug}: OTLP config: {error}"));}
-        if let Err(error)=codex::collect(&project,codex::Budget::TICK,false) {line.line(&format!("{slug}: telemetry collect: {error:#}"));}
+        if let Err(error)=herdr_farm::telemetry::otlp::start_configured(&project,&otlp_config) {line.error(&format!("{slug}: OTLP config: {error}"));}
+        if let Err(error)=codex::collect(&project,codex::Budget::TICK,false) {line.error(&format!("{slug}: telemetry collect: {error:#}"));}
         // A source-backed collect can opt a previously untouched project in.
         // Start its observed prefix now, without backfilling any earlier time.
         if !existing&&sidecar::path(&project).is_file()
-            && let Err(error)=operating::observe_project(&project,&session,crate::timing::tick().as_millis() as i64) {line.line(&format!("{slug}: operating observation: {error:#}"));}
-        if let Err(error)=herdr_farm::telemetry::accounting::tick(&project,codex::Budget::TICK) {line.line(&format!("{slug}: telemetry accounting tick: {error:#}"));}
+            && let Err(error)=operating::observe_project(&project,&session,crate::timing::tick().as_millis() as i64) {line.error(&format!("{slug}: operating observation: {error:#}"));}
+        if let Err(error)=herdr_farm::telemetry::accounting::tick(&project,codex::Budget::TICK) {line.error(&format!("{slug}: telemetry accounting tick: {error:#}"));}
         if let Ok(mut derived)=TELEMETRY_DERIVED.lock() {
             if derived.is_none() {
                 let derived_log=line.clone();
                 match herdr_farm::telemetry::background::DeferredLanes::new(move |project| {
                     herdr_farm::telemetry::background::idle_priority(|warning|derived_log.line(warning));
                     for lane in herdr_farm::telemetry::LANES.iter().filter(|lane|lane.stream!="accounting") {
-                        if let Err(error)=(lane.tick)(project,codex::Budget::TICK) {derived_log.line(&format!("{}: telemetry {} tick: {error:#}",project.display(),lane.stream));}
+                        if let Err(error)=(lane.tick)(project,codex::Budget::TICK) {derived_log.error(&format!("{}: telemetry {} tick: {error:#}",project.display(),lane.stream));}
                     }
                 }) {
                     Ok(worker)=>*derived=Some(worker),
-                    Err(error)=>line.line(&format!("telemetry derived worker: {error}")),
+                    Err(error)=>line.error(&format!("telemetry derived worker: {error}")),
                 }
             }
             if let Some(worker)=derived.as_ref() && !worker.submit(&project) {line.line(&format!("{slug}: telemetry derived queue full; deferred"));}
@@ -827,7 +847,7 @@ fn telemetry_pass(ctx:&Ctx,log:&Log,session:&str) {
             }
             *running=Some(pass);
         },
-        Err(error)=>log.line(&format!("telemetry pass thread: {error}")),
+        Err(error)=>log.error(&format!("telemetry pass thread: {error}")),
     }
 }
 /// Whole-store check off the ticker's pass: at most once per interval per
@@ -852,9 +872,9 @@ fn integrity_pass(ctx:&Ctx,log:&Log,slug:&str) {
         Ok(IntegrityOutcome::Incomplete)=>log.line(&format!("{slug}: store integrity check incomplete within its budget; resumes on a later pass")),
         Ok(IntegrityOutcome::Ok)=>log.line(&format!("{slug}: store integrity check ok")),
         Ok(IntegrityOutcome::NotDue)=>{},
-        Err(error)=>log.line(&format!("{slug}: store integrity check: {error:#}")),
+        Err(error)=>log.error(&format!("{slug}: store integrity check: {error:#}")),
     }});
-    match check {Ok(check)=>{running.insert(project,check);},Err(error)=>log.line(&format!("{}: store integrity check: {error}",project.display()))}
+    match check {Ok(check)=>{running.insert(project,check);},Err(error)=>log.error(&format!("{}: store integrity check: {error}",project.display()))}
 }
 fn drain_executor(root:&Path,log:&Log,memory:&mut Memory)->Result<()> {
     let result=memory.pr_reads.as_mut().expect("ticker shared executor").stop();
@@ -870,7 +890,7 @@ fn admit_background(_ctx:&Ctx,log:&Log,memory:&mut Memory,canonical:Vec<PathBuf>
     #[cfg(all(feature="state-store",target_os="linux"))]
     if let Some(queue)=memory.copy_jobs.as_mut() {
         let reads=memory.canonical_observations.as_ref();
-        for error in queue.admit_verifier(|project|!reads.is_some_and(|reads|reads.pending_project(project))&&herdr_farm::watchdog::effects_paused(Path::new(project)).is_none()){log.line(&error);}
+        for error in queue.admit_verifier(|project|!reads.is_some_and(|reads|reads.pending_project(project))&&herdr_farm::watchdog::effects_paused(Path::new(project)).is_none()){log.error(&error);}
     }
     // The exclusive slot is still one ticket. Declared transfers may already be
     // running; top those up without admitting a launch or a routine beside them.
@@ -882,7 +902,7 @@ fn admit_background(_ctx:&Ctx,log:&Log,memory:&mut Memory,canonical:Vec<PathBuf>
         if admit_effects(log,memory){memory.prefer_copy=false;return;}
     }
     #[cfg(feature="state-store")]
-    if let Some(queue)=memory.routine_jobs.as_mut(){for error in queue.admit_projects_where(canonical,|project|!memory.canonical_observations.as_ref().is_some_and(|reads|reads.pending_project(&project.display().to_string()))){log.line(&error);}for passed in queue.take_passed(){log.line(&passed);}if queue.pending(){memory.prefer_copy=true;return;}}
+    if let Some(queue)=memory.routine_jobs.as_mut(){for error in queue.admit_projects_where(canonical,|project|!memory.canonical_observations.as_ref().is_some_and(|reads|reads.pending_project(&project.display().to_string()))){log.error(&error);}for passed in queue.take_passed(){log.line(&passed);}if queue.pending(){memory.prefer_copy=true;return;}}
     #[cfg(not(feature="state-store"))]
     let _=canonical;
     if admit_effects(log,memory){memory.prefer_copy=false;}
@@ -897,7 +917,7 @@ fn admit_effects(log:&Log,memory:&mut Memory)->bool {
     });
     #[cfg(not(feature="state-store"))]
     let errors=queue.admit();
-    for error in errors{log.line(&error);}queue.pending()
+    for error in errors{log.error(&error);}queue.pending()
 }
 
 
