@@ -636,7 +636,7 @@ S6 refinements:
   decision without windows (`... <attempt> n/a (<reason>)`); the fleet pane
   shows the same lines. Unknown is `n/a (<reason>)`. Text is the default; `--json` prints the object above.
 
-MET-NOW-A adds registry v8 M51–M58 quality, cost and setup usage projections;
+MET-NOW-A adds registry v9 M51–M58 quality, cost and setup usage projections;
 see [contracts-analytics.md §8](contracts-analytics.md#8-stored-quality-and-consumption-metrics-met-now-a).
 They read existing signed-policy metadata, review findings, proxy flags and
 normalized usage. No schema/stream migration or new retention class is needed.
@@ -907,7 +907,7 @@ See [contracts-accounting.md](contracts-accounting.md#product-cli-self-observati
 
 ### MET-NOW-B operations metadata
 
-Registry **v8** adds M60–M64 ([definitions and unavailable reasons](contracts-analytics.md#met-now-b-flow-and-operations-registry-v8)).
+Registry **v9** adds M60–M64 ([definitions and unavailable reasons](contracts-analytics.md#met-now-b-flow-and-operations-registry-v9)).
 Sidecar `operations` **v1**, `migrations/telemetry/operations/0001_samples.sql`,
 adds `operation_launch_load` and `operation_storage_samples`. Canonical SCHEMA
 and receipt formats are unchanged. The §7 allowlist adds only attempt ID,

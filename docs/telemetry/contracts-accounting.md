@@ -1858,7 +1858,7 @@ M37.fleet-v1 is retained as an absent, superseded definition.
 
 ## 18. MET-NOW-A setup consumption and review cost
 
-Analytics registry v8 exposes M53 and M55–M58 from this lane's existing
+Analytics registry v9 exposes M53 and M55–M58 from this lane's existing
 normalized ledger, session graph and published-rate estimates. Definitions,
 windows, exact unavailable reasons and fixture evidence are in
 [contracts-analytics.md §8](contracts-analytics.md#8-stored-quality-and-consumption-metrics-met-now-a).
@@ -1876,5 +1876,5 @@ M60 exposes the fleet's running/unknown interval semantics as a dedicated idle
 gap distribution, clipped to DG3 operating observations when present. M61–M64
 add launch phases, host load/outcome observations, hourly storage growth and
 rendered brief-size/outcome buckets. Their precise cohorts, ratios, percentile
-rule and absence reasons are in [contracts-analytics.md](contracts-analytics.md#met-now-b-flow-and-operations-registry-v8).
+rule and absence reasons are in [contracts-analytics.md](contracts-analytics.md#met-now-b-flow-and-operations-registry-v9).
 These figures do not change M35's time-weighted concurrency or allocation rules.

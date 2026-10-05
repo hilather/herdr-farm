@@ -536,7 +536,7 @@ reports until explicit collection upgrades the stream.
 
 ## 7. MET-NOW-A verification strength, density and weakening
 
-Analytics registry v8 adds M51 `verification_strength` (signed executable
+Analytics registry v9 adds M51 `verification_strength` (signed executable
 acceptance policies, command vs file-presence-only), M52
 `defect_density_by_setup` (the review lane's validated unique non-seeded
 findings per distinct reviewed candidate, by author profile and severity),

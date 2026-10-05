@@ -8,7 +8,7 @@ are [contracts.md](contracts.md) §0. Code: `src/telemetry/analytics/`
 (TM4.3). Telemetry never grants launch, changes budgets or accepts results;
 nothing here writes `state.db`.
 
-## 1. Metric registry (`analytics-registry.v8`)
+## 1. Metric registry (`analytics-registry.v9`)
 
 Version history: v8 adds bounded lifecycle `role` and M37.lineage-v2 (LINEAGE-1); M37.fleet-v1 remains absent as `definition_superseded`. v1 TM4.1; v2 adds `verification_flip_rate` (DG6, #198); v3 adds M30 `M30.submission-v1` (DG1, #202); v4 adds M10 `M10.v1` (DG2, #204); v5 adds M03 operating throughput (DG3); v6 adds M05 lifecycle tokens and specifies M19’s missing timed history; v7 adds M13 never-running exclusions, M04/M05 partial values and M31 lifecycle sampling, M35 attempt-time concurrency and M40 reported/merged quota windows, plus the bounded lifecycle `profile` dimension (TFIX-4, no definition change). Previous M13.slice-v1, M04.cost-v1, M05.tokens-v1, M31.attention-v1, M35.fanout-v1 and M40.quota-windows-v1 definitions remain only as absent (`definition_superseded`). v9 adds MET-NOW-A `M51.v1`–`M58.v1` and MET-NOW-B `M60`–`M64` (sections 8 and 9).
 
@@ -431,7 +431,7 @@ labels tasks without it `unknown`.
 
 ## 8. Stored quality and consumption metrics (MET-NOW-A)
 
-Registry v8 adds `M51.v1`–`M58.v1`, all certification `fixture`, evidence
+Registry v9 adds `M51.v1`–`M58.v1`, all certification `fixture`, evidence
 `tests/telemetry_stored_metrics.rs`. The analytics lane produces them for
 `telemetry PROJECT report [--since MS]` and `query --metric M51,...,M58`.
 They use since-only activity windows; `--to` and `--by` retain the lane
@@ -479,9 +479,9 @@ or stress command that is not a recognized presence check makes the policy
 `command`. This is a conservative syntactic classification of retained signed
 policies, never another execution or a claim about test adequacy.
 
-## MET-NOW-B: flow and operations (registry v8)
+## MET-NOW-B: flow and operations (registry v9)
 
-Registry v8 adds M60–M64, using the `operations` lane, activity cohorts and
+Registry v9 adds M60–M64, using the `operations` lane, activity cohorts and
 since-only windows. Query, report, exports and revision refresh share these
 producers. `--to`, dimensions and drill-down are unsupported; historical
 as-of queries use recorded analytics revisions. All values are descriptive
