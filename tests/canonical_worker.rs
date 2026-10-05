@@ -944,9 +944,9 @@ fn ticker_does_not_dispatch_a_launch_cancelled_before_creation() {
 #[test]
 fn profile_budgets_refuse_preparation_and_draft_before_any_approval() {
     // The retained knowledge including Remember intake and the worker command
-    // card fits in 800 tokens;
+    // card fits in 850 tokens (margin for longer root paths in the card);
     // the complete brief with worktree framing does not.
-    let mut small = Lab::new("soft_input_tokens=800\nunknown_usage='allow_with_warning'");
+    let mut small = Lab::new("soft_input_tokens=850\nunknown_usage='allow_with_warning'");
     small.prepare_profile();
     let selection = small.selection("Retained instructions");
     let error = small.refused(&["launch", "demo", "draft", "--selection", selection.to_str().unwrap(), "--expected-head", &small.head().to_string()]);
