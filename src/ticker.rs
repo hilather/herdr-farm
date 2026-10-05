@@ -643,6 +643,12 @@ pub fn tick(ctx: &Ctx, log: &Log, memory: &mut Memory) -> bool {
         // holds them until the just-admitted canonical batch has fully drained.
         memory.attempt_token_tickets.retain(|(identity, ticket)| {
             let log_error = |error: &anyhow::Error| {
+                // A cancelled or expired advisory job (ticker stop, executor cancellation,
+                // its own short deadline under contention) is not a failure; the next
+                // pass retries it.
+                let cause = error.root_cause().to_string();
+                if matches!(cause.as_str(), "live copy cancelled" | "identity inventory cancelled or expired")
+                    || error.chain().any(|e| matches!(e.downcast_ref::<herdr_farm::store::StoreError>(), Some(herdr_farm::store::StoreError::Cancelled))) { return; }
                 let slug = std::path::Path::new(&identity.project).file_name().unwrap_or_default().to_string_lossy();
                 let attempt = identity.operation.trim_start_matches("tokens:attempt:");
                 log.line(&format!("{slug}: attempt token {attempt}: {error:#}"));
