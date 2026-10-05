@@ -42,11 +42,11 @@ fn close_transferred(file:File) {let _gate=SPAWN_GATE.write().unwrap_or_else(Poi
 
 /// One copy of a transferred lock's description, closed through the gate.
 #[derive(Debug)]
-pub(crate) struct TransferredFile(ManuallyDrop<File>);
-impl AsRawFd for TransferredFile {fn as_raw_fd(&self)->RawFd {self.0.as_raw_fd()}}
+pub(crate) struct TransferredFile { file: ManuallyDrop<File>, _ownership: std::sync::Arc<()> }
+impl AsRawFd for TransferredFile {fn as_raw_fd(&self)->RawFd {self.file.as_raw_fd()}}
 impl Drop for TransferredFile {
     // SAFETY: the file is taken once, here, and never used again.
-    fn drop(&mut self) {close_transferred(unsafe{ManuallyDrop::take(&mut self.0)})}
+    fn drop(&mut self) {close_transferred(unsafe{ManuallyDrop::take(&mut self.file)})}
 }
 
 /// A held lock. Dropping it unlocks explicitly: a child forked by any thread
@@ -54,11 +54,11 @@ impl Drop for TransferredFile {
 /// descriptor would leave the lock held for that window. A lock transferred to
 /// a supervisor must outlive this handle, so it is never unlocked here; its
 /// copies close through the spawn gate instead.
-pub(crate) struct LockFile {file:ManuallyDrop<File>,transferred:AtomicBool}
+pub(crate) struct LockFile {file:ManuallyDrop<File>,transferred:AtomicBool,_ownership:std::sync::Arc<()>}
 impl LockFile {
     /// A descriptor sharing this lock for a supervisor that keeps it held.
     pub(crate) fn transfer(&self)->Result<TransferredFile> {
-        self.transferred.store(true,Ordering::SeqCst);Ok(TransferredFile(ManuallyDrop::new(self.file.try_clone()?)))
+        self.transferred.store(true,Ordering::SeqCst);Ok(TransferredFile { file: ManuallyDrop::new(self.file.try_clone()?), _ownership: self._ownership.clone() })
     }
 }
 impl Drop for LockFile {
@@ -75,7 +75,14 @@ fn lock_file(path:&Path)->Result<File> {
     ensure!(file.metadata()?.is_file(),"execution lock must be a regular file");
     Ok(file)
 }
-fn held(file:File)->LockFile {LockFile{file:ManuallyDrop::new(file),transferred:AtomicBool::new(false)}}
+fn held(file:File)->LockFile {
+    let ownership=std::sync::Arc::new(());
+    HELD.with_borrow_mut(|held| {
+        held.retain(|lock| lock.strong_count() != 0);
+        held.push(std::sync::Arc::downgrade(&ownership));
+    });
+    LockFile{file:ManuallyDrop::new(file),transferred:AtomicBool::new(false),_ownership:ownership}
+}
 pub(crate) fn exclusive_file(path:&Path)->Result<LockFile> {exclusive_file_until(path,std::time::Instant::now(),&|| false)}
 /// As [`exclusive_file`], retrying a lock held by others until `until`
 /// unless `cancelled`. Only contention is retried; any other failure returns at once.
@@ -89,24 +96,62 @@ fn exclusive_file_until(path:&Path,until:std::time::Instant,cancelled:&dyn Fn()-
         }
     }
 }
-/// Foreground open waits only for cooperative lock contention. Reacquisition
-/// repeats the entire operation so a failed project lock releases the root.
+thread_local! {
+    static FOREGROUND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static ACQUIRING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    // Weak ownership markers remain accurate when a guard moves to another thread.
+    static HELD: std::cell::RefCell<Vec<std::sync::Weak<()>>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+/// Enable bounded acquisition waits for this interactive CLI thread only.
+/// Background threads and ticker invocations retain non-blocking acquisition.
+pub struct ForegroundWait(bool);
+impl ForegroundWait {
+    pub fn enter() -> Self { Self(FOREGROUND.replace(true)) }
+}
+impl Drop for ForegroundWait { fn drop(&mut self) { FOREGROUND.set(self.0); } }
+
+/// Retry the complete acquisition, releasing all partially acquired locks
+/// before sleeping. Never wait when the caller already owns another lock.
 pub fn retry_open<T>(mut acquire: impl FnMut() -> Result<T>) -> Result<T> {
-    let until = std::time::Instant::now() + crate::timing::retry(std::time::Duration::from_secs(30));
-    let poll = crate::timing::retry(std::time::Duration::from_millis(100));
+    let owns_lock = HELD.with_borrow_mut(|held| {
+        held.retain(|lock| lock.strong_count() != 0);
+        !held.is_empty()
+    });
+    if ACQUIRING.get() || owns_lock { return acquire(); }
+    struct Acquisition;
+    impl Drop for Acquisition { fn drop(&mut self) { ACQUIRING.set(false); } }
+    ACQUIRING.set(true);
+    let _acquisition = Acquisition;
+    let seconds = std::env::var("HERDR_FARM_LOCK_WAIT_SECS").ok()
+        .and_then(|value| value.parse::<u64>().ok()).unwrap_or(30);
+    let started = std::time::Instant::now();
+    let bound = std::time::Duration::from_secs(seconds);
+    let mut notified = false;
     loop {
         match acquire() {
             Ok(guard) => return Ok(guard),
             Err(error) => {
                 let busy = error.chain().any(|cause|
-                    matches!(cause.downcast_ref::<std::fs::TryLockError>(), Some(std::fs::TryLockError::WouldBlock))
-                    || cause.downcast_ref::<std::io::Error>().is_some_and(|e| e.kind() == std::io::ErrorKind::WouldBlock));
-                let remaining = until.saturating_duration_since(std::time::Instant::now());
-                if !busy || remaining.is_zero() { return Err(error); }
-                std::thread::sleep(poll.min(remaining));
+                    matches!(cause.downcast_ref::<std::fs::TryLockError>(), Some(std::fs::TryLockError::WouldBlock)));
+                let elapsed = started.elapsed();
+                if !busy || elapsed >= bound { return Err(error); }
+                if !notified && elapsed >= std::time::Duration::from_secs(2) {
+                    let lock = error.chain().find_map(|cause| {
+                        let message = cause.to_string();
+                        message.strip_prefix("another operation owns lock ")
+                            .and_then(|path| path.strip_suffix("; retry")).map(str::to_owned)
+                            .or_else(|| message.rsplit_once("; retry: ").map(|(_, path)| path.to_owned()))
+                    }).unwrap_or_else(|| error.to_string());
+                    eprintln!("waiting for {lock} held by another operation…");
+                    notified = true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100).min(bound - elapsed));
             }
         }
     }
+}
+pub(crate) fn foreground_acquire<T>(acquire: impl FnMut() -> Result<T>) -> Result<T> {
+    if FOREGROUND.get() { retry_open(acquire) } else { let mut acquire = acquire; acquire() }
 }
 
 /// How long a root-exclusive effect waits for shared holders to finish.
@@ -114,7 +159,7 @@ const EXCLUSIVE_WAIT:std::time::Duration=std::time::Duration::from_secs(2);
 const EXCLUSIVE_POLL:std::time::Duration=std::time::Duration::from_millis(10);
 fn shared_file(path:&Path,busy:&'static str)->Result<LockFile> {
     let file=lock_file(path)?;
-    file.try_lock_shared().context(busy)?;
+    file.try_lock_shared().with_context(|| format!("{busy}: {}", path.display()))?;
     Ok(held(file))
 }
 
@@ -126,6 +171,9 @@ impl RootGuard {
         Ok(vec![crate::runner::InheritedLock::new(self._file.transfer()?)])
     }
     pub fn exclusive(root:&Path)->Result<Self> {
+        foreground_acquire(|| Self::exclusive_now(root))
+    }
+    fn exclusive_now(root:&Path)->Result<Self> {
         let file=exclusive_file(&root.join(".execution.lock"))?;
         Ok(Self{_file:file})
     }
@@ -194,6 +242,9 @@ impl ProjectGuard {
         CheckGuard{_fence:fence,_root,project,identity}
     }
     pub fn acquire(project:&Path)->Result<Self> {
+        foreground_acquire(|| Self::acquire_now(project))
+    }
+    fn acquire_now(project:&Path)->Result<Self> {
         let project=project.canonicalize()?;
         let root_path=project.parent().context("project has no root")?.to_path_buf();
         let root=RootGuard::shared(&root_path)?;

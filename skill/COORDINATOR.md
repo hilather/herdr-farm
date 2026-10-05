@@ -90,6 +90,10 @@ task looks longer than that budget, tell the owner before launching. After an
 
 The coordinator never passes `--sign-with`, never looks for or reads key files,
 and never edits config.toml. If policy refuses, tell the owner the exact rule.
+Busy project locks are handled by the commands themselves (up to 30 seconds,
+with a waiting notice after about two seconds); shell retry loops for busy locks
+are no longer needed. `HERDR_FARM_LOCK_WAIT_SECS=0` disables that wait.
+
 Run `launch run` as a background command or with a long timeout (at least five
 minutes); Claude Code's default Bash timeout is two minutes and a profile refresh
 can take 120 seconds. Each step prints progress to stderr. If interrupted, rerun

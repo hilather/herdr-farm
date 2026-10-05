@@ -359,8 +359,17 @@ and `authority` before signing; these fields may be omitted. `task_id` must matc
 preserved through JSON reserialization. Signing keys and signature namespaces
 are unchanged.
 
-Launch retries store conflicts and transient cooperative lock contention up to
-eight attempts with fresh heads and a short
+Interactive `launch run`/`launch stop`, `context`, `inbox`, `task`, `result`,
+and `memory` commands wait up to 30 seconds per acquisition for busy project
+locks. They retry only lock contention, release partial ownership before waiting,
+and print one waiting notice after about two seconds. Set
+`HERDR_FARM_LOCK_WAIT_SECS` to an integer number of seconds to override the bound
+(`0` restores immediate failure). Ticker effects and jobs keep their existing
+non-blocking acquisition policy. Coordinator shell retry loops for busy locks
+are no longer needed. A lock busy beyond the bound stops launch with the usual
+resumable “rerun the same command” message. Pure reads need no lock wait.
+
+Launch retries store head conflicts up to eight attempts with fresh heads and a short
 50–250 ms backoff (accelerated only in test labs), rebuilding and signing documents
 that embed the head. Fences remain enforced. Exhaustion asks you to rerun the same
 command. The report includes the contract digest, write paths and outputs.

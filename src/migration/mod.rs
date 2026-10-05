@@ -267,11 +267,17 @@ impl Maintenance {
         Ok(Self{_locks:vec![record],_project:Some(guard),_root:None})
     }
     fn runtime(project:&Path)->Result<Self> {
+        crate::execution_guard::foreground_acquire(|| Self::runtime_now(project))
+    }
+    fn runtime_now(project:&Path)->Result<Self> {
         let guard=crate::execution_guard::ProjectGuard::acquire(project)?;
         let record=crate::execution_guard::exclusive_file(&project.join(".state/lock"))?;
         Ok(Self{_locks:vec![record],_project:Some(guard),_root:None})
     }
     fn acquire(project:&Path)->Result<Self> {
+        crate::execution_guard::foreground_acquire(|| Self::acquire_now(project))
+    }
+    fn acquire_now(project:&Path)->Result<Self> {
         let root=project.parent().context("project has no root")?;
         let ticker=crate::execution_guard::exclusive_file(&root.join(".ticker.lock"))?;
         let barrier=crate::execution_guard::RootGuard::exclusive(root)?;

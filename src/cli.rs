@@ -1073,6 +1073,10 @@ pub fn run(#[cfg(feature="state-store")] capture: &mut crate::cli_invocation::Ca
             error.exit();
         }
     };
+    #[cfg(feature="state-store")]
+    let _lock_wait = matches!(&cli.command, Command::Context {..} | Command::Inbox {..}
+        | Command::Task {..} | Command::Result {..} | Command::Launch {..} | Command::Memory {..})
+        .then(herdr_farm::execution_guard::ForegroundWait::enter);
     if let Command::BuildInfo { require_factory }=&cli.command {
         let info=doctor::build_info();
         println!("{}",serde_json::to_string_pretty(&info)?);

@@ -5938,3 +5938,87 @@ fn cli_self_worker_metadata_is_ingested_once_by_ticker_before_spool_removal() {
     assert!(!spool.exists(),"ended attempt spool is removed after ingestion");
     assert_eq!(db.query_row("SELECT count(*) FROM cli_invocations",[],|r|r.get::<_,i64>(0)).unwrap(),2);
 }
+
+#[cfg(all(feature="state-store",target_os="linux"))]
+#[test]
+fn interactive_task_waits_for_project_locks_with_bounded_notice_and_no_partial_ownership() {
+    use std::{io::{BufRead, BufReader}, process::Stdio, time::{Duration, Instant}};
+    use herdr_farm::{migration, runtime, execution_guard::RootGuard};
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().join("root");
+    let r = root.to_str().unwrap();
+    for action in ["new", "pause"] { assert!(hp(home.path(), &["--root", r, action, "demo"]).status.success()); }
+    let project = root.join("demo");
+    let plan = migration::inspect(&project).unwrap();
+    migration::apply(&project, &plan, true).unwrap();
+    for (index, lock, hold, bound, succeeds, notice) in [
+        (0, project.join(".state/effect.lock"), 1.0, "5", true, false),
+        (1, root.join(".execution.lock"), 1.0, "0", false, false),
+        (2, project.join(".state/lock"), 3.0, "5", true, true),
+        (3, project.join(".state/effect.lock"), 3.0, "1", false, false),
+    ] {
+        let mut holder = Command::new("/usr/bin/python3").args(["-c",
+            "import fcntl,sys,time; f=open(sys.argv[1],'a'); fcntl.flock(f,fcntl.LOCK_EX); print('ready',flush=True); time.sleep(float(sys.argv[2]))"])
+            .arg(&lock).arg(hold.to_string()).stdout(Stdio::piped()).spawn().unwrap();
+        let mut ready = String::new();
+        BufReader::new(holder.stdout.take().unwrap()).read_line(&mut ready).unwrap();
+        assert_eq!(ready.trim(), "ready");
+        let head = runtime::snapshot(&project).unwrap().head.to_string();
+        let id = format!("wait-{index}");
+        let started = Instant::now();
+        let mut child = Command::new(BIN).env_clear().env("HOME", home.path())
+            .env("HERDR_FARM_TEST_TIME_SCALE", include_str!("support/time-scale.txt").trim())
+            .env("HERDR_FARM_LOCK_WAIT_SECS", bound)
+            .args(["--root", r, "task", "demo", "add", &id, "--title", "Waited task", "--expected-head", &head])
+            .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        let notice_reader = notice.then(|| {
+            let stderr = child.stderr.take().unwrap();
+            std::thread::spawn(move || {
+                let mut text = String::new();
+                for line in BufReader::new(stderr).lines() {
+                    let line = line.unwrap();
+                    if line.contains("waiting for ") {
+                        assert!(started.elapsed() >= Duration::from_secs(2), "notice printed before threshold");
+                    }
+                    text.push_str(&line); text.push('\n');
+                }
+                text
+            })
+        });
+        if index == 0 {
+            std::thread::sleep(Duration::from_millis(300));
+            assert!(child.try_wait().unwrap().is_none());
+            drop(RootGuard::exclusive(&root).expect("waiting must release the partial shared root lock"));
+        }
+        let output = child.wait_with_output().unwrap();
+        let elapsed = started.elapsed();
+        let stderr = notice_reader.map(|reader| reader.join().unwrap())
+            .unwrap_or_else(|| String::from_utf8_lossy(&output.stderr).into_owned());
+        assert_eq!(output.status.success(), succeeds, "{stderr}");
+        assert_eq!(stderr.contains("waiting for "), notice, "{stderr}");
+        assert_eq!(stderr.matches("waiting for ").count(), usize::from(notice));
+        if bound == "0" { assert!(elapsed < Duration::from_millis(800), "{elapsed:?}"); }
+        if succeeds { assert!(elapsed >= Duration::from_millis(900)); }
+        let snapshot = runtime::snapshot(&project).unwrap();
+        assert_eq!(snapshot.tasks.iter().any(|task| task.id.as_str() == id), succeeds);
+        if !succeeds { assert_eq!(snapshot.head.to_string(), head); }
+        holder.kill().ok(); holder.wait().unwrap();
+    }
+    let lock = project.join(".state/effect.lock");
+    std::fs::remove_file(&lock).unwrap();
+    let target = home.path().join("preserve");
+    std::fs::write(&target, "preserve").unwrap();
+    std::os::unix::fs::symlink(&target, &lock).unwrap();
+    let head = runtime::snapshot(&project).unwrap().head.to_string();
+    let started = Instant::now();
+    let output = Command::new(BIN).env_clear().env("HOME", home.path())
+        .env("HERDR_FARM_TEST_TIME_SCALE", include_str!("support/time-scale.txt").trim())
+        .env("HERDR_FARM_LOCK_WAIT_SECS", "5")
+        .args(["--root", r, "task", "demo", "add", "refused", "--title", "Refused", "--expected-head", &head])
+        .output().unwrap();
+    assert!(!output.status.success());
+    assert!(started.elapsed() < Duration::from_millis(800));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("waiting for "));
+    assert_eq!(runtime::snapshot(&project).unwrap().head.to_string(), head);
+    assert_eq!(std::fs::read_to_string(target).unwrap(), "preserve");
+}

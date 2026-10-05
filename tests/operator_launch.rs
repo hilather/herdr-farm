@@ -1670,3 +1670,30 @@ fn owner_toolchain_policy_refuses_verifier_control_environment() {
     assert_eq!(policy["toolchain"], "tests");
     assert_eq!(policy["checks"], serde_json::json!(["/bin/sh", "-c", "true"]));
 }
+
+#[test]
+fn launch_run_busy_execution_lock_exhaustion_keeps_the_resumable_step_report() {
+    use std::{io::{BufRead, BufReader}, process::Stdio, time::{Duration, Instant}};
+    let mut lab = Lab::new();
+    lab.plant_launchable("codex-sol", "codex", "gpt-6.1-sol");
+    lab.extra_env.push(("HERDR_FARM_LOCK_WAIT_SECS".into(), PathBuf::from("1")));
+    let prompt = lab.home.join("prompt.txt");
+    fs::write(&prompt, "Plan the next milestone.").unwrap();
+    let before = herdr_farm::runtime::snapshot(&lab.project).unwrap();
+    let mut holder = Command::new("/usr/bin/python3").args(["-c",
+        "import fcntl,sys; f=open(sys.argv[1],'a'); fcntl.flock(f,fcntl.LOCK_EX); print('ready',flush=True); sys.stdin.read()"])
+        .arg(lab.root.join(".execution.lock")).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+    let mut ready = String::new();
+    BufReader::new(holder.stdout.take().unwrap()).read_line(&mut ready).unwrap();
+    assert_eq!(ready.trim(), "ready");
+    let started = Instant::now();
+    let error = lab.fail(&lab.run_args("busy", "codex-sol", "docs/busy.md", prompt.to_str().unwrap()));
+    holder.kill().ok(); holder.wait().unwrap();
+    assert!(started.elapsed() >= Duration::from_secs(1));
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(error.contains("launch run stopped at step 1"), "{error}");
+    assert!(error.contains(".execution.lock"), "{error}");
+    assert!(error.contains("rerun the same command"), "{error}");
+    assert!(!error.contains("waiting for "), "{error}");
+    assert_eq!(herdr_farm::runtime::snapshot(&lab.project).unwrap(), before);
+}
