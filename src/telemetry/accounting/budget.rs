@@ -402,12 +402,13 @@ pub fn token_metric(project: &Path, since: Option<i64>) -> Result<BTreeMap<Strin
         let index = crate::telemetry::sidecar::child_index(&sidecar)?;
         let entries = super::ledger::derive(&sidecar)?;
         for attempt in &cohort {
-            // An attempt that never reached running has no session to count
-            // (M04 treats it the same way): it is not missing usage.
-            if attempt.never_running { continue; }
             let usage = crate::telemetry::sidecar::attempt_usage_with(&sidecar, &attempt.id, &index)?;
             if usage["status"] == "unavailable" || usage["records"] == 0 {
-                *missing.entry(usage["reason"].as_str().unwrap_or("no_usage_observed").to_owned()).or_default() += 1;
+                // An attempt that never reached running has no session to count
+                // (M04 treats it the same way): it is not missing usage.
+                if !attempt.never_running {
+                    *missing.entry(usage["reason"].as_str().unwrap_or("no_usage_observed").to_owned()).or_default() += 1;
+                }
                 continue;
             }
             for entry in entries.iter().filter(|e| membership.get(&e.session).is_some_and(|(owner, reason)| owner.as_deref() == Some(attempt.id.as_str()) && reason.is_none())) {
