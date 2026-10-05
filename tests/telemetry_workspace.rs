@@ -185,8 +185,10 @@ fn every_surface_shows_the_same_values_as_the_query_service() {
     }
     let quota = &snap["services"]["quota_at_last_dispatch"][0];
     assert_eq!(quota, &result("M40")["detail"]["decisions"][0]);
-    assert_eq!((&quota["windows"][0]["value"], &quota["windows"][0]["used"], &quota["windows"][0]["freshness"], &quota["windows"][1]["value"]),
-        (&json!("62.5"), &json!("37.5"), &json!("fresh"), &json!({"status": "unavailable", "reason": "not_reported"})));
+    assert_eq!((&quota["windows"][0]["value"], &quota["windows"][0]["used"], &quota["windows"][0]["freshness"]),
+        (&json!("62.5"), &json!("37.5"), &json!("fresh")));
+    assert_eq!(quota["windows"].as_array().unwrap().len(), 1);
+    assert_eq!(result("M40")["detail"]["not_reported"][0]["window_kind"], "secondary");
     assert_eq!((&snap["services"]["M38"]["value"], &snap["replay"]["reason"]), (&json!({"status": "unavailable", "reason": "throttling_not_certified"}), &json!("no_replay_suite")));
 
     // Active attempts: the TM1.8 projection's open record, attention and usage verbatim.
@@ -250,7 +252,7 @@ fn every_surface_shows_the_same_values_as_the_query_service() {
         "─ ALERTS (1 open; `health notify` leaves inbox notices)".to_owned(),
         "  M38 throttled time share: n/a (throttling_not_certified)".to_owned(),
         "  M39 provider error rate: n/a (provider_errors_not_certified)".to_owned(),
-        format!("  codex quota at last dispatch ({}): primary 62.5% remaining (window 300m, fresh) · secondary n/a (not_reported)", &f.attempt[..16]),
+        format!("  codex quota at last dispatch ({}): primary 62.5% remaining (window 300m, fresh)", &f.attempt[..16]),
         "─ CONFIGURATIONS · M02 acceptance · terminal_cohort · observational · 95% interval · min 20 tasks per cell · never a routing decision".to_owned(),
         "  code".to_owned(),
         format!("    claude 1.0 [{}]  20/20 (1.0000) [20/20–20/20] n=20 pooled 1", &a[7..15]),
@@ -276,7 +278,7 @@ fn every_surface_shows_the_same_values_as_the_query_service() {
         "Active attempts: 1 (running 1, launching 0, reserved 0); bound usage ".to_owned() + if coverage == "complete" { "1 of 1" } else { "0 of 1" },
         format!("Waiting on operator: {} task work (6m00s so far)", &f.attempt[..16]),
         "Health alerts (1 open): warn waiting_on_you [attention] waiting_on_you".to_owned(),
-        format!("Services: throttled n/a (throttling_not_certified); errors n/a (provider_errors_not_certified); codex quota at last dispatch ({}): primary 62.5% remaining (window 300m, fresh) · secondary n/a (not_reported)", &f.attempt[..16]),
+        format!("Services: throttled n/a (throttling_not_certified); errors n/a (provider_errors_not_certified); codex quota at last dispatch ({}): primary 62.5% remaining (window 300m, fresh)", &f.attempt[..16]),
         "Routing evidence (M02 acceptance, terminal_cohort, 95% interval, n; below 20 tasks insufficient):".to_owned(),
         "  code: claude 1.0 20/20 [20/20–20/20] n=20; gemini 2.0 insufficient (n=3)".to_owned(),
         "Replay M49: n/a (no_replay_suite)".to_owned(),

@@ -6,8 +6,8 @@
 //! evidence (contracts §6 `A`), integration operations and the owner's
 //! supersession reasons from canonical `state.db` (read-only), the latest
 //! valuation revision from the sidecar, and attempt worktree reflogs (a gated,
-//! read-only `git`, counts only). M35 buckets fixed activity windows by their
-//! time-weighted active-attempt count; M36 counts integrator-observed and,
+//! read-only `git`, counts only). M35 buckets tasks by concurrency experienced
+//! during their attempts; M36 counts integrator-observed and,
 //! apart, worker-observed conflict/rebase events; M34 prices the coordinator
 //! scope (`coordinator-scope-v2`) against the project's lifecycle cost and
 //! allocates it by rule `coordinator-allocation-v2`; M37 prices attempts
@@ -32,7 +32,7 @@ const TERMINAL: [&str; 4] = ["completed", "failed", "cancelled", "lost"];
 /// within this total variation distance of the reference bucket's.
 const MAX_TVD: (i128, i128) = (1, 10);
 const UNCLASSIFIED: &str = "unclassified";
-const NAMES: [(&str, &str, &str); 4] = [("M34", "coordinator_overhead", "M34.fleet-v1"), ("M35", "fan_out_efficiency", "M35.fanout-v1"),
+const NAMES: [(&str, &str, &str); 4] = [("M34", "coordinator_overhead", "M34.fleet-v1"), ("M35", "fan_out_efficiency", "M35.fanout-v2"),
     ("M36", "integration_conflict_rate", "M36.integration-v1"), ("M37", "overlap_waste_share", "M37.fleet-v1")];
 
 /// An exact rational, always reduced with a positive denominator.
@@ -111,6 +111,8 @@ struct Fleet {
     /// First acceptance evidence time per accepted task (contracts §6 `A`),
     /// with the configuration of the attempt that produced it.
     accepted: Vec<(i64, Option<String>)>,
+    #[serde(default)]
+    accepted_tasks: BTreeMap<String, (i64, Option<String>)>,
     /// Display labels (`<kind> <agent_version>`) per configuration id.
     labels: BTreeMap<String, String>,
     /// Integration operations per attempt, in creation order.
@@ -173,6 +175,7 @@ fn load(db: &Connection, horizon: i64) -> Result<std::result::Result<Fleet, &'st
         if (at, &attempt) < (slot.0, &slot.1) { *slot = (at, attempt); }
     }
     drop(stmt);
+    let accepted_tasks = first.iter().map(|(task, (at, attempt))| (task.clone(), (*at, configs.get(attempt).cloned().flatten()))).collect();
     let accepted = first.into_values().map(|(at, attempt)| (at, configs.get(&attempt).cloned().flatten())).collect();
     // `<kind> <agent_version>` (contracts §2): derived for display, never an identity.
     let mut labels = if decisions && table(db, "agent_configurations")? {
@@ -192,7 +195,7 @@ fn load(db: &Connection, horizon: i64) -> Result<std::result::Result<Fleet, &'st
         let (attempt, op) = row?;
         operations.entry(attempt).or_default().push(op);
     }
-    Ok(Ok(Fleet { horizon, runs, unknown, coverage, accepted, labels, operations }))
+    Ok(Ok(Fleet { horizon, runs, unknown, coverage, accepted, accepted_tasks, labels, operations }))
 }
 
 /// Round half up to the nearest whole number of agents.
@@ -248,13 +251,39 @@ fn fan_out(f: &Fleet, since: Option<i64>, window_ms: i64, config: Option<&str>) 
             };
         *excluded.get_mut(reason).unwrap() += 1;
     }
-    let per_hour = |b: &Bucket| Q::new(b.accepted * HOUR_MS, b.span_ms);
-    let reference = buckets.iter().find(|(k, b)| **k >= 1 && b.accepted > 0).map(|(k, b)| (*k, per_hour(b), shares(&b.mix)));
+    let window_buckets = std::mem::take(&mut buckets);
+    // Concurrency is measured during an attempt's running time, independent
+    // of the reporting window's width. Each accepted task is counted once.
+    let mut tasks = BTreeMap::<&str, Vec<&Run>>::new();
+    let mut bucket_windows = BTreeMap::<i64, BTreeSet<i64>>::new();
+    for run in f.runs.iter().filter(|r| mine(&r.config) && r.to > r.from && r.to <= f.horizon && !r.open
+        && since.is_none_or(|at| r.from >= at)) {
+        tasks.entry(&run.task).or_default().push(run);
+    }
+    for (task, runs) in tasks {
+        if runs.iter().any(|r| unknown.iter().any(|u| overlap(*u, (r.from, r.to)) > 0)) { continue; }
+        let span: i128 = runs.iter().map(|r| (r.to - r.from) as i128).sum();
+        let active: i128 = runs.iter().map(|r| f.runs.iter().filter(|other| mine(&other.config))
+            .map(|other| overlap((r.from, r.to), (other.from, other.to)) as i128).sum::<i128>()).sum();
+        let k = level(active, span).max(1);
+        let b = buckets.entry(k).or_default();
+        b.active_ms += span;
+        // Worker-time divided by the experienced level is effective wall time.
+        b.span_ms += span;
+        for run in &runs {
+            for w in run.from.div_euclid(window_ms)..=(run.to - 1).div_euclid(window_ms) { bucket_windows.entry(k).or_default().insert(w); }
+        }
+        b.windows = bucket_windows.get(&k).map_or(0, BTreeSet::len);
+        b.accepted += i128::from(f.accepted_tasks.get(task).is_some_and(|(at, c)| mine(c) && since.is_none_or(|since| *at >= since)));
+        for run in runs { *b.mix.entry(run.mix.clone()).or_default() += (run.to - run.from) as i128; }
+    }
+    let per_hour = |k: i64, b: &Bucket| Q::new(b.accepted * HOUR_MS * k as i128, b.span_ms);
+    let reference = buckets.iter().find(|(k, b)| **k >= 1 && b.accepted > 0).map(|(k, b)| (*k, per_hour(*k, b), shares(&b.mix)));
     let (mut rows, mut previous, mut differs, mut unclassified) = (Vec::new(), None::<(i64, Q)>, false, false);
     for (k, b) in &buckets {
-        let (k, thr, mix) = (*k, per_hour(b), shares(&b.mix));
-        let mut row = json!({"level": k, "windows": b.windows, "window_ms": b.span_ms as i64, "active_ms": b.active_ms as i64,
-            "mean_active": Q::new(b.active_ms, b.span_ms).show(), "accepted": b.accepted as i64, "accepted_per_hour": thr.show(),
+        let (k, thr, mix) = (*k, per_hour(*k, b), shares(&b.mix));
+        let mut row = json!({"level": k, "windows": b.windows, "window_ms": (b.span_ms / k.max(1) as i128) as i64, "active_ms": b.active_ms as i64,
+            "mean_active": k.to_string(), "accepted": b.accepted as i64, "accepted_per_hour": thr.show(),
             "mix": mix.iter().map(|(c, s)| (c.clone(), json!(s.show()))).collect::<serde_json::Map<_, _>>()});
         if k == 0 {
             row["per_agent_per_hour"] = unavailable("level_zero");
@@ -281,13 +310,14 @@ fn fan_out(f: &Fleet, since: Option<i64>, window_ms: i64, config: Option<&str>) 
         previous = Some((k, thr));
         rows.push(row);
     }
-    let top = buckets.keys().copied().filter(|k| *k >= 1).max();
+    let top = buckets.iter().filter(|(_, b)| b.accepted > 0).map(|(k, _)| *k).max()
+        .or_else(|| buckets.keys().copied().filter(|k| *k >= 1).max());
     let mut reasons = Vec::new();
     if unclassified { reasons.push("classification_unknown"); }
     if differs { reasons.push("task_mix_differs"); }
     let comparability = json!({"test": "class_band_active_time_tvd", "max_tvd": Q::new(MAX_TVD.0, MAX_TVD.1).show(), "reference": "reference bucket",
         "label": if reasons.is_empty() { "comparable" } else { "descriptive" }, "reasons": reasons});
-    let mut m35 = json!({"window_ms": window_ms, "window_minutes": window_ms / 60_000, "level_rule": "round_half_up(time_weighted_active_attempts)", "scope": "worker_attempts",
+    let mut m35 = json!({"window_ms": window_ms, "window_minutes": window_ms / 60_000, "level_rule": "round_half_up(task_attempt_time_weighted_concurrency)", "scope": "worker_attempts",
         "reference_level": reference.as_ref().map(|r| r.0), "level": top, "comparability": comparability.clone(), "label": comparability["label"].clone()});
     m35["value"] = match (&reference, top) {
         _ if buckets.is_empty() => unavailable("no_complete_window"),
@@ -301,8 +331,45 @@ fn fan_out(f: &Fleet, since: Option<i64>, window_ms: i64, config: Option<&str>) 
         if *r != top { m35["marginal_per_added_agent_per_hour"] = rows.iter().find(|row| row["level"] == top).map_or(Value::Null, |row| row["marginal_per_added_agent_per_hour"].clone()); }
     }
     let detail = json!({"window_ms": window_ms, "window_minutes": window_ms / 60_000, "horizon_unix_ms": f.horizon, "coverage": f.coverage,
-        "windows": {"bucketed": buckets.values().map(|b| b.windows).sum::<usize>(), "excluded": excluded}, "buckets": rows, "comparability": comparability});
+        "windows": {"bucketed": window_buckets.values().map(|b| b.windows).sum::<usize>(), "excluded": excluded}, "buckets": rows, "concurrency": concurrency(f, since, config), "comparability": comparability});
     (detail, m35)
+}
+
+/// Sweep half-open running intervals. Unknown spans are excluded rather than
+/// silently counted as idle; the observation span is first through last run.
+fn concurrency(f: &Fleet, since: Option<i64>, config: Option<&str>) -> Value {
+    let unknown: Vec<_> = f.unknown.iter().filter(|u| config.is_none() || u.2.is_none() || u.2.as_deref() == config).collect();
+    let runs: Vec<&Run> = f.runs.iter().filter(|r| config.is_none_or(|c| r.config.as_deref() == Some(c)) && r.to > r.from).collect();
+    let Some(from) = runs.iter().map(|r| r.from).min().map(|at| at.max(since.unwrap_or(at))) else { return unavailable("no_running_intervals") };
+    let to = runs.iter().map(|r| r.to).max().unwrap().min(f.horizon);
+    if to <= from { return unavailable("no_running_intervals"); }
+    let mut marks = BTreeSet::from([from, to]);
+    for r in &runs { marks.insert(r.from.clamp(from, to)); marks.insert(r.to.clamp(from, to)); }
+    for u in &unknown { marks.insert(u.0.clamp(from, to)); marks.insert(u.1.clamp(from, to)); }
+    let marks: Vec<i64> = marks.into_iter().collect();
+    let (mut levels, mut gaps, mut gap, mut unknown_ms) = (BTreeMap::<usize, i64>::new(), Vec::new(), 0, 0);
+    for pair in marks.windows(2) {
+        let ms = pair[1] - pair[0];
+        if unknown.iter().any(|u| overlap((u.0, u.1), (pair[0], pair[1])) > 0) {
+            unknown_ms += ms;
+            if gap > 0 { gaps.push(gap); gap = 0; }
+            continue;
+        }
+        let k = runs.iter().filter(|r| r.from <= pair[0] && r.to > pair[0]).count();
+        *levels.entry(k).or_default() += ms;
+        if k == 0 { gap += ms; } else if gap > 0 { gaps.push(gap); gap = 0; }
+    }
+    if gap > 0 { gaps.push(gap); }
+    for k in 0..=levels.keys().copied().max().unwrap_or(0) { levels.entry(k).or_default(); }
+    gaps.sort();
+    let total: i64 = levels.values().sum();
+    let busy = total - levels.get(&0).copied().unwrap_or(0);
+    let active: i128 = levels.iter().map(|(k, ms)| *k as i128 * *ms as i128).sum();
+    let quantile = |p: usize| gaps.get((gaps.len() * p).div_ceil(100).saturating_sub(1)).copied();
+    json!({"from_unix_ms": from, "to_unix_ms": to, "observed_ms": total, "unknown_ms": unknown_ms,
+        "distribution": levels.iter().map(|(k, ms)| json!({"level": k, "duration_ms": ms, "share": if total > 0 { json!(Q::new(*ms as i128, total as i128).show()) } else { unavailable("concurrency_unknown") }})).collect::<Vec<_>>(),
+        "mean_while_busy": if busy > 0 { json!(Q::new(active, busy as i128).show()) } else { unavailable("no_busy_time") },
+        "idle_gaps": {"count": gaps.len(), "median_ms": quantile(50), "p90_ms": quantile(90)}})
 }
 
 /// M35 per agent configuration (the dispatch decision's content-addressed
@@ -316,7 +383,7 @@ fn per_configuration(f: &Fleet, since: Option<i64>, window_ms: i64) -> (Value, V
         let (d, mut m) = fan_out(f, since, window_ms, Some(id));
         let attempts: BTreeSet<&str> = f.runs.iter().filter(|r| r.config.as_ref() == Some(id)).map(|r| r.attempt.as_str()).collect();
         let label = f.labels.get(id).map_or(Value::Null, |l| json!(l));
-        detail.insert(id.clone(), json!({"display_label": label, "attempts": attempts.len(), "windows": d["windows"], "buckets": d["buckets"], "comparability": d["comparability"]}));
+        detail.insert(id.clone(), json!({"display_label": label, "attempts": attempts.len(), "windows": d["windows"], "buckets": d["buckets"], "concurrency": d["concurrency"], "comparability": d["comparability"]}));
         if let Value::Object(o) = &mut m { for key in ["window_ms", "window_minutes", "level_rule", "scope", "comparability"] { o.remove(key); } }
         m["display_label"] = label;
         metric.insert(id.clone(), m);
@@ -784,6 +851,7 @@ fn load_current(project: &Path, state: &Connection, horizon: i64, aggregates: bo
         let body: Option<String> = db.query_row("SELECT body FROM accounting_fleet_snapshot WHERE canonical=?1", [canonical], |r| r.get(0)).optional()?;
         if let Some(body) = body {
             let mut fleet: Fleet = serde_json::from_str(&body)?;
+            if fleet.accepted_tasks.is_empty() && !fleet.accepted.is_empty() { return load(state, horizon); }
             fleet.horizon = horizon;
             for run in &mut fleet.runs { if run.open { run.to = horizon; } }
             for unknown in &mut fleet.unknown { if unknown.3 { unknown.1 = horizon; } }
@@ -859,6 +927,12 @@ pub fn text(value: &Value) -> String {
         let w = &fleet["windows"];
         out += &format!("windows {} ms: {} bucketed, excluded {}\n", fleet["window_ms"], w["bucketed"],
             w["excluded"].as_object().into_iter().flatten().map(|(k, v)| format!("{k} {v}")).collect::<Vec<_>>().join(", "));
+        let concurrency = &fleet["concurrency"];
+        for level in concurrency["distribution"].as_array().into_iter().flatten() {
+            out += &format!("concurrency k={} duration_ms={} share={}\n", level["level"], level["duration_ms"], show(&level["share"]));
+        }
+        out += &format!("concurrency mean while busy={} idle gaps={} median_ms={} p90_ms={} unknown_ms={}\n",
+            show(&concurrency["mean_while_busy"]), concurrency["idle_gaps"]["count"], concurrency["idle_gaps"]["median_ms"], concurrency["idle_gaps"]["p90_ms"], concurrency["unknown_ms"]);
         for b in fleet["buckets"].as_array().into_iter().flatten() {
             out += &format!("bucket k={} windows={} accepted={} per_hour={} per_agent={} m35={} marginal={}\n", b["level"], b["windows"], b["accepted"],
                 show(&b["accepted_per_hour"]), show(&b["per_agent_per_hour"]), show(&b["m35"]), show(&b["marginal_per_added_agent_per_hour"]));

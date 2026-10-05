@@ -463,29 +463,49 @@ reset − `window_minutes`, first/last trusted observation, `first_used`,
 (account-wide: never attributed to a task, as the window's invocation scope
 is not certified), latest `plan_type`, trusted `observations` and `flagged`.
 
-**Account identity.** The account is the execution home, not the provider
-login: credentials are never read. In the A4 live run, two homes holding
-copies of one login reported identical windows at overlapping times, so the
-provider window belongs to the login. Within one home, "one home = one
-login" held. Herdr does not merge such accounts. It names them: windows of
-different accounts with the same `limit_id`, `window_kind`,
-`window_minutes` and `resets_unix_ms` (within `RESETS_TOLERANCE_MS` of the
-group's earliest reset, which the candidate shows, since B12) are a
-**shared-window candidate** (evidence `same_limit_kind_minutes_resets`,
-`merged: false`); M40's per-decision `shared_window_candidates` use the same
-tolerance around the decision's observation. The accounts
-may be one login. Two unrelated logins whose resets fall on the same second
-would also match, so this is a candidate, not proof. Values of different
-accounts are never summed, averaged or used for each other: each window
-keeps its own `used`, `remaining` and `observed_increase`. Adding two homes'
-increases would count the same consumption twice.
+**Account identity and merge rule (TFIX-2).** Observations retain execution
+home digests; credentials are never read. Trusted windows from different homes
+with the same limit id, kind, minutes and resets within 60000 ms of the group's
+earliest reset are treated as the same provider window for headroom. The
+latest trusted reading wins; percentages are never added or averaged. Merged
+windows carry `accounts`, `window_ids`, `merge_evidence:
+same_limit_kind_minutes_resets` and `merged: true`. `evidence_windows` retains
+each home's original window; `shared_window_candidates` retains membership
+and the reset anchor (now `merged: true`). This is window evidence, not a
+credential-derived provider identity. M40 uses only matching trusted
+observations at or before the decision, preserving historical answers.
+
+**Quota runway (detail only).** `runway` has one entry per displayed window.
+The last 24 h end at its latest trusted observation (`as_of_unix_ms`), keeping
+read-only replay deterministic. Sum non-negative high-water increases between
+trusted readings entirely within the lookback and the same window. Never
+count an initial reading as consumption, prorate an interval crossing the
+lookback boundary, or subtract across a reset. Matching homes share one
+high-water sequence and are counted once. `points_used`, `points_per_hour`
+(points / 24), `project_points`, `unattributed_points`, `project_share` and
+`unattributed_share` are exact decimal or reduced rational strings. Attribute
+an increase to project usage when the snapshot session has counted bound
+usage records in that account since its preceding trusted snapshot; otherwise
+it is unattributed. This is an observation-linked estimate
+(`attribution_basis: counted_project_usage_since_previous_session_observation`,
+`semantics: not_certified`), not a certified token-to-quota conversion or proof
+excluding simultaneous external usage. `hours_to_exhaustion` is remaining /
+burn rate; `hours_to_reset` is reset minus as-of time in hours;
+`exhausts_before_reset` compares them. Zero observed burn makes shares and
+exhaustion `unavailable no_observed_burn`, not infinity or zero. These values
+are detail, not a registry metric.
+
+Migration `0023_concurrency_headroom.sql` invalidates accounting and clears
+the dispatch headroom/frontier and fleet snapshot so the next sync rebuilds
+v2 definitions. No tables are added; existing derived retention and backup
+classifications apply.
 
 **`accounting quota [--json]`** (read-only; `collection_not_run` without a
 sidecar, `ledger_not_synced` before a sync): `account_basis:
 execution_home`, `windows`, `shared_window_candidates` (per candidate
 `{limit_id, window_kind, window_minutes, resets_unix_ms, accounts,
-window_ids, evidence, merged: false}`, accounts in account order; text: one
-`shared window candidate …` line each), `observations`
+window_ids, evidence, merged: true}`, accounts in account order; text: one
+`shared window …` line each), `observations`
 (count per window kind and trust), `evidence.rate_limit_reached_type`
 (`snapshots` per value, `semantics: not_certified`, `certified: fixture`),
 and `metrics`:
@@ -496,7 +516,7 @@ and `metrics`:
 - M39 `provider_error_rate`: `unavailable provider_errors_not_certified`. No
   typed provider error field is collected or certified; human-readable
   messages never become certified fields.
-- M40 extended (`M40.quota-windows-v1`): per dispatch decision (attempt
+- M40 extended (`M40.quota-windows-v2`): per dispatch decision (attempt
   order), `{attempt_id, decided_unix_ms, service, account, account_basis:
   execution_home, windows}` (`account_basis` also on the decision-level
   `no_observation`/`no_trusted_observation` entries); per
@@ -507,15 +527,15 @@ and `metrics`:
   `age_ms > stale_after_ms` = 900000, value still shown); if the window reset
   at or before the decision, `value` is `unavailable
   window_reset_since_observation` (the new window's value is unknown).
-  When other accounts reported a trusted observation of the same window
-  (same limit, kind, minutes and reset) by the decision, the entry has
-  `shared_window_candidates` = every such account, the decision's included,
-  in account order. The value is still the decision account's own; a newer
-  value from another home is never substituted.
-  `secondary` follows the same rules from the secondary observations; with
-  no trusted one it is `unavailable not_reported` (the latest snapshot's
-  window was `null`), `not_collected` (no snapshot carries the kind, e.g.
-  stored before A4) or `no_trusted_observation`. Decision-level reasons:
+  Matching homes are listed in `shared_window_candidates`, with `merged:
+  true` and `merge_evidence`; the latest matching trusted reading supplies
+  value and age. A kind that has never had a trusted observation for the
+  account/limit is omitted from decisions and listed once at limit level in
+  `not_reported` (`not_collected` for pre-A4 absence). A previously reported
+  kind retains a decision entry: before its first trusted reading it is
+  `not_reported`, `not_collected` or `no_trusted_observation` as appropriate;
+  a latest explicit null yields `not_reported` even after trusted readings.
+  Decision-level reasons:
   `adapter_absent`, `execution_home_unknown`, `no_observation` (no snapshot
   of the account by then), `no_trusted_observation`. Native units; never
   summed or averaged across accounts, limits or services.
@@ -532,23 +552,23 @@ increase `7.25`, remaining `87.75`), never −55. A snapshot 20 minutes old is
 `stale` (`62.5`, age 1200000); one whose window reset before the decision is
 `window_reset_since_observation`; no snapshot is `no_observation` and one
 with `primary: null` is `incomplete` → `no_trusted_observation`, never 0.
-Its rollouts report `secondary: null`: `not_reported`.
+Its rollouts report `secondary: null`: one limit-level `not_reported`, no secondary decision entry.
 
 Test `shared_window_across_homes_is_flagged_not_summed`: home A reads
 37.5 one minute before dispatch; home B reads 37.5 then 40 (two minutes and
 half a minute before) for the same 300-minute window, and a secondary window
 that A reports as `null`. Three windows: A primary (increase `0`, remaining
 `62.5`), B primary (increase `2.5`, remaining `60`), B secondary (`10`). One
-candidate names A's and B's primary windows; the secondary is not shared.
-A's headroom is `62.5` (its own), not B's newer `60` and not
-100 − (37.5 + 40). The report's M40 equals `accounting quota`'s.
+merge names A's and B's primary windows; the secondary is not shared.
+A's headroom is B's newer `60`; it never sums consumption as
+100 − (37.5 + 40). Original home readings remain in `evidence_windows`. The report's M40 equals `accounting quota`'s.
 
 Test `secondary_window_is_tracked`: a 10,080-minute secondary window reads
 10 → 12.5 before dispatch (headroom `87.5`, age 120000, increase `2.5`),
 11 afterwards (flagged), then `null` (`not_reported`) while the primary
 resets (20 → 30, then 5 → 6 in a new window); one `primary` reached type
 is evidence; M38 stays unavailable. With the A4 rows removed (as stored
-before A4), secondary is `not_collected`.
+before A4), secondary is omitted with limit-level `not_collected`.
 
 Test `resets_jitter_and_null_plan_stay_one_window` (B12, run2 §6 shapes):
 a 10,080-minute window reads 43 (R, `pro`) → 43 (R + 5 s, `pro`) → 44
@@ -932,45 +952,53 @@ never_running, predates_lifecycle_log, end_unknown}`:
 - A store without `attempt_lifecycle`: M35 and M36 `unavailable
   predates_lifecycle_log`. No `state.db`: `no_state_store`.
 
-**Windows and buckets.** Activity windows are fixed windows of
-`--window-minutes` (default 60, whole UTC hours; any divisor of 1440, so
-windows align to UTC days; anything else is refused), recorded as
-`window_ms` and `window_minutes` in `fleet` and M35, that hold active time
-or an acceptance. The report hook uses the default. A window's time-weighted
-active-attempt count is Σ overlap / `window_ms`. Its level `k` is that count
-rounded half up (`round_half_up(time_weighted_active_attempts)`). Some
-windows are not bucketed. They are counted in `windows.excluded` as
-`incomplete` (ends after the horizon), `concurrency_unknown` (overlaps an
-unknown span) or `outside_window` (starts before `--since`). Accepted
-throughput counts each task of contracts §6 `A` once, at its first acceptance
-evidence: `verified_results.created_unix_ms` for `verify_only`, and
-`integrated_commits.created_unix_ms` for `verify_then_integrate`. The
-evidence lands in the window that contains that time. Per bucket:
-`{level, windows, window_ms, active_ms, mean_active, accepted,
-accepted_per_hour, per_agent_per_hour, m35, marginal_per_added_agent_per_hour,
-mix, mix_tvd}`.
+**Time-weighted concurrency (TFIX-2).** `fleet.concurrency` sweeps half-open
+running intervals from the first run (clipped by `--since`) through the last
+run end, extending open runs to the read horizon. Explicit `from_unix_ms` and
+`to_unix_ms` identify the observed span; time outside it is not inferred.
+Unknown lifecycle spans are excluded (`unknown_ms`), not called idle.
+`distribution` lists every level from zero through the maximum, with
+`duration_ms` and exact `share` of known observed time. `mean_while_busy`
+excludes idle time. `idle_gaps` gives count and nearest-rank median/p90 in ms
+(null without a gap); unknown spans split gaps. This view includes open runs.
+
+M35 groups each task's completed attempts by running-time-weighted experienced
+concurrency, rounded half up. Open attempts and unknown concurrency are
+excluded; `--since` excludes runs starting before it. Each accepted task is
+counted once using current-contract evidence, regardless of which reporting
+window holds its acceptance. Known running intervals have level at least one.
+`--window-minutes` (default 60; divisor of 1440) controls diagnostic UTC
+windows and is recorded in the output; widening it cannot change M35 levels
+or rates. `windows` retains complete-window diagnostics and incomplete,
+unknown-concurrency and outside-window exclusions. Per M35 bucket,
+`active_ms` is task attempt running time, `window_ms` is effective wall time
+(active / experienced level, integer display), `mean_active` is the
+experienced level, and `windows` counts distinct UTC reporting windows
+containing attempts. Rates use the exact worker-time ratio before display
+truncation. Buckets retain accepted count, class/band mix, reference,
+marginal rate and comparability fields.
 
 All quantities are exact reduced rationals as strings (`"3/4"`, `"2"`), never
 floats.
-- `accepted_per_hour` = accepted × 3600000 / bucket `window_ms`.
+- `accepted_per_hour` = accepted × 3600000 × level / bucket `active_ms`.
 - `per_agent_per_hour` = that / `k`.
 - The **reference** level is the lowest level ≥ 1 with an accepted task.
 - `m35(k)` = `accepted_per_hour(k)` / (`k` × the reference's per-agent rate).
 - Marginal = the difference in `accepted_per_hour` from the previous level ≥ 1
   bucket, divided by the difference in levels (`null` for the first).
-- A level-0 bucket carries `unavailable level_zero` for these fields.
+- Known running attempts cannot produce a level-zero bucket.
 
-**M35 `fan_out_efficiency`** (`M35.fanout-v1`): `value` = `m35` of the
-highest level, with `level`, `reference_level`,
+**M35 `fan_out_efficiency`** (`M35.fanout-v2`): `value` = `m35` of the
+highest level with accepted work, with `level`, `reference_level`,
 `reference_per_agent_per_hour` and `marginal_per_added_agent_per_hour`.
 Otherwise it is `unavailable`:
-- `no_complete_window`: no bucketed window.
+- `no_complete_window`: no eligible completed running attempts.
 - `no_accepted_throughput`: no reference level.
 - `single_concurrency_level`: the highest level is the reference.
 
 **Per configuration.** M35 is also computed per agent configuration (the
 dispatch decision's `chosen_configuration_id`, contracts §2) that has active
-time or an acceptance: the same windows, buckets, reference and
+time or an acceptance: the same experienced-task buckets, reference and
 comparability rule over that configuration's attempts only (their active
 time; the acceptances whose first evidence is a result of its attempt; the
 unknown spans of its attempts or of attempts without a decision).
@@ -1172,7 +1200,7 @@ never counted as waste. Before 0060: `unavailable
 supersession_reason_not_recorded`, `missing: [accepted_supersession_reason]`.
 
 **`accounting fleet [--json]`** (read-only) prints `{fleet: {window_ms,
-horizon_unix_ms, coverage, windows {bucketed, excluded}, buckets,
+horizon_unix_ms, coverage, concurrency, windows {bucketed, excluded}, buckets,
 comparability}, metrics: {M34, M35, M36, M37}}`. The metrics are identical to
 the ones `telemetry <slug> report` shows through the lane hook. The text form
 has a windows line, one line per bucket (`bucket k=8 windows=1 accepted=3
@@ -1196,8 +1224,12 @@ Test `fan_out_buckets_and_integration_conflicts`:
 - An open pre-log attempt makes both hours `concurrency_unknown`: M35 is
   `no_complete_window`, never 0, and M36's bucket is `unknown`.
 - `--window-minutes 120`: hour 0 (23:00 UTC) alone in 22:00–24:00 → level
-  2, `1`/hour; hour 1 in 00:00–02:00 → level 4, `3/2`/hour; M35 `3/4`,
+  4, `2`/hour; hour 1 stays level 8, `3`/hour; M35 `3/4`,
   marginal `1/4`. 7, 0 and 2880 are refused.
+- Short attempts spanning 15 minutes give idle/one/two shares `1/5`,
+  `3/5`, `1/5`, busy mean `5/4` and one 180000 ms idle gap. Accepted
+  short work gives M35 `1`; all accepted work alone is
+  `single_concurrency_level`, never `no_accepted_throughput`.
 - Two configurations X (a1, a2, b1–b4, `codex 0.154.0`) and Y (the rest,
   `claude 2.1.0`): X level 2 (2 accepted, reference `1`/agent) and level 4
   (3 accepted) → `3/4`, marginal `1/2`; Y `no_accepted_throughput`; the

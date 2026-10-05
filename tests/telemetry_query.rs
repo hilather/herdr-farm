@@ -140,7 +140,7 @@ fn registry_declares_every_metric_and_gates_families() {
     assert_eq!(report["metrics"]["M19"]["reason"], "blocked_intervals_not_recorded");
     assert_eq!(p.query(&["--metric", "M19"])["reason"], "blocked_intervals_not_recorded");
     let get = |id: &str| metrics.iter().find(|m| m["id"] == id).unwrap().clone();
-    for (id, current, previous) in [("M04", "M04.cost-v2", "M04.cost-v1"), ("M05", "M05.tokens-v2", "M05.tokens-v1"), ("M13", "M13.slice-v2", "M13.slice-v1"), ("M31", "M31.attention-v2", "M31.attention-v1")] {
+    for (id, current, previous) in [("M04", "M04.cost-v2", "M04.cost-v1"), ("M05", "M05.tokens-v2", "M05.tokens-v1"), ("M13", "M13.slice-v2", "M13.slice-v1"), ("M31", "M31.attention-v2", "M31.attention-v1"), ("M35", "M35.fanout-v2", "M35.fanout-v1"), ("M40", "M40.quota-windows-v2", "M40.quota-windows-v1")] {
         assert_eq!(get(id)["versions"][0]["definition"], current);
         assert_eq!(get(id)["versions"][1]["definition"], previous);
         assert_eq!(get(id)["versions"][1]["provider"]["kind"], "absent");

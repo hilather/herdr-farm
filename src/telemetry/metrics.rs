@@ -235,7 +235,7 @@ fn usage_metrics(sidecar: Option<&Connection>, attempts: &[Attempt], since: Opti
     Ok(())
 }
 
-/// Extended M40 (contracts-accounting §5, `M40.quota-windows-v1`): per
+/// Extended M40 (contracts-accounting §5, `M40.quota-windows-v2`): per
 /// decision in the window and per limit window, the latest trusted remaining
 /// value from the quota tables the last `accounting sync` built, never summed
 /// across accounts, limits or services. Each entry equals the one `accounting
@@ -263,7 +263,8 @@ fn headroom(project: &Path, sidecar: Option<&Connection>, attempts: &[Attempt], 
         decisions.push(entry);
     }
     let mut m40 = metric("M40", json!({"decisions": decisions, "stale_after_ms": quota::STALE_AFTER_MS}));
-    m40["definition"] = json!("M40.quota-windows-v1");
+    m40["definition"] = json!("M40.quota-windows-v2");
+    if synced && let Some(db) = sidecar { m40["not_reported"] = json!(quota::unreported(db)?); }
     Ok(m40)
 }
 
@@ -299,6 +300,9 @@ pub fn text(report: &Value) -> String {
         let id = registered.id;
         let Some(m) = metrics.get(id) else { continue };
         let name = m["name"].as_str().unwrap_or(registered.name);
+        for w in m["not_reported"].as_array().into_iter().flatten() {
+            out += &format!("limit {} {} {} n/a ({})\n", w["account"].as_str().unwrap_or(""), w["limit_id"].as_str().unwrap_or(""), w["window_kind"].as_str().unwrap_or(""), w["reason"].as_str().unwrap_or("not_reported"));
+        }
         match m["decisions"].as_array() {
             Some(list) if list.is_empty() => out += &format!("{id} {name} n/a (no_decisions)\n"),
             // M40: one line per decision and limit window, or per decision without windows.

@@ -548,7 +548,7 @@ separately. `succeeded` without evidence stays in `T \ A` and is counted as
 | M13 Usage coverage (adapted: attempt-level) | terminated Codex attempts with complete usage / terminated Codex attempts in window, excluding unbound never-running attempts | complete = ≥1 bound session, none quarantined/ambiguous, all records accepted, certified version. Non-Codex attempts reported as `adapter_absent` count, not in denominator |
 | M15 Effective-model coverage | accepted records with a non-null reported `model` / accepted records | requested model (null) never qualifies |
 | M31–M33 | lane B attention (contracts-accounting.md §6) | before any sample `unavailable: attention_not_collected` |
-| M40 Quota headroom at dispatch (extended, `M40.quota-windows-v1`) | per decision and limit window: remaining percent of the latest trusted quota observation of the attempt's account with `observed ≤ decided_unix_ms` (contracts-accounting.md §5), with age and freshness | decision- or window-level `unavailable` with a reason; native units; never summed or averaged across accounts, limits or services |
+| M40 Quota headroom at dispatch (extended, `M40.quota-windows-v2`) | per decision and limit window: remaining percent of the latest trusted quota observation of the attempt's account or a matching merged home with `observed ≤ decided_unix_ms` (contracts-accounting.md §5), with age and freshness | decision- or window-level `unavailable` with a reason; native units; never summed or averaged across accounts, limits or services |
 
 Worked M02/M07 example (golden E2E): tasks t1 (verify_only, verified), t2
 (verify_then_integrate, verified and integrated), t3 (verify_then_integrate,
@@ -582,14 +582,18 @@ S6 refinements:
   reason: `not_bound`, `quarantined`, `cli_version_uncertified`,
   `records_not_accepted` (a source's `records` ≠ its accepted rows).
 - M40 is the extended form of `accounting quota` (contracts-accounting.md
-  §5): `definition` `M40.quota-windows-v1`, `stale_after_ms` 900000,
+  §5): `definition` `M40.quota-windows-v2`, `stale_after_ms` 900000,
   `decisions` in attempt order, each `{attempt_id, decided_unix_ms, service,
   account?, windows | value}`. Each window entry is `{limit_id, window_kind,
   unit, window_id, window_minutes, resets_unix_ms, observed_unix_ms, age_ms,
   value, used, freshness}` (`value` = remaining, exact decimal string;
   `freshness` `fresh|stale`), or `value: unavailable
-  window_reset_since_observation` (with its age), or `secondary`
-  `unavailable not_collected`. Decision-level reasons, first match:
+  window_reset_since_observation` (with its age), or a previously reported kind
+  `unavailable not_reported` after an explicit null. Never-reported kinds
+  are omitted from decisions and described once at limit level (pre-A4
+  absence is `not_collected`). Matching trusted provider windows from
+  different execution homes merge within the 60 s reset tolerance, using
+  the latest reading while retaining evidence; percentages are never summed. Decision-level reasons, first match:
   `adapter_absent` (non-Codex kind), `execution_home_unknown`,
   `collection_not_run` (no sidecar), `ledger_not_synced`, `no_observation`,
   `no_trusted_observation`. The report reads the quota tables built by the
@@ -798,3 +802,8 @@ classification remain in force; canonical schema is unchanged.
 Accounting stream **v21**, `migrations/telemetry/accounting/0021_newer_cli_usage.sql`,
 updates the OTLP projection view and backfills accepted newer-version records;
 existing source/session retention and backup classifications are unchanged.
+
+Accounting stream **v23**, `migrations/telemetry/accounting/0023_concurrency_headroom.sql`,
+invalidates cached M40 dispatch answers and fleet lifecycle snapshots for
+`M35.fanout-v2` / `M40.quota-windows-v2` (registry v7). No new tables or
+retention/backup classes; see contracts-accounting.md §5 and §10.

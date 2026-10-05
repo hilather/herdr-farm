@@ -694,6 +694,58 @@ fn headroom(f: &Fixture) -> serde_json::Value {
     decisions[0].clone()
 }
 
+/// Public collection/sync/quota workflow: percent-point burn stays within
+/// one window and links counted project usage without converting token counts.
+#[test]
+fn quota_runway_links_usage_and_preserves_previously_reported_null() {
+    let f = Fixture::new();
+    let d = f.decided.div_euclid(1000) * 1000;
+    let path = f.rollout(&f.home, "runway", &[RECORD], &f.worktree(), f.decided + 1000, "0.154.0");
+    let text = fs::read_to_string(&path).unwrap();
+    let mut lines = text.lines();
+    let mut out = format!("{}\n{}\n", lines.next().unwrap(), lines.next().unwrap());
+    let mut usage: serde_json::Value = serde_json::from_str(lines.next().unwrap()).unwrap();
+    let timestamp = |at: i64| jiff::Timestamp::from_millisecond(at).unwrap().to_string();
+    for (at, used, secondary, own) in [(d - 10_800_000, 20, true, false), (d - 7_200_000, 40, true, true), (d - 3_600_000, 50, false, false)] {
+        if own {
+            usage["timestamp"] = json!(timestamp(at - 1000));
+            out += &format!("{usage}\n");
+        }
+        let secondary = if secondary { json!({"used_percent": 10, "window_minutes": 10_080, "resets_at": d / 1000 + 86_400}) } else { serde_json::Value::Null };
+        out += &format!("{}\n", json!({"timestamp": timestamp(at), "type": "event_msg", "payload": {"type": "token_count", "info": null,
+            "rate_limits": {"limit_id": "codex", "primary": {"used_percent": used, "window_minutes": 300, "resets_at": d / 1000 + 3600}, "secondary": secondary}}}));
+    }
+    fs::write(path, out).unwrap();
+    f.cli("collect");
+    f.cli_args(&["accounting", "sync"]);
+    let quota = f.cli_args(&["accounting", "quota", "--json"]).0;
+    let runway = quota["runway"].as_array().unwrap().iter().find(|r| r["window_id"].as_str().unwrap().contains(":primary:")).unwrap();
+    assert_eq!(runway, &json!({"window_id": format!("codex:{}:codex:primary:{}", digest(&f.home), d + 3_600_000),
+        "as_of_unix_ms": d - 3_600_000, "lookback_ms": 86_400_000, "points_used": "30", "points_per_hour": "5/4",
+        "project_points": "20", "unattributed_points": "10", "project_share": "2/3", "unattributed_share": "1/3",
+        "hours_to_exhaustion": "40", "hours_to_reset": "2", "exhausts_before_reset": false,
+        "attribution_basis": "counted_project_usage_since_previous_session_observation", "semantics": "not_certified"}));
+    let idle = quota["runway"].as_array().unwrap().iter().find(|r| r["window_id"].as_str().unwrap().contains(":secondary:")).unwrap();
+    assert_eq!((&idle["points_per_hour"], &idle["hours_to_exhaustion"]["reason"]), (&json!("0"), &json!("no_observed_burn")));
+    assert_eq!(headroom(&f)["windows"][1], json!({"limit_id": "codex", "window_kind": "secondary", "value": {"status": "unavailable", "reason": "not_reported"}}));
+    assert!(f.text(&["accounting", "quota"]).contains("project_share=2/3"));
+    f.cli_args(&["analytics", "refresh"]);
+    assert_eq!(f.cli_args(&["analytics", "rebuild", "--verify"]).0["identical"], true);
+    f.sidecar().execute("DELETE FROM usage_ledger", []).unwrap();
+    f.cli_args(&["accounting", "sync"]);
+    assert_eq!(f.cli_args(&["accounting", "quota", "--json"]).0, quota);
+    // A v22 projection must rebuild instead of retaining phantom decisions
+    // or a fleet snapshot without the new accepted-task identity.
+    f.sidecar().execute_batch("UPDATE accounting_dispatch_headroom SET body='{}';
+        UPDATE accounting_fleet_snapshot SET body=json_remove(body,'$.accepted_tasks');
+        UPDATE telemetry_streams SET version=22 WHERE stream='accounting';").unwrap();
+    f.cli_args(&["accounting", "sync"]);
+    assert_eq!(f.cli_args(&["accounting", "status"]).0["version"], 23);
+    assert_eq!(f.sidecar().query_row("SELECT json_type(body,'$.accepted_tasks') FROM accounting_fleet_snapshot", [], |r| r.get::<_, String>(0)).unwrap(), "object");
+    assert_eq!(f.cli_args(&["accounting", "quota", "--json"]).0, quota);
+    assert_eq!(f.report()["metrics"]["M40"]["decisions"], quota["metrics"]["M40"]["decisions"]);
+}
+
 /// Doc 05 §5b / TM2.7: one 300-minute Codex `primary` window, in percent, of
 /// the attempt's execution home. Before the decision it reads 40 → 55.5, then
 /// 50 without a reset (flagged, not subtracted: the high-water mark stays
@@ -742,11 +794,10 @@ fn window_reset_starts_new_window_not_negative() {
     // Headroom at dispatch: the latest trusted snapshot at or before the decision.
     assert_eq!(headroom(&f), json!({"attempt_id": f.attempt, "decided_unix_ms": d, "service": "codex", "account": account, "account_basis": "execution_home", "windows": [
         {"limit_id": "codex", "window_kind": "primary", "unit": "percent", "window_id": w1, "window_minutes": 300, "resets_unix_ms": r1 * 1000,
-         "observed_unix_ms": t4, "age_ms": 60_000, "value": "40", "used": "60", "freshness": "fresh"},
-        {"limit_id": "codex", "window_kind": "secondary", "value": unavailable("not_reported")}]}));
-    assert_eq!((&quota["metrics"]["M40"]["definition"], &quota["metrics"]["M40"]["stale_after_ms"]), (&json!("M40.quota-windows-v1"), &json!(900_000)));
+         "observed_unix_ms": t4, "age_ms": 60_000, "value": "40", "used": "60", "freshness": "fresh"}]}));
+    assert_eq!((&quota["metrics"]["M40"]["definition"], &quota["metrics"]["M40"]["stale_after_ms"]), (&json!("M40.quota-windows-v2"), &json!(900_000)));
     let text = f.text(&["accounting", "quota"]);
-    for line in [format!("M40 {} codex primary remaining 40% age_ms=60000 fresh", f.attempt), format!("M40 {} codex secondary n/a (not_reported)", f.attempt),
+    for line in [format!("M40 {} codex primary remaining 40% age_ms=60000 fresh", f.attempt),
         "M38 throttled_time_share n/a (throttling_not_certified)".to_owned()] {
         assert!(text.lines().any(|l| if line.starts_with("attempt ") { l.starts_with(&line) && l.contains("(primary ") } else { l == line }), "{line:?} in\n{text}");
     }
@@ -942,7 +993,8 @@ fn secondary_window_is_tracked() {
     f.cli_args(&["accounting", "sync"]);
     let (quota, _) = f.cli_args(&["accounting", "quota", "--json"]);
     assert_eq!(quota["observations"], json!({"primary": {"trusted": 4}}));
-    assert_eq!(headroom(&f)["windows"][1], json!({"limit_id": "codex", "window_kind": "secondary", "value": {"status": "unavailable", "reason": "not_collected"}}));
+    assert_eq!(headroom(&f)["windows"].as_array().unwrap().len(), 1);
+    assert!(quota["not_reported"].as_array().unwrap().iter().any(|w| w["window_kind"] == "secondary" && w["reason"] == "not_collected"));
     use std::io::Write;
     let late = lines[3].replace(&jiff::Timestamp::from_millisecond(t2).unwrap().to_string(),
         &jiff::Timestamp::from_millisecond(d - 3_600_000).unwrap().to_string());
@@ -961,10 +1013,9 @@ fn secondary_window_is_tracked() {
 /// reads 37.5 two minutes before and 40 half a minute before it, for the same
 /// `codex` primary window (300 minutes, same `resets_at`), plus a secondary
 /// window A reports as `null`. Accounts are keyed by home (`account_basis:
-/// execution_home`): two primary windows (increases 0 and 2.5, remaining 62.5
-/// and 60), named together as one shared-window candidate, never merged or
-/// summed (not 37.5 + 40 = 77.5 used, not 2.5 attributed to A). A's headroom
-/// stays its own 62.5, not B's newer 60; the secondary window is not shared.
+/// execution_home`): original readings remain as evidence, while primary
+/// windows merge using B's newer 60% headroom. Percentages are never summed;
+/// the secondary window is not shared.
 #[test]
 fn shared_window_across_homes_is_flagged_not_summed() {
     let f = Fixture::new();
@@ -989,22 +1040,24 @@ fn shared_window_across_homes_is_flagged_not_summed() {
     // Windows are listed by account: the digests' order decides which home comes first.
     let (windows, accounts) = if a < b { ([a_windows, b_windows].concat(), [&a, &b]) } else { ([b_windows, a_windows].concat(), [&b, &a]) };
     assert_eq!(quota["account_basis"], "execution_home");
-    assert_eq!(quota["windows"], json!(windows));
+    assert_eq!(quota["evidence_windows"], json!(windows));
+    assert_eq!(quota["windows"].as_array().unwrap().len(), 2);
+    let merged = quota["windows"].as_array().unwrap().iter().find(|w| w["window_kind"] == "primary").unwrap();
+    assert_eq!((&merged["merged"], &merged["remaining"], &merged["accounts"]), (&json!(true), &json!("60"), &json!(accounts)));
     assert_eq!(quota["shared_window_candidates"], json!([{"limit_id": "codex", "window_kind": "primary", "window_minutes": 300, "resets_unix_ms": r1 * 1000,
-        "accounts": accounts, "window_ids": accounts.map(|account| id(account, "primary", r1)), "evidence": "same_limit_kind_minutes_resets", "merged": false}]));
+        "accounts": accounts, "window_ids": accounts.map(|account| id(account, "primary", r1)), "evidence": "same_limit_kind_minutes_resets", "merged": true}]));
     assert_eq!(quota["observations"], json!({"primary": {"trusted": 3}, "secondary": {"trusted": 1, "not_reported": 2}}));
 
-    // A's headroom is its own latest snapshot (62.5), with the candidate named; B's value is not used.
+    // A uses B's newer trusted reading of their merged provider window.
     let expected = json!({"attempt_id": f.attempt, "decided_unix_ms": d, "service": "codex", "account": a, "account_basis": "execution_home", "windows": [
-        {"limit_id": "codex", "window_kind": "primary", "unit": "percent", "window_id": id(&a, "primary", r1), "window_minutes": 300, "resets_unix_ms": r1 * 1000,
-         "observed_unix_ms": d - 60_000, "age_ms": 60_000, "shared_window_candidates": accounts, "value": "62.5", "used": "37.5", "freshness": "fresh"},
-        {"limit_id": "codex", "window_kind": "secondary", "value": {"status": "unavailable", "reason": "not_reported"}}]});
+        {"limit_id": "codex", "window_kind": "primary", "unit": "percent", "window_id": id(&b, "primary", r1), "window_minutes": 300, "resets_unix_ms": r1 * 1000,
+         "observed_unix_ms": d - 30_000, "age_ms": 30_000, "shared_window_candidates": accounts, "merged": true, "merge_evidence": "same_limit_kind_minutes_resets", "value": "60", "used": "40", "freshness": "fresh"}]});
     assert_eq!(headroom(&f), expected);
     assert_eq!(f.report()["metrics"]["M40"]["decisions"], json!([expected]));
     let text = f.text(&["accounting", "quota"]);
-    let line = format!("shared window candidate codex primary reset {}: accounts {}, {} (execution homes; not merged, never summed)", r1 * 1000, accounts[0], accounts[1]);
+    let line = format!("shared window codex primary reset {}: accounts {}, {} (execution homes; merged, never summed)", r1 * 1000, accounts[0], accounts[1]);
     assert!(text.lines().any(|l| if line.starts_with("attempt ") { l.starts_with(&line) && l.contains("(primary ") } else { l == line }), "{line:?} in\n{text}");
-    assert!(text.lines().any(|l| l == format!("M40 {} codex primary remaining 62.5% age_ms=60000 fresh", f.attempt)), "{text}");
+    assert!(text.lines().any(|l| l == format!("M40 {} codex primary remaining 60% age_ms=30000 fresh", f.attempt)), "{text}");
 
     // Replay leaves everything byte-identical.
     f.cli("collect");
@@ -1019,8 +1072,8 @@ fn shared_window_across_homes_is_flagged_not_summed() {
 /// (`first_observation`, 4 trusted observations, increase 2.5, remaining
 /// 54.5, plan `pro`), never `reset_moved` or `window_regressed`. Home B's one
 /// snapshot at R + 5 s is the same provider window within the 60 s tolerance:
-/// one shared-window candidate (reset R, the earliest), never merged. A's
-/// headroom 54.5 is its own. Then A reads 46 at R + 120 s (beyond the
+/// one merged window (reset R, the earliest). A's headroom 54.5 is the
+/// latest reading. Then A reads 46 at R + 120 s (beyond the
 /// tolerance, before R: `reset_moved`, a second window) and 47 back at R
 /// (`window_regressed`, no window): headroom 54 from the new window.
 #[test]
@@ -1041,7 +1094,7 @@ fn resets_jitter_and_null_plan_stay_one_window() {
             "unit": "percent", "window_minutes": 10_080, "window_start_unix_ms": resets * 1000 - 604_800_000, "resets_unix_ms": resets * 1000,
             "start_evidence": evidence, "first_observed_unix_ms": first, "last_observed_unix_ms": last, "first_used": first_used, "used": used,
             "remaining": remaining, "observed_increase": increase, "plan_type": plan, "observations": observations, "flagged": 0});
-    let of = |quota: &serde_json::Value, account: &str| quota["windows"].as_array().unwrap().iter().filter(|w| w["account"] == account).cloned().collect::<Vec<_>>();
+    let of = |quota: &serde_json::Value, account: &str| quota["evidence_windows"].as_array().unwrap().iter().filter(|w| w["account"] == account).cloned().collect::<Vec<_>>();
     let a_window = window(&a, r, "first_observation", (d - 240_000, d - 60_000), ["43", "45.5", "54.5", "2.5"], Some("pro"), 4);
     assert_eq!(of(&quota, &a), std::slice::from_ref(&a_window));
     assert_eq!(of(&quota, &b), [window(&b, r + 5, "first_observation", (d - 90_000, d - 90_000), ["43", "43", "57", "0"], Some("pro"), 1)]);
@@ -1054,10 +1107,10 @@ fn resets_jitter_and_null_plan_stay_one_window() {
     let mut members = [(a.clone(), id(&a, r)), (b.clone(), id(&b, r + 5))];
     members.sort();
     assert_eq!(quota["shared_window_candidates"], json!([{"limit_id": "codex", "window_kind": "primary", "window_minutes": 10_080, "resets_unix_ms": r * 1000,
-        "accounts": members.clone().map(|m| m.0), "window_ids": members.clone().map(|m| m.1), "evidence": "same_limit_kind_minutes_resets", "merged": false}]));
+        "accounts": members.clone().map(|m| m.0), "window_ids": members.clone().map(|m| m.1), "evidence": "same_limit_kind_minutes_resets", "merged": true}]));
     let primary = headroom(&f)["windows"][0].clone();
     assert_eq!(primary, json!({"limit_id": "codex", "window_kind": "primary", "unit": "percent", "window_id": id(&a, r), "window_minutes": 10_080,
-        "resets_unix_ms": r * 1000, "observed_unix_ms": d - 60_000, "age_ms": 60_000, "shared_window_candidates": members.clone().map(|m| m.0),
+        "resets_unix_ms": r * 1000, "observed_unix_ms": d - 60_000, "age_ms": 60_000, "shared_window_candidates": members.clone().map(|m| m.0), "merged": true, "merge_evidence": "same_limit_kind_minutes_resets",
         "value": "54.5", "used": "45.5", "freshness": "fresh"}));
 
     // Beyond the tolerance: a moved reset opens a window; going back to R regresses.
@@ -1147,7 +1200,7 @@ fn attention_intervals_union_and_censor() {
         (serde_json::from_str(&text).unwrap_or(serde_json::Value::Null), text)
     };
     cli(&["collect"]);
-    assert_eq!(cli(&["accounting", "status"]).0, json!({"stream": "accounting", "version": 22}));
+    assert_eq!(cli(&["accounting", "status"]).0, json!({"stream": "accounting", "version": 23}));
     // Stream 8 dropped the superseded projections (v2, v4, v6); their replacements stay.
     let tables: Vec<String> = rusqlite::Connection::open(project.join(".state/telemetry.db")).unwrap()
         .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('session_graph','quota_observations','session_nodes','session_graph_nodes','quota_window_observations') ORDER BY name").unwrap()
@@ -1666,6 +1719,11 @@ fn at(hours: i64, minutes: i64) -> i64 { HOUR0 + hours * 3_600_000 + minutes * 6
 /// code, docs)` picks each attempt's classification (`None`: unclassified) and
 /// `config_of(attempt)` its dispatch decision's configuration id.
 fn plant_fleet(project: &Path, class_of: &dyn Fn(&str, &str, &str) -> Option<String>, config_of: &dyn Fn(&str) -> String) -> rusqlite::Connection {
+    plant_fleet_with_runs(project, class_of, config_of, None)
+}
+
+fn plant_fleet_with_runs(project: &Path, class_of: &dyn Fn(&str, &str, &str) -> Option<String>, config_of: &dyn Fn(&str) -> String,
+    running: Option<&std::collections::BTreeMap<&str, (i64, i64)>>) -> rusqlite::Connection {
     use herdr_farm::store::SqliteStore;
     fs::create_dir_all(project.join(".state")).unwrap();
     let db_path = project.join(".state/state.db");
@@ -1692,13 +1750,20 @@ fn plant_fleet(project: &Path, class_of: &dyn Fn(&str, &str, &str) -> Option<Str
                 rusqlite::params![attempt, task, class_of(attempt, &code, &docs), marks[0].1, config_of(attempt)]).unwrap();
         }
     };
-    for n in 1..=4 { attempt(&format!("a{n}"), &format!("ta{n}"), "completed", &[("reserved", at(0, -1)), ("running", at(0, 0)), ("completed", at(1, 0))]); }
-    for n in 1..=8 { attempt(&format!("b{n}"), &format!("tb{n}"), "completed", &[("reserved", at(1, -1)), ("running", at(1, 0)), ("completed", at(2, 0))]); }
+    for (prefix, count, from, to) in [("a", 4, at(0, 0), at(1, 0)), ("b", 8, at(1, 0), at(2, 0))] {
+        for n in 1..=count {
+            let id = format!("{prefix}{n}");
+            let bounds = running.map_or(Some((from, to)), |runs| runs.get(id.as_str()).copied());
+            let marks = bounds.map_or(Vec::new(), |(from, to)| vec![("reserved", from - if running.is_some() { 1000 } else { 60_000 }), ("running", from), ("completed", to)]);
+            attempt(&id, &format!("t{id}"), "completed", &marks);
+        }
+    }
     // Predates the lifecycle log and ended before it: no marks, ignored.
     attempt("z1", "tz1", "completed", &[]);
     // Open, running since the start of the current hour: only the incomplete window.
     let now_hour = unix_ms().div_euclid(3_600_000) * 3_600_000;
-    attempt("c1", "tc1", "running", &[("reserved", now_hour), ("running", now_hour)]);
+    if running.is_some() { attempt("c1", "tc1", "completed", &[]); }
+    else { attempt("c1", "tc1", "running", &[("reserved", now_hour), ("running", now_hour)]); }
 
     // Results: (task, attempt, route, verified at, operations (ref, state, reason, created, integrated)).
     type Op = (&'static str, &'static str, Option<&'static str>, i64, bool);
@@ -1841,8 +1906,8 @@ fn fan_out_buckets_and_integration_conflicts() {
     // One configuration (`cfg`, no display label planted): its split equals the fleet's.
     let by_configuration = json!({"configurations": {"cfg": {"display_label": null, "reference_level": 4, "level": 8, "reference_per_agent_per_hour": "1/2",
         "marginal_per_added_agent_per_hour": "1/4", "label": "comparable", "value": "3/4"}}, "configuration_unknown": {"attempts": 0, "accepted": 0}});
-    let m35 = json!({"definition": "M35.fanout-v1", "name": "fan_out_efficiency", "window_ms": 3_600_000, "window_minutes": 60,
-        "level_rule": "round_half_up(time_weighted_active_attempts)",
+    let m35 = json!({"definition": "M35.fanout-v2", "name": "fan_out_efficiency", "window_ms": 3_600_000, "window_minutes": 60,
+        "level_rule": "round_half_up(task_attempt_time_weighted_concurrency)",
         "scope": "worker_attempts", "reference_level": 4, "level": 8, "reference_per_agent_per_hour": "1/2", "marginal_per_added_agent_per_hour": "1/4",
         "comparability": comparable, "label": "comparable", "value": "3/4", "by_configuration": by_configuration});
     assert_eq!(fleet["metrics"]["M35"], m35);
@@ -1877,17 +1942,14 @@ fn fan_out_buckets_and_integration_conflicts() {
     assert_eq!(windowed["metrics"]["M35"]["value"], json!({"status": "unavailable", "reason": "single_concurrency_level"}));
     assert_eq!((&windowed["metrics"]["M36"]["numerator"], &windowed["metrics"]["M36"]["denominator"]), (&json!(2), &json!(3)));
 
-    // A 120-minute window (recorded in the output): hour 0 is 23:00 UTC, so it
-    // shares its window 22:00–24:00 with nothing (4 agents × 1 h / 2 h → level
-    // 2, 2 accepted → 1/hour) and hour 1 opens 00:00–02:00 (8 × 1 / 2 → level
-    // 4, 3 accepted → 3/2 per hour). M35 = (3/2) / (4 × 1/2) = 3/4, marginal
-    // (3/2 − 1) / (4 − 2) = 1/4. A window that does not divide a day is refused.
+    // Widening reporting windows cannot dilute experienced concurrency or
+    // change its throughput rates. Non-divisors of a day are still refused.
     let (wide, _) = cli(&["accounting", "fleet", "--json", "--window-minutes", "120"]);
     assert_eq!((&wide["fleet"]["window_ms"], &wide["fleet"]["window_minutes"], &wide["metrics"]["M35"]["window_minutes"]),
         (&json!(7_200_000), &json!(120), &json!(120)));
     let levels: Vec<_> = wide["fleet"]["buckets"].as_array().unwrap().iter()
         .map(|b| (b["level"].clone(), b["accepted"].clone(), b["accepted_per_hour"].clone(), b["per_agent_per_hour"].clone())).collect();
-    assert_eq!(levels, [(json!(2), json!(2), json!("1"), json!("1/2")), (json!(4), json!(3), json!("3/2"), json!("3/8"))]);
+    assert_eq!(levels, [(json!(4), json!(2), json!("2"), json!("1/2")), (json!(8), json!(3), json!("3"), json!("3/8"))]);
     let m = &wide["metrics"]["M35"];
     assert_eq!((&m["value"], &m["marginal_per_added_agent_per_hour"], &m["label"]), (&json!("3/4"), &json!("1/4"), &json!("comparable")));
     for bad in ["7", "0", "2880"] {
@@ -1934,7 +1996,21 @@ fn fan_out_buckets_and_integration_conflicts() {
     let fleet = serde_json::from_str::<serde_json::Value>(&cli_in("unknown", &["accounting", "fleet", "--json"])).unwrap();
     assert_eq!(fleet["metrics"]["M35"]["comparability"]["reasons"], json!(["classification_unknown", "task_mix_differs"]));
 
-    // A pre-log attempt still open was active at an unknown time: no window can be bucketed, never 0.
+    // Short overlapping attempts retain their experienced levels even when
+    // the hourly mean is below one. Read the actual CLI projection.
+    let mut short_runs = std::collections::BTreeMap::from([("a1", (at(0, 0), at(0, 5))), ("a2", (at(0, 2), at(0, 7))), ("b1", (at(0, 10), at(0, 15)))]);
+    plant_fleet_with_runs(&root.join("short"), &|_, code, _| Some(code.to_owned()), &|_| "cfg".to_owned(), Some(&short_runs));
+    let view: serde_json::Value = serde_json::from_str(&cli_in("short", &["accounting", "fleet", "--json"])).unwrap();
+    assert_eq!(view["fleet"]["concurrency"], json!({"from_unix_ms": at(0, 0), "to_unix_ms": at(0, 15), "observed_ms": 900_000, "unknown_ms": 0,
+        "distribution": [{"level": 0, "duration_ms": 180_000, "share": "1/5"}, {"level": 1, "duration_ms": 540_000, "share": "3/5"}, {"level": 2, "duration_ms": 180_000, "share": "1/5"}],
+        "mean_while_busy": "5/4", "idle_gaps": {"count": 1, "median_ms": 180_000, "p90_ms": 180_000}}));
+    assert_eq!((&view["metrics"]["M35"]["value"], &view["metrics"]["M35"]["reference_level"], &view["metrics"]["M35"]["level"]), (&json!("1"), &json!(1), &json!(2)));
+    short_runs.remove("a2");
+    plant_fleet_with_runs(&root.join("alone"), &|_, code, _| Some(code.to_owned()), &|_| "cfg".to_owned(), Some(&short_runs));
+    let alone: serde_json::Value = serde_json::from_str(&cli_in("alone", &["accounting", "fleet", "--json"])).unwrap();
+    assert_eq!(alone["metrics"]["M35"]["value"]["reason"], "single_concurrency_level");
+
+    // A pre-log attempt still open makes concurrency unknown.
     db.execute("INSERT INTO tasks(id,revision,state,title) VALUES('tz2',1,'running','tz2')", []).unwrap();
     db.execute("INSERT INTO attempts(id,task_id,revision,state,reservation,termination_observed) VALUES('z2','tz2',2,'running','z2',0)", []).unwrap();
     let (fleet, _) = cli(&["accounting", "fleet", "--json"]);
@@ -2038,7 +2114,7 @@ fn provider_charges_reconcile_allocate_and_convert() {
     let current = f.cli_args(&["accounting", "charges"]).1;
     f.sidecar().execute("UPDATE telemetry_streams SET version=9 WHERE stream='accounting'", []).unwrap();
     assert_eq!(f.cli_args(&["accounting", "import-charges", &part("charges-2.json")]).0["charges"][0]["imported"], false);
-    assert_eq!((f.cli_args(&["accounting", "status"]).0["version"].clone(), f.cli_args(&["accounting", "charges"]).1), (json!(22), current));
+    assert_eq!((f.cli_args(&["accounting", "status"]).0["version"].clone(), f.cli_args(&["accounting", "charges"]).1), (json!(23), current));
 
     // Invoice allocation by a named, versioned rule: 12 × 2980/3480 and 12 × 500/3480 in units
     // of 10^-12; the one remaining unit goes to the larger remainder; the sum is exactly 12.
