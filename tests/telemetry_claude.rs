@@ -174,12 +174,16 @@ fn native_claude_backup_restore_retention_and_tombstones() {
     transcript(&f, SID, &f.worktree(), "2.1.286", f.decided + 1000);
     f.cli("collect");
     f.cli_args(&["accounting", "sync"]);
+    let turn_rows = f.count("claude_turn_lines");
+    assert!(turn_rows > 0);
     let backup = f.tmp.path().join("synthetic-claude-backup");
     f.cli_args(&["backup", "create", "--out", backup.to_str().unwrap()]);
     for name in ["telemetry.db", "telemetry.db-wal", "telemetry.db-shm"] {
         let _ = fs::remove_file(f.project.join(".state").join(name));
     }
     let restored = f.cli_args(&["backup", "restore", "--from", backup.to_str().unwrap()]).0;
+    assert_eq!(restored["rows"]["claude_turn_lines"], turn_rows);
+    assert_eq!(f.count("claude_turn_lines"), turn_rows);
     assert_eq!(restored["rows"]["claude_messages"], 2);
     assert_eq!(restored["rows"]["claude_tool_results"], 3);
     assert_eq!(f.cli("collect").0["collected"]["records"], 0);
@@ -190,6 +194,7 @@ fn native_claude_backup_restore_retention_and_tombstones() {
     let plan = f.cli_args(&["maintenance", "plan", "--json"]).0;
     let digest = plan["plan_digest"].as_str().unwrap();
     f.cli_args(&["maintenance", "apply", "--confirm", digest, "--json"]);
+    assert_eq!(f.count("claude_turn_lines"), 0);
     assert_eq!(f.count("claude_messages"), 0);
     assert_eq!(f.count("claude_tool_results"), 0);
     assert_eq!(f.count("codex_usage"), 0);
@@ -198,12 +203,14 @@ fn native_claude_backup_restore_retention_and_tombstones() {
         assert_eq!(f.count(table), 0, "retention must purge {table}");
     }
     f.cli("collect");
+    assert_eq!(f.count("claude_turn_lines"), 0);
     assert_eq!(f.count("claude_messages"), 0);
     f.cli_args(&["accounting", "sync"]);
     let purged = f.report();
     assert_eq!(purged["metrics"]["M08"]["value"]["reason"], "no_certified_source");
     assert_eq!(purged["metrics"]["M16"]["coverage"]["sessions"], 0);
     f.cli_args(&["backup", "restore", "--from", backup.to_str().unwrap(), "--force"]);
+    assert_eq!(f.count("claude_turn_lines"), 0);
     assert_eq!(f.count("claude_messages"), 0);
     assert_eq!(f.count("claude_tool_results"), 0);
     no_secrets(&f);
@@ -228,7 +235,7 @@ fn claude_upgrade_preserves_an_existing_codex_ledger() {
     drop(db);
     // A writable public command upgrades; every Codex byte visible in the ledger stays.
     f.cli("collect");
-    assert_eq!(f.cli_args(&["accounting", "status"]).0["version"], 24);
+    assert_eq!(f.cli_args(&["accounting", "status"]).0["version"], 25);
     assert_eq!(f.cli_args(&["accounting", "entries"]).1, before);
     assert_eq!(attempt_usage(&f)["total_tokens"], 1680);
 }
@@ -337,7 +344,8 @@ fn claude_2_1_286_two_turns_in_lossy_project_directory() {
         }
         v.to_string()
     }).collect();
-    fs::write(dir.join("ID000.jsonl"), format!("{}\n", lines.join("\n"))).unwrap();
+    fs::write(dir.join("ID000.jsonl"), format!("{}\n", lines.join("
+"))).unwrap();
     assert_eq!(f.cli("collect").0["collected"]["records"], 2);
     assert_eq!(f.binding(), ("bound".into(), Some(f.attempt.clone())));
     f.cli_args(&["accounting", "sync"]);
@@ -563,7 +571,8 @@ fn newer_claude_schema_drift_is_never_partial_usage() {
             value.to_string()
         }).collect();
         assert!(changed);
-        fs::write(path, format!("{}\n", lines.join("\n"))).unwrap();
+        fs::write(path, format!("{}\n", lines.join("
+"))).unwrap();
         f.cli("collect");
         assert_eq!(attempt_usage(&f)["reason"], "schema_unrecognized");
         assert_eq!(attempt_usage(&f)["cli_version"], "claude-code/2.1.300");
@@ -666,7 +675,8 @@ fn claude_v2_thinking_effort_and_cache_tiers_survive_rebuild() {
         }
         v.to_string()
     }).collect();
-    fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
+    fs::write(&path, format!("{}\n", lines.join("
+"))).unwrap();
     f.cli("collect");
     assert_eq!(attempt_usage(&f)["reasoning_output_tokens"], 6);
     assert_eq!(f.report()["metrics"]["M09"]["reasoning_output_tokens"], 6);
@@ -719,5 +729,91 @@ fn claude_v2_thinking_effort_and_cache_tiers_survive_rebuild() {
     assert_eq!(attempt_usage(&f)["reasoning_output_tokens"], 6);
     f.cli_args(&["accounting", "sync"]);
     assert_eq!(f.cli_args(&["accounting", "entries"]).0, ledger);
+    no_secrets(&f);
+}
+
+#[test]
+fn claude_turn_metadata_workers_and_coordinator_detail() {
+    let f = claude();
+    let path = transcript(&f, SID, &f.worktree(), "2.1.286", f.decided+1000);
+    let fixture = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/telemetry/claude-code/turns.jsonl")).unwrap();
+    let render = |sid: &str, cwd: &str| fixture.replace("@SID@",sid).replace("@CWD@",cwd)
+        .replace("@TS@",&jiff::Timestamp::from_millisecond(f.decided+1000).unwrap().to_string());
+    fs::write(&path,render(SID,&f.worktree())).unwrap();
+    f.cli("collect");
+    let attempts = f.cli_args(&["attempts","--json"]).0;
+    let a = attempts["attempts"].as_array().unwrap().iter().find(|a| a["attempt_id"] == f.attempt).unwrap();
+    assert_eq!(a["turns"],8);
+    assert_eq!(a["stop_reasons"]["end_turn"],8);
+    let db = f.sidecar();
+    let invalid: String = db.query_row("SELECT json_extract(metadata,'$.turn_origin') FROM claude_turn_lines WHERE json_extract(metadata,'$.prompt_id')='prompt-7'",[],|r|r.get(0)).unwrap();
+    assert_eq!(invalid,"other");
+    assert_eq!(f.count("claude_turn_lines"),32);
+    f.cli("collect");
+    assert_eq!(f.count("claude_turn_lines"),32);
+    no_secrets(&f);
+    // A project-root transcript is a coordinator session, isolated from workers.
+    let owner_path = transcript(&f,"turn-coordinator",&f.project.display().to_string(),"2.1.286",f.decided+1000);
+    let mut rows: Vec<Value> = render("turn-coordinator",&f.project.display().to_string()).lines().map(|l|serde_json::from_str(l).unwrap()).collect();
+    for (index, r) in rows.iter_mut().enumerate() {
+        r["timestamp"] = json!(jiff::Timestamp::from_millisecond(f.decided+1000+index as i64*1000).unwrap().to_string());
+        if r["type"] == "assistant" {
+            r["message"]["usage"]["cache_read_input_tokens"] = json!(0);
+            r["message"]["usage"]["cache_creation_input_tokens"] = json!(50);
+            r["message"]["usage"]["cache_creation"]["ephemeral_5m_input_tokens"] = json!(45);
+        }
+        if r["type"] == "assistant" && r["message"]["id"] == "turn-msg-3" {
+            r["message"]["content"].as_array_mut().unwrap().retain(|b| b["type"] != "tool_use");
+        }
+        if r["type"] == "assistant" && r["message"]["id"] == "turn-msg-0" {
+            r["message"]["content"][1]["name"] = json!("AskUserQuestion");
+        }
+    }
+    // Isolate tag classification from previous background-result evidence.
+    for r in &mut rows { if r["type"] == "user" && r["toolUseResult"].is_object() { r["toolUseResult"].as_object_mut().unwrap().remove("backgroundTaskId"); } }
+    fs::write(&owner_path,format!("{}\n",rows[..8].iter().map(Value::to_string).collect::<Vec<_>>().join("\n"))).unwrap();
+    f.cli("collect");
+    let early = f.cli_args(&["accounting","coordinator"]).0;
+    assert_eq!(early["sessions"][0]["turns"].as_array().unwrap().len(),2);
+    assert_eq!(early["sessions"][0]["turns"][0]["context_tokens_sum"],60);
+    assert_eq!(early["sessions"][0]["turns"][0]["unpriced_requests"],1);
+    assert_eq!(early["sessions"][0]["turns"][1]["idle_gap_ms"],1000);
+    fs::write(owner_path,format!("{}\n",rows.iter().map(Value::to_string).collect::<Vec<_>>().join("\n"))).unwrap();
+    // Worker execution homes are scanned but the root cwd still scopes coordinator.
+    f.cli("collect");
+    f.cli_args(&["accounting","sync"]);
+    let card = f.tmp.path().join("turn-rates.json");
+    fs::write(&card,json!({"card_id":"turn-synthetic","version":1,"provider":"anthropic","product":"claude-code",
+        "models":["claude-fixture-sonnet"],"currency":"USD","rate_unit":1000000,"effective_from_unix_ms":0,
+        "includes":{"discounts":false,"taxes":false,"fees":false},"source":"INVENTED fixture rates",
+        "rates":[{"category":"input","rate":"1"},{"category":"output","rate":"1"},{"category":"cache_read","rate":"1"},{"category":"cache_write","rate":"1"}]}).to_string()).unwrap();
+    f.cli_args(&["accounting","import-rate-card",card.to_str().unwrap()]);
+    f.cli_args(&["accounting","reprice"]);
+    let fleet = f.cli_args(&["accounting","fleet","--json"]).0;
+    let view = &fleet["metrics"]["M34"]["coordinator"]["turn_sessions"][0];
+    let direct = f.cli_args(&["accounting","coordinator"]).0;
+    assert_eq!(direct["sessions"][0],*view);
+    assert_eq!(direct["summary"]["turns"],8);
+    assert_eq!(direct["summary"]["requests"],8);
+    assert_eq!(direct["summary"]["cost_by_trigger_class"]["other"]["USD"],"0.000124");
+    let turns = view["turns"].as_array().unwrap();
+    assert_eq!(turns.len(),8,"{fleet}");
+    for (t,trigger) in turns.iter().zip(["owner_typed","queued_owner","background_task","scheduled_wakeup","subagent","bootstrap","other","other"]) {
+        assert_eq!(t["trigger_class"],trigger);
+        assert_eq!(t["requests"],1);
+        assert_eq!(t["context_tokens_max"],60);
+        assert_eq!(t["context_tokens_sum"],60);
+        assert_eq!(t["cache_write_5m_tokens"],45);
+        assert_eq!(t["cache_write_1h_tokens"],5);
+        assert_eq!(t["wall_duration_ms"],123);
+        assert_eq!(t["cost_by_currency"]["USD"],"0.000062");
+        assert_eq!(t["full_context_cache_rewrite"],true);
+    }
+    assert_eq!(turns[0]["ask_user_question_wait_ms"],1000);
+    assert_eq!(turns[1]["idle_gap_ms"],1000);
+    assert_eq!(view["no_tool_call_turns"].as_array().unwrap().len(),1);
+    assert_eq!(view["no_tool_call_turns"][0]["trigger_class"],"scheduled_wakeup");
+    assert_eq!(view["cost_by_trigger_class"]["other"]["USD"],"0.000124");
+    assert_eq!(view["idle_gaps_before_cache_rewrites"].as_array().unwrap().len(),7);
     no_secrets(&f);
 }

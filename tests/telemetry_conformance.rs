@@ -539,6 +539,7 @@ const CAPABILITIES: &str = "codex rollout_jsonl certified_versions=0.154.0,0.159
   turn_context.collaboration_mode available=false basis=unavailable certified=none reason=content_forbidden
   turn_context.user_instructions available=false basis=unavailable certified=none reason=content_forbidden
   task_started.turn_id available=true basis=reported certified=live
+  task_started.model_context_window available=true basis=reported certified=fixture caveat=0_159_key_census
   task_started.started_at available=false basis=unavailable certified=none reason=not_collected
   token_usage_record.session_id available=true basis=reported certified=live caveat=child_reports_parent_session
   token_usage_record.turn_id available=true basis=reported certified=live
@@ -617,6 +618,9 @@ const CAPABILITIES: &str = "codex rollout_jsonl certified_versions=0.154.0,0.159
   item_completed.item.status available=true basis=reported_excerpt certified=live caveat=observed_completed_failed
   item_completed.item.source available=true basis=reported_excerpt certified=live caveat=command_execution_only
   item_completed.item.exit_code available=true basis=reported certified=live caveat=command_execution_only
+  item_completed.item.changed_files available=true basis=derived certified=fixture caveat=changes_entry_count_only
+  item_completed.item.changes available=false basis=unavailable certified=none reason=content_forbidden
+  item_completed.item.path available=false basis=unavailable certified=none reason=content_forbidden
   item_completed.item.duration.secs available=true basis=reported certified=live caveat=startup_not_run_time
   item_completed.item.duration.nanos available=true basis=reported certified=live caveat=startup_not_run_time
   item_completed.started_at_ms available=false basis=unavailable certified=none reason=not_collected
@@ -678,6 +682,16 @@ fn capabilities_match_emitted_fields() {
         .map(|f| format!("{}.{}", f["kind"].as_str().unwrap(), f["field"].as_str().unwrap())).collect::<BTreeSet<_>>();
 
     for c in CASES { plant(&f, c.name); }
+    // Synthetic 0.159.x metadata gives the additional allowlisted fields
+    // real collector evidence, without copying any owner rollout.
+    let path = f.rollout(&f.home, "worker-session", &["head.jsonl"], &f.worktree(), f.decided + 1_000, "0.159.3");
+    let mut text = fs::read_to_string(&path).unwrap().replace(SID, "00000000-0000-4000-8000-0000000a1001");
+    let ts = jiff::Timestamp::from_millisecond(f.decided + 1_000).unwrap().to_string();
+    for payload in [json!({"type":"task_started","turn_id":"turn-new","model_context_window":2000}),
+        json!({"type":"item_completed","item":{"type":"FileChange","id":"files-new","status":"completed","changes":[{"path":"WORKER_PATH_SECRET","diff":"WORKER_DIFF_SECRET"}]}})] {
+        text += &format!("{}\n", json!({"type":"event_msg","timestamp":ts,"payload":payload}));
+    }
+    fs::write(path, text).unwrap();
     f.cli("collect");
     let (mut emitted, mut valued) = (BTreeSet::new(), BTreeSet::new());
     let rows: Vec<(String, String, Option<i64>)> = f.sidecar().prepare("SELECT event_kind,payload,occurred_unix_ms FROM source_observations").unwrap()
@@ -698,7 +712,7 @@ fn capabilities_match_emitted_fields() {
     assert_eq!(valued, emitted, "every available field has fixture evidence");
     let unavailable = declared(false);
     assert!(emitted.iter().all(|path| !unavailable.iter().any(|u| path == u || path.starts_with(&format!("{u}.")))));
-    assert_eq!(rows.len(), 10 + 11 + 10 + 3 * 6 + 8 + 4 + 13 + 25 + 6);
+    assert_eq!(rows.len(), 10 + 11 + 10 + 3 * 6 + 8 + 4 + 13 + 25 + 6 + 8);
 }
 
 fn rows<T: rusqlite::types::FromSql>(f: &Fixture, sql: &str) -> Vec<Vec<T>> {
@@ -847,7 +861,7 @@ fn rollouts_read_before_a4_gain_their_metadata_on_the_next_collect() {
     }
     let (upgraded, _) = f.cli("collect");
     assert_eq!(upgraded["collected"]["records"], 0, "the re-read counts nothing twice");
-    assert_eq!(f.cli_args(&["collectors", "status"]).0, json!({"stream": "ingest", "version": 14}));
+    assert_eq!(f.cli_args(&["collectors", "status"]).0, json!({"stream": "ingest", "version": 16}));
     assert!(fresh == ledger(&f), "the upgraded sidecar equals a fresh collect");
     assert_eq!(f.cli_args(&["usage", "--json"]).0, fresh_usage);
     assert_eq!(f.cli_args(&["collectors", "sessions"]).0, fresh_sessions);
@@ -944,7 +958,7 @@ fn rollouts_read_before_a5_gain_their_thread_lineage_on_the_next_collect() {
     assert_eq!(sessions[2]["subagent"]["kind"], "other");
     let (upgraded, _) = f.cli("collect");
     assert_eq!(upgraded["collected"]["records"], 0, "the re-read counts nothing twice");
-    assert_eq!(f.cli_args(&["collectors", "status"]).0, json!({"stream": "ingest", "version": 14}));
+    assert_eq!(f.cli_args(&["collectors", "status"]).0, json!({"stream": "ingest", "version": 16}));
     assert!(fresh == ledger(&f), "the upgraded sidecar equals a fresh collect");
     assert_eq!(f.cli_args(&["usage", "--json"]).0, fresh_usage);
     assert_eq!(f.cli_args(&["collectors", "sessions"]).0, fresh_sessions);
@@ -955,7 +969,7 @@ fn rollouts_read_before_a5_gain_their_thread_lineage_on_the_next_collect() {
 /// `duration` and `result` whole) gives it.
 fn item_envelope(set: &str, thread: &str, turn: &str) -> String {
     let set: serde_json::Map<String, Value> = serde_json::from_str(&format!("{{{set}}}")).unwrap();
-    let mut item = json!({"agent_thread_id": null, "duration": {"nanos": null, "secs": null}, "exit_code": null, "id": null, "readOnlyHint": null,
+    let mut item = json!({"agent_thread_id": null, "changed_files": null, "duration": {"nanos": null, "secs": null}, "exit_code": null, "id": null, "readOnlyHint": null,
         "receiver_thread_ids": null, "result": {"isError": null}, "sender_thread_id": null, "server": null, "source": null, "status": null, "tool": null, "type": null});
     for (key, value) in set { item[key] = value; }
     json!({"item": item, "thread_id": thread, "turn_id": turn}).to_string()
@@ -1000,9 +1014,9 @@ fn tool_and_exec_metadata_is_collected_without_content() {
             call("call-t9", None, None, None, None, None, Some("function_call_output"), t(51_000))],
          "exec_items": [
             {"item_id": "exec-t1", "thread_id": TOOLS_SID, "turn_id": "turn-t1", "status": "completed", "source": "unified_exec_startup", "exit_code": 0,
-                "startup_duration": {"secs": 0, "nanos": 2125}, "completed_unix_ms": t(47_400)},
+                "startup_duration": {"secs": 0, "nanos": 2125}, "reported_duration": {"secs": 0, "nanos": 2125}, "completed_unix_ms": t(47_400)},
             {"item_id": "exec-t2", "thread_id": TOOLS_SID, "turn_id": "turn-t1", "status": null, "source": null, "exit_code": null,
-                "startup_duration": {"secs": null, "nanos": null}, "completed_unix_ms": t(50_500)}],
+                "startup_duration": {"secs": null, "nanos": null}, "reported_duration": {"secs": null, "nanos": null}, "completed_unix_ms": t(50_500)}],
          "mcp_calls": [], "agent_items": [], "turn_aborts": []},
     ]}));
     assert_eq!(f.cli_args(&["collectors", "tools", "--json"]).0, listed, "a second read is identical");
@@ -1064,7 +1078,7 @@ fn rollouts_read_before_a6_gain_their_tool_metadata_on_the_next_collect() {
     assert_eq!(f.cli_args(&["collectors", "status"]).0, json!({"stream": "ingest", "version": 5}), "a read does not migrate");
     let (upgraded, _) = f.cli("collect");
     assert_eq!(upgraded["collected"]["records"], 0, "the re-read counts nothing twice");
-    assert_eq!(f.cli_args(&["collectors", "status"]).0, json!({"stream": "ingest", "version": 14}));
+    assert_eq!(f.cli_args(&["collectors", "status"]).0, json!({"stream": "ingest", "version": 16}));
     assert!(fresh == ledger(&f), "the upgraded sidecar equals a fresh collect");
     assert_eq!(f.cli_args(&["usage", "--json"]).0, fresh_usage);
     assert_eq!(f.cli_args(&["collectors", "tools", "--json"]).0, fresh_tools);
@@ -1128,7 +1142,7 @@ fn rollouts_read_before_a8_gain_their_live_run2_metadata_on_the_next_collect() {
     assert_eq!(f.cli_args(&["collectors", "status"]).0, json!({"stream": "ingest", "version": 7}), "a read does not migrate");
     let (upgraded, _) = f.cli("collect");
     assert_eq!(upgraded["collected"]["records"], 0, "the re-read counts nothing twice");
-    assert_eq!(f.cli_args(&["collectors", "status"]).0, json!({"stream": "ingest", "version": 14}));
+    assert_eq!(f.cli_args(&["collectors", "status"]).0, json!({"stream": "ingest", "version": 16}));
     assert!(fresh == ledger(&f), "the upgraded sidecar equals a fresh collect");
     assert_eq!(f.count("ingest_quarantine"), 0, "no digest conflict");
     assert_eq!(f.cli_args(&["usage", "--json"]).0, fresh_usage);
@@ -1186,7 +1200,7 @@ fn rollouts_read_before_a7_gain_their_subagent_detail_and_turn_state_on_the_next
     assert_eq!(f.cli_args(&["collectors", "status"]).0, json!({"stream": "ingest", "version": 6}), "a read does not migrate");
     let (upgraded, _) = f.cli("collect");
     assert_eq!(upgraded["collected"]["records"], 0, "the re-read counts nothing twice");
-    assert_eq!(f.cli_args(&["collectors", "status"]).0, json!({"stream": "ingest", "version": 14}));
+    assert_eq!(f.cli_args(&["collectors", "status"]).0, json!({"stream": "ingest", "version": 16}));
     assert!(fresh == ledger(&f), "the upgraded sidecar equals a fresh collect");
     assert_eq!(f.count("ingest_quarantine"), 0, "no digest conflict");
     assert_eq!(f.cli_args(&["usage", "--json"]).0, fresh_usage);
@@ -1317,9 +1331,9 @@ fn live_run2_shapes_are_collected_without_content() {
             call("call-d1", Some("custom_tool_call"), exec, Some("completed"), Some("turn-l2"), t(71_500), Some("custom_tool_call_output"), t(80_243))],
         "exec_items": [
             {"item_id": "exec-s1", "thread_id": LIVE2_SID, "turn_id": "turn-l1", "status": "completed", "source": "unified_exec_startup", "exit_code": 0,
-                "startup_duration": {"secs": 2, "nanos": 879_307_435}, "completed_unix_ms": t(15_729)},
+                "startup_duration": {"secs": 2, "nanos": 879_307_435}, "reported_duration": {"secs": 2, "nanos": 879_307_435}, "completed_unix_ms": t(15_729)},
             {"item_id": "exec-f1", "thread_id": LIVE2_SID, "turn_id": "turn-l1", "status": "failed", "source": "unified_exec_startup", "exit_code": 2,
-                "startup_duration": {"secs": 0, "nanos": 3610}, "completed_unix_ms": t(17_565)}],
+                "startup_duration": {"secs": 0, "nanos": 3610}, "reported_duration": {"secs": 0, "nanos": 3610}, "completed_unix_ms": t(17_565)}],
         "mcp_calls": [
             {"item_id": "exec-m1", "thread_id": LIVE2_SID, "turn_id": "turn-l1", "server": "live2_stub_server", "tool": "live2_noop_tool", "status": "completed",
                 "read_only_hint": true, "is_error": false, "duration": {"secs": 0, "nanos": 556_587}, "completed_unix_ms": t(6_724)}],

@@ -484,22 +484,28 @@ fn fleet_pane(f: &Fixture) -> String {
     String::from_utf8(out.stdout).unwrap()
 }
 
-/// Contracts §0 read-only opens: `attempts`, `usage`, `report` and the fleet
-/// pane write nothing under `.state`, with or without a live sidecar writer.
+/// Projection reads preserve canonical/native state, while CLI observation
+/// appends only metadata. A busy sidecar writer still lets reads proceed.
 #[test]
-fn reads_leave_state_untouched() {
+fn reads_preserve_state_and_projections_while_observing_cli() {
     let f = Fixture::new();
     let path = f.rollout(&f.home, SID, &["head.jsonl"], &f.worktree(), f.decided + 1_000, "0.154.0");
     f.cli("collect");
     let state = f.project.join(".state");
+    let usage_before=f.usage();
     let before = tree(&state);
+    let observed_before=f.count("cli_invocations");
     assert!(!before.iter().any(|(p, ..)| p.to_string_lossy().ends_with("-wal") || p.to_string_lossy().ends_with("-shm")), "{before:?}");
     f.cli_args(&["attempts", "--json"]);
     f.cli_args(&["usage", "--json"]);
     f.report();
     let pane = fleet_pane(&f);
     assert!(pane.contains("M08 input_tokens 1000\n"), "{pane}");
-    assert_eq!(tree(&state), before, "no reader writes or creates a file");
+    assert_eq!(f.usage(),usage_before,"projection reads preserve native usage");
+    assert_eq!(f.count("cli_invocations"),observed_before+3);
+    let without_sidecar=|tree:Vec<(PathBuf,u64,std::time::SystemTime)>|tree.into_iter().filter(|(path, ..)|!path.ends_with("telemetry.db")).collect::<Vec<_>>();
+    assert_eq!(without_sidecar(tree(&state)),without_sidecar(before.clone()),"canonical and other state files stay untouched");
+    assert_eq!(names(&state),before.into_iter().map(|(path, ..)|path).collect::<Vec<_>>(),"read completion creates no persistent side file");
 
     // A live writer (the ticker) keeps the sidecar's WAL open: readers see its
     // committed frames through the existing `-shm` and still create nothing.
@@ -510,6 +516,8 @@ fn reads_leave_state_untouched() {
     let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
     std::io::Write::write_all(&mut file, tail.replace("@SID@", SID).replace("@CWD@", &f.worktree()).replace("@TS@", &ts).as_bytes()).unwrap();
     f.cli("collect");
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let observed=writer.query_row("SELECT count(*) FROM cli_invocations",[],|r|r.get::<_,i64>(0)).unwrap();
     let live = names(&state);
     assert!(live.iter().any(|p| p.ends_with("telemetry.db-wal")), "{live:?}");
     assert_eq!(metric(&f.report(), "M08")["value"], 1500, "the WAL's committed frames are read");
@@ -518,6 +526,8 @@ fn reads_leave_state_untouched() {
     let pane = fleet_pane(&f);
     assert!(pane.contains("M08 input_tokens 1500\n"), "{pane}");
     assert_eq!(names(&state), live);
+    assert_eq!(writer.query_row("SELECT count(*) FROM cli_invocations",[],|r|r.get::<_,i64>(0)).unwrap(),observed,"busy self-observation is skipped");
+    writer.execute_batch("ROLLBACK").unwrap();
     drop(writer);
 }
 
@@ -567,7 +577,10 @@ fn sidecar_streams_upgrade_v2_store() {
     assert_eq!(f.cli_args(&["usage", "--json"]).1, v2, "usage is byte-identical after the upgrade");
     assert_eq!(metric(&f.report(), "M08")["value"], 1000);
     assert_eq!(f.cli_args(&["accounting", "status"]).0["stream"], "accounting");
-    assert_eq!(tree(&state), before, "reads of an upgraded sidecar create no file");
+    let after=tree(&state);
+    assert_eq!(after.iter().map(|(path, ..)|path).collect::<Vec<_>>(),before.iter().map(|(path, ..)|path).collect::<Vec<_>>(),"reads of an upgraded sidecar create no persistent file");
+    assert_eq!(after.into_iter().filter(|(path, ..)|!path.ends_with("telemetry.db")).collect::<Vec<_>>(),
+        before.into_iter().filter(|(path, ..)|!path.ends_with("telemetry.db")).collect::<Vec<_>>(),"only self-observation may update the upgraded sidecar");
 
     f.sidecar().execute("INSERT OR REPLACE INTO telemetry_streams(stream,version) VALUES('accounting',99)", []).unwrap();
     for args in [&["usage"][..], &["report", "--json"], &["collect"]] {
@@ -680,6 +693,7 @@ fn verification_combines_every_acceptance_policy() {
     run('2', "clean", "accepted", None, 3000);
     let record = || f.cli_args(&["attempts", "--json"]).0["attempts"][0].clone();
     let first = record();
+    assert_eq!(first["session"]["end_state"], "submitted");
     assert_eq!(first["verification"], serde_json::json!({"state": "pending", "policies": [
         {"policy_id": "clean", "state": "accepted"}, {"policy_id": "content", "state": "pending"}]}), "a policy without a run is pending");
     assert_eq!(first["integration"], serde_json::json!({"state": "pending"}));
@@ -858,4 +872,93 @@ fn newer_codex_without_usage_is_unavailable() {
     plant_aggregate_termination(&f);
     assert_eq!(f.report()["metrics"]["M13"]["value"], "0/1");
     assert!(f.report()["metrics"]["M13"]["coverage"]["newer_than_certified"].is_null());
+}
+
+/// 0.159.x-shaped synthetic records through collect/attempts/accounting CLI.
+#[test]
+fn worker_session_counts_end_states_and_privacy() {
+    use serde_json::json;
+    use std::io::Write;
+    let f = Fixture::new();
+    let path = f.rollout(&f.home, SID, &["head.jsonl"], &f.worktree(), f.decided + 1000, "0.159.3");
+    let ts = |ms| jiff::Timestamp::from_millisecond(f.decided + ms).unwrap().to_string();
+    let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    let event = |payload| json!({"type":"event_msg","timestamp":ts(2000),"payload":payload});
+    let call = |id, name| json!({"type":"response_item","timestamp":ts(2000),"payload":{"type":"function_call","call_id":id,"name":name,"arguments":"SESSION_SECRET_ARGUMENTS"}});
+    let mut records = vec![event(json!({"type":"task_started","turn_id":"turn-1","model_context_window":2000})),
+        call("question-1","request_user_input_async"),call("spawn-1","spawn_agent"),
+        // Async output is an acknowledgement, not a user answer.
+        json!({"type":"response_item","timestamp":ts(2100),"payload":{"type":"function_call_output","call_id":"question-1","output":"SESSION_SECRET_OUTPUT"}})];
+    for (n,code) in [0,127,1,2,7,-9,137].into_iter().enumerate() {
+        records.push(event(json!({"type":"item_completed","turn_id":"turn-1","item":{"type":"CommandExecution","id":format!("cmd-{n}"),"status":"completed","exit_code":code,"duration":{"secs":3,"nanos":4},"command":"SESSION_SECRET_COMMAND","aggregated_output":"SESSION_SECRET_OUTPUT","cwd":"SESSION_SECRET_CWD"}})));
+    }
+    records.extend([event(json!({"type":"item_completed","item":{"type":"FileChange","id":"files-1","status":"completed","changes":[{"path":"SESSION_SECRET_PATH","diff":"SESSION_SECRET_DIFF"},{"path":"SESSION_SECRET_PATH2"}]}})),
+        event(json!({"type":"item_completed","item":{"type":"FileChange","id":"files-2","status":"failed","changes":[]}})),
+        event(json!({"type":"item_completed","item":{"type":"ImageView","id":"image-1","path":"SESSION_SECRET_IMAGE"}})),
+        json!({"type":"event_msg","timestamp":ts(3000),"payload":{"type":"task_complete","turn_id":"turn-1","last_agent_message":"SESSION_SECRET_MESSAGE"}})]);
+    for record in records { writeln!(file,"{record}").unwrap(); }
+    drop(file);
+    f.cli("collect");
+    let a=f.cli_args(&["attempts","--json"]).0;
+    let s=&a["attempts"][0]["session"];
+    assert_eq!(s["turns"],1);
+    assert_eq!(s["commands"],7);
+    assert_eq!(s["failed_commands"],6);
+    assert_eq!(s["failed_commands_by_class"],json!({"127_not_found":1,"1":1,"2":1,"other_nonzero":1,"signal":2}));
+    assert_eq!(s["file_change_items"],2); assert_eq!(s["failed_file_change_items"],1); assert_eq!(s["image_views"],1);
+    assert_eq!(s["unanswered_user_input_requests"],1); assert_eq!(s["sub_agents_spawned"],1);
+    assert_eq!(s["max_context_window_fill"],"0.5"); assert_eq!(s["end_state"],"ended_without_submission");
+    let db=f.sidecar();
+    assert_eq!(db.query_row("SELECT changed_files FROM codex_session_items WHERE item_id='files-1'",[],|r|r.get::<_,i64>(0)).unwrap(),2);
+    assert_eq!(db.query_row("SELECT reported_duration_secs,reported_duration_nanos FROM codex_reported_exec_durations WHERE item_id='cmd-0'",[],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?))).unwrap(),(3,4));
+    let tools=f.cli_args(&["collectors","tools","--json"]).0;
+    assert_eq!(tools["sessions"][0]["exec_items"][0]["reported_duration"],json!({"secs":3,"nanos":4}));
+    let summary=f.cli_args(&["accounting","tools","--json"]).0;
+    assert_eq!(summary["sessions_summary"]["by_class"]["signal"]["share"],"2/7");
+    assert_eq!(summary["sessions_summary"]["unanswered_user_input_requests"],1);
+    assert_eq!(summary["sessions_summary"]["by_profile"]["codex"]["failed_command_share"],"6/7");
+    assert_eq!(summary["sessions_summary"]["end_states"]["ended_without_submission"],1);
+    let mut file=fs::OpenOptions::new().append(true).open(&path).unwrap();
+    writeln!(file,"{}",json!({"type":"event_msg","timestamp":ts(4000),"payload":{"type":"item_completed","item":{"type":"UserMessage","id":"answer-1","content":"SESSION_SECRET_ANSWER"}}})).unwrap();
+    drop(file); f.cli("collect");
+    assert_eq!(f.cli_args(&["attempts","--json"]).0["attempts"][0]["session"]["unanswered_user_input_requests"],0);
+    // A later started turn defeats the earlier completed turn.
+    let mut file=fs::OpenOptions::new().append(true).open(&path).unwrap();
+    writeln!(file,"{}",json!({"type":"event_msg","timestamp":ts(5000),"payload":{"type":"task_started","turn_id":"turn-2"}})).unwrap();
+    drop(file); f.cli("collect");
+    assert_eq!(f.cli_args(&["attempts","--json"]).0["attempts"][0]["session"]["end_state"],"unknown");
+    let mut file=fs::OpenOptions::new().append(true).open(&path).unwrap();
+    writeln!(file,"{}",json!({"type":"event_msg","timestamp":ts(6000),"payload":{"type":"turn_aborted","turn_id":"turn-2","reason":"wall_budget"}})).unwrap();
+    drop(file); f.cli("collect");
+    assert_eq!(f.cli_args(&["attempts","--json"]).0["attempts"][0]["session"]["end_state"],"timed_out");
+    // An older wall-budget abort does not classify a subsequent resumed turn.
+    let mut file=fs::OpenOptions::new().append(true).open(&path).unwrap();
+    writeln!(file,"{}",json!({"type":"event_msg","timestamp":ts(6000),"payload":{"type":"task_started","turn_id":"turn-3"}})).unwrap();
+    drop(file); f.cli("collect");
+    assert_eq!(f.cli_args(&["attempts","--json"]).0["attempts"][0]["session"]["end_state"],"unknown");
+    let mut file=fs::OpenOptions::new().append(true).open(&path).unwrap();
+    writeln!(file,"{}",json!({"type":"event_msg","timestamp":ts(6000),"payload":{"type":"task_complete","turn_id":"turn-3"}})).unwrap();
+    drop(file); f.cli("collect");
+    assert_eq!(f.cli_args(&["attempts","--json"]).0["attempts"][0]["session"]["end_state"],"ended_without_submission");
+    let mut canonical=SqliteStore::open(&f.project.join(".state/state.db")).unwrap();
+    canonical.cancel_attempt(&herdr_farm::domain::AttemptId::new(f.attempt.clone()).unwrap(),1,canonical.current_head().unwrap(),"fixture stop",f.decided+9000).unwrap();
+    let a=f.cli_args(&["attempts","--json"]).0;
+    assert_eq!(a["attempts"][0]["session"]["end_state"],"stopped");
+    assert_eq!(a["attempts"][0]["session"]["lingering_ms"],3000);
+    let summary=f.cli_args(&["accounting","tools","--json"]).0;
+    assert_eq!(summary["sessions_summary"]["lingering_ms"],json!({"samples":1,"p50":3000,"p95":3000}));
+    f.cli("collect"); // Replay/append collection keeps exact counts.
+    assert_eq!(f.cli_args(&["attempts","--json"]).0["attempts"][0]["session"]["commands"],7);
+    // Public reads do not migrate a pre-0016 sidecar. Collect replays it.
+    db.execute_batch("DROP TABLE codex_session_clock; DROP TABLE codex_session_turns; DROP TABLE codex_session_items;
+        UPDATE telemetry_streams SET version=15 WHERE stream='ingest'").unwrap();
+    assert_eq!(f.cli_args(&["attempts","--json"]).0["attempts"][0]["session"]["status"],"unavailable");
+    f.cli("collect");
+    let upgraded=f.cli_args(&["attempts","--json"]).0;
+    assert_eq!(upgraded["attempts"][0]["session"]["commands"],7);
+    assert_eq!(upgraded["attempts"][0]["session"]["lingering_ms"],3000);
+    drop(db);
+    for name in ["telemetry.db","telemetry.db-wal","telemetry.db-shm"] {
+        if let Ok(bytes)=fs::read(f.project.join(".state").join(name)) { assert!(!bytes.windows(b"SESSION_SECRET".len()).any(|w|w==b"SESSION_SECRET"),"{name}"); }
+    }
 }

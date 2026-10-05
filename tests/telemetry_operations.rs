@@ -414,9 +414,10 @@ fn backup_restore_reapplies_tombstones_and_never_writes_canonical_state() {
     ticker.lock().unwrap();
     assert!(fail(&f, &["backup", "restore", "--from", out.to_str().unwrap()]).contains("restore is offline"));
     ticker.unlock().unwrap();
-    let report = json_of(&f, &["backup", "restore", "--from", out.to_str().unwrap()]);
+    // CLI observations after the backup are newer metadata, so acknowledge their loss.
+    let report = json_of(&f, &["backup", "restore", "--from", out.to_str().unwrap(), "--force"]);
     assert_eq!((report["tombstones"]["reapplied"].clone(), report["tombstones"]["total"].clone()), (json!({"sidecar.normalized_sessions": 1}), json!(2)));
-    assert_eq!((report["rows"]["codex_usage"].clone(), report["canonical_written"].clone(), report["replaced_newer"].clone()), (json!(0), json!(false), Value::Null));
+    assert_eq!((report["rows"]["codex_usage"].clone(), report["canonical_written"].clone()), (json!(0), json!(false)));
     assert_eq!(f.count("codex_usage"), 0, "restore never resurrects deleted content");
     f.cli("collect");
     f.cli_args(&["accounting", "sync"]);
@@ -483,7 +484,7 @@ fn encrypted_backups_use_the_operators_age_and_leave_no_plaintext() {
     assert!(String::from_utf8_lossy(&refused.stderr).contains("pass --identity"));
     let identity = f.tmp.path().join("identity.txt");
     write_private(&identity, "AGE-SECRET-KEY-FIXTURE\n");
-    let restored = run(&["backup", "restore", "--from", out.to_str().unwrap(), "--identity", identity.to_str().unwrap()]);
+    let restored = run(&["backup", "restore", "--from", out.to_str().unwrap(), "--identity", identity.to_str().unwrap(), "--force"]);
     assert_eq!((restored["rows"]["codex_usage"].clone(), restored["verified_files"].clone()), (json!(2), json!(2)));
     assert_eq!(f.count("codex_usage"), 2);
 }
@@ -731,9 +732,13 @@ const RUNBOOK: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/docs/telemetry/opera
 fn runbook_transcripts_are_the_fixture_run() {
     let f = collected();
     let mut transcripts: Vec<(&str, String)> = Vec::new();
+    let observation_after=std::cell::Cell::new(None::<i64>);
     let mut run = |name: &'static str, args: &[&str], expect_ok: bool| -> String {
         let out = command(&f, args, None, None);
         assert_eq!(out.status.success(), expect_ok, "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        if let Some(mark)=observation_after.get() {
+            f.sidecar().execute("UPDATE cli_invocations SET recorded_unix_ms=?1 WHERE rowid=(SELECT max(rowid) FROM cli_invocations)",[mark+1]).unwrap();
+        }
         let shown = args.iter().map(|a| if a.contains(' ') { format!("\"{a}\"") } else { (*a).to_owned() }).collect::<Vec<_>>().join(" ");
         let text = format!("$ herdr-farm telemetry demo {shown}\n{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
         transcripts.push((name, normalize(&text, &f)));
@@ -741,7 +746,12 @@ fn runbook_transcripts_are_the_fixture_run() {
     };
     let backups = f.tmp.path().join("backup-2026-09-30");
     run("classes", &["maintenance", "classes"], true);
-    run("backup-create", &["backup", "create", "--out", backups.to_str().unwrap()], true);
+    let created=run("backup-create", &["backup", "create", "--out", backups.to_str().unwrap()], true);
+    // Keep this fixture's post-backup CLI observations newer than its snapshot
+    // even when native fixture timestamps are briefly ahead of wall time.
+    let mark=serde_json::from_str::<Value>(&created).unwrap()["watermark_unix_ms"].as_i64().unwrap();
+    observation_after.set(Some(mark));
+    f.sidecar().execute("UPDATE cli_invocations SET recorded_unix_ms=?1 WHERE rowid=(SELECT max(rowid) FROM cli_invocations)",[mark+1]).unwrap();
     // The session's acceptance is 91 days old and its attempt ended (fixture).
     f.sidecar().execute("UPDATE rollout_sources SET observed_unix_ms=observed_unix_ms-?1", [91 * DAY]).unwrap();
     f.cancel_reserved();
@@ -753,7 +763,7 @@ fn runbook_transcripts_are_the_fixture_run() {
     run("hold-release", &["maintenance", "hold", "release", "hold-1", "--reason", "released by counsel"], true);
     run("apply", &["maintenance", "apply", "--confirm", &digest], true);
     run("backup-verify", &["backup", "verify", "--from", backups.to_str().unwrap()], true);
-    run("restore", &["backup", "restore", "--from", backups.to_str().unwrap()], true);
+    run("restore", &["backup", "restore", "--from", backups.to_str().unwrap(), "--force"], true);
     assert_eq!(f.count("codex_usage"), 0);
     let doc = fs::read_to_string(RUNBOOK).unwrap();
     let mut rewritten = String::new();

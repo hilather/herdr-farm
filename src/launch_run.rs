@@ -103,16 +103,22 @@ fn sign(key: &Path, namespace: &str, file: &Path) -> Result<PathBuf> {
     Ok(signature)
 }
 
+// A head read before lock acquisition can become stale while ownership waits.
+// Snapshot-at-head refusals use HistoryUnavailable; retain the same eight-pass
+// head-race policy rather than treating them as lock contention.
 fn retry<T>(mut step: impl FnMut() -> Result<T>) -> Result<T> {
     for attempt in 0..8 {
         match step() {
             Ok(value) => return Ok(value),
             Err(error) if error.chain().any(|cause|
-                matches!(cause.downcast_ref::<herdr_farm::store::StoreError>(), Some(herdr_farm::store::StoreError::Conflict | herdr_farm::store::StoreError::Busy))
-                    || cause.downcast_ref::<std::fs::TryLockError>().is_some_and(|error| matches!(error, std::fs::TryLockError::WouldBlock))
-                    || cause.to_string() == "project changed during observation; retry") => {
+                matches!(cause.downcast_ref::<herdr_farm::store::StoreError>(), Some(herdr_farm::store::StoreError::Conflict | herdr_farm::store::StoreError::Busy | herdr_farm::store::StoreError::HistoryUnavailable(_)))
+                    || cause.to_string().starts_with("project head changed during observation:")) => {
                 if attempt == 7 {
-                    return Err(error.context("the project kept changing while launching; rerun the same command"));
+                    let detail = error.chain().find_map(|cause| match cause.downcast_ref::<herdr_farm::store::StoreError>() {
+                        Some(herdr_farm::store::StoreError::HistoryUnavailable(head)) => Some(format!(" (expected project store head {head} is no longer current)")),
+                        _ => None,
+                    }).unwrap_or_default();
+                    return Err(error.context(format!("the project store head kept changing while launching{detail}; rerun the same command")));
                 }
                 std::thread::sleep(herdr_farm::timing::retry(Duration::from_millis(50 + 30 * attempt)));
             }

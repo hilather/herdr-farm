@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 pub mod attention;
+mod claude_turns;
 pub mod budget;
 pub(crate) mod cache;
 pub mod charges;
@@ -19,6 +20,8 @@ pub mod ledger;
 pub mod quota;
 pub mod tools;
 pub(crate) mod otlp;
+
+pub mod cli_invocations;
 
 pub const STREAM: &str = "accounting";
 /// `include_str!` of `migrations/telemetry/accounting/`, in order; index + 1 is the stream version.
@@ -45,13 +48,18 @@ pub const MIGRATIONS: &[&str] = &[include_str!("../../../migrations/telemetry/ac
     include_str!("../../../migrations/telemetry/accounting/0021_newer_cli_usage.sql"),
     include_str!("../../../migrations/telemetry/accounting/0022_spawn_not_fork.sql"),
     include_str!("../../../migrations/telemetry/accounting/0023_concurrency_headroom.sql"),
-    include_str!("../../../migrations/telemetry/accounting/0024_claude_cache_tiers.sql")];
+    include_str!("../../../migrations/telemetry/accounting/0024_claude_cache_tiers.sql"),
+    include_str!("../../../migrations/telemetry/accounting/0025_cli_invocations.sql")];
 
 /// `herdr-farm telemetry <slug> accounting ...`
 #[derive(clap::Subcommand)]
 pub enum Command {
+    /// Product CLI invocations by caller and fixed command path. Read-only JSON.
+    Cli,
     /// Stream version of this lane's sidecar tables. Read-only.
     Status,
+    /// Claude coordinator turn metadata and costs, printed as JSON. Read-only.
+    Coordinator,
     /// Sync changed sessions and quota accounts; rebuild after invalidation. Writes only the sidecar.
     Sync,
     /// The synced usage ledger: entries with their provenance. Read-only.
@@ -190,6 +198,7 @@ fn unavailable(reason: &str) -> Value {
 /// The command's stdout.
 pub fn run(project: &Path, command: Command) -> Result<String> {
     let value = match command {
+        Command::Cli => cli_invocations::read(project)?,
         Command::Status => {
             let mut value = super::sidecar::status(project, STREAM)?;
             if value["version"] == MIGRATIONS.len() && let Some(db) = super::sidecar::read(project)? && let Some(status) = ledger::status(&db)? {
@@ -281,6 +290,7 @@ pub fn run(project: &Path, command: Command) -> Result<String> {
             if !json { return Ok(tools::text(&value)); }
             value
         }
+        Command::Coordinator => fleet::coordinator_turns(project)?,
         Command::Fleet { json, window_minutes } => {
             let value = fleet::read(project, window_minutes)?;
             if !json { return Ok(fleet::text(&value) + &super::configuration_names::project_text(project)?); }

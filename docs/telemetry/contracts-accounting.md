@@ -1774,3 +1774,61 @@ Migration 0024 adds columns to existing usage entries and invalidates the
 ledger for normal sync replay. Native-session retention and full-backup
 classification cover the columns; no retained table is added. Stored valuation
 revisions remain available as-of; reprice appends changed valuations.
+
+## Product CLI self-observation
+
+`herdr-farm telemetry <slug> accounting cli` prints read-only JSON with
+`callers` totals and `commands` detail grouped by caller and fixed clap
+command path. Each group contains `invocations`, `help_share`, `error_share`
+(runtime errors plus usage errors divided by all invocations),
+`p50_duration_ms`, and `p95_duration_ms`. Shares are exact numerator/denominator
+strings, following telemetry JSON conventions. Percentiles use nearest rank over
+the retained observations, including help/error/version calls. There are no
+registry metrics yet. An absent sidecar reports `collection_not_run`; an
+older accounting schema reports `stream_upgrade_required`. The view itself
+is captured after its output is computed, so appears on the next read. Read-only
+refers to the projection; CLI self-observation can append metadata afterward.
+Because observations have timestamps and are included in backups, a restore
+after further CLI calls can require `--force` under the existing newer-sidecar
+safety check.
+
+Accounting migration 0025 stores only the §7 allowlist in contracts.md.
+Observation is best effort: contention, old/absent sidecars, full worker
+spools and terminated CLI processes can lose samples. Worker samples are
+untrusted reports, with validated command names and forced worker labels;
+they cannot grant authority. The bounded metadata table follows
+`sidecar.cli_invocations` retention and full telemetry backup.
+
+### Claude coordinator turns (M34 detail)
+
+`accounting coordinator` prints the turn view as JSON, even before pricing
+(unpriced requests remain explicit), with a `summary` across all coordinator
+sessions that preserves currencies and session identity. `accounting fleet --json` also exposes `metrics.M34.coordinator.turn_sessions`.
+Each non-tool-result user line opens a turn; following assistant, system and
+tool-result lines belong to it until the next prompt. Lines before the first
+prompt are not assigned a synthetic turn. Unknown timestamps remain null.
+The view reports distinct usage-bearing requestId values (API message id fallback) as requests, input
+including cache per-request maximum and sum, 5m/1h cache writes, published-rate
+cost by currency with unpriced request counts, wall duration (reported system
+duration when present, otherwise observed timestamp span), and AskUserQuestion
+call-to-result wait. Stop reasons count reported assistant line tags.
+
+Trigger precedence: scheduled_wakeup (tags scheduled_wakeup, scheduled, timer,
+wakeup); subagent (subagent, subagent_notification); background_task (a preceding
+tool-result backgroundTaskId, or background_task/background_task_notification);
+bootstrap (bootstrap, startup, init); queued_owner (preceding enqueue operation,
+or queued_owner, queue, queued); owner_typed (owner_typed, user, owner, typed,
+cli); other. Tags are matched against turnOrigin and promptSource. Queue and
+background evidence is consumed by the next prompt; dequeue clears queue
+evidence. This is a metadata heuristic, not an assertion about prompt content.
+
+Summaries report costs by trigger class, turns issuing no tool calls, and idle
+gaps from the previous turn's last observed line before cache rewrites. A
+full-context rewrite is flagged when a request reports zero cache reads and
+positive cache creation (a rewrite of the reusable prefix); the exact quantities remain visible. Missing
+cache tier counters make the corresponding tier sum null; cost coverage
+remains explicit. Turns issuing no tools are candidates for no-op wake-ups,
+not proof that their output was useless.
+
+`attempts --json` exposes worker prompt count as `turns` and reported assistant
+`stop_reasons` counts. These do not enter worker token totals or M35.

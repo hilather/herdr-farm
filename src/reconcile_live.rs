@@ -99,7 +99,7 @@ fn collect_limited(ctx:&Ctx,project:&Path,control:Option<&herdr_farm::store::con
         Some(control)=>migration::open_active_scoped(project,control.clone())?.current_head().map_err(map_store)?,
         None=>migration::open_active(project)?.current_head().map_err(map_store)?,
     };
-    ensure!(after==head,"project changed during observation; retry");
+    ensure!(after==head,"project head changed during observation: expected {head}, observed {after}; retry");
     Ok(ObservationBatch{expected_head:head,observations,dispatch_allowed:false,recorded_head:None})
 }
 

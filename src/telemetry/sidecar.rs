@@ -159,6 +159,11 @@ pub(crate) fn migrate(db: &mut Connection) -> Result<()> {
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let versions = versions(&tx)?;
     check(&versions)?;
+    // Legacy ingest rebuilds temporarily drop the duration view's base table.
+    // Recreate the neutral alias in ingest 0016 within this same transaction.
+    if versions.get("ingest").copied().unwrap_or(0) < 12 {
+        tx.execute_batch("DROP VIEW IF EXISTS codex_reported_exec_durations")?;
+    }
     tx.execute_batch(STREAMS_TABLE)?;
     let mut upgraded = false;
     for (stream, migrations) in streams() {

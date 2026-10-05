@@ -2130,6 +2130,7 @@ fn spool_request(kind: &str, attempt: &str, document: &str) -> (String, Vec<u8>)
 #[test]
 fn an_isolated_worker_submits_only_through_its_own_spool() {
     let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+    drop(herdr_farm::telemetry::sidecar::open(&lab.project, true).unwrap());
     let home = lab.home.path().canonicalize().unwrap();
     let state = lab.project.canonicalize().unwrap().join(".state");
     // Another attempt's spool and outputs, as gate release creates them.
@@ -2214,6 +2215,9 @@ fn an_isolated_worker_submits_only_through_its_own_spool() {
     lab.wait(&mut ticker, 90, &|| lab.attempt(&attempt).termination_observed && !spool.exists());
     lab.stop(ticker);
     assert!(state.join("spool/other-attempt").is_dir(), "an unknown attempt's spool is not removed");
+    let telemetry=rusqlite::Connection::open_with_flags(herdr_farm::telemetry::sidecar::path(&lab.project),rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY|rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW).unwrap();
+    let submissions:i64=telemetry.query_row("SELECT count(*) FROM cli_invocations WHERE command_path='result submit' AND caller='worker' AND trust='worker_reported' AND outcome='ok'",[],|r|r.get(0)).unwrap();
+    assert_eq!(submissions,2,"both sandbox submissions are observed before ended-attempt spool removal");
 }
 
 /// D9's worker channel through the spool: a sandboxed reviewing worker (the

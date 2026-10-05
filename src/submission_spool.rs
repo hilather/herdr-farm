@@ -118,6 +118,57 @@ pub fn worker_spool() -> Option<PathBuf> {
     crate::product_environment::product_var_os(ENV).map(PathBuf::from).filter(|path| path.is_absolute())
 }
 
+/// One bounded append-only metadata file, counted as one spool entry. No receipt.
+pub const CLI_INVOCATIONS_FILE: &str = "cli-invocations.jsonl";
+const CLI_INVOCATIONS_LIMIT: u64 = 128 * 1024;
+
+pub fn append_cli_invocation(spool: &Path, row: &crate::telemetry::accounting::cli_invocations::Invocation) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let dir = Dir::open(spool)?;
+    let name = Dir::name(CLI_INVOCATIONS_FILE)?;
+    if dir.kind(CLI_INVOCATIONS_FILE)?.is_none() && dir.names()?.len() >= ENTRY_LIMIT { return Ok(()); }
+    let fd = unsafe { libc::openat(dir.0.as_raw_fd(), name.as_ptr(),
+        libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC, 0o600) };
+    if fd < 0 { return Err(io::Error::last_os_error().into()); }
+    // SAFETY: openat returned an owned descriptor.
+    let mut file = unsafe { File::from_raw_fd(fd) };
+    // Serialize concurrent writers without waiting, including the cap check.
+    if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } != 0 { return Ok(()); }
+    let metadata = file.metadata()?;
+    ensure!(metadata.is_file() && metadata.nlink() == 1, "invalid CLI spool file");
+    let mut bytes = serde_json::to_vec(row)?;
+    bytes.push(b'\n');
+    if bytes.len() <= 2048 && metadata.len() + bytes.len() as u64 <= CLI_INVOCATIONS_LIMIT {
+        file.write_all(&bytes)?;
+    }
+    Ok(())
+}
+
+fn ingest_cli(project: &Path, dir: &Dir, allowed_paths: &[String]) -> Result<()> {
+    use crate::telemetry::accounting::cli_invocations::{self, Invocation};
+    let Ok(bytes) = dir.read(CLI_INVOCATIONS_FILE, CLI_INVOCATIONS_LIMIT) else { return Ok(()) };
+    let now = crate::telemetry::maintenance::store::now();
+    let slug = project.file_name().and_then(OsStr::to_str);
+    let mut rows = Vec::new();
+    // The last partial write is retried next pass; never truncate the file.
+    for line in bytes.split_inclusive(|b| *b == b'\n').filter(|line| line.ends_with(b"\n") && line.len() <= 2048) {
+        let Ok(mut row) = serde_json::from_slice::<Invocation>(line) else { continue };
+        if !allowed_paths.contains(&row.command_path)
+            || !is_digest(&row.invocation_id)
+            || !matches!(row.outcome.as_str(), "ok" | "error" | "help" | "version" | "usage_error")
+            || !(0..=255).contains(&row.exit_code)
+            || !(0..=7*86_400_000).contains(&row.duration_ms)
+            || row.recorded_unix_ms < now-cli_invocations::MAX_AGE_MS
+            || row.recorded_unix_ms > now+300_000
+            || row.project_slug.as_deref().is_some_and(|value| Some(value) != slug) { continue; }
+        row.caller = "worker".into();
+        row.trust = "worker_reported".into();
+        rows.push(row);
+    }
+    if !rows.is_empty() { cli_invocations::write(project, &rows)?; }
+    Ok(())
+}
+
 /// `result submit` from inside the sandbox: the document is bounded and
 /// checked as the store checks it first, then exchanged through the spool.
 pub fn submit_result(spool: &Path, document: &Path) -> Result<String> {
@@ -461,6 +512,11 @@ pub fn pending(project: &Path) -> bool {
 /// One pass over `project`'s spools. Returns log lines; a failure in one
 /// attempt's spool does not stop the others.
 pub fn ingest(project: &Path) -> Result<Vec<String>> {
+    ingest_with_cli_paths(project, &[])
+}
+
+/// Ticker ingestion validates worker metadata against the product clap schema.
+pub fn ingest_with_cli_paths(project: &Path, allowed_paths: &[String]) -> Result<Vec<String>> {
     let root_path = project.join(".state/spool");
     match std::fs::symlink_metadata(&root_path) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -474,7 +530,7 @@ pub fn ingest(project: &Path) -> Result<Vec<String>> {
         return Ok(lines);
     }
     for attempt in attempts {
-        if let Err(error) = ingest_attempt(project, &root, &attempt, &mut lines) {
+        if let Err(error) = ingest_attempt(project, &root, &attempt, &mut lines, allowed_paths) {
             lines.push(format!("spool {attempt}: {error:#}"));
         }
     }
@@ -495,7 +551,7 @@ struct At<'a> {
     held: &'a crate::migration::Maintenance,
 }
 
-fn ingest_attempt(project: &Path, root: &Dir, attempt: &str, lines: &mut Vec<String>) -> Result<()> {
+fn ingest_attempt(project: &Path, root: &Dir, attempt: &str, lines: &mut Vec<String>, allowed_paths: &[String]) -> Result<()> {
     if !matches!(root.kind(attempt)?, Some((libc::S_IFDIR, _))) {
         lines.push(format!("spool {attempt}: not a directory; ignored"));
         return Ok(());
@@ -527,6 +583,11 @@ fn ingest_attempt(project: &Path, root: &Dir, attempt: &str, lines: &mut Vec<Str
         for digest in &pending {
             handle(&at, &dir, attempt, &status, digest, lines);
         }
+    }
+    if names.is_some() && !matches!(status, Liveness::Missing) {
+        // Before removal, outside every runtime mutation guard. Busy writers
+        // leave the append-only file for the next pass, including ended attempts.
+        ingest_cli(project, &dir, allowed_paths)?;
     }
     if matches!(status, Liveness::Ended(true)) {
         // The worker is gone: remove what it left, never following a link.

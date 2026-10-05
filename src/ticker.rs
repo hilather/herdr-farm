@@ -245,6 +245,7 @@ fn spawn(root: &Path) -> Result<()> {
     let binary = std::env::current_exe().context("could not find this binary's own path")?;
     let mut command = Command::new(binary);
     command
+        .env("HERDR_FARM_TICKER_CHILD", "1")
         .arg("--root")
         .arg(root)
         .args(["ticker", "run"])
@@ -415,7 +416,7 @@ pub fn run_passes(ctx: &Ctx, passes: Option<u64>) -> Result<()> {
             for slug in project::list_slugs(root) {
                 let dir=root.join(&slug);
                 if !herdr_farm::submission_spool::pending(&dir) {continue;}
-                match herdr_farm::submission_spool::ingest(&dir) {
+                match herdr_farm::submission_spool::ingest_with_cli_paths(&dir, crate::cli_invocation::paths()) {
                     Ok(lines)=>for line in lines {log.line(&format!("{slug}: {line}"));},
                     Err(error)=>log.line(&format!("{slug}: submission spool: {error:#}")),
                 }
@@ -599,7 +600,7 @@ pub fn tick(ctx: &Ctx, log: &Log, memory: &mut Memory) -> bool {
             // Isolated workers submit through their attempt's spool: ingest
             // each pending request through the store's own submission path.
             #[cfg(target_os="linux")]
-            match herdr_farm::submission_spool::ingest(&ctx.root.join(slug)) {
+            match herdr_farm::submission_spool::ingest_with_cli_paths(&ctx.root.join(slug), crate::cli_invocation::paths()) {
                 Ok(lines)=>for line in lines {log.line(&format!("{slug}: {line}"));},
                 Err(error)=>log.line(&format!("{slug}: submission spool: {error:#}")),
             }
@@ -642,6 +643,14 @@ pub fn tick(ctx: &Ctx, log: &Log, memory: &mut Memory) -> bool {
         // holds them until the just-admitted canonical batch has fully drained.
         memory.attempt_token_tickets.retain(|(identity, ticket)| {
             let log_error = |error: &anyhow::Error| {
+                // A cancelled or expired advisory job (ticker stop, executor cancellation,
+                // its own short deadline under contention) is not a failure; the next
+                // pass retries it.
+                let cause = error.root_cause().to_string();
+                if matches!(cause.as_str(), "live copy cancelled" | "identity inventory cancelled or expired")
+                    || error.chain().any(|e| matches!(e.downcast_ref::<herdr_farm::store::StoreError>(),
+                        Some(herdr_farm::store::StoreError::Cancelled)) || matches!(e.downcast_ref::<herdr_farm::store::StoreError>(),
+                        Some(herdr_farm::store::StoreError::Io(message)) if message == "interrupted")) { return; }
                 let slug = std::path::Path::new(&identity.project).file_name().unwrap_or_default().to_string_lossy();
                 let attempt = identity.operation.trim_start_matches("tokens:attempt:");
                 log.line(&format!("{slug}: attempt token {attempt}: {error:#}"));

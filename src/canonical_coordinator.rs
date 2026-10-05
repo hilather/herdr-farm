@@ -894,10 +894,18 @@ pub fn surface(ctx: &Ctx, slug: &str) -> Result<String> {
     let evidence = if profiles.is_empty() { "none".into() } else { profiles.join(", ") };
     let readiness = format!("Launchable retained profile evidence: {evidence} (launch revalidates current inputs).\nControl state: {state}{automatic}.\n{}\n", permission_status(ctx.env, &p.dir(), ctx.runner)?);
     Ok(format!(
-        "{readiness}Safety: start_threads={} resolve_threads={} cleanup_resolved={}\nWith propose, request owner approval before dispatch or integration. With keep, retain artifacts and worktrees; never run destructive cleanup. Herdr Farm signs launches automatically within owner policy: sandboxed workers, project repositories, owner profiles, and the owner cap (default 4). Never pass --sign-with, look for or read key files, or edit config.toml. Report the exact policy rule to the owner on refusal. Run launch run in the background or with a long timeout; rerun the same command after interruption.\n{}",
+        "{readiness}Safety: start_threads={} resolve_threads={} cleanup_resolved={}\nWith propose, request owner approval before dispatch or integration. With keep, retain artifacts and worktrees; never run destructive cleanup. Herdr Farm signs launches automatically within owner policy: sandboxed workers, project repositories, owner profiles, and the owner cap (default 4). Never pass --sign-with, look for or read key files, or edit config.toml. Report the exact policy rule to the owner on refusal. Busy project locks wait up to 30 seconds within interactive commands; shell retry loops for busy locks are no longer needed. Run launch run in the background or with a long timeout; rerun the same command after interruption.\n{}",
         safety.start_threads,
         safety.resolve_threads,
         safety.cleanup_resolved,
         commands(&ctx.root, slug)?
     ))
+}
+
+/// Classify only the journal's canonical pane; no runtime or server calls.
+pub(crate) fn caller_is_coordinator(project: &Path) -> bool {
+    let Some(pane) = std::env::var_os("HERDR_PANE_ID") else { return false };
+    paths::read_control_text(&project.join(".state/canonical-coordinator.json"), 64 * 1024)
+        .ok().flatten().and_then(|text| read_journal(&text).ok())
+        .is_some_and(|journal| !journal.route.pane_id.is_empty() && pane == journal.route.pane_id.as_str())
 }

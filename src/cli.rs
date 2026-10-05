@@ -1052,8 +1052,31 @@ enum RuntimeCommand {
     Rebind { id:String, #[arg(long)] route:PathBuf, #[arg(long)] expected_revision:u64, #[arg(long)] expected_head:u64 },
 }
 
-pub fn run() -> Result<()> {
-    let cli = Cli::parse();
+#[cfg(feature="state-store")]
+pub(crate) fn invocation_schema() -> clap::Command {
+    <Cli as clap::CommandFactory>::command()
+}
+
+pub fn run(#[cfg(feature="state-store")] capture: &mut crate::cli_invocation::Capture) -> Result<()> {
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => {
+            #[cfg(feature="state-store")]
+            {
+                let outcome = match error.kind() {
+                    clap::error::ErrorKind::DisplayHelp => "help",
+                    clap::error::ErrorKind::DisplayVersion => "version",
+                    _ => "usage_error",
+                };
+                capture.finish(outcome, error.exit_code());
+            }
+            error.exit();
+        }
+    };
+    #[cfg(feature="state-store")]
+    let _lock_wait = matches!(&cli.command, Command::Context {..} | Command::Inbox {..}
+        | Command::Task {..} | Command::Result {..} | Command::Launch {..} | Command::Memory {..})
+        .then(herdr_farm::execution_guard::ForegroundWait::enter);
     if let Command::BuildInfo { require_factory }=&cli.command {
         let info=doctor::build_info();
         println!("{}",serde_json::to_string_pretty(&info)?);

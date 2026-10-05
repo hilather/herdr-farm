@@ -15,6 +15,8 @@ pub enum Class {
     Text,
     /// A string, or the first key of an object (Codex `source`), then as `Text`.
     Tag,
+    /// Metadata enum: strict lowercase ASCII tag, otherwise "other".
+    EnumTag,
     /// A path: rule 2 only (contracts §7 stores `cwd` so), ≤1024 chars.
     Path,
     /// An integer stays an integer; any other number becomes its decimal text.
@@ -52,7 +54,7 @@ pub fn codex_allowlist(kind: &str) -> Option<Vec<(String, Class)>> {
             ("rate_limits.primary.window_minutes", Number), ("rate_limits.primary.resets_at", Number), ("rate_limits.secondary.used_percent", Number),
             ("rate_limits.secondary.window_minutes", Number), ("rate_limits.secondary.resets_at", Number), ("rate_limits.rate_limit_reached_type", Text)]).into_iter()
             .chain(usage("info.total_token_usage")).collect(),
-        "task_started" => fields(&[("turn_id", Id)]),
+        "task_started" => fields(&[("turn_id", Id), ("model_context_window", Number)]),
         "task_complete" => fields(&[("turn_id", Id), ("duration_ms", Number), ("time_to_first_token_ms", Number)]),
         // A6 tool/exec metadata (contracts-collection.md A6): `response_item`
         // tool calls and outputs by their payload type, never `input`,
@@ -62,7 +64,7 @@ pub fn codex_allowlist(kind: &str) -> Option<Vec<(String, Class)>> {
         "function_call" => fields(&[("call_id", Id), ("name", Tag), ("namespace", Tag), ("status", Tag), ("internal_chat_message_metadata_passthrough.turn_id", Id)]),
         "custom_tool_call_output" | "function_call_output" => fields(&[("call_id", Id)]),
         "item_completed" => fields(&[("thread_id", Id), ("turn_id", Id), ("item.type", Tag), ("item.id", Id), ("item.status", Tag), ("item.source", Tag),
-            ("item.exit_code", Number), ("item.duration.secs", Number), ("item.duration.nanos", Number),
+            ("item.changed_files", Number), ("item.exit_code", Number), ("item.duration.secs", Number), ("item.duration.nanos", Number),
             // A8 (contracts-collection.md A8): `McpToolCall` server and tool
             // names, hint and error flag (never `arguments` or `result.content`);
             // `SubAgentActivity` and `CollabAgentToolCall` ids (never
@@ -125,6 +127,11 @@ fn keep(value: &Value, class: Class) -> Value {
             if valid { Value::String(s.into()) } else { text(value) }
         }),
         Class::Text => text(value),
+        Class::EnumTag => value.as_str().map_or(Value::Null, |s| {
+            let valid = (1..=32).contains(&s.len()) && s.as_bytes()[0].is_ascii_lowercase()
+                && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-');
+            Value::String(if valid { s } else { "other" }.to_owned())
+        }),
         Class::Tag => match value {
             Value::Object(map) => map.keys().next().map_or(Value::Null, |key| Value::String(excerpt(key))),
             other => text(other),

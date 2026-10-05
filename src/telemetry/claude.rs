@@ -28,7 +28,9 @@ pub(super) fn walk(root: &Path, out: &mut Vec<PathBuf>) {
 pub fn capabilities() -> Value {
     use sanitize::Class::*;
     let source_fields = [("sessionId", Id), ("timestamp", Text), ("cwd", Path), ("version", Text), ("type", Tag),
-        ("effort", Tag), ("message.usage.output_tokens_details.thinking_tokens", Number),
+        ("turnOrigin", EnumTag), ("promptSource", EnumTag), ("turnPosition.promptIndex", Number), ("turnPosition.turnIndex", Number),
+        ("promptId", Id), ("requestId", Id), ("message.stop_reason", EnumTag), ("subtype", EnumTag), ("durationMs", Number),
+        ("toolUseResult.backgroundTaskId", Id), ("operation", EnumTag), ("effort", Tag), ("message.usage.output_tokens_details.thinking_tokens", Number),
         ("message.usage.cache_creation.ephemeral_5m_input_tokens", Number), ("message.usage.cache_creation.ephemeral_1h_input_tokens", Number),
         ("message.model", ModelId), ("message.id", Id), ("isSidechain", Bool),
         ("message.usage.input_tokens", Number), ("message.usage.output_tokens", Number),
@@ -43,7 +45,7 @@ pub fn capabilities() -> Value {
         "certified": if LIVE_FIELDS.contains(&field) { "live" } else { "fixture" },
         "live_versions": if LIVE_FIELDS.contains(&field) { LIVE_VERSIONS } else { &[] as &[&str] },
         "caveat": if field == "cwd" { Some("binding_only") } else { None }})).chain(
-        ["message.text", "message.thinking", "tool_use.input", "tool_result.content", "toolUseResult", "summary", "user_prompt"].map(|field|
+        ["message.text", "message.thinking", "tool_use.input", "tool_result.content", "toolUseResult.* (except backgroundTaskId)", "summary", "user_prompt"].map(|field|
             json!({"kind": "line", "field": field, "available": false, "basis": "unavailable", "certified": "none", "reason": "content_forbidden"})));
     json!({"adapter": "claude-code", "interface": "session_jsonl", "certified_versions": LIVE_VERSIONS, "fixture_versions": FIXTURE_VERSIONS,
         "accepted_versions": LIVE_VERSIONS, "version_rule":"at_or_above_lowest_live_certified", "certification": "live", "uncertified_version": "cli_version_uncertified",
@@ -53,6 +55,8 @@ pub fn capabilities() -> Value {
 pub fn allowlist() -> Vec<(String, sanitize::Class)> {
     use sanitize::Class::*;
     [("session_id", Id), ("timestamp", Text), ("version", Text), ("line_type", Tag), ("model", ModelId), ("message_id", Id),
+        ("turn_origin", EnumTag), ("prompt_source", EnumTag), ("prompt_index", Number), ("turn_index", Number), ("prompt_id", Id),
+        ("request_id", Id), ("stop_reason", EnumTag), ("subtype", EnumTag), ("duration_ms", Number), ("background_task_id", Id), ("operation", EnumTag),
         ("effort", Tag), ("thinking_tokens", Number), ("cache_write_5m_tokens", Number), ("cache_write_1h_tokens", Number),
         ("isSidechain", Bool), ("input_tokens", Number), ("output_tokens", Number), ("cache_creation_input_tokens", Number),
         ("cache_read_input_tokens", Number), ("tool_use_ids", IdList), ("tool_names", IdList), ("tool_result_ids", IdList),
@@ -103,13 +107,13 @@ pub(super) fn record_line(tx: &Transaction, ledger: &ingest::Ledger, at: u64, li
     let message = &raw["message"];
     let mut unknown = Vec::new();
     let mut unmapped_count = 0;
-    unmapped(&raw, "", &["type", "sessionId", "timestamp", "cwd", "version", "isSidechain", "effort", "message", "toolUseResult", "summary"], &mut unknown, &mut unmapped_count);
-    unmapped(message, "message.", &["id", "model", "usage", "content"], &mut unknown, &mut unmapped_count);
+    unmapped(&raw, "", &["type", "sessionId", "timestamp", "cwd", "version", "isSidechain", "effort", "message", "toolUseResult", "summary", "turnOrigin", "promptSource", "turnPosition", "promptId", "requestId", "subtype", "durationMs", "operation"], &mut unknown, &mut unmapped_count);
+    unmapped(message, "message.", &["id", "model", "usage", "content", "stop_reason"], &mut unknown, &mut unmapped_count);
     let usage = &message["usage"];
     unmapped(usage, "message.usage.", &["input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens_details", "cache_creation"], &mut unknown, &mut unmapped_count);
     unmapped(&usage["output_tokens_details"], "message.usage.output_tokens_details.", &["thinking_tokens"], &mut unknown, &mut unmapped_count);
     unmapped(&usage["cache_creation"], "message.usage.cache_creation.", &["ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens"], &mut unknown, &mut unmapped_count);
-    if !matches!(kind, "assistant" | "user" | "summary" | "system") { unknown.push(format!("type:{kind}")); unmapped_count += 1; }
+    if !matches!(kind, "assistant" | "user" | "summary" | "system" | "queue-operation") { unknown.push(format!("type:{kind}")); unmapped_count += 1; }
     let mut payload = json!({"session_id": session, "timestamp": timestamp, "version": raw["version"], "line_type": kind,
         "model": field(message, "model", sanitize::Class::ModelId), "message_id": id(message, "id"), "isSidechain": raw["isSidechain"].as_bool(),
         "tool_use_ids": [], "tool_names": [], "tool_result_ids": [], "tool_result_errors": 0});
@@ -185,6 +189,30 @@ pub(super) fn record_line(tx: &Transaction, ledger: &ingest::Ledger, at: u64, li
             tx.execute("INSERT OR IGNORE INTO claude_tool_results(session_id,call_id,is_error,completed_unix_ms) VALUES(?1,?2,?3,?4)",
                 params![session, call, error, ms(timestamp)])?;
         }
+    }
+    // Read these leaves only in their approved line classes. Never walk toolUseResult.
+    let tool_result = message["content"].as_array().is_some_and(|blocks| blocks.iter().any(|b| b["type"] == "tool_result"));
+    if kind == "user" && !tool_result {
+        payload["turn_origin"] = field(&raw, "turnOrigin", sanitize::Class::EnumTag);
+        payload["prompt_source"] = field(&raw, "promptSource", sanitize::Class::EnumTag);
+        payload["prompt_id"] = field(&raw, "promptId", sanitize::Class::Id);
+        payload["prompt_index"] = field(&raw["turnPosition"], "promptIndex", sanitize::Class::Number);
+        payload["turn_index"] = field(&raw["turnPosition"], "turnIndex", sanitize::Class::Number);
+    }
+    if kind == "assistant" {
+        payload["request_id"] = field(&raw, "requestId", sanitize::Class::Id);
+        payload["stop_reason"] = field(message, "stop_reason", sanitize::Class::EnumTag);
+    }
+    if kind == "system" {
+        payload["subtype"] = field(&raw, "subtype", sanitize::Class::EnumTag);
+        payload["duration_ms"] = field(&raw, "durationMs", sanitize::Class::Number);
+    }
+    if tool_result { payload["background_task_id"] = field(&raw["toolUseResult"], "backgroundTaskId", sanitize::Class::Id); }
+    if kind == "queue-operation" { payload["operation"] = field(&raw, "operation", sanitize::Class::EnumTag); }
+    if matches!(kind, "user" | "assistant" | "system" | "queue-operation") {
+        tx.execute("INSERT OR IGNORE INTO claude_turn_lines(session_id,path_digest,byte_offset,occurred_unix_ms,line_type,is_prompt,metadata)
+            VALUES(?1,?2,?3,?4,?5,?6,?7)", params![session, key, at as i64, ms(timestamp), kind,
+            kind == "user" && !tool_result, serde_json::to_string(&sanitize::payload(&allowlist(), &payload))?])?;
     }
     payload["unmapped_count"] = json!(unmapped_count);
     payload["unmapped_keys"] = json!(unknown);

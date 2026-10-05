@@ -3347,6 +3347,7 @@ fn outcome_success_path() {
         "reserved_unix_ms":marks[0].2,
         "result":{"candidate_oid":a_candidate,"created_unix_ms":submitted_ms,"state":"submitted","submission_id":a,"submissions":1},
         "running_unix_ms":marks[2].2,
+        "session":{"end_state":"submitted","reason":"session_metadata_not_collected","status":"unavailable"},
         "task_id":"a",
         "terminal_state":"completed",
         "terminal_unix_ms":marks[3].2,
@@ -5765,4 +5766,259 @@ fn legacy_permission_requests_accept_exact_owner_ask_decisions_and_keep_terminal
     let state:serde_json::Value=serde_json::from_slice(&std::fs::read(root.join("demo/.state/worker-permissions.json")).unwrap()).unwrap();
     let record=state["records"].as_array().unwrap().iter().find(|v|v["id"]==id).unwrap();
     assert_eq!(record["status"],"granted");assert_eq!(record["decision_by"],"owner:claude-code-ask");assert!(record["decided"].as_str().is_some_and(|v|!v.is_empty()));
+}
+
+#[cfg(all(feature="state-store", target_os="linux"))]
+#[test]
+fn cli_self_observation_records_only_metadata_and_skips_busy_or_absent_sidecars() {
+    use herdr_farm::{migration, telemetry::sidecar};
+    use serde_json::{Value, json};
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().join("root");
+    let r = root.to_str().unwrap();
+    for action in ["new", "pause"] { assert!(hp(home.path(), &["--root",r,action,"demo"]).status.success()); }
+    let project = root.join("demo");
+    migration::apply(&project, &migration::inspect(&project).unwrap(), true).unwrap();
+    assert!(hp(home.path(), &["--root",r,"task","demo","list"]).status.success());
+    assert!(!sidecar::path(&project).exists(), "observation must not create a sidecar");
+    let db = sidecar::open(&project, true).unwrap().unwrap();
+    let invoke = |args: &[&str], vars: &[(&str,&str)]| {
+        Command::new(BIN).env_clear().env("HOME",home.path()).env("PATH","/usr/bin:/bin")
+            .env("HERDR_FARM_TEST_TIME_SCALE",include_str!("support/time-scale.txt").trim())
+            .envs(vars.iter().copied()).args(["--root",r]).args(args).output().unwrap()
+    };
+    assert!(invoke(&["task","demo","list"], &[]).status.success());
+    assert!(invoke(&["task","demo","list","--help"], &[]).status.success());
+    let error = invoke(&["task","demo","list","--private-argument-value=/secret/worktree"], &[]);
+    assert_eq!(error.status.code(),Some(2));
+    let columns:Vec<String>=db.prepare("PRAGMA table_info(cli_invocations)").unwrap()
+        .query_map([],|r|r.get(1)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+    assert_eq!(columns,["invocation_id","command_path","outcome","exit_code","duration_ms","project_slug","caller","trust","recorded_unix_ms"]);
+    let rows: Vec<Value> = db.prepare("SELECT invocation_id,command_path,outcome,exit_code,duration_ms,project_slug,caller,trust,recorded_unix_ms FROM cli_invocations ORDER BY recorded_unix_ms,rowid").unwrap()
+        .query_map([], |r| Ok(json!({"invocation_id":r.get::<_,String>(0)?,"command_path":r.get::<_,String>(1)?,"outcome":r.get::<_,String>(2)?,
+            "exit_code":r.get::<_,i32>(3)?,"duration_ms":r.get::<_,i64>(4)?,"project_slug":r.get::<_,String>(5)?,
+            "caller":r.get::<_,String>(6)?,"trust":r.get::<_,String>(7)?,"recorded_unix_ms":r.get::<_,i64>(8)?}))).unwrap()
+        .collect::<rusqlite::Result<_>>().unwrap();
+    assert_eq!(rows.len(),3);
+    for row in &rows {
+        assert_eq!((row["command_path"].as_str(),row["caller"].as_str(),row["trust"].as_str(),row["project_slug"].as_str()),
+            (Some("task list"),Some("operator"),Some("local"),Some("demo")));
+        assert!(row["duration_ms"].as_i64().unwrap()>=0);
+        let text=row.to_string();
+        for forbidden in [r,"/secret/worktree","private-argument-value","unexpected argument","Usage:"] { assert!(!text.contains(forbidden),"{text}"); }
+    }
+    assert_eq!(rows.iter().map(|r| (r["outcome"].as_str().unwrap(),r["exit_code"].as_i64().unwrap())).collect::<Vec<_>>(),
+        vec![("ok",0),("help",0),("usage_error",2)]);
+    // Lock only telemetry: the real command still succeeds immediately.
+    db.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let started=std::time::Instant::now();
+    assert!(invoke(&["task","demo","list","--help"], &[]).status.success());
+    assert!(started.elapsed()<std::time::Duration::from_secs(2));
+    db.execute_batch("ROLLBACK").unwrap();
+    let count=|| db.query_row("SELECT count(*) FROM cli_invocations",[],|r|r.get::<_,i64>(0)).unwrap();
+    assert_eq!(count(),3);
+    // Old and future stream versions must never be changed by observation.
+    for version in [24,999] {
+        db.execute("UPDATE telemetry_streams SET version=?1 WHERE stream='accounting'",[version]).unwrap();
+        assert!(invoke(&["task","demo","list","--help"], &[]).status.success());
+        assert_eq!(count(),3);
+        assert_eq!(db.query_row("SELECT version FROM telemetry_streams WHERE stream='accounting'",[],|r|r.get::<_,i32>(0)).unwrap(),version);
+    }
+    db.execute("UPDATE telemetry_streams SET version=?1 WHERE stream='accounting'",[herdr_farm::telemetry::accounting::MIGRATIONS.len()]).unwrap();
+    let journal=json!({"version":2,"socket":"/fixture.sock","session_identity":{"device":1,"inode":2,"born_secs":3,"born_nanos":0},
+        "route":{"socket":"/fixture.sock","workspace_id":"w","tab_id":"t","pane_id":"canonical","cwd":"/fixture"},
+        "terminal":"fixture","kind":"fixture","name":"fixture","settings_digest":"fixture","config_digest":null,
+        "phase":"active","deliveries":0,"replace_missing":false});
+    std::fs::write(project.join(".state/canonical-coordinator.json"),journal.to_string()).unwrap();
+    for (vars,expected) in [ (vec![("HERDR_PANE_ID","canonical")],"coordinator"),
+        (vec![("HERDR_PANE_ID","other")],"operator"), (vec![("HERDR_PLUGIN_TEST","private-plugin-value")],"plugin"),
+        (vec![("HERDR_FARM_TICKER_CHILD","1")],"ticker") ] {
+        assert!(invoke(&["task","demo","list","--help"],&vars).status.success());
+        assert_eq!(db.query_row("SELECT caller FROM cli_invocations ORDER BY rowid DESC LIMIT 1",[],|r|r.get::<_,String>(0)).unwrap(),expected);
+    }
+    let before=count();
+    for args in [vec!["build-info"],vec!["ticker","run","--help"]] {assert!(invoke(&args,&[]).status.success());}
+    assert_eq!(count(),before);
+    let out=invoke(&["telemetry","demo","accounting","cli"],&[]);
+    assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stderr));
+    let view:Value=serde_json::from_slice(&out.stdout).unwrap();
+    let operator=view["callers"].as_array().unwrap().iter().find(|v|v["caller"]=="operator").unwrap();
+    assert_eq!(operator["invocations"],4);
+    assert_eq!(operator["help_share"],"2/4");
+    assert_eq!(operator["error_share"],"1/4");
+    let durations:Vec<i64>=db.prepare("SELECT duration_ms FROM cli_invocations WHERE caller='operator' AND command_path='task list' ORDER BY duration_ms").unwrap()
+        .query_map([],|r|r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+    assert_eq!(operator["p50_duration_ms"],durations[1]);
+    assert_eq!(operator["p95_duration_ms"],durations[3]);
+    // Parse-only help remains usable with unrelated non-Unicode environment data.
+    use std::os::unix::ffi::OsStringExt;
+    let observed=count();
+    let help=Command::new(BIN).env_clear().env("HOME",home.path())
+        .env("HERDR_FARM_TEST_TIME_SCALE",include_str!("support/time-scale.txt").trim())
+        .env("UNRELATED_FIXTURE",std::ffi::OsString::from_vec(vec![0xff]))
+        .args(["--root",r,"task","demo","list","--help"]).output().unwrap();
+    assert!(help.status.success());
+    assert_eq!(count(),observed+1);
+    let failed=invoke(&["task","demo","show","private-task-name"],&[]);
+    assert_eq!(failed.status.code(),Some(1));
+    let last:(String,String,i32)=db.query_row("SELECT command_path,outcome,exit_code FROM cli_invocations ORDER BY rowid DESC LIMIT 1",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+    assert_eq!(last,("task show".into(),"error".into(),1));
+    // Age real observations, then exercise capture's bounded retention.
+    db.execute("UPDATE cli_invocations SET recorded_unix_ms=?1",[jiff::Timestamp::now().as_millisecond()-91*86_400_000]).unwrap();
+    assert!(invoke(&["task","demo","list","--help"],&[]).status.success());
+    assert_eq!(count(),1);
+}
+
+#[cfg(all(feature="state-store", target_os="linux"))]
+#[path="support/telemetry.rs"]
+mod cli_self_lab;
+
+#[cfg(all(feature="state-store", target_os="linux"))]
+#[test]
+fn cli_self_worker_metadata_is_ingested_once_by_ticker_before_spool_removal() {
+    use herdr_farm::{domain::AttemptId, submission_spool, telemetry::sidecar};
+    let f=cli_self_lab::Fixture::reserved();
+    std::fs::write(f.project.join("PROJECT.md"),"---\nname = 'CLI metadata lab'\n---\n").unwrap();
+    std::fs::write(f.project.join(".state/format.json"),serde_json::to_vec(&herdr_farm::migration::Format {
+        version:1, runtime:"sqlite-v2".into(), memory:"legacy-markdown".into(), migration:"fixture".into(), reconciliation_required:false,
+    }).unwrap()).unwrap();
+    let home=f.tmp.path().join("home");
+    let attempt=AttemptId::new(f.attempt.clone()).unwrap();
+    submission_spool::prepare(&f.project,&attempt).unwrap();
+    let spool=f.project.join(".state/spool").join(&f.attempt);
+    let db=sidecar::open(&f.project,true).unwrap().unwrap();
+    let run=|args:&[&str],worker:bool| {
+        let mut command=Command::new(BIN);
+        command.env_clear().env("HOME",&home).env("PATH","/usr/bin:/bin")
+            .env("HERDR_FARM_TEST_TIME_SCALE",include_str!("support/time-scale.txt").trim())
+            .args(["--root",f.root.to_str().unwrap()]).args(args);
+        if worker {command.env(submission_spool::ENV,&spool);}
+        command.output().unwrap()
+    };
+    assert!(run(&["task","demo","list","--help"],true).status.success());
+    let file=spool.join(submission_spool::CLI_INVOCATIONS_FILE);
+    assert!(run(&["--version"],true).status.success());
+    let original=std::fs::read(&file).unwrap();
+    let reports:Vec<serde_json::Value>=original.split(|b|*b==b'\n').filter(|line|!line.is_empty())
+        .map(|line|serde_json::from_slice(line).unwrap()).collect();
+    assert_eq!(reports.len(),2);
+    assert_eq!(reports[1]["outcome"],"version");
+    assert_eq!(reports[1]["command_path"],"");
+    assert!(reports[1]["project_slug"].is_null());
+    let report=reports[0].clone();
+    assert_eq!((&report["command_path"],&report["caller"],&report["trust"]),
+        (&serde_json::json!("task list"),&serde_json::json!("worker"),&serde_json::json!("worker_reported")));
+    assert_eq!(std::fs::read_dir(&spool).unwrap().count(),1);
+    assert_eq!(db.query_row("SELECT count(*) FROM cli_invocations",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+    // No server or worker launch is needed to ingest a reserved attempt.
+    for _ in 0..2 {
+        let out=run(&["ticker","run","--passes","1"],false);
+        assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stderr));
+        assert_eq!(db.query_row("SELECT count(*) FROM cli_invocations WHERE caller='worker' AND trust='worker_reported' AND command_path='task list'",[],|r|r.get::<_,i64>(0)).unwrap(),1,"{}",std::fs::read_to_string(f.root.join(".ticker.log")).unwrap_or_default());
+    }
+    assert_eq!(std::fs::read(&file).unwrap(),original,"ingestion keeps the file append-only");
+    // Unknown fields and arbitrary command strings are refused at ingestion.
+    use std::io::Write;
+    let mut malicious=report.clone();malicious["invocation_id"]=serde_json::json!("e".repeat(64));malicious["command_path"]=serde_json::json!("task /private/path");
+    let mut append=std::fs::OpenOptions::new().append(true).open(&file).unwrap();
+    writeln!(append,"{malicious}").unwrap();
+    malicious=report.clone();malicious["invocation_id"]=serde_json::json!("f".repeat(64));
+    malicious["arguments"]=serde_json::json!("/private/path");
+    writeln!(append,"{malicious}").unwrap();
+    let out=run(&["ticker","run","--passes","1"],false);
+    assert!(out.status.success());
+    assert_eq!(db.query_row("SELECT count(*) FROM cli_invocations",[],|r|r.get::<_,i64>(0)).unwrap(),2);
+    // A full spool stays bounded even when a version lookup exits in clap.
+    append.set_len(128*1024).unwrap();
+    assert!(run(&["--version"],true).status.success());
+    assert_eq!(std::fs::metadata(&file).unwrap().len(),128*1024);
+    f.cancel_reserved();
+    let out=run(&["ticker","run","--passes","1"],false);
+    assert!(out.status.success());
+    assert!(!spool.exists(),"ended attempt spool is removed after ingestion");
+    assert_eq!(db.query_row("SELECT count(*) FROM cli_invocations",[],|r|r.get::<_,i64>(0)).unwrap(),2);
+}
+
+#[cfg(all(feature="state-store",target_os="linux"))]
+#[test]
+fn interactive_task_waits_for_project_locks_with_bounded_notice_and_no_partial_ownership() {
+    use std::{io::{BufRead, BufReader}, process::Stdio, time::{Duration, Instant}};
+    use herdr_farm::{migration, runtime, execution_guard::RootGuard};
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().join("root");
+    let r = root.to_str().unwrap();
+    for action in ["new", "pause"] { assert!(hp(home.path(), &["--root", r, action, "demo"]).status.success()); }
+    let project = root.join("demo");
+    let plan = migration::inspect(&project).unwrap();
+    migration::apply(&project, &plan, true).unwrap();
+    for (index, lock, hold, bound, succeeds, notice) in [
+        (0, project.join(".state/effect.lock"), 1.0, "5", true, false),
+        (1, root.join(".execution.lock"), 1.0, "0", false, false),
+        (2, project.join(".state/lock"), 3.0, "5", true, true),
+        (3, project.join(".state/effect.lock"), 3.0, "1", false, false),
+    ] {
+        let mut holder = Command::new("/usr/bin/python3").args(["-c",
+            "import fcntl,sys,time; f=open(sys.argv[1],'a'); fcntl.flock(f,fcntl.LOCK_EX); print('ready',flush=True); time.sleep(float(sys.argv[2]))"])
+            .arg(&lock).arg(hold.to_string()).stdout(Stdio::piped()).spawn().unwrap();
+        let mut ready = String::new();
+        BufReader::new(holder.stdout.take().unwrap()).read_line(&mut ready).unwrap();
+        assert_eq!(ready.trim(), "ready");
+        let head = runtime::snapshot(&project).unwrap().head.to_string();
+        let id = format!("wait-{index}");
+        let started = Instant::now();
+        let mut child = Command::new(BIN).env_clear().env("HOME", home.path())
+            .env("HERDR_FARM_TEST_TIME_SCALE", include_str!("support/time-scale.txt").trim())
+            .env("HERDR_FARM_LOCK_WAIT_SECS", bound)
+            .args(["--root", r, "task", "demo", "add", &id, "--title", "Waited task", "--expected-head", &head])
+            .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        let notice_reader = notice.then(|| {
+            let stderr = child.stderr.take().unwrap();
+            std::thread::spawn(move || {
+                let mut text = String::new();
+                for line in BufReader::new(stderr).lines() {
+                    let line = line.unwrap();
+                    if line.contains("waiting for ") {
+                        assert!(started.elapsed() >= Duration::from_secs(2), "notice printed before threshold");
+                    }
+                    text.push_str(&line); text.push('\n');
+                }
+                text
+            })
+        });
+        if index == 0 {
+            std::thread::sleep(Duration::from_millis(300));
+            assert!(child.try_wait().unwrap().is_none());
+            drop(RootGuard::exclusive(&root).expect("waiting must release the partial shared root lock"));
+        }
+        let output = child.wait_with_output().unwrap();
+        let elapsed = started.elapsed();
+        let stderr = notice_reader.map(|reader| reader.join().unwrap())
+            .unwrap_or_else(|| String::from_utf8_lossy(&output.stderr).into_owned());
+        assert_eq!(output.status.success(), succeeds, "{stderr}");
+        assert_eq!(stderr.contains("waiting for "), notice, "{stderr}");
+        assert_eq!(stderr.matches("waiting for ").count(), usize::from(notice));
+        if bound == "0" { assert!(elapsed < Duration::from_millis(800), "{elapsed:?}"); }
+        if succeeds { assert!(elapsed >= Duration::from_millis(900)); }
+        let snapshot = runtime::snapshot(&project).unwrap();
+        assert_eq!(snapshot.tasks.iter().any(|task| task.id.as_str() == id), succeeds);
+        if !succeeds { assert_eq!(snapshot.head.to_string(), head); }
+        holder.kill().ok(); holder.wait().unwrap();
+    }
+    let lock = project.join(".state/effect.lock");
+    std::fs::remove_file(&lock).unwrap();
+    let target = home.path().join("preserve");
+    std::fs::write(&target, "preserve").unwrap();
+    std::os::unix::fs::symlink(&target, &lock).unwrap();
+    let head = runtime::snapshot(&project).unwrap().head.to_string();
+    let started = Instant::now();
+    let output = Command::new(BIN).env_clear().env("HOME", home.path())
+        .env("HERDR_FARM_TEST_TIME_SCALE", include_str!("support/time-scale.txt").trim())
+        .env("HERDR_FARM_LOCK_WAIT_SECS", "5")
+        .args(["--root", r, "task", "demo", "add", "refused", "--title", "Refused", "--expected-head", &head])
+        .output().unwrap();
+    assert!(!output.status.success());
+    assert!(started.elapsed() < Duration::from_millis(800));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("waiting for "));
+    assert_eq!(runtime::snapshot(&project).unwrap().head.to_string(), head);
+    assert_eq!(std::fs::read_to_string(target).unwrap(), "preserve");
 }

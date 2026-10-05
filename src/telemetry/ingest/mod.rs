@@ -22,7 +22,9 @@ const MAX_ENVELOPE: usize = 64 << 10;
 fn normalization_version(kind: &str) -> i64 {
     match kind {
         "session_meta" => 5,
-        "token_count" | "function_call" | "item_completed" | "claude_line" => 2,
+        "claude_line" => 3,
+        "item_completed" => 3,
+        "task_started" | "token_count" | "function_call" => 2,
         _ => 1,
     }
 }

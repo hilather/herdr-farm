@@ -49,6 +49,8 @@ mod local_reports;
 mod local_observations;
 mod adopt;
 mod cli;
+#[cfg(feature="state-store")]
+mod cli_invocation;
 #[cfg(all(feature="state-store",target_os="linux"))]
 mod launch_run;
 mod cleanup;
@@ -129,7 +131,12 @@ fn main() {
         }
     }
     extend_path();
-    if let Err(error) = cli::run() {
+    #[cfg(feature="state-store")]
+    let mut capture = cli_invocation::Capture::start();
+    let result = cli::run(#[cfg(feature="state-store")] &mut capture);
+    #[cfg(feature="state-store")]
+    capture.finish(if result.is_ok() { "ok" } else { "error" }, if result.is_ok() { 0 } else { 1 });
+    if let Err(error) = result {
         eprintln!("herdr-farm: {error:#}");
         std::process::exit(1);
     }

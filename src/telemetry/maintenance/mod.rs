@@ -36,6 +36,7 @@ const TERMINAL_TASK: [&str; 3] = ["succeeded", "failed", "cancelled"];
 
 pub const SESSIONS: &str = "sidecar.normalized_sessions";
 pub const ATTENTION: &str = "sidecar.attention_samples";
+pub const CLI: &str = "sidecar.cli_invocations";
 pub const HEALTH: &str = "sidecar.health_evaluations";
 pub const ANALYTICS: &str = "sidecar.analytics_revisions";
 pub const QUARANTINE: &str = "artefact.git_quarantine";
@@ -100,11 +101,13 @@ pub const CLASSES: &[Class] = &[
         action: Action::Retain, age_from: "created_unix_ms", requires: "hashed credentials and revocations retained in full backups; no plaintext tokens; expiry remains absolute" },
     Class { id: "secret.otlp_tokens", store: "<config_dir>/otlp-<project-digest>.token", scope: "per-project bearer tokens", default_days: None, basis: "source_of_truth", destructive: true,
         action: Action::External, age_from: "-", requires: "never included in telemetry backups; delete to rotate while receiver stopped" },
-    Class { id: SESSIONS, store: "telemetry.db", scope: "per native session: muse_events, muse_parents, claude_messages, claude_tool_results, opencode_messages, opencode_tools, codex_*, rollout_*, collect_offsets, codex_tool_sources, source_bindings, source_observations, ingest_quarantine, coverage_gaps, source_cursors, usage_entries, usage_dispositions, model_segments, quota_window_observations, session_graph_nodes",
+    Class { id: SESSIONS, store: "telemetry.db", scope: "per native session: muse_events, muse_parents, claude_turn_lines, claude_messages, claude_tool_results, opencode_messages, opencode_tools, codex_*, rollout_*, collect_offsets, codex_tool_sources, source_bindings, source_observations, ingest_quarantine, coverage_gaps, source_cursors, usage_entries, usage_dispositions, model_segments, quota_window_observations, session_graph_nodes",
         default_days: Some(90), basis: "derivable_from_native_source", destructive: true, action: Action::Prune, age_from: "last durable acceptance (rollout_sources.observed_unix_ms)",
         requires: "bound attempt terminal; accounting ledger synced after acceptance with no unresolved or conflicting disposition; no quarantined record" },
     Class { id: ATTENTION, store: "telemetry.db", scope: "attention_samples", default_days: Some(90), basis: "source_of_truth", destructive: true, action: Action::Prune,
         age_from: "observed_unix_ms", requires: "attempt terminal" },
+    Class { id: CLI, store: "telemetry.db", scope: "cli_invocations", default_days: Some(90), basis: "source_of_truth", destructive: false, action: Action::Prune,
+        age_from: "recorded_unix_ms", requires: "none (capture also caps at 90 days and 100000 rows); included in full backups" },
     Class { id: HEALTH, store: "telemetry.db", scope: "health_evaluations", default_days: Some(90), basis: "derivable", destructive: false, action: Action::Prune,
         age_from: "evaluated_unix_ms", requires: "none (the newest 1000 are also capped by the health lane)" },
     Class { id: ANALYTICS, store: "telemetry.db", scope: "analytics_revisions and their analytics_lineage and analytics_workspace_metrics (superseded revisions only), analytics_workspace_comparisons (latest kept)", default_days: Some(365), basis: "derivable",
@@ -157,7 +160,7 @@ fn class(id: &str) -> Option<&'static Class> { CLASSES.iter().find(|c| c.id == i
 const BY_PATH: &[&str] = &["collect_offsets", "rollout_sources", "rollout_metadata", "rollout_threads", "rollout_subagents", "rollout_ingest_state", "rollout_forks",
     "rollout_turn_ends", "rollout_turn_terminations", "codex_tool_sources", "source_bindings", "session_graph_nodes", "usage_dispositions", "accounting_source_summary"];
 const BY_SESSION: &[&str] = &["codex_usage", "codex_usage_times", "codex_quarantine", "codex_discrepancy", "codex_rate_limits", "codex_rate_limit_windows", "codex_turns",
-    "muse_events", "muse_parents", "claude_messages", "claude_tool_results", "opencode_messages", "opencode_tools", "codex_tool_calls", "codex_tool_namespaces", "codex_exec_items", "codex_mcp_calls", "codex_agent_items", "codex_turn_aborts", "codex_fork_reconciliation", "usage_entries",
+    "muse_events", "muse_parents", "claude_turn_lines", "claude_messages", "claude_tool_results", "opencode_messages", "opencode_tools", "codex_tool_calls", "codex_tool_namespaces", "codex_exec_items", "codex_session_items", "codex_session_turns", "codex_session_clock", "codex_mcp_calls", "codex_agent_items", "codex_turn_aborts", "codex_fork_reconciliation", "usage_entries",
     "model_segments", "quota_window_observations", "session_graph_nodes", "accounting_dirty_sessions", "accounting_usage_totals", "accounting_cache_totals", "accounting_native_totals", "accounting_source_summary", "accounting_tool_summary"];
 /// `(table, column)` holding the source's path digest.
 const BY_SOURCE: &[(&str, &str)] = &[("source_observations", "producer_epoch"), ("ingest_quarantine", "source"), ("coverage_gaps", "source"), ("source_cursors", "source")];
@@ -315,6 +318,7 @@ enum Target {
     Session { id: String, paths: Vec<String> },
     Attention { attempt: String, before: i64 },
     Health { before: i64 },
+    Cli { before: i64 },
     Revision { revision: i64 },
     Comparison { revision: i64 },
     Tree(PathBuf),
@@ -393,6 +397,7 @@ pub fn plan(project: &Path, config_dir: &Path, now: i64, forget: &[String]) -> R
         let found = match (class.id, &sidecar) {
             (SESSIONS, Some(db)) => sessions(&ctx, db, forget)?,
             (ATTENTION, Some(db)) => attention(&ctx, db)?,
+            (CLI, Some(db)) => cli(&ctx, db)?,
             (HEALTH, Some(db)) => health(&ctx, db)?,
             (ANALYTICS, Some(db)) => analytics(&ctx, db)?,
             (QUARANTINE, _) => quarantines(&ctx)?,
@@ -481,6 +486,19 @@ fn attention(ctx: &Ctx, db: &Connection) -> Result<Found> {
         let item = Item { class: ATTENTION, key: key.clone(), tombs: vec![(Some(key), Some(before))], target: Target::Attention { attempt: attempt.clone(), before },
             detail: json!({"samples": samples}), reason: "retention_expired" };
         found.offer(ctx, item, &[attempt.as_str()]);
+    }
+    Ok(found)
+}
+
+fn cli(ctx: &Ctx, db: &Connection) -> Result<Found> {
+    let mut found = Found::default();
+    if !table(db, "cli_invocations")? { return Ok(found); }
+    let before = ctx.cutoff(CLI);
+    let rows: i64 = db.query_row("SELECT count(*) FROM cli_invocations WHERE recorded_unix_ms<?1", [before], |r| r.get(0))?;
+    if rows > 0 {
+        let item = Item { class: CLI, key: "invocations_before_cutoff".into(), tombs: vec![(None, Some(before))], target: Target::Cli { before },
+            detail: json!({"invocations": rows}), reason: "retention_expired" };
+        found.offer(ctx, item, &[]);
     }
     Ok(found)
 }
@@ -788,6 +806,10 @@ pub fn enforce(db: &mut Connection, tombstones: &Tombstones) -> Result<BTreeMap<
         }
         if n > 0 { out.insert(ATTENTION, n); }
     }
+    if let Some(&before) = tombstones.before.get(CLI) && table(&tx, "cli_invocations")? {
+        let n = tx.execute("DELETE FROM cli_invocations WHERE recorded_unix_ms<?1", [before])?;
+        if n > 0 { out.insert(CLI, n); }
+    }
     if let Some(&before) = tombstones.before.get(HEALTH) && table(&tx, "health_evaluations")? {
         let n = tx.execute("DELETE FROM health_evaluations WHERE evaluated_unix_ms<?1", [before])?;
         if n > 0 { out.insert(HEALTH, n); }
@@ -896,6 +918,7 @@ pub fn apply(project: &Path, config_dir: &Path, confirm: Option<&str>, dry_run: 
                 sidecar.as_ref().context("the sidecar disappeared")?
                     .execute("DELETE FROM attention_samples WHERE attempt_id=?1 AND observed_unix_ms<?2", params![attempt, before])?;
             }
+            Target::Cli { before } => { sidecar.as_ref().context("the sidecar disappeared")?.execute("DELETE FROM cli_invocations WHERE recorded_unix_ms<?1", [before])?; }
             Target::Health { before } => { sidecar.as_ref().context("the sidecar disappeared")?.execute("DELETE FROM health_evaluations WHERE evaluated_unix_ms<?1", [before])?; }
             Target::Revision { revision } => {
                 let db = sidecar.as_mut().context("the sidecar disappeared")?;

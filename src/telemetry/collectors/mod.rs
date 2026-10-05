@@ -21,7 +21,9 @@ pub const MIGRATIONS: &[&str] = &[include_str!("../../../migrations/telemetry/in
     include_str!("../../../migrations/telemetry/ingest/0011_opencode.sql"),
     include_str!("../../../migrations/telemetry/ingest/0012_compact_envelopes.sql"),
     include_str!("../../../migrations/telemetry/ingest/0013_muse.sql"),
-    include_str!("../../../migrations/telemetry/ingest/0014_claude_mapping_v2.sql")];
+    include_str!("../../../migrations/telemetry/ingest/0014_claude_mapping_v2.sql"),
+    include_str!("../../../migrations/telemetry/ingest/0015_claude_turns.sql"),
+    include_str!("../../../migrations/telemetry/ingest/0016_worker_sessions.sql")];
 
 /// `herdr-farm telemetry <slug> collectors ...`
 #[derive(clap::Subcommand)]
@@ -165,6 +167,7 @@ fn codex_fields() -> Vec<Field> {
         absent("turn_context", "collaboration_mode", "content_forbidden"),
         absent("turn_context", "user_instructions", "content_forbidden"),
         field("task_started", "turn_id", Live, None),
+        field("task_started", "model_context_window", Fixture, Some("0_159_key_census")),
         absent("task_started", "started_at", "not_collected"),
         field("token_usage_record", "session_id", Live, Some("child_reports_parent_session")),
         field("token_usage_record", "turn_id", Live, None),
@@ -239,6 +242,9 @@ fn codex_fields() -> Vec<Field> {
         field("item_completed", "item.status", Live, Some("observed_completed_failed")),
         field("item_completed", "item.source", Live, Some("command_execution_only")),
         field("item_completed", "item.exit_code", Live, Some("command_execution_only")),
+        field("item_completed", "item.changed_files", Fixture, Some("changes_entry_count_only")),
+        absent("item_completed", "item.changes", "content_forbidden"),
+        absent("item_completed", "item.path", "content_forbidden"),
         field("item_completed", "item.duration.secs", Live, Some("startup_not_run_time")),
         field("item_completed", "item.duration.nanos", Live, Some("startup_not_run_time")),
         absent("item_completed", "started_at_ms", "not_collected"),
@@ -305,8 +311,9 @@ fn capabilities(project: &Path) -> Result<Value> {
         anyhow::ensure!(collected == class.is_some(), "capability table and allowlist disagree on codex {}.{}", f.kind, f.field);
         let basis = match (f.kind, class) {
             ("line", _) => "reported",
+            ("item_completed", _) if f.field == "item.changed_files" => "derived",
             (_, None) => "unavailable",
-            (_, Some(Class::ModelId | Class::Id | Class::Number | Class::Bool | Class::IdList)) => "reported",
+            (_, Some(Class::ModelId | Class::Id | Class::EnumTag | Class::Number | Class::Bool | Class::IdList)) => "reported",
             (_, Some(Class::Text | Class::Tag)) => "reported_excerpt",
             (_, Some(Class::Path)) => "reported_home_redacted",
         };
@@ -589,6 +596,7 @@ fn tools(project: &Path) -> Result<Value> {
                     .query_map([&session], |r| Ok(json!({"item_id": r.get::<_, String>(0)?, "thread_id": r.get::<_, Option<String>>(1)?,
                         "turn_id": r.get::<_, Option<String>>(2)?, "status": r.get::<_, Option<String>>(3)?, "source": r.get::<_, Option<String>>(4)?,
                         "exit_code": r.get::<_, Option<i64>>(5)?, "startup_duration": {"secs": r.get::<_, Option<i64>>(6)?, "nanos": r.get::<_, Option<i64>>(7)?},
+                        "reported_duration": {"secs": r.get::<_, Option<i64>>(6)?, "nanos": r.get::<_, Option<i64>>(7)?},
                         "completed_unix_ms": r.get::<_, Option<i64>>(8)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
                 (json!(calls), json!(items))
             }

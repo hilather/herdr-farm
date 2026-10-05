@@ -26,7 +26,7 @@ needs a new reviewed revision, not a silent reinterpretation.
   `migrations/telemetry/`, also `user_version`; 3 adds TM5.1's read indexes,
   certificate-scale.md §5; 4 adds lossless storage compaction, §4.15), and
   one stream per lane under
-  `migrations/telemetry/<stream>/`: `ingest`, `accounting`, `quality` (0004 adds DG6d/e rerun observations; contracts-quality.md §6),
+  `migrations/telemetry/<stream>/`: `ingest`, `accounting` (0025 adds product CLI metadata, §7), `quality` (0004 adds DG6d/e rerun observations; contracts-quality.md §6),
   `review`,
   `analytics` (TM4.1 aggregate revisions), `health` (TM4.5 alert
   state), `otlp` (DG4a sanitized native records, migration 0001;
@@ -66,7 +66,9 @@ migrated sidecar.
 
 - **Authority.** Telemetry never grants launch, changes budgets, accepts
   results or writes memory. Canonical rows below are written by existing
-  controller transactions; the sidecar is analytics only.
+  controller transactions; the sidecar is analytics only. A command described
+  as read-only can still append product CLI invocation metadata after its
+  projection completes (§7).
 - **Unknown is not zero.** Every value that can be missing is either a value
   or `{"status":"unavailable","reason":<code>}`. A known subtotal with missing
   coverage is `{"status":"partial","reason":<code>,…subtotal…}`; it never
@@ -87,6 +89,9 @@ migrated sidecar.
   namespaces, fork points and fork reconciliation, 0009 terminated turns,
   0010 Claude Code message identity and reported tool outcomes (DG4b);
   0011 OpenCode native message/tool metadata (DG4d);
+  ingest 0015 Claude turn metadata (session-retained, full backup);
+  ingest 0016 worker-session metadata (`codex_session_items`,
+  `codex_session_turns`, `codex_session_clock`, native-session retention/full backup);
   accounting 0013 adds Claude ledger source/cache normalization, 0014 adds OpenCode,
   0015 adds maintained read aggregates,
   contracts-collection.md A6–A9 and DG4b/DG4d), mode 0600, created on first collect. No
@@ -368,10 +373,12 @@ S3 refinements:
 `task_complete`, `turn_aborted` (A8), `item_completed`, and `response_item`
 of type `custom_tool_call`, `function_call`, `custom_tool_call_output`,
 `function_call_output` (A6: tool metadata only, through a typed allowlist).
-All other record types are skipped by type tag without retaining any field. Read only complete lines (ending `\n`); a partial last
+All other record payloads are skipped; only their line timestamp can advance
+the worker-session clock (ingest 0016). Read only complete lines (ending `\n`); a partial last
 line is left for the next pass and the file offset is not advanced past it.
 
-**Allowlisted fields.** `session_meta`: `id`, `timestamp`, `cwd`,
+**Allowlisted fields.** A10 adds worker-session item counts and context windows
+(ingest 0016; the exact additional fields are listed in §7). `session_meta`: `id`, `timestamp`, `cwd`,
 `cli_version`, `originator`, `source`, `model_provider`, `forked_from_id`,
 and from `source.subagent` its variant and, for `thread_spawn`,
 `parent_thread_id` and `depth` (A4), and for the `other` variant its string
@@ -610,12 +617,66 @@ S6 refinements:
 
 ## 7. Privacy allowlist and excerpts
 
+Worker sessions (ingest 0016) add `task_started.model_context_window`
+(positive integer); `FileChange` item id/status and `changed_files` (the count
+of `changes` array entries, never their values); `ImageView` item id/count
+(never its path); `UserMessage` line time and source position only (never content,
+used as evidence that a user message followed a question). Command items also
+expose `reported_duration_secs`/`reported_duration_nanos` through
+`codex_reported_exec_durations`, a view over the retained command fields. The supplied
+0.159.3 key census does not prove that `duration` is execution time; the
+0.154 startup columns stay compatible, and the neutral fields make no run-time
+claim. Session clocks keep line timestamps, including timestamps from otherwise
+ignored record types; their payloads remain unread. Turn counts, command exit
+classes, file/image counts, request/answer evidence, spawn counts, context-fill
+ratios, lingering intervals and end-state enums are derived metadata.
+
 Default: metadata only (IDs, digests, enums, counters, timestamps, durations,
 provider and parent-session identifiers, tool call ids, tool names and
 namespaces, call and exec statuses, exit codes and exec startup durations,
 MCP server and tool names with their read-only and error flags and
 durations, subagent and collab item ids and statuses, turn abort reasons,
 and fork points).
+Product CLI self-observation has exactly these stored metadata fields:
+`invocation_id` (opaque deduplication digest), `command_path` (fixed clap
+subcommand names only, without the executable name; empty for root help/version),
+`outcome` (`ok`, `error`,
+`help`, `version`, `usage_error`), `exit_code`, `duration_ms`, `project_slug`
+(validated slug when supplied, otherwise null), `caller` (`worker`,
+`coordinator`, `plugin`, `ticker`, `operator`), `trust` (`local` or
+`worker_reported`), and `recorded_unix_ms`. No argument values, paths, error
+text, environment values, stdout or stderr are collected. Internal
+`launch-exec`, `report-hash`, `artifact-stream`, `verification-setup`,
+`build-info`, and `ticker run` are excluded. Worker spool presence takes
+precedence; coordinator classification compares `HERDR_PANE_ID` with the
+validated canonical coordinator journal's route pane; plugin presence follows,
+then `HERDR_FARM_TICKER_CHILD` (inherited by the ticker's CLI children), then
+operator. These labels are observations, never authorization.
+
+Normal completion writes after all command guards drop. Parse-only help,
+version and usage-error exits write before clap exits, without project guards.
+Direct writes open only an existing current accounting stream, never create
+or migrate it, never take maintenance admission, and use a zero busy timeout.
+Failures are silently discarded. Projectless non-worker invocations have no
+sidecar destination. Workers append to one `cli-invocations.jsonl` entry in
+their attempt spool (128 KiB cap, 2 KiB per line, nonblocking writer lock).
+Ticker ingestion validates exact registered clap paths and typed metadata,
+forces `worker` / `worker_reported`, and deduplicates by invocation ID before
+ended-attempt spool removal. Busy ingestion defers removal to a later pass;
+absent or old sidecars receive no rows. The table is bounded to 90 days and
+100,000 newest rows, classified as `sidecar.cli_invocations`, included in full
+backups, retention planning/apply, restore loss counts and tombstone enforcement.
+
+Claude turn metadata adds exactly these leaves: non-tool-result user lines
+`turnOrigin`, `promptSource` (enum tags), `turnPosition.promptIndex`,
+`turnPosition.turnIndex` (numbers), `promptId` (id); assistant lines
+`requestId` (id), `message.stop_reason` (enum tag); system lines `subtype`
+(enum tag), `durationMs` (number); tool results
+`toolUseResult.backgroundTaskId` (id only); queue-operation lines `operation`
+(enum tag only). Enum values must match `^[a-z][a-z0-9_-]{0,31}$`;
+all other strings become `other`. These are metadata, never message content.
+No other leaf inside `toolUseResult` is read, stored or hashed.
+
 Allowed free text is limited to **excerpts** of: verification/integration
 `reason` (≤128 already), operator dispatch `note`, finding titles when that
 producer exists. Excerpt rule, applied before any write or display:
@@ -632,8 +693,8 @@ producer exists. Excerpt rule, applied before any write or display:
 
 Never collected: prompts, briefs, transcripts, agent messages, tool
 input/arguments/output (MCP `arguments` and `result` content included),
-subagent paths and collab agent records, commands and their working directories, parsed
-commands and output (stdout, stderr, aggregated or formatted), diffs, file
+subagent paths and collab agent records, shell commands and their working directories, user argument values, parsed
+command lines and output (stdout, stderr, aggregated or formatted), diffs, file
 contents, reasoning text, environment values. Tool metadata is read from
 `response_item` and `item_completed` only through a typed allowlist that
 never deserializes these fields.
@@ -812,3 +873,8 @@ Accounting stream **v24**, `migrations/telemetry/accounting/0024_claude_cache_ti
 adds Claude 5-minute and 1-hour cache-write quantities to `usage_entries` and
 invalidates accounting for the Claude mapping v2 (ingest migration 0014). The new
 columns follow the existing usage-entry retention and backup classes.
+
+Accounting stream **v25**, `migrations/telemetry/accounting/0025_cli_invocations.sql`,
+adds `cli_invocations` and its timestamp index for product CLI metadata (§7).
+Retention/backup class: `sidecar.cli_invocations`; 90 days and 100,000 rows.
+See [contracts-accounting.md](contracts-accounting.md#product-cli-self-observation).
