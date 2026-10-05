@@ -478,6 +478,7 @@ fn create_resource_inner(
             30_000,
         )?
     };
+    if !continuing { crate::telemetry::operations::sample_launch(&project, record.attempt.as_str()); }
     api.deadline = api.deadline.min(
         Instant::now()
             + Duration::from_millis(claim.lease_until_ms.saturating_sub(now()).max(0) as u64),

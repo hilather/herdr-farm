@@ -276,9 +276,23 @@ pub fn structured_text(value: &Value) -> Option<String> {
     let o = value.as_object()?;
     if value["status"] == "partial" && o.contains_key("denominator") {
         let subtotal = value["priced_amount"].as_str().map(str::to_owned).unwrap_or_else(|| value["tokens"].to_string());
-        return Some(format!("partial {subtotal}/{} ({}: {} attempts without usage)", value["denominator"], value["reason"].as_str().unwrap_or("unknown"), value["attempts_without_usage"]));
+        let reason = value["reason"].as_str().unwrap_or("unknown");
+        let missing = value.get("attempts_without_usage").map(|n| format!(": {n} attempts without usage")).unwrap_or_default();
+        return Some(format!("partial {subtotal}/{} ({reason}{missing})", value["denominator"]));
     }
     if o.contains_key("reason") { return None; }
+    if o.contains_key("state_db") {
+        let sizes = ["state_db", "telemetry_db", "worktrees", "worker_output"].map(|name| {
+            let category = &value[name];
+            let last = category["samples"].as_array().and_then(|rows| rows.last());
+            let bytes = last.and_then(|row| row["bytes"].as_i64()).map_or_else(|| "n/a (scan_incomplete)".to_owned(), |bytes| bytes.to_string());
+            let growth = &category["growth_bytes_per_day"];
+            let growth = growth.as_str().map(str::to_owned).unwrap_or_else(|| format!("n/a ({})", growth["reason"].as_str().unwrap_or("unknown")));
+            format!("{name} bytes={bytes} growth_bytes_per_day={growth}")
+        });
+        return Some(sizes.join("; "));
+    }
+    if o.contains_key("median_ms") || o.contains_key("reserved_to_launching") || o.contains_key("launch_samples") || o.contains_key("small") { return Some(value.to_string()); }
     let issued = o.get("issued")?.as_u64()?;
     let accepted = &value["accepted"];
     Some(format!("issued {issued}, accepted {} {} ({} unknown), executed {}", accepted["count"], accepted["status"].as_str().unwrap_or("unknown"),
@@ -302,6 +316,20 @@ pub fn text(report: &Value) -> String {
         let name = m["name"].as_str().unwrap_or(registered.name);
         for w in m["not_reported"].as_array().into_iter().flatten() {
             out += &format!("limit {} {} {} n/a ({})\n", w["account"].as_str().unwrap_or(""), w["limit_id"].as_str().unwrap_or(""), w["window_kind"].as_str().unwrap_or(""), w["reason"].as_str().unwrap_or("not_reported"));
+        }
+        for (dimension, cells) in [("profile", &m["by_profile"]), ("currency", &m["by_currency"])] {
+            for (label, cell) in cells.as_object().into_iter().flatten() {
+                if id == "M56" {
+                    for component in ["reasoning_share", "cache_share"] {
+                        out += &format!("{id} {name} {dimension}={label} {component} {}\n", show(&cell[component]));
+                    }
+                } else {
+                    out += &format!("{id} {name} {dimension}={label} {}\n", show(cell));
+                    for (severity, value) in cell["by_severity"].as_object().into_iter().flatten() {
+                        out += &format!("{id} {name} {dimension}={label} severity={severity} {}\n", show(value));
+                    }
+                }
+            }
         }
         match m["decisions"].as_array() {
             Some(list) if list.is_empty() => out += &format!("{id} {name} n/a (no_decisions)\n"),

@@ -99,7 +99,7 @@ pub(crate) fn group(provider: Provider, id: &str) -> &'static str {
 
 /// These evaluators consult the clock (censoring, active windows or maturity).
 /// Their dependency is time as well as stored inputs, so they never skip.
-pub(crate) fn clock(group: &str) -> bool { matches!(group, "attention" | "fleet" | "review" | "quality") }
+pub(crate) fn clock(group: &str) -> bool { matches!(group, "attention" | "fleet" | "review" | "quality" | "operations") }
 
 pub(crate) fn stamp(group: &str, canonical: &Value, generations: &BTreeMap<String, i64>) -> String {
     let relevant = |table: &str| table == "schema" || match group {

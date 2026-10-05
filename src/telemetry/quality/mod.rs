@@ -108,3 +108,8 @@ pub fn tick(project: &Path, _budget: super::codex::Budget) -> Result<()> {
     proxy::collect(project, false, TICK_DIFFS)?;
     outcomes::collect(project, false, outcomes::DEFAULT_HORIZON_DAYS, outcomes::CALLS_PER_INTEGRATION).map(drop)
 }
+
+/// Read the existing proxy's observation-time window for health evaluation.
+pub(crate) fn weakening_window(project: &Path, from: i64, to: i64) -> Result<Value> {
+    proxy::weakening_window(project, from, to)
+}

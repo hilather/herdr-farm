@@ -1013,3 +1013,86 @@ pub fn coordinator_turns(project: &Path) -> Result<Value> {
     let sessions = ids.iter().map(|id| super::claude_turns::read(&db,id,&cost)).collect::<Result<Vec<_>>>()?;
     Ok(json!({"scope":COORDINATOR_SCOPE,"summary":super::claude_turns::summarize(&sessions)?,"sessions":sessions}))
 }
+
+/// M60: complement of known running intervals inside observed operating time.
+/// Without operating observations use only the first-to-last running span;
+/// never extrapolate project idle time before/after recorded activity.
+pub(crate) fn idle_gaps(project: &Path, since: Option<i64>) -> Result<Value> {
+    let db = crate::telemetry::read_only(&project.join(".state/state.db"))?;
+    let horizon = now();
+    let fleet = match load(&db, horizon)? {
+        Ok(f) => f,
+        Err(reason) => return Ok(json!({"value":unavailable(reason)})),
+    };
+    let mut unknown = fleet.unknown.clone();
+    // Operating observations can precede the lifecycle log. A pre-log
+    // attempt's activity in that prefix is unknown, even when its terminal
+    // state means it no longer contributes uncertainty after the log began.
+    if fleet.coverage.get("predates_lifecycle_log").copied().unwrap_or(0) > 0 {
+        let first: Option<i64> = db.query_row("SELECT min(unix_ms) FROM attempt_lifecycle WHERE state='reserved'", [], |r| r.get(0))?;
+        unknown.push((i64::MIN, first.unwrap_or(horizon), None, false));
+    }
+    let mut observed = Vec::<(i64,i64)>::new();
+    let mut operating = false;
+    if let Some(sidecar) = crate::telemetry::sidecar::read(project)?
+        && table(&sidecar,"operating_clock")?
+        && sidecar.query_row("SELECT EXISTS(SELECT 1 FROM operating_clock)", [], |r| r.get::<_,bool>(0))? {
+        operating = true;
+        observed = sidecar.prepare("SELECT start_unix_ms,end_unix_ms FROM operating_intervals ORDER BY start_unix_ms")?
+            .query_map([], |r| Ok((r.get(0)?,r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+    }
+    if !operating {
+        let from = fleet.runs.iter().map(|r| r.from).min();
+        let to = fleet.runs.iter().map(|r| r.to).max();
+        if let (Some(from),Some(to)) = (from,to) { observed.push((from,to)); }
+    }
+    let mut spans = Vec::<(i64,i64)>::new();
+    for (from,to) in observed {
+        let from = from.max(since.unwrap_or(from));
+        let to = to.min(horizon);
+        if to <= from { continue; }
+        if let Some(last) = spans.last_mut() && from <= last.1 {last.1 = last.1.max(to);} else {spans.push((from,to));}
+    }
+    if spans.is_empty() { return Ok(json!({"value":unavailable(if operating {"no_observed_operating_intervals"} else {"no_running_intervals"})})); }
+    // Merge once, then walk both sorted lists. Historical attempts must not
+    // make every operating endpoint scan the entire attempt population.
+    let union = |mut rows: Vec<(i64,i64)>| {
+        rows.retain(|(from,to)| to>from);
+        rows.sort_unstable();
+        let mut merged = Vec::<(i64,i64)>::new();
+        for (from,to) in rows {
+            if let Some(last) = merged.last_mut() && from<=last.1 {last.1=last.1.max(to);} else {merged.push((from,to));}
+        }
+        merged
+    };
+    let unknown = union(unknown.iter().map(|u| (u.0,u.1)).collect());
+    let blocked = union(fleet.runs.iter().map(|r| (r.from,r.to)).chain(unknown.iter().copied()).collect());
+    let (mut gaps,mut unknown_ms,mut busy_index,mut unknown_index) = (Vec::new(),0,0,0);
+    for (from,to) in spans {
+        while unknown_index<unknown.len() && unknown[unknown_index].1<=from {unknown_index+=1;}
+        while unknown_index<unknown.len() && unknown[unknown_index].0<to {
+            let range=unknown[unknown_index];
+            unknown_ms+=overlap(range,(from,to));
+            if range.1>to {break;}
+            unknown_index+=1;
+        }
+        while busy_index<blocked.len() && blocked[busy_index].1<=from {busy_index+=1;}
+        let mut cursor=from;
+        while busy_index<blocked.len() && blocked[busy_index].0<to {
+            let range=blocked[busy_index];
+            let begin=range.0.max(from);
+            if begin>cursor {gaps.push(begin-cursor);}
+            cursor=cursor.max(range.1.min(to));
+            if range.1>to {break;}
+            busy_index+=1;
+        }
+        if cursor<to {gaps.push(to-cursor);}
+    }
+    gaps.sort_unstable();
+    let rank = |p:usize| gaps.get((gaps.len()*p).div_ceil(100).saturating_sub(1)).copied();
+    let mut value = json!({"count":gaps.len(),"median_ms":rank(50),"p90_ms":rank(90),"total_ms":gaps.iter().map(|v| i128::from(*v)).sum::<i128>()});
+    if unknown_ms > 0 { value["status"] = json!("partial"); }
+    Ok(json!({"value":value,"basis":if operating {"observed_operating_intervals"} else {"first_to_last_running"},
+        "coverage":{"state":if unknown_ms>0 {"partial"} else {"complete"},"unknown_ms":unknown_ms},
+        "censored":{"open_running_intervals":fleet.coverage.get("open_censored")}}))
+}

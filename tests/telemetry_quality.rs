@@ -100,6 +100,8 @@ fn first_candidate_ci_proxy_and_test_weakening_flag() {
     assert_eq!(f.cli_args(&["quality", "status"]).0, json!({"stream": "quality", "version": 4}));
 
     let after = f.report();
+    assert_eq!(after["metrics"]["M54"]["value"], json!("1/3"));
+    assert_eq!(after["metrics"]["M54"]["excluded"]["not_collected"], json!(2));
     let m45 = &f.cli_args(&["quality", "report"]).0["metrics"]["M45"];
     assert_eq!((&m45["definition"], &m45["proxy"], &m45["source_trust"]), (&json!("M45.proxy-v1"), &json!(true), &json!("proxy_observed")));
     assert_eq!((&m45["numerator"], &m45["denominator"], &m45["value"], &m45["pending"]), (&json!(1), &json!(2), &json!("1/2"), &json!(1)));

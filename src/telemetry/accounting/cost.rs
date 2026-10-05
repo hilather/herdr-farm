@@ -810,7 +810,7 @@ pub(super) fn stored_at(db: &Connection, revision: i64) -> Result<BTreeMap<Strin
 /// The estimate over some valuations: complete only when every entry is
 /// priced in one currency; a priced subset is labeled partial; currencies
 /// are never added together; nothing priced is unavailable, never 0.
-pub(super) fn summarize(entries: &[&Value]) -> Result<(Value, Value)> {
+pub(crate) fn summarize(entries: &[&Value]) -> Result<(Value, Value)> {
     let (mut by_currency, mut unpriced) = (
         BTreeMap::<String, Dec>::new(),
         BTreeMap::<String, usize>::new(),

@@ -117,6 +117,8 @@ may only be shortened.
 ```text
 $ herdr-farm telemetry demo maintenance classes
 retention.v1
+sidecar.launch_load retain - source_of_truth destructive
+sidecar.storage_samples prune 90d source_of_truth
 sidecar.operating_intervals retain - source_of_truth destructive
 sidecar.otlp retain - source_of_truth destructive
 sidecar.otlp_attempt_tokens retain - source_of_truth destructive
@@ -160,6 +162,7 @@ still apply; the tombstone reason is `operator_deletion`).
 ```text
 $ herdr-farm telemetry demo maintenance plan
 plan retention.v1 demo items=1 destructive=1 digest=sha256:<digest>
+sidecar.storage_samples 90d: eligible=0 blocked=0 held=0
 sidecar.normalized_sessions 90d destructive: eligible=1 blocked=0 held=0
   delete session:00000000-0000-4000-8000-00000000c0de
 sidecar.attention_samples 90d destructive: eligible=0 blocked=0 held=0
@@ -203,6 +206,7 @@ $ herdr-farm telemetry demo maintenance hold add --class sidecar.normalized_sess
 ```text
 $ herdr-farm telemetry demo maintenance plan
 plan retention.v1 demo items=0 destructive=0 digest=sha256:<digest>
+sidecar.storage_samples 90d: eligible=0 blocked=0 held=0
 sidecar.normalized_sessions 90d destructive: eligible=0 blocked=0 held=1
   held session:00000000-0000-4000-8000-00000000c0de (hold-1)
 sidecar.attention_samples 90d destructive: eligible=0 blocked=0 held=0
@@ -337,6 +341,7 @@ $ herdr-farm telemetry demo backup create --out <tmp>/backup-2026-09-30
     "health": <version>,
     "ingest": <version>,
     "operating": <version>,
+    "operations": <version>,
     "otlp": <version>,
     "policies": <version>,
     "quality": <version>
@@ -451,6 +456,8 @@ $ herdr-farm telemetry demo backup restore --from <tmp>/backup-2026-09-30 --forc
     "operating_clock": 0,
     "operating_gaps": 0,
     "operating_intervals": 0,
+    "operation_launch_load": 0,
+    "operation_storage_samples": 0,
     "otlp_attempt_tokens": 0,
     "otlp_records": 0,
     "provider_charges": 0,
@@ -466,6 +473,7 @@ $ herdr-farm telemetry demo backup restore --from <tmp>/backup-2026-09-30 --forc
     "health": <version>,
     "ingest": <version>,
     "operating": <version>,
+    "operations": <version>,
     "otlp": <version>,
     "policies": <version>,
     "quality": <version>

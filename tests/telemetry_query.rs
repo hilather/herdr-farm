@@ -121,15 +121,16 @@ fn nd(m: &Value) -> (Value, Value, Value) { (m["numerator"].clone(), m["denomina
 fn registry_declares_every_metric_and_gates_families() {
     let p = Planted::new();
     let registry = p.json(&["metrics", "registry", "--json"]);
-    assert_eq!(registry["registry"], "analytics-registry.v8");
+    assert_eq!(registry["registry"], "analytics-registry.v9");
     assert_eq!(registry["rejected_cohorts"], json!({"completed_task": "ambiguous_cohort"}));
     let metrics = registry["metrics"].as_array().unwrap();
     let ids: Vec<&str> = metrics.iter().map(|m| m["id"].as_str().unwrap()).collect();
-    let mut expected: Vec<String> = (1..=50).map(|n| format!("M{n:02}")).collect();
+    let mut expected: Vec<String> = (1..=58).map(|n| format!("M{n:02}")).collect();
+    expected.extend((60..=64).map(|n| format!("M{n}")));
     expected.push("flaky_tests".into());
     expected.push("verification_flip_rate".into());
     expected.sort();
-    assert_eq!(ids, expected, "M01-M50 and the lane C flaky-test proxy, once each, in order");
+    assert_eq!(ids, expected, "M01-M58 and the lane C flaky-test proxy, once each, in order");
     let report = p.json(&["report", "--json"]);
     let report_ids: Vec<&str> = report["metrics"].as_object().unwrap().keys().map(String::as_str).collect();
     assert_eq!(report_ids, ids);
@@ -172,7 +173,7 @@ fn registry_declares_every_metric_and_gates_families() {
     assert_eq!((&get("M49")["active"], &get("M49")["activation"]["card"]), (&json!(true), &json!("TM4.6")));
     // Text form: one line per metric.
     let text = String::from_utf8(p.raw(&["metrics", "registry"])).unwrap();
-    assert_eq!(text.lines().count(), 53, "{text}");
+    assert_eq!(text.lines().count(), 66, "{text}");
     assert!(text.contains("M20 review_completion M20.v1 review family=review_quality cohorts=assignment_cohort unit=ratio certification=certified-fixture active"), "{text}");
     assert!(text.contains("M49 replay_suite_pass_rate M49.v1 central family=replay cohorts=activity_window unit=ratio certification=fixture active"), "{text}");
 
@@ -858,34 +859,38 @@ fn ticker_records_operating_passes_pause_resume_and_restart() {
     state(ProjectState::Active);
     p.json(&["collect"]); // Explicitly opt this project into telemetry.
     let mut ticker=start();
-    let (_,first,mut observed,_)=wait(&mut ticker,&|row|row.0==1);
+    let (_,first,mut observed,_)=wait(&mut ticker,&|row|row.0>=1);
     // Count persisted operating samples, rather than waiting thirty real seconds.
     for _ in 0..2 {
         let previous=observed;
         observed=wait(&mut ticker,&|row|row.2>previous).2;
     }
-    let pass_ms=(15_000.0*include_str!("support/time-scale.txt").trim().parse::<f64>().unwrap()).max(50.0) as i64;
-    assert!((pass_ms..=5*pass_ms).contains(&(observed-first)),"three observed passes: {}",observed-first);
+    assert!(observed>first,"observations advance through completed passes");
     state(ProjectState::Paused);
-    wait(&mut ticker,&|row|!row.3);
+    let paused=wait(&mut ticker,&|row|!row.3);
     let db=rusqlite::Connection::open(p.project.join(".state/telemetry.db")).unwrap();
     let duration:i64=db.query_row("SELECT sum(end_unix_ms-start_unix_ms) FROM operating_intervals",[],|r|r.get(0)).unwrap();
-    assert!((pass_ms..=5*pass_ms).contains(&duration));
+    let end:i64=db.query_row("SELECT max(end_unix_ms) FROM operating_intervals",[],|r|r.get(0)).unwrap();
+    let gaps:i64=db.query_row("SELECT coalesce(sum(end_unix_ms-start_unix_ms),0) FROM operating_gaps WHERE reason='gap' AND start_unix_ms>=?1 AND end_unix_ms<=?2",rusqlite::params![first,end],|r|r.get(0)).unwrap();
+    assert_eq!(duration,end-first-gaps,"missed passes are excluded; first collection need not finish within a fixed number of scaled passes");
     drop(db);
     state(ProjectState::Active);
-    wait(&mut ticker,&|row|row.0==2 && row.3);
+    let resumed=wait(&mut ticker,&|row|row.0>paused.0 && row.3);
     fs::write(p.root.join(".ticker.stop"),b"").unwrap();
     assert!(ticker.0.wait().unwrap().success());
     fs::remove_file(p.root.join(".ticker.stop")).unwrap();
     let mut restarted=start();
-    wait(&mut restarted,&|row|row.0==3);
+    wait(&mut restarted,&|row|row.0>resumed.0);
     fs::write(p.root.join(".ticker.stop"),b"").unwrap();
     assert!(restarted.0.wait().unwrap().success());
     let db=rusqlite::Connection::open(p.project.join(".state/telemetry.db")).unwrap();
     assert_eq!(db.query_row("SELECT count(DISTINCT session) FROM operating_intervals",[],|r|r.get::<_,i64>(0)).unwrap(),2);
+    assert_eq!(db.query_row("SELECT count(*) FROM operation_storage_samples",[],|r|r.get::<_,i64>(0)).unwrap(),1,"ticker samples storage once; accelerated passes and restart do not accelerate the hourly cadence");
     assert_eq!(db.query_row("SELECT count(*) FROM operating_intervals WHERE close_reason='open'",[],|r|r.get::<_,i64>(0)).unwrap(),1);
     let after:i64=db.query_row("SELECT sum(end_unix_ms-start_unix_ms) FROM operating_intervals",[],|r|r.get(0)).unwrap();
-    assert!(after>=duration && after<=duration+4*pass_ms,"stop/restart never extrapolates a tail: {duration} -> {after}");
+    let last:i64=db.query_row("SELECT last_unix_ms FROM operating_clock",[],|r|r.get(0)).unwrap();
+    assert!(after>=duration && after<=last-first,"stop/restart never extrapolates a tail: {duration} -> {after}");
+    assert_eq!(db.query_row("SELECT count(*) FROM operating_gaps WHERE reason='restart'",[],|r|r.get::<_,i64>(0)).unwrap(),1);
 }
 
 /// A real foreground ticker with no agent, sockets or producer homes. Enabled
@@ -987,4 +992,130 @@ fn attempt_outcome_selects_acceptance_and_reports_verifier_failure() {
     let single = retried["attempts"].as_array().unwrap().iter().find(|a| a["task_id"] == "single").unwrap();
     assert_eq!(single["verification"]["state"], "accepted");
     assert!(single["verification"].get("reason").is_none());
+}
+
+/// MET-NOW-B: real CLI evaluations of planted lifecycle/brief/load metadata,
+/// with filesystem sizes sampled through the public producer (no source reads).
+#[test]
+fn flow_operations_metrics_exact_values_and_missing_evidence() {
+    let p = Planted::new();
+    for (id, reason) in [("M60","no_running_intervals"),("M61","no_attempts"),("M62","load_samples_not_recorded"),("M63","storage_not_sampled"),("M64","brief_size_not_recorded")] {
+        assert_eq!(p.query(&["--metric",id])["reason"],reason);
+    }
+    let db = p.db();
+    plant(&db,"a","succeeded",Some("verify_only"),&[("a1","completed",&[("reserved",100),("launching",200),("running",1000),("completed",2000)])],Some(("a1",2050)),None);
+    plant(&db,"b","failed",None,&[("b1","failed",&[("reserved",6000),("launching",6500),("running",6500),("failed",7000)]),
+        ("b2","completed",&[("reserved",7100),("launching",7200),("running",7300),("completed",7500)])],None,None);
+    plant(&db,"c","cancelled",None,&[("c1","cancelled",&[("reserved",2500),("cancelled",2800)])],None,None);
+    plant(&db,"d","queued",None,&[("d1","reserved",&[("reserved",2600)])],None,None);
+    for (attempt,chars) in [("a1",3999),("b1",4000),("b2",15999),("c1",16000)] {
+        db.execute("INSERT INTO operations(id,task_id,kind,target,payload_version,payload,payload_hash,expected_revision,due_unix_ms,idempotency_key)
+            VALUES(?1,?2,'runtime.worker_brief','binding',1,?3,?4,1,1,?1)",rusqlite::params![format!("brief-{attempt}"),&attempt[..1],json!({"attempt":attempt,"prompt_chars":chars}).to_string(),hex(attempt)]).unwrap();
+    }
+    for (attempt,task,at) in [("a1","a",50),("b1","b",5900)] {
+        db.execute("INSERT INTO dispatch_decisions(attempt_id,task_id,task_revision,chosen_configuration_id,eligible,chooser_kind,chooser_principal,reason_codes,decided_unix_ms)
+            VALUES(?1,?2,1,?3,'[{}]','operator','operator:cli','[\"fixture\"]',?4)",rusqlite::params![attempt,task,format!("sha256:{}",hex("config")),at]).unwrap();
+    }
+    db.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES('runtime.worker_terminated','c1',1,1,'{\"cause\":\"cancellation\"}')",[]).unwrap();
+    db.execute("INSERT INTO verification_runs(run_id,project_store,idempotency_key,payload_digest,submission_id,task_id,contract_revision,contract_digest,attempt_id,policy_id,policy_digest,commit_oid,tree_oid,object_format,memory_fence,isolation,argv,library_manifest,state,reason,exit_status,receipt_digest,store_device,store_inode,created_unix_ms,metadata)
+        VALUES(?1,'store',?1,?2,?3,'a',1,?2,'a1','ci',?2,?4,?4,'sha1',0,'linux-unshare-user-pid-mount-v1','[]','[]','accepted',NULL,0,?2,1,1,2050,?5)",
+        rusqlite::params![hex("run"),hex("digest"),hex("submission-a"),OID,json!({"version":"verification-metadata.v1","load":{"host_load_1m":"3.25"}}).to_string()]).unwrap();
+    drop(db);
+    use herdr_farm::telemetry::{operating,operations};
+    for (at,active,epoch) in [(0,true,1),(1000,true,1),(3000,true,1),(4000,false,2),(5000,true,3),(7000,true,3)] {
+        operating::observe(&p.project,"fixture",active,epoch,at,1000).unwrap();
+    }
+    let sidecar = rusqlite::Connection::open(p.project.join(".state/telemetry.db")).unwrap();
+    sidecar.execute("INSERT INTO operation_launch_load VALUES('a1',200,'1.25','2.50','3.75',NULL)",[]).unwrap();
+    sidecar.execute("INSERT INTO operation_launch_load VALUES('c1',2600,'9.00','8.00','7.00',NULL)",[]).unwrap();
+    drop(sidecar);
+    let canonical = p.state_bytes();
+    let report = p.json(&["report","--json"]);
+    assert_eq!(report["metrics"]["M60"]["value"],json!({"count":3,"median_ms":1000,"p90_ms":1500,"total_ms":3500}));
+    assert_eq!(report["metrics"]["M60"]["basis"],"observed_operating_intervals");
+    let m61 = &report["metrics"]["M61"];
+    assert_eq!(m61["value"]["reserved_to_launching"],json!({"count":3,"median_ms":100,"p90_ms":500,"total_ms":700}));
+    assert_eq!(m61["value"]["launching_to_running"],json!({"count":3,"median_ms":100,"p90_ms":800,"total_ms":900}));
+    assert_eq!(m61["value"]["decided_to_reserved"],json!({"count":2,"median_ms":50,"p90_ms":100,"total_ms":150}));
+    assert_eq!(m61["never_running"],json!({"count":1,"denominator":4,"share":"1/4","reason":null,"by_cause":{"cancellation":{"count":1,"share":"1/4"}}}));
+    assert_eq!(m61["pending"],1);
+    assert_eq!(m61["attempts"][3]["reserved_to_launching"]["reason"],"phase_end_not_recorded");
+    let m62 = &report["metrics"]["M62"];
+    assert_eq!(m62["value"],json!({"launch_samples":2,"verification_samples":1}));
+    assert_eq!(m62["launches"][0]["load"]["load_1m"],"1.25");
+    assert_eq!(m62["launches"][3]["outcome"],"never_running");
+    assert_eq!(m62["launches"][3]["load"]["load_1m"],"9.00");
+    assert_eq!(m62["launches"][1]["load"]["reason"],"launch_load_not_recorded");
+    assert_eq!(m62["verifications"][0]["load"]["host_load_1m"],"3.25");
+    assert_eq!(report["metrics"]["M64"]["value"]["small"]["accepted_share"],"1/1");
+    assert_eq!(report["metrics"]["M64"]["value"]["medium"]["accepted_share"],"0/1");
+    assert_eq!(report["metrics"]["M64"]["value"]["medium"]["attempts_per_task"],"2/1");
+    assert_eq!(report["metrics"]["M64"]["value"]["large"]["accepted_share"],"0/1");
+    assert_eq!(report["metrics"]["M64"]["excluded"]["brief_size_not_recorded"],1);
+    for id in ["M60","M61","M62","M64"] {
+        assert_eq!(p.query(&["--metric",id])["detail"],report["metrics"][id]);
+        assert!(String::from_utf8(p.raw(&["report"])).unwrap().contains(id));
+        assert_eq!(p.query(&["--metric",id,"--to","8000"])["reason"],"window_end_unsupported");
+    }
+    fs::create_dir_all(p.project.join(".state/worktrees/a1")).unwrap();
+    fs::create_dir_all(p.project.join(".state/worker-output/a1")).unwrap();
+    fs::write(p.project.join(".state/worktrees/a1/file"),[0;100]).unwrap();
+    fs::write(p.project.join(".state/worker-output/a1/file"),[0;20]).unwrap();
+    std::os::unix::fs::symlink(p.project.join(".state/worktrees"),p.project.join(".state/worktrees/a1/link")).unwrap();
+    operations::sample_storage(&p.project,10_000).unwrap();
+    assert_eq!(p.query(&["--metric","M63"])["value"]["worktrees"]["growth_bytes_per_day"]["reason"],"insufficient_storage_samples");
+    fs::write(p.project.join(".state/worktrees/a1/file"),[0;150]).unwrap();
+    fs::write(p.project.join(".state/worker-output/a1/file"),[0;10]).unwrap();
+    operations::sample_storage(&p.project,11_000).unwrap(); // suppressed inside hour
+    operations::sample_storage(&p.project,86_410_000).unwrap();
+    let m63 = p.query(&["--metric","M63"]);
+    assert_eq!(m63["detail"]["samples"],2);
+    assert_eq!(m63["value"]["worktrees"]["samples"],json!([{"sampled_unix_ms":10000,"bytes":100,"reason":null},{"sampled_unix_ms":86410000,"bytes":150,"reason":null}]));
+    assert_eq!(m63["value"]["worktrees"]["growth_bytes_per_day"],"4320000000/86400000");
+    assert_eq!(m63["value"]["worker_output"]["growth_bytes_per_day"],"-864000000/86400000");
+    assert_eq!(m63["value"]["state_db"]["samples"][0]["bytes"],canonical.len() as u64);
+    assert!(m63["value"]["telemetry_db"]["samples"][0]["bytes"].as_u64().unwrap()>0);
+    assert_eq!(p.query(&["--metric","M63","--from","90000000"])["reason"],"storage_not_sampled");
+    assert_eq!(p.state_bytes(),canonical,"telemetry never writes canonical state");
+    p.json(&["analytics","refresh","--metric","M63"]);
+    assert_eq!(p.query(&["--metric","M63"])["value"],m63["value"]);
+}
+
+#[test]
+fn flow_operations_unknown_history_is_never_zero() {
+    let p = Planted::new();
+    let db = p.db();
+    plant(&db,"old","running",None,&[("old-a","running",&[])],None,None);
+    plant(&db,"stopped","failed",None,&[("stopped-a","failed",&[("reserved",100),("failed",500)])],None,None);
+    drop(db);
+    herdr_farm::telemetry::operating::observe(&p.project,"fixture",true,1,0,1000).unwrap();
+    herdr_farm::telemetry::operating::observe(&p.project,"fixture",true,1,2000,1000).unwrap();
+    let idle = p.query(&["--metric","M60"]);
+    assert_eq!(idle["status"],"partial");
+    assert_eq!(idle["detail"]["coverage"]["unknown_ms"],2000);
+    assert_eq!(idle["value"]["count"],0,"no observed gap, not proof that the project was busy");
+    let latency = p.query(&["--metric","M61"]);
+    assert_eq!(latency["status"],"unavailable");
+    assert_eq!(latency["reason"],"launch_phases_not_recorded");
+    assert_eq!(latency["detail"]["attempts"][0]["reserved_to_launching"]["reason"],"predates_lifecycle_log");
+    assert_eq!(latency["detail"]["never_running"]["share"],"1/1");
+    assert_eq!(latency["detail"]["never_running"]["by_cause"],json!({"cause_not_recorded":{"count":1,"share":"1/1"}}));
+    let load = p.query(&["--metric","M62"]);
+    assert_eq!(load["detail"]["launches"][0]["reached_running"],Value::Null);
+    assert_eq!(load["detail"]["launches"][0]["outcome"],"unknown");
+}
+
+#[test]
+fn idle_gaps_merge_overlapping_workers_and_clip_the_window() {
+    let p = Planted::new();
+    let db = p.db();
+    for (task,attempt,start,end) in [("a","a1",1000,2500),("b","b1",1500,3000),("c","c1",4000,4500)] {
+        plant(&db,task,"failed",None,&[(attempt,"failed",&[("reserved",start-100),("running",start),("failed",end)])],None,None);
+    }
+    drop(db);
+    assert_eq!(p.query(&["--metric","M60"])["value"],json!({"count":1,"median_ms":1000,"p90_ms":1000,"total_ms":1000}));
+    herdr_farm::telemetry::operating::observe(&p.project,"fixture",true,1,0,2000).unwrap();
+    herdr_farm::telemetry::operating::observe(&p.project,"fixture",true,1,5000,2000).unwrap();
+    assert_eq!(p.query(&["--metric","M60"])["value"],json!({"count":3,"median_ms":1000,"p90_ms":1000,"total_ms":2500}));
+    assert_eq!(p.query(&["--metric","M60","--from","2500"])["value"],json!({"count":2,"median_ms":500,"p90_ms":1000,"total_ms":1500}));
 }

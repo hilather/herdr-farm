@@ -41,12 +41,14 @@ warn, critical, unknown}, states[], alerts {open[], last_evaluated_unix_ms}
 | `evidence` | the numbers the state rests on (numerator/denominator, age, remaining, longest wait, counts by reason); unavailable values stay `{status: unavailable, reason}` |
 | `thresholds` | `{direction, warn, critical, unit, window_ms, cooldown_ms}` from the rule table |
 
-## 2. Rule table (`health-rules.v3`, `rules.rs` `RULES`)
+## 2. Rule table (`health-rules.v4`, `rules.rs` `RULES`)
 
-A change of a rule, threshold or read path is a new rules version.
+A change of a rule, threshold or read path is a new rules version. v4 adds
+`test_weakening` (MET-NOW-A; fixture evidence `tests/telemetry_stored_metrics.rs`).
 
 | rule | family / service | read path | warn | critical | cooldown |
 |---|---|---|---|---|---|
+| `test_weakening` | proxy | quality `tests-net-removal.v1` observation counts, last 24 hours | ≥ 1 flagged submission | — | 1 h |
 | `verification_flaky` | proxy | `quality flaky`, last 30 days | ≥ 1 flipped tree/policy pair | — | 1 h |
 | `collector_stale` | collection / codex | query `source_watermarks.sidecar.last_collect_unix_ms` | age ≥ 15 min | ≥ 60 min | 1 h |
 | `usage_after_termination` | consumption / codex | `usage.after_termination` (bound record times and canonical receipts) | ≥ 1 record | — | 1 h |
@@ -62,6 +64,10 @@ A change of a rule, threshold or read path is a new rules version.
 | `quota_headroom` | services / codex | `accounting quota` (current trusted windows) | < 20 % remaining | < 5 % (0 = `window_exhausted`) | 1 h |
 | `waiting_on_you` | attention | `accounting attention` (open waits of open attempts) | ≥ 5 min | ≥ 30 min | 15 min |
 | `recommendation_stale` | recommendation, per role | TM4.4 `compare` M02 + M50 (§5) | M50 < 1/2 | — | 6 h |
+
+`test_weakening` windows by signal observation, so a newly collected flag on
+an older submission warns too. It resolves on observed zero, stays unknown
+with only unavailable diffs, and has no critical escalation.
 
 `usage_after_termination` reads the unwindowed per-attempt `usage` diagnostic,
 aggregating record and affected-attempt counts in evidence (identities are

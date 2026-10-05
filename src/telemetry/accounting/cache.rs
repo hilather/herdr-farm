@@ -64,7 +64,7 @@ pub(crate) fn store_frontier(db: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn current(db: &Connection) -> Result<bool> {
+pub(crate) fn current(db: &Connection) -> Result<bool> {
     if !complete(db)? { return Ok(false); }
     let table: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='accounting_cache_frontier')", [], |r| r.get(0))?;
     if !table { return Ok(false); }

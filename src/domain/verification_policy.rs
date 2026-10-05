@@ -82,6 +82,22 @@ impl ExecutionPolicy {
         }
         Ok(policy)
     }
+    /// Conservative classification of the signed policy, never an executable probe.
+    pub(crate) fn file_presence_only(&self) -> bool {
+        self.toolchain.is_none() && std::iter::once(self.checks.as_slice())
+            .chain(self.stress.iter().flat_map(|s| s.checks.iter()).filter_map(|name| self.named_checks.get(name).map(Vec::as_slice)))
+            .chain(self.stress.iter().filter_map(|s| s.load.as_deref())).all(|args| {
+            let executable = args.first().map(String::as_str);
+            if matches!(executable, Some("/usr/bin/test" | "/bin/test")) {
+                return args.len() == 3 && args[1] == "-s";
+            }
+            // Recognize only the nonempty-file idiom, with no additional grep semantics.
+            matches!(executable, Some("/usr/bin/git" | "/bin/git")) && args.len() >= 8 && args[1] == "grep"
+                && args[4] == "-e" && args[2..4].iter().all(|s| matches!(s.as_str(), "--quiet" | "--no-index"))
+                && args[2..5].iter().collect::<std::collections::BTreeSet<_>>().len() == 3
+                && args[5] == "." && args[6] == "--"
+        })
+    }
     pub(crate) fn commands(&self) -> impl Iterator<Item = &[String]> {
         std::iter::once(self.checks.as_slice())
             .chain(self.named_checks.values().map(Vec::as_slice))

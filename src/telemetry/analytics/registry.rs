@@ -1,11 +1,11 @@
-//! The TM4.1 metric registry `analytics-registry.v8` (docs/telemetry/contracts-analytics.md §1):
+//! The TM4.1 metric registry `analytics-registry.v9` (docs/telemetry/contracts-analytics.md §1):
 //! one declared, read-only table of every metric the report or the query
 //! service can name, with its definition versions, family, cohorts, window
 //! semantics, unit, certification and activation. A change here is a new
 //! registry version, never an edit in place of a published definition.
 use serde_json::{Value, json};
 
-pub const VERSION: &str = "analytics-registry.v8";
+pub const VERSION: &str = "analytics-registry.v9";
 
 /// The TM3.5 quality certificate. Without it every validated-quality family is
 /// `unavailable: awaiting_quality_certificate`; landing or withdrawing it is
@@ -208,6 +208,19 @@ pub const METRICS: &[Metric] = &[
     m!("M50", "evidence_freshness", Freshness, "ratio", [Version { definition: "M50.recommendation-v1", provider: Provider::Recommendation, cohorts: T,
         window: Window::HalfOpen, time_basis: "task_terminal_time", dimensions: &[] }, absent("M50.v1", A, "no_producer")], "fixture",
         "tests/telemetry_health.rs (TM4.5 fixtures)", Some("per recommendation only; lineage by profile name, else agent kind")),
+    m!("M51", "verification_strength", Lifecycle, "ratio", [lane("analytics", "M51.v1", A, "acceptance_time")], "fixture", "tests/telemetry_stored_metrics.rs", None),
+    m!("M52", "defect_density_by_setup", ReviewQuality, "findings_per_submission", [lane("analytics", "M52.v1", A, "review_completion_and_discovery")], "fixture", "tests/telemetry_stored_metrics.rs", None),
+    m!("M53", "cost_per_validated_finding", Cost, "currency_per_finding", [lane("analytics", "M53.v1", A, "review_attempt_decision_and_discovery")], "fixture", "tests/telemetry_stored_metrics.rs", None),
+    m!("M54", "test_weakening_rate", Proxy, "ratio", [lane("analytics", "M54.v1", A, "first_submission_time")], "fixture", "tests/telemetry_stored_metrics.rs", None),
+    m!("M55", "subagent_token_share", Consumption, "ratio", [lane("analytics", "M55.v1", A, "attempt_decision")], "fixture", "tests/telemetry_stored_metrics.rs", None),
+    m!("M56", "reasoning_and_cache_share", Consumption, "ratio", [lane("analytics", "M56.v1", A, "attempt_decision")], "fixture", "tests/telemetry_stored_metrics.rs", None),
+    m!("M57", "long_context_exposure", Consumption, "ratio", [lane("analytics", "M57.v1", A, "attempt_decision")], "fixture", "tests/telemetry_stored_metrics.rs", None),
+    m!("M58", "fixed_overhead_per_attempt", Consumption, "tokens", [lane("analytics", "M58.v1", A, "attempt_decision")], "fixture", "tests/telemetry_stored_metrics.rs", None),
+    m!("M60", "idle_gap_distribution", Fleet, "milliseconds", [lane("operations", "M60.idle-v1", A, "running_intervals_clipped_to_observed_operating_time")], "fixture", "tests/telemetry_query.rs (MET-NOW-B)", None),
+    m!("M61", "launch_latency_by_phase", Lifecycle, "milliseconds", [lane("operations", "M61.launch-v1", A, "attempt_reserved_at_or_after_since")], "fixture", "tests/telemetry_query.rs (MET-NOW-B)", None),
+    m!("M62", "machine_load_at_launch", Fleet, "load_average", [lane("operations", "M62.load-v1", A, "attempt_reserved_or_verification_created_at_or_after_since")], "fixture", "tests/telemetry_query.rs (MET-NOW-B)", Some("descriptive association; missing launch samples explicit")),
+    m!("M63", "storage_growth", Fleet, "bytes_per_day", [lane("operations", "M63.storage-v1", A, "storage_sample_at_or_after_since")], "fixture", "tests/telemetry_query.rs (MET-NOW-B)", Some("logical regular-file bytes; at most hourly; 90 days and 2160 rows")),
+    m!("M64", "brief_size_vs_outcome", Lifecycle, "ratio", [lane("operations", "M64.brief-v1", A, "attempt_reserved_at_or_after_since")], "fixture", "tests/telemetry_query.rs (MET-NOW-B)", Some("descriptive; task may occur in multiple size buckets")),
     m!("flaky_tests", "newly_flaky_tests_proxy", Proxy, "tests", [lane("quality", "flaky_tests.proxy-v1", A, "ci_run")], "unavailable", QUALITY, Some("no_repeat_runs")),
     m!("verification_flip_rate", "verification_flip_rate", Proxy, "ratio", [lane("quality", "verification_flip_rate.v1", A, "verification_completed")], "fixture", "tests/telemetry_quality.rs (DG6)", Some("passive reruns only; accepted vs checks_failed; policy drill-down in quality flaky")),
 ];
