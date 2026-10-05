@@ -8,9 +8,9 @@ are [contracts.md](contracts.md) §0. Code: `src/telemetry/analytics/`
 (TM4.3). Telemetry never grants launch, changes budgets or accepts results;
 nothing here writes `state.db`.
 
-## 1. Metric registry (`analytics-registry.v5`)
+## 1. Metric registry (`analytics-registry.v6`)
 
-Version history: v1 TM4.1; v2 adds `verification_flip_rate` (DG6, #198); v3 adds M30 `M30.submission-v1` (DG1, #202); v4 adds M10 `M10.v1` (DG2, #204); v5 adds M03 operating throughput (DG3).
+Version history: v1 TM4.1; v2 adds `verification_flip_rate` (DG6, #198); v3 adds M30 `M30.submission-v1` (DG1, #202); v4 adds M10 `M10.v1` (DG2, #204); v5 adds M03 operating throughput (DG3); v6 adds M05 lifecycle tokens and specifies M19’s missing timed history.
 
 `telemetry <slug> metrics registry [--json]` prints one declared table
 (`registry.rs`) of every metric `telemetry report` or `query` can name:
@@ -30,10 +30,9 @@ Native definitions added by TM4.1 (the certified `slice-v1` ones stay
 servable by name): `M01.cohort-v1` accepted tasks, `M02.cohort-v1`
 acceptance rate, `M06.cohort-v1` lead-time p95 (nearest rank, ms, accepted
 tasks with both times; failed/open counted, never given a time),
-`M07.cohort-v1` attempt amplification. Absent producers: M05, M10, M19.
+`M07.cohort-v1` attempt amplification. Absent producer: M19 (`blocked_intervals_not_recorded`).
 M49 (`M49.v1`, central provider) is produced by the replay suite ([contracts-replay.md](contracts-replay.md)).
-`M07.cohort-v1` attempt amplification. Absent producers: M03, M05, M19,
-M30. M49 (`M49.v1`, central provider) is produced by the replay suite ([contracts-replay.md](contracts-replay.md)).
+Historical absent definitions for M03, M05, M19 and M30 remain servable by name.
 M50's current definition `M50.recommendation-v1` (TM4.5,
 [contracts-health.md](contracts-health.md) §5) has provider
 `per_recommendation`: `query --metric M50` answers `unavailable:
@@ -126,6 +125,31 @@ Plan doc 07 §1. `T`/`A` evidence is exactly contracts §6 (`metrics::task_evide
 - Dimensions for native definitions: `route`, `task_class` (latest
   classification, else `unclassified`), `agent_kind` (the attempts' effective
   profile kind, `mixed`, `unknown` or `unassigned`). At most 64 cells.
+
+### Lifecycle consumption and blocked time
+
+M05 (`M05.tokens-v1`, fixture certification) uses M04’s contracts §6 T/A
+cohort and since-only window: a task qualifies when any attempt was decided
+at or after `since`; every attempt of that task contributes its full lifecycle
+input plus output tokens. Counted ledger normalization matches M08/M09;
+reasoning is already in output and cache reads in input. Separate native
+children follow attempt ownership, including guardians and subagents;
+uncertified fork replay and unowned children stay excluded. Divide by count(A)
+as an exact unreduced `tokens/tasks` ratio. An empty A gives null with
+`empty_denominator`; any attempt missing counted usage gives
+`lifecycle_usage_incomplete`, with per-reason coverage and the observed
+numerator retained as a partial subtotal. `M05.v1` remains the historical
+absent definition.
+
+M19 (`M19.blocked-v1`; historical `M19.v1` remains absent) would divide
+assignment-cohort task time spent blocked by total observed task time, censoring open tails and observation gaps like attention intervals.
+It remains unavailable with `blocked_intervals_not_recorded`: canonical
+`task.changed` events retain state and sequence but no transition timestamp;
+attempt lifecycle timestamps do not record task blocked entry/exit, and
+attention samples describe agent activity, not task state. A future producer
+needs durable timestamped task state transitions, a known initial state and
+observation boundaries to censor gaps and open intervals. Current blocked
+state or event order cannot establish elapsed blocked time.
 
 ### DG1: first-candidate independent verification (M30)
 
@@ -329,11 +353,16 @@ lane's ledger commands.
 
 `telemetry report` and the fleet pane read through the query service's read
 path (`analytics::query::report`: the central slice metrics, then each lane's,
-a lane key replacing a central one). DG1 adds the native M30 body; the other
+a lane key replacing a central one), then fills missing rows from the registry.
+Both text and JSON list every registry metric in registry order, including
+unavailable values and reasons. M01 and M06 use their native query definitions;
+M50 reads “per recommendation (see `telemetry PROJECT recommend`)”. DG1 adds
+the native M30 body; the other
 report bodies retain their contracts. The report keeps each lane's own
 definitions and does not apply the
 registry's activation gate (every current family is active). For every
-metric the report prints, `query --metric <its definition>` returns that
+lane or central metric the report prints, `query --metric <its definition>`
+returns that
 body as `detail` (`report_and_query_share_one_read_path`). The `analytics`
 lane adds no report keys.
 

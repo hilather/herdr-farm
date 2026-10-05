@@ -43,6 +43,20 @@ pub fn report(project: &Path, since: Option<i64>) -> Result<Value> {
         Ok((metrics, tasks, lanes, after))
     })?;
     for (_, lane) in lanes { metrics.extend(lane); }
+    let mut sources = Sources::new(project)?;
+    for metric in registry::METRICS {
+        if !metrics.contains_key(metric.id) {
+            let mut cell = Cell::default_for(metric);
+            cell.from = since;
+            let (mut body, _) = evaluate(&mut sources, &cell)?;
+            body["definition"] = json!(cell.version.definition);
+            body["name"] = json!(metric.name);
+            if metric.id == "M50" {
+                body["value"] = json!("per recommendation (see `telemetry PROJECT recommend`)");
+            }
+            metrics.insert(metric.id.to_owned(), body);
+        }
+    }
     let mut report = json!({"metrics": metrics, "since_unix_ms": since, "tasks": tasks});
     if !after.is_empty() { report["after_termination"] = json!(after); }
     Ok(report)

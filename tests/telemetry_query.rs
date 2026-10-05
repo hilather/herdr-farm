@@ -121,7 +121,7 @@ fn nd(m: &Value) -> (Value, Value, Value) { (m["numerator"].clone(), m["denomina
 fn registry_declares_every_metric_and_gates_families() {
     let p = Planted::new();
     let registry = p.json(&["metrics", "registry", "--json"]);
-    assert_eq!(registry["registry"], "analytics-registry.v5");
+    assert_eq!(registry["registry"], "analytics-registry.v6");
     assert_eq!(registry["rejected_cohorts"], json!({"completed_task": "ambiguous_cohort"}));
     let metrics = registry["metrics"].as_array().unwrap();
     let ids: Vec<&str> = metrics.iter().map(|m| m["id"].as_str().unwrap()).collect();
@@ -130,6 +130,15 @@ fn registry_declares_every_metric_and_gates_families() {
     expected.push("verification_flip_rate".into());
     expected.sort();
     assert_eq!(ids, expected, "M01-M50 and the lane C flaky-test proxy, once each, in order");
+    let report = p.json(&["report", "--json"]);
+    let report_ids: Vec<&str> = report["metrics"].as_object().unwrap().keys().map(String::as_str).collect();
+    assert_eq!(report_ids, ids);
+    let text = String::from_utf8(p.raw(&["report"])).unwrap();
+    let text_ids: Vec<&str> = text.lines().filter_map(|line| line.split_whitespace().next()).filter(|id| ids.contains(id)).collect();
+    assert_eq!(text_ids, ids);
+    assert!(text.contains("M50 evidence_freshness per recommendation (see `telemetry PROJECT recommend`)"));
+    assert_eq!(report["metrics"]["M19"]["reason"], "blocked_intervals_not_recorded");
+    assert_eq!(p.query(&["--metric", "M19"])["reason"], "blocked_intervals_not_recorded");
     let get = |id: &str| metrics.iter().find(|m| m["id"] == id).unwrap().clone();
     let m02 = get("M02");
     assert_eq!((&m02["definition"], &m02["family"], &m02["unit"]), (&json!("M02.cohort-v1"), &json!("lifecycle"), &json!("ratio")));
@@ -529,7 +538,7 @@ fn report_and_query_share_one_read_path() {
     worked_example(&p);
     p.raw(&["collect"]);
     let report = p.json(&["report", "--json"]);
-    let definitions: Vec<String> = report["metrics"].as_object().unwrap().values().map(|m| m["definition"].as_str().unwrap().to_owned()).collect();
+    let definitions: Vec<String> = report["metrics"].as_object().unwrap().values().filter(|m| !["M01.cohort-v1", "M06.cohort-v1", "M19.blocked-v1", "M50.recommendation-v1"].contains(&m["definition"].as_str().unwrap())).map(|m| m["definition"].as_str().unwrap().to_owned()).collect();
     let out = p.json(&["query", "--json", "--metric", &definitions.join(",")]);
     for result in out["results"].as_array().unwrap() {
         let id = result["metric_id"].as_str().unwrap();
@@ -537,6 +546,13 @@ fn report_and_query_share_one_read_path() {
         assert_eq!(result["definition"], report["metrics"][id]["definition"], "{id}");
         for key in ["projection", "source_watermarks", "coverage", "exclusions", "observation_cutoff_unix_ms", "certification"] {
             assert!(result.get(key).is_some(), "{id} {key}");
+        }
+    }
+    let native = p.json(&["query", "--json", "--metric", "M01,M06"]);
+    for result in native["results"].as_array().unwrap() {
+        let id = result["metric_id"].as_str().unwrap();
+        for key in ["value", "numerator", "denominator", "reason"] {
+            assert_eq!(result[key], report["metrics"][id][key], "{id} {key}");
         }
     }
     let priced = out["results"].as_array().unwrap().iter().find(|r| r["metric_id"] == "M12").unwrap();

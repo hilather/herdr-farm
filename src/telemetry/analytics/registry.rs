@@ -1,11 +1,11 @@
-//! The TM4.1 metric registry `analytics-registry.v5` (docs/telemetry/contracts-analytics.md §1):
+//! The TM4.1 metric registry `analytics-registry.v6` (docs/telemetry/contracts-analytics.md §1):
 //! one declared, read-only table of every metric the report or the query
 //! service can name, with its definition versions, family, cohorts, window
 //! semantics, unit, certification and activation. A change here is a new
 //! registry version, never an edit in place of a published definition.
 use serde_json::{Value, json};
 
-pub const VERSION: &str = "analytics-registry.v5";
+pub const VERSION: &str = "analytics-registry.v6";
 
 /// The TM3.5 quality certificate. Without it every validated-quality family is
 /// `unavailable: awaiting_quality_certificate`; landing or withdrawing it is
@@ -159,7 +159,7 @@ pub const METRICS: &[Metric] = &[
         central("M02.slice-v1", T, "attempt_decided_at_or_after_since")], "certified-fixture", CORE, None),
     m!("M03", "accepted_throughput", Lifecycle, "tasks_per_hour", [Version { dimensions: &[], ..native("M03.operating-v1", A, "task_acceptance_time_and_observed_operating_intervals") }, absent("M03.v1", A, "operating_hours_not_recorded")], "fixture", "tests/telemetry_query.rs (DG3)", Some("project operating time; observation gaps and open tails are censored")),
     m!("M04", "cost_per_accepted_task", Cost, "currency_per_task", [lane("accounting", "M04.cost-v1", T, "attempt_decided_at_or_after_since")], "certified-fixture", CORE, Some("R1 fixture-only rate cards; R5 shadow budget")),
-    m!("M05", "tokens_per_accepted_task", Lifecycle, "tokens_per_task", [absent("M05.v1", T, "no_producer")], "absent", "no producer", None),
+    m!("M05", "tokens_per_accepted_task", Lifecycle, "tokens_per_task", [lane("accounting", "M05.tokens-v1", T, "attempt_decided_at_or_after_since"), absent("M05.v1", T, "no_producer")], "fixture", "tests/telemetry_accounting.rs", None),
     m!("M06", "task_lead_time_p95", Lifecycle, "milliseconds", [native("M06.cohort-v1", T, "task_terminal_time")], "fixture", QUERY, None),
     m!("M07", "attempt_amplification", Lifecycle, "attempts_per_accepted_task", [native("M07.cohort-v1", TA, "task_terminal_time"),
         central("M07.slice-v1", T, "attempt_decided_at_or_after_since")], "certified-fixture", CORE, None),
@@ -174,7 +174,7 @@ pub const METRICS: &[Metric] = &[
     m!("M16", "tool_call_volume", Tools, "calls", [lane("accounting", "M16.tools-v1", A, "call_time")], "certified-live", CORE, None),
     m!("M17", "tool_execution_success", Tools, "ratio", [lane("accounting", "M17.tools-v1", A, "call_time")], "certified-live", CORE, None),
     m!("M18", "tool_latency_p95", Tools, "milliseconds", [lane("accounting", "M18.tools-v1", A, "call_time")], "restricted", CORE, Some("execution_duration_not_exposed")),
-    m!("M19", "blocked_time_share", Lifecycle, "ratio", [absent("M19.v1", AS, "no_producer")], "absent", "no producer", None),
+    m!("M19", "blocked_time_share", Lifecycle, "ratio", [absent("M19.blocked-v1", AS, "blocked_intervals_not_recorded"), absent("M19.v1", AS, "no_producer")], "absent", "task.changed events have no transition timestamps", None),
     m!("M20", "review_completion", ReviewQuality, "ratio", [lane("review", "M20.v1", AS, "opportunity_assigned")], "certified-fixture", QUALITY, Some("basis declared: worker-declared completions without acceptance")),
     m!("M21", "validated_unique_findings", ReviewQuality, "findings", [lane("review", "M21.v1", A, "discovery")], "certified-fixture", QUALITY, None),
     m!("M22", "proposal_validation_rate", ReviewQuality, "ratio", [lane("review", "M22.v1", A, "submission")], "certified-fixture", QUALITY, None),

@@ -378,3 +378,50 @@ pub fn metrics(project: &Path, since: Option<i64>) -> Result<BTreeMap<String, Va
     };
     Ok(body(with(common, value)))
 }
+
+/// Full lifecycle input + output consumption of M04's terminal-task cohort.
+pub fn token_metric(project: &Path, since: Option<i64>) -> Result<BTreeMap<String, Value>> {
+    let db = crate::telemetry::read_only(&project.join(".state/state.db"))?;
+    let (attempts, _) = canonical(&db)?;
+    let tasks = crate::telemetry::metrics::task_evidence(&db)?;
+    let mut terminal = BTreeSet::new();
+    let mut accepted = 0usize;
+    for (task, state, evidence) in &tasks {
+        if since.is_some_and(|from| !attempts.iter().any(|a| &a.task == task && a.decided.is_some_and(|at| at >= from))) { continue; }
+        if *evidence || ["succeeded", "failed", "cancelled"].contains(&state.as_str()) {
+            terminal.insert(task.as_str());
+            accepted += usize::from(*evidence);
+        }
+    }
+    let cohort: Vec<_> = attempts.iter().filter(|a| terminal.contains(a.task.as_str())).collect();
+    let mut total = 0i64;
+    let mut missing = BTreeMap::<String, usize>::new();
+    if let Some(sidecar) = crate::telemetry::sidecar::read(project)? {
+        let _snapshot = sidecar.unchecked_transaction()?;
+        let membership = super::graph::attempt_membership(&sidecar)?;
+        let index = crate::telemetry::sidecar::child_index(&sidecar)?;
+        let entries = super::ledger::derive(&sidecar)?;
+        for attempt in &cohort {
+            let usage = crate::telemetry::sidecar::attempt_usage_with(&sidecar, &attempt.id, &index)?;
+            if usage["status"] == "unavailable" || usage["records"] == 0 {
+                *missing.entry(usage["reason"].as_str().unwrap_or("no_usage_observed").to_owned()).or_default() += 1;
+                continue;
+            }
+            for entry in entries.iter().filter(|e| membership.get(&e.session).is_some_and(|(owner, reason)| owner.as_deref() == Some(attempt.id.as_str()) && reason.is_none())) {
+                if entry.counted() {
+                    if let Some(n) = entry.normalized { total += n[0] + n[4]; }
+                    else { *missing.entry("records_not_accepted".into()).or_default() += 1; }
+                } else if !entry.repeated() && entry.basis == "delta" {
+                    *missing.entry("records_not_accepted".into()).or_default() += 1;
+                }
+            }
+        }
+    } else { missing.insert("collection_not_run".into(), cohort.len()); }
+    let mut body = json!({"definition": "M05.tokens-v1", "name": "tokens_per_accepted_task", "numerator": total,
+        "denominator": accepted, "coverage": {"attempts": cohort.len(), "attempts_without_usage": missing},
+        "tasks": {"terminal": terminal.len(), "accepted": accepted}});
+    if accepted == 0 { body["value"] = Value::Null; body["reason"] = json!("empty_denominator"); }
+    else if !missing.is_empty() { body["value"] = super::unavailable("lifecycle_usage_incomplete"); }
+    else { body["value"] = json!(format!("{total}/{accepted}")); }
+    Ok(BTreeMap::from([("M05".to_owned(), body)]))
+}
