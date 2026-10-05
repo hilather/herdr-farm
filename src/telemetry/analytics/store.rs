@@ -25,9 +25,10 @@ fn tracked(db: &Connection) -> Result<Vec<String>> {
 }
 
 /// The default tracked set: every active metric's current definition, its
-/// default cohort, the unbounded window.
+/// default cohort, the unbounded window. CLI self-observation metrics require
+/// explicit tracking: evaluating analytics commands changes their own cohort.
 fn defaults() -> Vec<Cell> {
-    registry::METRICS.iter().filter(|m| m.family.activation().is_ok() && !matches!(m.versions[0].provider, Provider::Absent(_) | Provider::Recommendation)).map(Cell::default_for).collect()
+    registry::METRICS.iter().filter(|m| !matches!(m.id, "M73" | "M74") && m.family.activation().is_ok() && !matches!(m.versions[0].provider, Provider::Absent(_) | Provider::Recommendation)).map(Cell::default_for).collect()
 }
 
 type SerializedLineage = BTreeMap<String, Vec<(&'static str, String, String)>>;

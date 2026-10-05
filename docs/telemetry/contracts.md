@@ -643,6 +643,13 @@ normalized usage. No schema/stream migration or new retention class is needed.
 
 ## 7. Privacy allowlist and excerpts
 
+MET-REWORK-1 (registry v10): M65–M69 derive rework, escaped findings, lead time
+and waste from schema 72 launch lineage, lifecycle and receipt timestamps,
+review triage and accounting estimates. These are metadata-only projections
+under §7; no prompt, source or transcript text is read for this producer, and
+no storage schema changes. Definitions and fixture evidence:
+[contracts-analytics.md §10](contracts-analytics.md#10-work-item-rework-and-delivery-met-rework-1).
+
 Worker sessions (ingest 0016) add `task_started.model_context_window`
 (positive integer); `FileChange` item id/status and `changed_files` (the count
 of `changes` array entries, never their values); `ImageView` item id/count
@@ -934,3 +941,15 @@ Worker termination derives wall budgets from the existing attempt-input frozen
 profile using launch-wrapper validation; no canonical or sidecar migration is
 needed. Unreadable historical frozen definitions retain `process_exit`. Existing
 attempt-input authority retention and full backup/restore classification apply.
+
+
+### MET-WORKER-1 metadata projections
+
+Registry v10 adds fixture-certified M70–M77 from the existing A10 worker
+session summaries and CLI-SELF-1 invocation rows, with no new collected leaves,
+tables or retention classes. Report and query expose end states, lingering
+latency, command failures, help and error friction, unanswered requests,
+context fill and coordinator reaction latency. The full definitions and
+unavailable reasons are in [contracts-analytics.md](contracts-analytics.md#met-worker-1-worker-and-command-friction-registry-v10).
+M78–M79 remain reserved until definitions are supplied. No prompts, commands,
+arguments, answers or result message contents enter these metrics.

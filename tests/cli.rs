@@ -5465,6 +5465,10 @@ fn fleet_text_matches_report_json() {
     let (home,r,decided)=fleet_fixture();
     // A sidecar with nothing collected: no Codex home, so no rollout is ever read.
     assert!(hp(home.path(),&["--root",&r,"telemetry","demo","collect"]).status.success());
+    // Keep both projections on the same invocation cohort: each CLI otherwise
+    // appends its own observation after printing its result.
+    let writer=rusqlite::Connection::open(std::path::Path::new(&r).join("demo/.state/telemetry.db")).unwrap();
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
     let out=hp(home.path(),&["--root",&r,"telemetry","demo","report","--json"]);assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stderr));
     let report:serde_json::Value=serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(report["tasks"],serde_json::json!({"accepted":0,"open":2,"succeeded_without_evidence":0,"terminal":1,"replay_candidates":0}));
@@ -5485,10 +5489,12 @@ fn fleet_text_matches_report_json() {
             (serde_json::Value::Number(value),_)=>value.to_string(),
             (value,_) if value["status"] == "partial" && value.get("denominator").is_some() => format!("partial {}/{} ({}: {} attempts without usage)",
                 value["priced_amount"].as_str().map(str::to_owned).unwrap_or_else(|| value["tokens"].to_string()), value["denominator"], value["reason"].as_str().unwrap(), value["attempts_without_usage"]),
-            (value,_) if ["M60","M61","M62","M64"].contains(&id.as_str()) && value.get("reason").is_none() => value.to_string(),
+            (value,_) if ["M60","M61","M62","M64","M70"].contains(&id.as_str()) && value.get("reason").is_none() => value.to_string(),
             (value,_)=>format!("n/a ({})",value["reason"].as_str().unwrap_or_else(||panic!("{id}: a structured value needs its own expectation: {value}"))),
         };
-        assert!(shown.ends_with(&expected),"{shown} != {expected}");
+        if ["M70","M71","M72","M73","M74","M75","M76","M77"].contains(&id.as_str()) {
+            assert!(shown.contains(&expected),"{shown} != {expected}");
+        } else { assert!(shown.ends_with(&expected),"{shown} != {expected}"); }
         if expected.starts_with("n/a") {assert!(!shown.split_whitespace().any(|w|w=="0"),"unavailable must not read 0: {shown}");}
     }
     assert_eq!(line("tasks "),"tasks terminal=1 accepted=0 open=2 succeeded_without_evidence=0");

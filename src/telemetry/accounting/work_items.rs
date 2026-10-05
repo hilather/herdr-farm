@@ -7,6 +7,10 @@ use std::{collections::BTreeMap, path::Path};
 pub fn read(project: &Path) -> Result<Value> {
     let db = crate::telemetry::read_only(&project.join(".state/state.db"))?;
     let tx = db.unchecked_transaction()?;
+    read_snapshot(project, &tx)
+}
+
+pub(super) fn read_snapshot(project: &Path, tx: &Connection) -> Result<Value> {
     let present: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_lineage')",
         [],
@@ -23,7 +27,7 @@ pub fn read(project: &Path) -> Result<Value> {
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|a| Some((a["attempt_id"].as_str()?, &a["estimate"])))
+        .filter_map(|a| Some((a["attempt_id"].as_str()?, a)))
         .collect();
     let rows: Vec<(String,String,String,Option<String>)> = tx.prepare("SELECT task_id,work_item,role,supersedes_task FROM task_lineage ORDER BY work_item,task_id")?
         .query_map([], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?.collect::<rusqlite::Result<_>>()?;
@@ -44,7 +48,7 @@ pub fn read(project: &Path) -> Result<Value> {
             if let Some(old) = supersedes {
                 superseded.insert(old.clone());
             }
-            attempts.extend(task_attempts(&tx, task, &estimates)?);
+            attempts.extend(task_attempts(tx, task, &estimates)?);
         }
         let first = attempts
             .iter()
@@ -104,8 +108,10 @@ fn task_attempts(
         FROM attempts a WHERE a.task_id=?1 ORDER BY a.rowid")?
         .query_map([task], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?.collect::<rusqlite::Result<_>>()?;
     Ok(rows.into_iter().map(|(attempt,state,launch,terminal)| {
-        let estimate = costs.get(attempt.as_str()).copied().cloned().unwrap_or_else(|| super::unavailable("cost_not_observed"));
-        json!({"attempt_id":attempt,"task_id":task,"state":state,"launch_unix_ms":launch,"terminal_unix_ms":terminal,"cost_estimate":estimate})
+        let cost = costs.get(attempt.as_str()).copied();
+        let estimate = cost.map(|c| c["estimate"].clone()).unwrap_or_else(|| super::unavailable("cost_not_observed"));
+        let coverage = cost.map(|c| c["coverage"].clone()).unwrap_or(Value::Null);
+        json!({"attempt_id":attempt,"task_id":task,"state":state,"launch_unix_ms":launch,"terminal_unix_ms":terminal,"cost_estimate":estimate,"cost_coverage":coverage})
     }).collect())
 }
 pub fn text(value: &Value) -> String {

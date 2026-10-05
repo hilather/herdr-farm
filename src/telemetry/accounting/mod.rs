@@ -495,3 +495,4 @@ fn tick_once(project: &Path, budget: super::codex::Budget) -> Result<Value> {
 }
 
 mod work_items;
+pub(crate) mod work_metrics;

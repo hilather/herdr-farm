@@ -18,7 +18,7 @@ pub const MAX_PAGE: u32 = 500;
 /// Most dimension cells one result may carry (doc 08 §4 bounded complexity).
 pub const MAX_CELLS: usize = 64;
 /// Priced metrics: they carry the valuation (rate card) revision they read.
-const PRICED: [&str; 7] = ["M04", "M12", "M14", "M24", "M34", "M37", "M53"];
+const PRICED: [&str; 9] = ["M04", "M12", "M14", "M24", "M34", "M37", "M53", "M66", "M69"];
 
 /// `herdr-farm telemetry <slug> report`: central slice metrics, then every
 /// lane's (`super::super::LANES`, a lane key replacing a central one).
@@ -328,6 +328,8 @@ impl<'a> Sources<'a> {
                         map
                     },
                     Provider::Lane("accounting") => crate::telemetry::accounting::metric_group_uncached(self.project, group, since, self.use_aggregates)?,
+                    Provider::Lane("analytics") if group == "worker" => super::worker_metrics::metrics(self.project, since)?,
+                    Provider::Lane("analytics") => super::stored_metrics::metrics(self.project, since)?,
                     Provider::Lane(stream) => match crate::telemetry::LANES.iter().find(|l| l.stream == stream) {
                         Some(lane) => (lane.metrics)(self.project, since)?,
                         None => BTreeMap::new(),
@@ -349,7 +351,7 @@ fn unavailable_core(reason: &str, diagnostic: Value) -> Value {
 /// denominator, exclusions and coverage are lifted; the whole body stays in
 /// `detail` (its keys are lane-native fields, never labels).
 fn lane_core(body: Value) -> Value {
-    let status = match body["value"].get("status").and_then(Value::as_str) { Some("unavailable") => "unavailable", Some("partial") => "partial", _ => "available" };
+    let status = match body["value"].get("status").or_else(|| body.get("status")).and_then(Value::as_str) { Some("unavailable") => "unavailable", Some("partial") => "partial", _ => "available" };
     let reason = body["value"].get("reason").cloned().or_else(|| body.get("reason").cloned()).unwrap_or(Value::Null);
     let exclusions = match &body["excluded"] { Value::Object(o) => Value::Object(o.clone()), _ => json!({}) };
     let coverage = match status {

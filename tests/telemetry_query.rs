@@ -121,16 +121,17 @@ fn nd(m: &Value) -> (Value, Value, Value) { (m["numerator"].clone(), m["denomina
 fn registry_declares_every_metric_and_gates_families() {
     let p = Planted::new();
     let registry = p.json(&["metrics", "registry", "--json"]);
-    assert_eq!(registry["registry"], "analytics-registry.v9");
+    assert_eq!(registry["registry"], "analytics-registry.v10");
     assert_eq!(registry["rejected_cohorts"], json!({"completed_task": "ambiguous_cohort"}));
     let metrics = registry["metrics"].as_array().unwrap();
     let ids: Vec<&str> = metrics.iter().map(|m| m["id"].as_str().unwrap()).collect();
     let mut expected: Vec<String> = (1..=58).map(|n| format!("M{n:02}")).collect();
-    expected.extend((60..=64).map(|n| format!("M{n}")));
+    expected.extend((60..=69).map(|n| format!("M{n}")));
+    expected.extend((70..=77).map(|n| format!("M{n}")));
     expected.push("flaky_tests".into());
     expected.push("verification_flip_rate".into());
     expected.sort();
-    assert_eq!(ids, expected, "M01-M58 and the lane C flaky-test proxy, once each, in order");
+    assert_eq!(ids, expected, "M01-M58, M60-M69 and the lane C proxies, once each, in order");
     let report = p.json(&["report", "--json"]);
     let report_ids: Vec<&str> = report["metrics"].as_object().unwrap().keys().map(String::as_str).collect();
     assert_eq!(report_ids, ids);
@@ -173,7 +174,7 @@ fn registry_declares_every_metric_and_gates_families() {
     assert_eq!((&get("M49")["active"], &get("M49")["activation"]["card"]), (&json!(true), &json!("TM4.6")));
     // Text form: one line per metric.
     let text = String::from_utf8(p.raw(&["metrics", "registry"])).unwrap();
-    assert_eq!(text.lines().count(), 66, "{text}");
+    assert_eq!(text.lines().count(), ids.len() + 1, "{text}");
     assert!(text.contains("M20 review_completion M20.v1 review family=review_quality cohorts=assignment_cohort unit=ratio certification=certified-fixture active"), "{text}");
     assert!(text.contains("M49 replay_suite_pass_rate M49.v1 central family=replay cohorts=activity_window unit=ratio certification=fixture active"), "{text}");
 
@@ -543,6 +544,10 @@ fn report_and_query_share_one_read_path() {
     let p = Planted::new();
     worked_example(&p);
     p.raw(&["collect"]);
+    // Pin CLI self-observation as well as the rollout evidence while comparing
+    // these public projections; otherwise each read adds an invocation.
+    let writer=rusqlite::Connection::open(p.project.join(".state/telemetry.db")).unwrap();
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
     let report = p.json(&["report", "--json"]);
     let definitions: Vec<String> = report["metrics"].as_object().unwrap().values().filter(|m| !["M01.cohort-v1", "M06.cohort-v1", "M19.blocked-v1", "M50.recommendation-v1"].contains(&m["definition"].as_str().unwrap())).map(|m| m["definition"].as_str().unwrap().to_owned()).collect();
     let out = p.json(&["query", "--json", "--metric", &definitions.join(",")]);

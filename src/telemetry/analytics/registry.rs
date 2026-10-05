@@ -1,11 +1,11 @@
-//! The TM4.1 metric registry `analytics-registry.v9` (docs/telemetry/contracts-analytics.md §1):
+//! The TM4.1 metric registry `analytics-registry.v10` (docs/telemetry/contracts-analytics.md §1):
 //! one declared, read-only table of every metric the report or the query
 //! service can name, with its definition versions, family, cohorts, window
 //! semantics, unit, certification and activation. A change here is a new
 //! registry version, never an edit in place of a published definition.
 use serde_json::{Value, json};
 
-pub const VERSION: &str = "analytics-registry.v9";
+pub const VERSION: &str = "analytics-registry.v10";
 
 /// The TM3.5 quality certificate. Without it every validated-quality family is
 /// `unavailable: awaiting_quality_certificate`; landing or withdrawing it is
@@ -221,6 +221,19 @@ pub const METRICS: &[Metric] = &[
     m!("M62", "machine_load_at_launch", Fleet, "load_average", [lane("operations", "M62.load-v1", A, "attempt_reserved_or_verification_created_at_or_after_since")], "fixture", "tests/telemetry_query.rs (MET-NOW-B)", Some("descriptive association; missing launch samples explicit")),
     m!("M63", "storage_growth", Fleet, "bytes_per_day", [lane("operations", "M63.storage-v1", A, "storage_sample_at_or_after_since")], "fixture", "tests/telemetry_query.rs (MET-NOW-B)", Some("logical regular-file bytes; at most hourly; 90 days and 2160 rows")),
     m!("M64", "brief_size_vs_outcome", Lifecycle, "ratio", [lane("operations", "M64.brief-v1", A, "attempt_reserved_at_or_after_since")], "fixture", "tests/telemetry_query.rs (MET-NOW-B)", Some("descriptive; task may occur in multiple size buckets")),
+    m!("M65", "rounds_to_green", Lifecycle, "fix_tasks", [lane("analytics", "M65.v1", A, "work_item_first_launch")], "fixture", "tests/telemetry_rework.rs", None),
+    m!("M66", "rework_cost_share", Cost, "ratio", [lane("analytics", "M66.v1", A, "work_item_first_launch")], "fixture", "tests/telemetry_rework.rs", None),
+    m!("M67", "escaped_defects", ReviewQuality, "findings_per_work_item", [lane("analytics", "M67.v1", A, "work_item_first_launch")], "fixture", "tests/telemetry_rework.rs", None),
+    m!("M68", "work_item_lead_time", Lifecycle, "milliseconds", [lane("analytics", "M68.v1", A, "work_item_first_launch")], "fixture", "tests/telemetry_rework.rs", None),
+    m!("M69", "waste_share", Cost, "ratio", [lane("analytics", "M69.v1", A, "work_item_first_launch")], "fixture", "tests/telemetry_rework.rs", None),
+    m!("M70", "worker_end_states", Lifecycle, "attempts", [lane("analytics", "M70.v1", A, "attempt_reserved_time")], "fixture", "tests/telemetry.rs (MET-WORKER-1)", Some("metadata only; incomplete observation explicit")),
+    m!("M71", "lingering_time", Lifecycle, "milliseconds", [lane("analytics", "M71.v1", A, "attempt_reserved_time")], "fixture", "tests/telemetry.rs (MET-WORKER-1)", Some("metadata only; incomplete observation explicit")),
+    m!("M72", "failed_command_share", Tools, "ratio", [lane("analytics", "M72.v1", A, "attempt_reserved_time")], "fixture", "tests/telemetry.rs (MET-WORKER-1)", Some("metadata only; incomplete observation explicit")),
+    m!("M73", "help_lookup_share", Tools, "ratio", [lane("analytics", "M73.v1", A, "cli_invocation_or_notice_time")], "fixture", "tests/telemetry.rs (MET-WORKER-1)", Some("metadata only; incomplete observation explicit")),
+    m!("M74", "command_friction", Tools, "ratio", [lane("analytics", "M74.v1", A, "cli_invocation_or_notice_time")], "fixture", "tests/telemetry.rs (MET-WORKER-1)", Some("metadata only; incomplete observation explicit")),
+    m!("M75", "unanswered_worker_questions", Attention, "questions_per_attempt", [lane("analytics", "M75.v1", A, "attempt_reserved_time")], "fixture", "tests/telemetry.rs (MET-WORKER-1)", Some("metadata only; incomplete observation explicit")),
+    m!("M76", "context_window_fill", Consumption, "ratio", [lane("analytics", "M76.v1", A, "attempt_reserved_time")], "fixture", "tests/telemetry.rs (MET-WORKER-1)", Some("metadata only; incomplete observation explicit")),
+    m!("M77", "coordinator_reaction_time", Fleet, "milliseconds", [lane("analytics", "M77.v1", A, "cli_invocation_or_notice_time")], "fixture", "tests/telemetry.rs (MET-WORKER-1)", Some("metadata only; incomplete observation explicit")),
     m!("flaky_tests", "newly_flaky_tests_proxy", Proxy, "tests", [lane("quality", "flaky_tests.proxy-v1", A, "ci_run")], "unavailable", QUALITY, Some("no_repeat_runs")),
     m!("verification_flip_rate", "verification_flip_rate", Proxy, "ratio", [lane("quality", "verification_flip_rate.v1", A, "verification_completed")], "fixture", "tests/telemetry_quality.rs (DG6)", Some("passive reruns only; accepted vs checks_failed; policy drill-down in quality flaky")),
 ];

@@ -92,6 +92,7 @@ pub(crate) fn group(provider: Provider, id: &str) -> &'static str {
             "M31" | "M32" | "M33" => "attention",
             _ => "fleet",
         },
+        Provider::Lane("analytics") if matches!(id, "M70" | "M71" | "M72" | "M73" | "M74" | "M75" | "M76" | "M77") => "worker",
         Provider::Lane(stream) => stream,
         _ => "unsupported",
     }
@@ -99,7 +100,7 @@ pub(crate) fn group(provider: Provider, id: &str) -> &'static str {
 
 /// These evaluators consult the clock (censoring, active windows or maturity).
 /// Their dependency is time as well as stored inputs, so they never skip.
-pub(crate) fn clock(group: &str) -> bool { matches!(group, "attention" | "fleet" | "review" | "quality" | "operations") }
+pub(crate) fn clock(group: &str) -> bool { matches!(group, "attention" | "fleet" | "review" | "quality" | "operations" | "worker") }
 
 pub(crate) fn stamp(group: &str, canonical: &Value, generations: &BTreeMap<String, i64>) -> String {
     let relevant = |table: &str| table == "schema" || match group {
