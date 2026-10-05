@@ -843,12 +843,13 @@ pub fn open(ctx: &Ctx, slug: &str, options: &OpenOptions) -> Result<()> {
 
 pub fn commands(root: &Path, slug: &str) -> Result<String> {
     let p = coordinator::current_prefix(root)?;
-    let defaults = herdr_farm::verification::toolchains::default_accept(&root.join(slug))?;
-    let accept_example = if defaults.is_empty() { " --accept TOOLCHAIN:COMMAND" } else { "" };
-    let acceptance_note = if defaults.is_empty() {
-        "Acceptance toolchains are owner-declared in external config.toml.".to_owned()
-    } else {
-        format!("Code launches automatically carry owner acceptance defaults: {}. --no-default-accept opts out for one launch.", defaults.join(", "))
+    // The command list stays available when the owner config cannot be read; launch reports the error.
+    let defaults = herdr_farm::verification::toolchains::default_accept(&root.join(slug));
+    let accept_example = if defaults.as_ref().is_ok_and(|d| !d.is_empty()) { "" } else { " --accept TOOLCHAIN:COMMAND" };
+    let acceptance_note = match &defaults {
+        Ok(defaults) if !defaults.is_empty() => format!("Code launches automatically carry owner acceptance defaults: {}. --no-default-accept opts out for one launch.", defaults.join(", ")),
+        Ok(_) => "Acceptance toolchains are owner-declared in external config.toml.".to_owned(),
+        Err(error) => format!("Owner acceptance defaults unreadable ({error:#}); code launches will refuse until the owner config is fixed."),
     };
     Ok(format!(
         "\nCanonical commands (replace uppercase values with retained IDs/paths):\n\
