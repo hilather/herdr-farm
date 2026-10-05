@@ -17,15 +17,16 @@ import fcntl,json,os,sys
 root=os.environ['HOME'];lock=open(root+'/herdr-fixture.lock','w');fcntl.flock(lock,fcntl.LOCK_EX);path=root+'/herdr-state.json';a=sys.argv[1:]
 s=json.load(open(path)) if os.path.exists(path) else {'creates':0,'starts':0,'prompts':[],'live':False,'agent':False,'accepted':False}
 def pane():return {'pane_id':s.get('pane','w1:p1'),'workspace_id':'w1','tab_id':'w1:t1','terminal_id':'term'+str(s['creates']),'cwd':s.get('cwd','')}
-def agent():return dict(pane(),agent='claude',name='hp-demo-coordinator',agent_status='working' if s['accepted'] else 'idle',interactive_ready=True)
+def agent():return dict(pane(),agent='claude',name='hp-demo-coordinator',agent_status=s.get('status','working' if s['accepted'] else 'idle'),interactive_ready=True)
 if a==['--version']:print('herdr 0.9.1');sys.exit(0)
 if a==['remote-api-bridge']:
  r=json.loads(sys.stdin.readline());m=r['method'];p=r.get('params') or {};res=None
  if m=='pane.list':res={'panes':[pane()] if s['live'] else []}
  elif m=='agent.list':res={'type':'agent_list','agents':[agent()] if s['live'] and s['agent'] else []}
- elif m=='agent.explain':res={'explain':{'agent':'claude','state':'working' if s['accepted'] else 'idle','manifest_source':s.get('manifest_source','bundled'),'manifest_version':'fixture-1','matched_rule':{'id':'prompt','state':'idle'},'visible_idle':not s['accepted'],'visible_working':s['accepted'],'visible_blocker':False,'screen_detection_skipped':False,'skip_state_update':False,'local_override_shadowing_remote':s.get('shadow',False),'fallback_reason':None,'warning':None}}
+ elif m=='agent.explain':res={'explain':{'agent':'claude','state':s.get('status','working' if s['accepted'] else 'idle'),'manifest_source':s.get('manifest_source','bundled'),'manifest_version':'fixture-1','matched_rule':{'id':'prompt','state':'idle'},'visible_idle':not s['accepted'],'visible_working':s['accepted'],'visible_blocker':False,'screen_detection_skipped':False,'skip_state_update':False,'local_override_shadowing_remote':s.get('shadow',False),'fallback_reason':None,'warning':None}}
  elif m=='agent.prompt':
   s['prompts'].append(p['text'])
+  s.pop('status',None)
   s['accepted']=len(s['prompts'])>s.get('swallow',0)
   res={'type':'agent_prompted','agent':agent()}
  else:res={'type':'ok'}
@@ -313,6 +314,16 @@ fn socket_open_primes_owned_coordinator_retries_swallowed_prompt_and_recreates_c
     l.stop();
     assert_eq!(l.state()["starts"], 1);
     assert_eq!(l.state()["prompts"].as_array().unwrap().len(), 2);
+    let refused = l.settled(&["open", "demo", "--reprime"]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("not ready"));
+    let mut done = l.state();
+    done["status"] = json!("done");
+    done["accepted"] = json!(false);
+    fs::write(l.home.path().join("herdr-state.json"), serde_json::to_vec(&done).unwrap()).unwrap();
+    l.settled_ok(&["open", "demo", "--reprime"]);
+    l.stop();
+    assert_eq!(l.state()["prompts"].as_array().unwrap().len(), 3);
     // Older effect journals migrate through a public focus-only open without
     // inventing startup provenance or restarting the accepted agent.
     let journal_path = l.project.join(".state/canonical-coordinator.json");
@@ -664,4 +675,86 @@ fn legacy_open_waits_then_reports_bounded_root_refusal() {
     let error = String::from_utf8_lossy(&out.stderr);
     assert!(error.contains("another operation owns lock") && error.contains("operation would block"), "{error}");
     assert!(!l.home.path().join("herdr-state.json").exists());
+}
+
+/// Public store intake plus ticker/launch/inbox CLI: no live services required.
+#[test]
+fn restarted_ticker_sweeps_ended_server_but_retains_active_worker_server() {
+    use herdr_farm::domain::{Attempt, AttemptId, AttemptState, TaskState, Commit, Mutation};
+    struct Server(std::process::Child);
+    impl Drop for Server { fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); } }
+    let lab = Lab::new();
+    let mut db = migration::open_active(&lab.project).unwrap();
+    lab.ok(&["task", "demo", "add", "private", "--title", "Private worker", "--expected-head", &db.current_head().unwrap().to_string()]);
+    let mut task = db.read_snapshot(None).unwrap().tasks.into_iter().find(|t| t.id.as_str() == "private").unwrap();
+    let mut attempt = Attempt { id: AttemptId::new("private-attempt").unwrap(), task: task.id.clone(), revision: 1, state: AttemptState::Running, snapshot: None, reservation: "private-reservation".into(), termination_observed: false };
+    task.revision += 1; task.state = TaskState::Running; task.active_attempt = Some(attempt.id.clone());
+    db.commit(Commit { expected_head: db.current_head().unwrap(), mutations: vec![Mutation::Task { expected: Some(task.revision - 1), next: task }, Mutation::Attempt { expected: None, next: attempt.clone() }] }).unwrap();
+    let directory = lab.root.join(".herdr-run/demo-private/herdr");
+    fs::create_dir_all(&directory).unwrap();
+    let socket_dir = lab.home.path().join("rprivate");
+    fs::create_dir(&socket_dir).unwrap();
+    let socket = socket_dir.join("s");
+    fs::write(&socket, b"fixture socket marker").unwrap();
+    let mut server = Server(Command::new("/usr/bin/python3").args(["-c", "import time; time.sleep(300)", "server"]).env("HERDR_SOCKET_PATH", &socket).spawn().unwrap());
+    fs::write(directory.join("server.json"), json!({"pid":server.0.id(),"socket":socket}).to_string()).unwrap();
+    // An orphaned record must also be retired even without a task row.
+    let orphan_dir = lab.root.join(".herdr-run/demo-missing/herdr");
+    fs::create_dir_all(&orphan_dir).unwrap();
+    let orphan_socket = lab.home.path().join("rorphan/s");
+    fs::create_dir_all(orphan_socket.parent().unwrap()).unwrap();
+    fs::write(&orphan_socket, b"orphan socket marker").unwrap();
+    let mut orphan = Server(Command::new("/usr/bin/python3").args(["-c", "import time; time.sleep(300)", "server"]).env("HERDR_SOCKET_PATH", &orphan_socket).spawn().unwrap());
+    fs::write(orphan_dir.join("server.json"), json!({"pid":orphan.0.id(),"socket":orphan_socket}).to_string()).unwrap();
+    lab.ok(&["ticker", "run", "--passes", "1"]);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if let Some(status) = orphan.0.try_wait().unwrap() { assert!(status.code().is_none()); break; }
+        assert!(std::time::Instant::now() < deadline, "orphaned server was not stopped");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(!orphan_dir.join("server.json").exists());
+    assert!(!orphan_socket.exists());
+    assert!(server.0.try_wait().unwrap().is_none());
+    assert!(directory.join("server.json").exists());
+    assert!(!lab.cli(&["launch", "demo", "stop", "--task", "private"]).status.success());
+    // End through the public store while the ticker is down. Leave the old
+    // task pointer in place: retirement must use attempt state, not that pointer.
+    attempt.revision += 1; attempt.state = AttemptState::Lost; attempt.termination_observed = true;
+    db.commit(Commit { expected_head: db.current_head().unwrap(), mutations: vec![Mutation::Attempt { expected: Some(attempt.revision - 1), next: attempt }] }).unwrap();
+    lab.ok(&["ticker", "run", "--passes", "1"]);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while server.0.try_wait().unwrap().is_none() {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(!directory.join("server.json").exists());
+    assert!(!socket.exists());
+}
+
+#[test]
+fn idle_observations_deliver_durable_inbox_advisories_without_stopping_worker() {
+    use herdr_farm::domain::{Attempt, AttemptId, AttemptState, TaskState, Commit, Mutation};
+    let lab = Lab::new();
+    let mut db = migration::open_active(&lab.project).unwrap();
+    lab.ok(&["task", "demo", "add", "quiet", "--title", "Quiet worker", "--expected-head", &db.current_head().unwrap().to_string()]);
+    let mut task = db.read_snapshot(None).unwrap().tasks.into_iter().find(|t| t.id.as_str() == "quiet").unwrap();
+    let attempt = Attempt { id: AttemptId::new("quiet-attempt").unwrap(), task: task.id.clone(), revision: 1, state: AttemptState::Running, snapshot: None, reservation: "quiet-reservation".into(), termination_observed: false };
+    task.revision += 1; task.state = TaskState::Running; task.active_attempt = Some(attempt.id.clone());
+    db.commit(Commit { expected_head: db.current_head().unwrap(), mutations: vec![Mutation::Task { expected: Some(task.revision - 1), next: task }, Mutation::Attempt { expected: None, next: attempt.clone() }] }).unwrap();
+    let now = jiff::Timestamp::now().as_millisecond();
+    use herdr_farm::domain::ReminderOutcome;
+    assert_eq!(db.notify_worker_idle(db.current_head().unwrap(), &attempt.id, 1, now, now + 600_000).unwrap(), Some(ReminderOutcome::Delivered));
+    drop(db);
+    let mut db = migration::open_active(&lab.project).unwrap();
+    assert_eq!(db.notify_worker_idle(db.current_head().unwrap(), &attempt.id, 1, now, now + 700_000).unwrap(), Some(ReminderOutcome::AlreadyDelivered));
+    let rows: Value = serde_json::from_str(&lab.ok(&["inbox", "list", "demo"])).unwrap();
+    assert_eq!(rows.as_array().unwrap().len(), 1);
+    assert_eq!(rows[0]["content"]["summary"], "attempt quiet-attempt: worker idle for 10 min without submitting");
+    lab.ok(&["inbox", "done", "demo", rows[0]["content"]["id"].as_str().unwrap()]);
+    assert_eq!(db.notify_worker_idle(db.current_head().unwrap(), &attempt.id, 1, now, now + 800_000).unwrap(), Some(ReminderOutcome::AlreadyDelivered));
+    assert_eq!(db.notify_worker_idle(db.current_head().unwrap(), &attempt.id, 1, now + 1_000_000, now + 1_600_000).unwrap(), Some(ReminderOutcome::Delivered));
+    let snapshot = runtime::snapshot(&lab.project).unwrap();
+    assert_eq!(snapshot.inbox.len(), 2);
+    assert_eq!(snapshot.attempts[0], attempt);
 }

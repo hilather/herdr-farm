@@ -922,3 +922,10 @@ retained with full sidecar backups. `sidecar.storage_samples` is bounded to
 planning/apply and restore tombstone enforcement and counted in backup/restore
 loss reports. Derived metric revisions follow the existing analytics class.
 No native agent directories are added to collection scope.
+
+Idle stretch tracking is ticker memory keyed by attempt id and revision, with no
+canonical schema change (schema 72). Stable idle notices use existing canonical
+inbox retention and backups. Restarting the ticker restarts the idle stretch and
+can deliver at most one extra notice for that stretch per restart.
+Worker question notices use existing bound `codex_tool_calls` metadata and
+canonical inbox rows, with no question text or new sidecar table.

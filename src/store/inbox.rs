@@ -222,3 +222,29 @@ pub(super) fn ended_notice(db: &Connection, attempt: &Attempt) -> Result<()> {
     }
     Ok(())
 }
+
+impl SqliteStore {
+    /// Deliver a ticker-owned idle stretch through the stable inbox path.
+    pub fn notify_worker_idle(&mut self, expected_head: u64, attempt: &AttemptId, revision: u64, since: i64, now: i64) -> Result<Option<crate::domain::ReminderOutcome>> {
+        super::delivery::now_check(now)?;
+        let current = read_attempt(&self.connection, attempt)?;
+        if current.revision != revision { return Err(StoreError::Conflict); }
+        let submitted: bool = self.connection.query_row("SELECT EXISTS(SELECT 1 FROM result_submissions WHERE attempt_id=?1)", [attempt.as_str()], |r| r.get(0))?;
+        if current.state != AttemptState::Running || current.termination_observed || submitted {
+            return Ok(None);
+        }
+        let minutes = now.saturating_sub(since) / 60_000;
+        let content = InboxContent { id: format!("worker-idle-{}-{revision}-{since}", attempt.as_str()), kind: "attempt.worker_idle".into(), subject: current.task.as_str().into(), created: String::new(), summary: format!("attempt {}: worker idle for {minutes} min without submitting", attempt.as_str()), body: String::new() };
+        self.deliver_stable_notice(expected_head, &content, now).map(Some)
+    }
+
+    /// Metadata-only question notice. Stable native call identity deduplicates
+    /// collectors and restarts; argument/question text is never accepted here.
+    pub fn notify_worker_question(&mut self, attempt: &AttemptId, session: &str, call: &str, tool: &str, now: i64) -> Result<crate::domain::ReminderOutcome> {
+        super::delivery::now_check(now)?;
+        if !matches!(tool,"request_user_input"|"request_user_input_async") || session.is_empty() || call.is_empty() { return Err(StoreError::Invalid("invalid question metadata".into())); }
+        let current = read_attempt(&self.connection, attempt)?;
+        let content = InboxContent { id: format!("worker-question-{:x}", Sha256::digest(format!("{}\0{session}\0{call}",attempt.as_str()).as_bytes())), kind: "attempt.worker_question".into(), subject: current.task.as_str().into(), created: String::new(), summary: format!("attempt {}: worker called {tool}; user questions are not answered in isolated workers; inspect or nudge the worker to state assumptions",attempt.as_str()), body: String::new() };
+        self.deliver_stable_notice(self.current_head()?, &content, now)
+    }
+}

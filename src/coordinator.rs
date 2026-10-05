@@ -40,7 +40,7 @@ pub fn agent_name(slug: &str) -> String {
 /// its working directory to start.
 pub fn priming_prompt(prefix: &str, slug: &str) -> String {
     format!(
-        "You are the coordinator of the herdr project `{slug}`. Run `{prefix} skill` and follow what it prints, then run `{prefix} context {slug}`."
+        "You are the coordinator of the herdr project `{slug}`. Run `{prefix} skill` and follow what it prints, then run `{prefix} context {slug}`. Handle worker-idle inbox notices by inspecting and nudging, stopping or relaunching the attempt; idle is not termination. Worker-question notices contain metadata only: isolated user questions are not answered, so direct workers to report assumptions. Mark handled notices done."
     )
 }
 

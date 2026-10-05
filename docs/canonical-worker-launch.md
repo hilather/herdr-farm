@@ -988,6 +988,28 @@ attempt/content digest for coordinator review. See [canonical Remember capture
 and delegated decisions](memory-store.md#canonical-remember-capture-and-delegated-decisions)
 for the 2026-10-04 owner delegation and mandatory owner inbox/Herdr notification.
 
+## Dedicated server retirement
+
+Each ticker pass scans persisted `.herdr-run/<project>-<task>/herdr/server.json`
+records, including after a restart. It stops a private server when no attempt
+for that task retains its worker, without depending on the task's active pointer
+or the continued existence of its task row. Previously the sweep skipped missing
+task rows, stale active pointers and servers without attempt history. Retained
+attempts still fence cleanup, including uncertain termination. Stop reads the
+socket from the persisted server record rather than recomputing a short socket
+path, and verifies the recorded process's server argv and socket environment
+before signaling. Retirement holds the project effect guard and an exclusive launch-preparation
+file lock, so it cannot race a reservation or a launch that has created its server
+but not yet reserved an attempt. Relaunch also reuses the persisted live socket when the
+runtime directory changed, and refuses to overwrite a live server record until
+the retention fence permits stopping it. Operator-managed servers remain running.
+
+The sweep reads a read-only canonical snapshot without a whole-store integrity
+check. Idle monitoring likewise uses persisted pane observations, leaving pane
+probes and the durable response to unexplained loss to reconciliation. A missing
+pane without proven termination pauses admission and requires reconciliation;
+it never makes a capacity-retaining attempt's server eligible for retirement.
+
 ### Worker command card and environment
 
 Rendered worker briefs end with a compact command card: the submission script

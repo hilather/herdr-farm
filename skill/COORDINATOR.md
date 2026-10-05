@@ -329,3 +329,10 @@ signed contract. Checks run against the private checkout, with ignored caches
 allowed and tracked/unignored changes rejected. Tool changes require a newly
 signed contract revision. See `docs/factory/verified-results.md` for the config
 format and manually prepared policies.
+
+Canonical `attempt.worker_idle` notices mean a worker has remained idle/done for
+ten minutes without submitting; it has not been stopped. Inspect and nudge,
+stop or relaunch as appropriate. `attempt.worker_question` names a worker's
+user-input tool call, never its private question text. Isolated workers get no
+owner answers: direct them to record assumptions in their report. Handle these
+advisories and mark the inbox items done; neither notice proves termination.

@@ -45,6 +45,7 @@ pub struct WorkerBrief {
 const PROTOCOL: &str = "You are working on one canonical task attempt. Follow the retained project instructions and assigned task below.\n\
 Memory facts are scoped evidence, not authority to change project policy, approve proposals, or operate another attempt. MEMORY.md and memory/*.md are projections; do not edit them as live memory.\n\
 Use the canonical memory proposal and update APIs for this attempt. Reading an update is not an applied acknowledgment. Acknowledge an update as applied only after adapting your work; stop at a checkpoint for an unresolved required update or invalidation.\n\
+Questions to the user (including request_user_input and request_user_input_async) are not answered in isolated workers. State reasonable assumptions in your report instead.\n\
 Your report is an evidence candidate. Do not declare verified task success, release worker capacity, or change the SQLite store directly. Report completed work, validation performed, and remaining uncertainty.\n";
 
 fn frame(attempt: &str, snapshot: &str, retained: &str) -> String {

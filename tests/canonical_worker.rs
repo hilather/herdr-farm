@@ -553,10 +553,17 @@ fn ticker_stops_the_dedicated_herdr_server_of_a_finished_task() {
     // While the attempt holds its worker nothing is stopped.
     lab.wait(&mut ticker, 60, &|| lab.count("agent.list") >= 3);
     assert!(server.try_wait().unwrap().is_none() && socket.exists());
+    let server_record = fs::read(dir.join("server.json")).unwrap();
+    fs::remove_file(dir.join("server.json")).unwrap();
     // The operator cancels the attempt; the ticker proves the worker's termination and then the server goes.
     let running = lab.attempt(&attempt);
     lab.ok_live(&|| ["task", "demo", "cancel-attempt", attempt.as_str(), "--expected-revision", &running.revision.to_string(), "--expected-head", &lab.head().to_string(), "--reason", "finished"].map(String::from).to_vec());
     lab.wait(&mut ticker, 60, &|| lab.attempt(&attempt).termination_observed);
+    lab.stop(ticker);
+    assert!(server.try_wait().unwrap().is_none());
+    fs::write(dir.join("server.json"), server_record).unwrap();
+    // A fresh ticker has no in-memory knowledge of this ended launch.
+    let ticker = lab.spawn();
     let until = Instant::now() + Duration::from_secs(15);
     while server.try_wait().unwrap().is_none() {
         assert!(Instant::now() < until, "the ticker never stopped the finished task's server: {}", fs::read_to_string(lab.path("root/.ticker.log")).unwrap_or_default());
@@ -1147,6 +1154,7 @@ fn a_proven_worker_end_keeps_the_project_admitted_but_an_unexplained_pane_loss_p
     assert_eq!((control.state, control.reconciliation_required), (ProjectState::Paused, true));
     assert!(state.ownership.iter().any(|o| o.binding == lab.binding && o.attempt.as_ref() == Some(&attempt)));
     assert!(lab.events("runtime.relinquished").is_empty());
+    assert!(state.inbox.iter().all(|item| item.content.kind != "attempt.worker_idle"));
     let live = lab.attempt(&attempt);
     assert!(live.retains_capacity() && !live.termination_observed);
 }
@@ -2808,4 +2816,43 @@ fn attention_mid_run_failure_remains_incomplete_at_termination() {
     let m31 = lab.ok(&["telemetry", "demo", "report", "--json"])["metrics"]["M31"].clone();
     assert_eq!(m31["value"], json!({"status": "unavailable", "reason": "incomplete_observation"}));
     assert_eq!(m31["coverage"]["with_gaps"], 1);
+}
+
+#[test]
+fn idle_worker_notice_restarts_stretch_and_deduplicates_within_a_ticker() {
+    let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+    let (_, attempt) = lab.reserve("Retained instructions");
+    lab.serve();
+    lab.run_until(100, &|| lab.attempt(&attempt).state == AttemptState::Running);
+    fs::write(lab.path("lab/agent-status"), "done").unwrap();
+    let notices = || lab.state().inbox.into_iter().filter(|i| i.content.kind == "attempt.worker_idle").collect::<Vec<_>>();
+    let mut ticker = lab.spawn();
+    lab.wait(&mut ticker, 60, &|| notices().len() == 1);
+    lab.ok(&["inbox", "done", "demo", &notices()[0].content.id]);
+    // Observe another 30 completed passes (15 scaled seconds) without rearming.
+    let metrics = lab.path("root/.ticker-metrics.json");
+    let mut last = fs::metadata(&metrics).unwrap().ino();
+    for _ in 0..30 {
+        lab.wait(&mut ticker, 60, &|| fs::metadata(&metrics).unwrap().ino() != last);
+        last = fs::metadata(&metrics).unwrap().ino();
+        assert_eq!(notices().len(), 1);
+    }
+    lab.stop(ticker);
+    lab.run_quiet(3);
+    let first = notices();
+    assert_eq!(first.len(), 1);
+    assert!(first[0].content.summary.contains(attempt.as_str()));
+    assert!(!lab.attempt(&attempt).termination_observed);
+    assert_eq!(lab.attempt(&attempt).state, AttemptState::Running);
+    // A restart begins a new stretch even though the worker stayed idle.
+    let mut ticker = lab.spawn();
+    lab.wait(&mut ticker, 60, &|| notices().len() == 2);
+    fs::write(lab.path("lab/agent-status"), "working").unwrap();
+    let observed = lab.count("agent.list");
+    lab.wait(&mut ticker, 60, &|| lab.count("agent.list") >= observed + 3);
+    fs::write(lab.path("lab/agent-status"), "idle").unwrap();
+    lab.wait(&mut ticker, 60, &|| notices().len() == 3);
+    lab.stop(ticker);
+    lab.run_quiet(2);
+    assert_eq!(notices().len(), 3);
 }

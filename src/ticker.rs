@@ -627,6 +627,9 @@ pub fn tick(ctx: &Ctx, log: &Log, memory: &mut Memory) -> bool {
                     Err(error) => log.line(&format!("{slug}: memory-review remind: {error:#}")),
                 }
             }
+            if let Err(error) = crate::reconcile_live::worker_attention(ctx, &ctx.root.join(slug), memory.worker_idle.entry(slug.clone()).or_default()) {
+                log.line(&format!("{slug}: worker attention: {error:#}"));
+            }
             integrity_pass(ctx,log,slug);
         }
         admit_background(ctx,log,memory,canonical.iter().map(|slug|ctx.root.join(slug)).collect());
