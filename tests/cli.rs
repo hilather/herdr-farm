@@ -3340,6 +3340,7 @@ fn outcome_success_path() {
         // min(1,8) + 2 x 1 uncertain (trailing-slash scope) + 1 verify_then_integrate = 4.
         "classification":{"band":"medium","class":"code","classification_id":classification},
         "configuration_id":configuration,
+        "effort_observed":{"reason":"effort_not_reported","status":"unavailable"},
         "integration":{"state":"integrated"},
         "launching_unix_ms":marks[1].2,
         "queue_to_launch_ms":marks[1].2-marks[0].2,
@@ -5468,7 +5469,7 @@ fn fleet_text_matches_report_json() {
     assert_eq!((&report["metrics"]["M02"]["value"],&report["metrics"]["M07"]["reason"],&report["metrics"]["M13"]["reason"]),(&"0/1".into(),&"empty_denominator".into(),&"empty_denominator".into()));
     // Extended M40: no attempt inputs record the execution home, so no account to read; unavailable, never 0.
     assert_eq!(report["metrics"]["M40"]["decisions"],serde_json::json!([{"attempt_id":"t2-a1","decided_unix_ms":decided,"service":"codex","value":{"reason":"execution_home_unknown","status":"unavailable"}}]));
-    assert_eq!(report["metrics"]["M40"]["definition"],"M40.quota-windows-v1");
+    assert_eq!(report["metrics"]["M40"]["definition"],"M40.quota-windows-v2");
     let out=hp(home.path(),&["--root",&r,"pane","fleet"]);assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stderr));
     let text=String::from_utf8(out.stdout).unwrap();
     let line=|prefix:&str|text.lines().find(|l|l.starts_with(prefix)).unwrap_or_else(||panic!("no `{prefix}` in {text}")).to_owned();
@@ -5480,6 +5481,8 @@ fn fleet_text_matches_report_json() {
             (serde_json::Value::String(value),_)=>value.clone(),
             (serde_json::Value::Null,_)=>format!("n/a ({})",metric["reason"].as_str().unwrap()),
             (serde_json::Value::Number(value),_)=>value.to_string(),
+            (value,_) if value["status"] == "partial" && value.get("denominator").is_some() => format!("partial {}/{} ({}: {} attempts without usage)",
+                value["priced_amount"].as_str().map(str::to_owned).unwrap_or_else(|| value["tokens"].to_string()), value["denominator"], value["reason"].as_str().unwrap(), value["attempts_without_usage"]),
             (value,_)=>format!("n/a ({})",value["reason"].as_str().unwrap_or_else(||panic!("{id}: a structured value needs its own expectation: {value}"))),
         };
         assert!(shown.ends_with(&expected),"{shown} != {expected}");

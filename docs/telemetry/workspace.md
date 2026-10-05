@@ -205,7 +205,8 @@ never read the whole store snapshot. Live Running/AwaitingInput attempts may
 publish. Cleanup is offered only for this ticker's successfully published
 bindings, until 300 seconds after their last publish. The in-process map holds
 at most 256 bindings, evicting the oldest publish. Successful erase or an absent
-pane removes the entry. After restart this map is empty: leftover decorations
+pane removes the entry. A missing dedicated server socket is an absent pane
+and removes the publish hint without an error or repeated cleanup retries. After restart this map is empty: leftover decorations
 expire by native TTL, the accepted residual also used for unreachable panes. Each
 project offers at most 16 attempt jobs per tick, rotating through attempts;
 these offers never evict other queue entries. Advisory jobs share bounded
@@ -285,7 +286,7 @@ captures.
 ─ SERVICES
   M38 throttled time share: n/a (throttling_not_certified)
   M39 provider error rate: n/a (provider_errors_not_certified)
-  codex quota at last dispatch (attempt-3f5c6a8e): primary 62.5% remaining (window 300m, fresh) · secondary n/a (not_reported)
+  codex quota at last dispatch (attempt-3f5c6a8e): primary 62.5% remaining (window 300m, fresh)
 ─ CONFIGURATIONS · M02 acceptance · terminal_cohort · observational · 95% interval · min 20 tasks per cell · never a routing decision
   code
     claude 1.0 [c1a0de10]  20/20 (1.0000) [20/20–20/20] n=20 pooled 1
@@ -307,7 +308,7 @@ line under `─ ALERTS` also carries its opening time and occurrence count.
 ## Fleet (advisory · as of 13:27 UTC · telemetry-workspace.v1)
 Active attempts: 1 (running 1, launching 0, reserved 0); bound usage 0 of 1
 Waiting on operator: attempt-3f5c6a8e task work (6m00s so far)
-Services: throttled n/a (throttling_not_certified); errors n/a (provider_errors_not_certified); codex quota at last dispatch (attempt-3f5c6a8e): primary 62.5% remaining (window 300m, fresh) · secondary n/a (not_reported)
+Services: throttled n/a (throttling_not_certified); errors n/a (provider_errors_not_certified); codex quota at last dispatch (attempt-3f5c6a8e): primary 62.5% remaining (window 300m, fresh)
 Routing evidence (M02 acceptance, terminal_cohort, 95% interval, n; below 20 tasks insufficient):
   code: claude 1.0 20/20 [20/20–20/20] n=20; gemini 2.0 insufficient (n=3)
 Health alerts (1 open): warn waiting_on_you [attention] waiting_on_you

@@ -1382,6 +1382,7 @@ fn cancelled_before_launch_is_censored_not_zero() {
         "attention": {"reason": "attention_not_collected", "status": "unavailable"},
         "classification": {"band": "small", "class": "code", "classification_id": classification},
         "configuration_id": sha256_id(&sim_configuration("1.0.0")),
+        "effort_observed": {"reason": "effort_not_reported", "status": "unavailable"},
         "integration": {"state": "not_applicable"},
         "launching_unix_ms": null,
         "queue_to_launch_ms": {"reason": "cancelled", "status": "censored"},
@@ -4460,6 +4461,11 @@ fn main() {
     assert!(fs::write(".tools/seal", b"escape").is_err(), "owner tool writable");
     assert_ne!(fs::read_link("/proc/self/ns/net").unwrap().to_string_lossy(), std::env::var("FIXTURE_HOST_NET").unwrap(), "host network namespace inherited");
     assert!(fs::read_to_string("/proc/net/route").unwrap().lines().count() <= 1, "network route available");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (_server, _) = listener.accept().unwrap();
+    drop(client);
+    assert!(std::net::TcpStream::connect_timeout(&"192.0.2.1:9".parse().unwrap(), std::time::Duration::from_millis(200)).is_err(), "outbound network available");
     unsafe extern "C" { fn mount(source: *const i8, target: *const i8, kind: *const i8, flags: u64, data: *const i8) -> i32; }
     assert_ne!(unsafe { mount(std::ptr::null(), c"/tmp".as_ptr(), std::ptr::null(), 32 | 1, std::ptr::null()) }, 0, "mount capability retained");
     fs::write("/tmp/private-test", b"temporary").unwrap();
@@ -4467,6 +4473,7 @@ fn main() {
     fs::write(".tools/cache", b"ignored").unwrap();
     match args[1].as_str() {
         "pass" | "timeout" => std::thread::sleep(std::time::Duration::from_secs(2)),
+        "outbound" => { std::net::TcpStream::connect_timeout(&"192.0.2.1:9".parse().unwrap(), std::time::Duration::from_millis(200)).unwrap(); },
         "fail" => std::process::exit(1),
         "tracked" => fs::write("README", b"changed tracked input").unwrap(),
         "unignored" => fs::write("unexpected", b"unignored output").unwrap(),
@@ -4490,7 +4497,7 @@ fn main() {
     let oid = git(&repo, &["rev-parse", "HEAD"]).trim().to_owned();
     let host_net = format!("FIXTURE_HOST_NET={}", fs::read_link("/proc/self/ns/net").unwrap().display());
     let config = format!("[verification.toolchains.fixture]\npaths=[\"/bin/sh\",\"/usr/bin/env\",{:?}]\nenv=[\"FIXTURE_VALUE=pinned\",{host_net:?}]\ntimeout_seconds=10\n", tools.to_str().unwrap());
-    for case in ["undeclared", "changed-before-install", "changed", "pass", "fail", "tracked", "unignored", "timeout"] {
+    for case in ["undeclared", "changed-before-install", "changed", "pass", "outbound", "fail", "tracked", "unignored", "timeout"] {
         let lab = memory_project_with_config(&if case == "timeout" { config.replace("timeout_seconds=10", "timeout_seconds=1") } else { config.clone() });
         let db_path = state_db(&lab.project);
         let mut store = SqliteStore::open(&db_path).unwrap();

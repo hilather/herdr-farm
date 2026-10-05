@@ -189,7 +189,7 @@ pub fn agent_cells(r: &Value) -> Value {
 }
 
 /// Requested versus reported versus unknown model identity, from the query only.
-pub fn identity(m15: Option<&Value>, m02_by_agent: Option<&Value>) -> Value {
+pub fn identity(m15: Option<&Value>, m02_by_agent: Option<&Value>, configurations: &[Value]) -> Value {
     let requested: Vec<Value> = m02_by_agent.and_then(|r| r["cells"].as_array()).into_iter().flatten()
         .map(|c| json!({"agent_kind": c["dimension"]["agent_kind"], "tasks": c["denominator"]})).collect();
     let reported = match m15 {
@@ -200,7 +200,7 @@ pub fn identity(m15: Option<&Value>, m02_by_agent: Option<&Value>) -> Value {
         Some(r) => json!({"status": "unavailable", "reason": r["reason"].as_str().or(r["value"]["reason"].as_str()).unwrap_or("unknown")}),
         None => json!({"status": "unavailable", "reason": "not_queried"}),
     };
-    json!({"requested_agent": requested, "requested_model_name": {"status": "unavailable", "reason": "not_in_query_service"},
+    json!({"requested_agent": requested, "requested_model_name": configurations,
         "reported_effective_model": reported, "hidden_identity": "unknown stays unknown; never inferred from the agent kind"})
 }
 
@@ -269,9 +269,14 @@ pub fn rows_text(body: &Value) -> String {
     }
     let identity = &body["identity"];
     if identity.is_object() {
+        for metric in body["by_profile"].as_array().into_iter().flatten() {
+            for cell in metric["cells"].as_array().into_iter().flatten() {
+                out += &format!("    {} profile={}: {} · pinned={}\n", metric["metric_id"].as_str().unwrap_or(""), cell["profile"].as_str().unwrap_or("unknown"), cell["display"].as_str().unwrap_or(""), cell["pins"].as_array().into_iter().flatten().map(|pin| format!("model={} effort={}", pin["model"].as_str().unwrap_or("unknown"), pin["reasoning_effort"].as_str().unwrap_or("unknown"))).collect::<Vec<_>>().join(", "));
+            }
+        }
         let requested: Vec<String> = identity["requested_agent"].as_array().into_iter().flatten()
             .map(|c| format!("{} {} tasks", c["agent_kind"].as_str().unwrap_or("?"), c["tasks"])).collect();
-        out += &format!("  identity requested agent (profile kind): {}; requested model name: n/a (not_in_query_service)\n",
+        out += &format!("  identity requested agent (profile kind): {}\n",
             if requested.is_empty() { na(Some("no_terminal_tasks")) } else { requested.join(", ") });
         let reported = &identity["reported_effective_model"];
         out += &match reported["records"].as_u64() {
@@ -323,4 +328,15 @@ pub fn drill_text(body: &Value) -> String {
     }
     if let Some(cursor) = d["next_cursor"].as_str() { out += &format!("  next: --cursor {cursor}\n"); }
     out
+}
+
+/// Profile cells preserve every historical pin rather than selecting a current configuration.
+pub fn profile_cells(r: &Value, configurations: &[Value]) -> Value {
+    let mut result = agent_cells(r);
+    for (cell, original) in result["cells"].as_array_mut().into_iter().flatten().zip(r["cells"].as_array().into_iter().flatten()) {
+        cell.as_object_mut().unwrap().remove("agent_kind");
+        cell["profile"] = original["dimension"]["profile"].clone();
+        cell["pins"] = json!(configurations.iter().filter(|c| c["profile"] == cell["profile"]).collect::<Vec<_>>());
+    }
+    result
 }

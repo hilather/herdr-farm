@@ -185,8 +185,10 @@ fn every_surface_shows_the_same_values_as_the_query_service() {
     }
     let quota = &snap["services"]["quota_at_last_dispatch"][0];
     assert_eq!(quota, &result("M40")["detail"]["decisions"][0]);
-    assert_eq!((&quota["windows"][0]["value"], &quota["windows"][0]["used"], &quota["windows"][0]["freshness"], &quota["windows"][1]["value"]),
-        (&json!("62.5"), &json!("37.5"), &json!("fresh"), &json!({"status": "unavailable", "reason": "not_reported"})));
+    assert_eq!((&quota["windows"][0]["value"], &quota["windows"][0]["used"], &quota["windows"][0]["freshness"]),
+        (&json!("62.5"), &json!("37.5"), &json!("fresh")));
+    assert_eq!(quota["windows"].as_array().unwrap().len(), 1);
+    assert_eq!(result("M40")["detail"]["not_reported"][0]["window_kind"], "secondary");
     assert_eq!((&snap["services"]["M38"]["value"], &snap["replay"]["reason"]), (&json!({"status": "unavailable", "reason": "throttling_not_certified"}), &json!("no_replay_suite")));
 
     // Active attempts: the TM1.8 projection's open record, attention and usage verbatim.
@@ -250,7 +252,7 @@ fn every_surface_shows_the_same_values_as_the_query_service() {
         "─ ALERTS (1 open; `health notify` leaves inbox notices)".to_owned(),
         "  M38 throttled time share: n/a (throttling_not_certified)".to_owned(),
         "  M39 provider error rate: n/a (provider_errors_not_certified)".to_owned(),
-        format!("  codex quota at last dispatch ({}): primary 62.5% remaining (window 300m, fresh) · secondary n/a (not_reported)", &f.attempt[..16]),
+        format!("  codex quota at last dispatch ({}): primary 62.5% remaining (window 300m, fresh)", &f.attempt[..16]),
         "─ CONFIGURATIONS · M02 acceptance · terminal_cohort · observational · 95% interval · min 20 tasks per cell · never a routing decision".to_owned(),
         "  code".to_owned(),
         format!("    claude 1.0 [{}]  20/20 (1.0000) [20/20–20/20] n=20 pooled 1", &a[7..15]),
@@ -276,7 +278,7 @@ fn every_surface_shows_the_same_values_as_the_query_service() {
         "Active attempts: 1 (running 1, launching 0, reserved 0); bound usage ".to_owned() + if coverage == "complete" { "1 of 1" } else { "0 of 1" },
         format!("Waiting on operator: {} task work (6m00s so far)", &f.attempt[..16]),
         "Health alerts (1 open): warn waiting_on_you [attention] waiting_on_you".to_owned(),
-        format!("Services: throttled n/a (throttling_not_certified); errors n/a (provider_errors_not_certified); codex quota at last dispatch ({}): primary 62.5% remaining (window 300m, fresh) · secondary n/a (not_reported)", &f.attempt[..16]),
+        format!("Services: throttled n/a (throttling_not_certified); errors n/a (provider_errors_not_certified); codex quota at last dispatch ({}): primary 62.5% remaining (window 300m, fresh)", &f.attempt[..16]),
         "Routing evidence (M02 acceptance, terminal_cohort, 95% interval, n; below 20 tasks insufficient):".to_owned(),
         "  code: claude 1.0 20/20 [20/20–20/20] n=20; gemini 2.0 insufficient (n=3)".to_owned(),
         "Replay M49: n/a (no_replay_suite)".to_owned(),
@@ -312,13 +314,10 @@ fn retained_terminal_attempts_do_not_change_live_sections_or_recorded_history() 
     assert_eq!((&active["attempt_id"], &active["task_id"], &active["state"]), (&json!(f.attempt), &json!("work"), &json!("running")));
     assert_eq!(active["waiting"], json!({"waiting_ms": 0, "open": true, "open_since_unix_ms": f.decided - 370_000, "open_observed_ms": 360_000}));
     let needs = snap["needs_you"].as_array().unwrap();
-    // Retained attempts without usage also raise the recorded critical
-    // coverage-loss alert; it precedes the warning and the live wait.
-    assert_eq!(needs.len(), 3, "{needs:?}");
-    assert_eq!(needs[0], json!({"kind": "alert", "alert_id": 1, "rule": "usage_coverage", "state": "critical",
-        "labels": {"family": "consumption", "project": "demo", "rule": "usage_coverage", "service": "codex"}, "reasons": ["coverage_loss"]}));
-    assert_eq!((&needs[1]["kind"], &needs[1]["rule"], &needs[1]["state"]), (&json!("alert"), &json!("waiting_on_you"), &json!("warn")));
-    assert_eq!(needs[2], json!({"kind": "waiting_on_you", "attempt_id": f.attempt, "task_id": "work", "since_unix_ms": f.decided - 370_000, "observed_ms": 360_000}));
+    // Never-launched retained attempts are excluded from usage-loss health.
+    assert_eq!(needs.len(), 2, "{needs:?}");
+    assert_eq!((&needs[0]["kind"], &needs[0]["rule"], &needs[0]["state"]), (&json!("alert"), &json!("waiting_on_you"), &json!("warn")));
+    assert_eq!(needs[1], json!({"kind": "waiting_on_you", "attempt_id": f.attempt, "task_id": "work", "since_unix_ms": f.decided - 370_000, "observed_ms": 360_000}));
     let revisions = f.cli_args(&["analytics", "revisions", "--metric", "M40"]).0;
     let revision = revisions["revisions"].as_array().unwrap().last().unwrap();
     assert_eq!(snap["services"]["M40"]["as_of"], json!({"seq": revision["revision"], "unix_ms": revision["recorded_unix_ms"]}));

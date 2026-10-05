@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-pub struct Attempt { pub id: String, pub state: String, pub decided: Option<i64>, pub reserved: Option<i64>, pub ended: Option<i64>, pub kind: Option<String> }
+pub struct Attempt { pub id: String, pub state: String, pub decided: Option<i64>, pub reserved: Option<i64>, pub ended: Option<i64>, pub kind: Option<String>, pub profile: Option<String> }
 
 pub struct FirstCandidate { pub at: i64, pub attempt: String, pub policy: String, pub policy_digest: String, pub outcome: &'static str }
 
@@ -52,8 +52,8 @@ impl Task {
             "policy" => self.first_candidate.as_ref().map(|f| format!("{}@{}", f.policy, f.policy_digest)).unwrap_or_else(|| "unknown".into()),
             "route" => self.route.clone().unwrap_or_else(|| "none".into()),
             "task_class" => self.class.clone().unwrap_or_else(|| "unclassified".into()),
-            "agent_kind" => {
-                let kinds: BTreeSet<&str> = self.attempts.iter().map(|a| a.kind.as_deref().unwrap_or("unknown")).collect();
+            "profile" | "agent_kind" => {
+                let kinds: BTreeSet<&str> = self.attempts.iter().map(|a| (if name == "profile" { &a.profile } else { &a.kind }).as_deref().unwrap_or("unknown")).collect();
                 match kinds.len() { 0 => "unassigned".into(), 1 => kinds.into_iter().next().unwrap_or_default().to_owned(), _ => "mixed".into() }
             }
             _ => "unknown".into(),
@@ -61,7 +61,7 @@ impl Task {
     }
     fn attrs(&self) -> Value {
         json!({"disposition": self.disposition(), "terminal_unix_ms": self.terminal_at(), "assigned_unix_ms": self.assigned_at(), "attempts": self.attempts.len(),
-            "route": self.dimension("route"), "agent_kind": self.dimension("agent_kind"), "task_class": self.dimension("task_class")})
+            "profile": self.dimension("profile"), "route": self.dimension("route"), "agent_kind": self.dimension("agent_kind"), "task_class": self.dimension("task_class")})
     }
 }
 
@@ -78,7 +78,7 @@ pub fn queries(db: &Connection) -> Result<Vec<(&'static str, String)>> {
          "(SELECT max(unix_ms) FROM attempt_lifecycle l WHERE l.attempt_id=a.id AND l.state IN ('completed','failed','cancelled','lost'))")
     } else { ("NULL", "NULL") };
     let mut out = vec![
-        ("lifecycle_attempts", format!("SELECT a.id,a.task_id,a.state,{decided},{reserved},{ended},json_extract(i.payload,'$.inputs.effective_profile.kind')
+        ("lifecycle_attempts", format!("SELECT a.id,a.task_id,a.state,{decided},{reserved},{ended},json_extract(i.payload,'$.inputs.effective_profile.kind'),json_extract(i.payload,'$.inputs.effective_profile.name')
             FROM attempts a LEFT JOIN attempt_inputs i ON i.attempt_id=a.id ORDER BY a.task_id,a.id")),
         ("lifecycle_contracts", "SELECT c.task_id,c.route FROM task_contracts c WHERE c.contract_revision=(SELECT max(contract_revision) FROM task_contracts x WHERE x.task_id=c.task_id)".to_owned()),
         ("lifecycle_acceptance_times", "SELECT c.task_id,min(r.created_unix_ms),min(k.created_unix_ms) FROM task_contracts c
@@ -106,7 +106,7 @@ pub fn load(project: &Path) -> Result<Vec<Task>> {
     let sql = |name: &str| queries.iter().find(|q| q.0 == name).map(|q| q.1.clone());
     let mut attempts: BTreeMap<String, Vec<Attempt>> = BTreeMap::new();
     let mut stmt = db.prepare(&sql("lifecycle_attempts").unwrap_or_default())?;
-    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(1)?, Attempt { id: r.get(0)?, state: r.get(2)?, decided: r.get(3)?, reserved: r.get(4)?, ended: r.get(5)?, kind: r.get(6)? })))?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(1)?, Attempt { id: r.get(0)?, state: r.get(2)?, decided: r.get(3)?, reserved: r.get(4)?, ended: r.get(5)?, kind: r.get(6)?, profile: r.get(7)? })))?;
     for row in rows { let (task, attempt) = row?; attempts.entry(task).or_default().push(attempt); }
     let routes: BTreeMap<String, String> = db.prepare(&sql("lifecycle_contracts").unwrap_or_default())?.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
     let times: BTreeMap<String, (Option<i64>, Option<i64>)> = db.prepare(&sql("lifecycle_acceptance_times").unwrap_or_default())?
@@ -131,7 +131,7 @@ pub fn load(project: &Path) -> Result<Vec<Task>> {
 /// returns tasks equal to `load`'s.
 pub(crate) fn encode(tasks: &[Task]) -> Value {
     Value::Array(tasks.iter().map(|t| json!([t.id, t.state, t.accepted, t.accepted_at, t.route, t.class, t.replay,
-        t.attempts.iter().map(|a| json!([a.id, a.state, a.decided, a.reserved, a.ended, a.kind])).collect::<Vec<_>>()])).collect())
+        t.attempts.iter().map(|a| json!([a.id, a.state, a.decided, a.reserved, a.ended, a.kind, a.profile])).collect::<Vec<_>>()])).collect())
 }
 
 /// `None` when the body is not the shape `encode` writes.
@@ -142,8 +142,8 @@ pub(crate) fn decode(body: &Value) -> Option<Vec<Task>> {
     body.as_array()?.iter().map(|row| {
         let row = row.as_array().filter(|r| r.len() == 8)?;
         let attempts = row[7].as_array()?.iter().map(|a| {
-            let a = a.as_array().filter(|a| a.len() == 6)?;
-            Some(Attempt { id: text(&a[0])?, state: text(&a[1])?, decided: maybe_int(&a[2])?, reserved: maybe_int(&a[3])?, ended: maybe_int(&a[4])?, kind: maybe_text(&a[5])? })
+            let a = a.as_array().filter(|a| a.len() == 7)?;
+            Some(Attempt { id: text(&a[0])?, state: text(&a[1])?, decided: maybe_int(&a[2])?, reserved: maybe_int(&a[3])?, ended: maybe_int(&a[4])?, kind: maybe_text(&a[5])?, profile: maybe_text(&a[6])? })
         }).collect::<Option<Vec<_>>>()?;
         Some(Task { id: text(&row[0])?, state: text(&row[1])?, accepted: row[2].as_bool()?, accepted_at: maybe_int(&row[3])?, route: maybe_text(&row[4])?,
             class: maybe_text(&row[5])?, replay: row[6].as_bool()?, attempts, first_candidate: None })
@@ -219,7 +219,7 @@ pub fn digest(tasks: &[Task]) -> String {
     // The replay mark is appended only when set, so a project without replay keeps its digest.
     let rows: Vec<Value> = tasks.iter().map(|t| {
         let mut row = json!([t.id, t.state, t.accepted, t.accepted_at, t.route, t.class,
-            t.attempts.iter().map(|a| json!([a.id, a.state, a.decided, a.reserved, a.ended, a.kind])).collect::<Vec<_>>()]);
+            t.attempts.iter().map(|a| json!([a.id, a.state, a.decided, a.reserved, a.ended, a.kind, a.profile])).collect::<Vec<_>>()]);
         if t.replay && let Value::Array(row) = &mut row { row.push(json!("replay_candidate")); }
         row
     }).collect();

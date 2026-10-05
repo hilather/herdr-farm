@@ -21,6 +21,7 @@ pub(super) fn command(
     inputs: &crate::domain::LaunchInputs,
     events: &[Event],
     launch_hides: &[String],
+    contract: Option<&crate::domain::PreparedContract>,
 ) -> Result<Vec<String>> {
     let definition = crate::profile_config::frozen_definition(profile)?;
     let wall = definition.validate_gated_preparation(prompt_chars)?;
@@ -41,6 +42,7 @@ pub(super) fn command(
             launch_hides,
         )?
         .with_submission_spool(attempt.as_str())?;
+        let isolation = isolation.with_acceptance_toolchains(project, contract)?;
         let isolation = crate::profile_config::share_login(isolation, profile, Path::new(home))?;
         return crate::worker_supervision::isolated_gated_command(
             Path::new(&profile.agent.path),
@@ -60,12 +62,11 @@ pub(super) fn command(
 }
 /// The agent's own arguments: the profile's `extra_args` (whose digest the
 /// profile retains), after a prefix the product derives for an isolated
-/// Codex attempt. That prefix, `-c sandbox_workspace_write.writable_roots=[..]`,
-/// grants Codex's own `workspace-write` sandbox exactly the places the worker
+/// Codex attempt. That prefix, `-c permissions.herdr-farm-worker.filesystem={..}`,
+/// grants Codex's permission profile exactly the places the worker
 /// sandbox already makes writable outside the worktree
-/// ([`crate::worker_supervision::agent_writable_roots`]); it replaces a
-/// `writable_roots` list in the execution home's Codex configuration and
-/// leaves the Codex sandbox mode to that configuration. Creation, gate release
+/// ([`crate::worker_supervision::agent_writable_roots`]); it supplies
+/// filesystem grants for this attempt without writing the shared home. Creation, gate release
 /// and start observation derive it from the same retained events.
 pub(super) fn agent_arguments(
     profile: &FrozenProfile,
@@ -80,7 +81,7 @@ pub(super) fn agent_arguments(
         let git = crate::worktree_preparation::retained_git_directories(events, operation)?;
         let worktrees = git.iter().map(|(w, d, c)| (Path::new(w.as_str()), Path::new(d.as_str()), Path::new(c.as_str()))).collect::<Vec<_>>();
         let roots = crate::worker_supervision::agent_writable_roots(project, &worktrees, attempt.as_str())?;
-        arguments.extend(["-c".to_owned(), format!("sandbox_workspace_write.writable_roots={}", serde_json::to_string(&roots)?)]);
+        arguments.extend(["-c".to_owned(), format!("permissions.herdr-farm-worker.filesystem={}", toml::Value::Table(roots.into_iter().map(|root| (root, toml::Value::String("write".into()))).collect()))]);
     }
     arguments.extend(definition.extra_args.iter().cloned());
     Ok(arguments)
@@ -385,7 +386,8 @@ fn create_resource_inner(
     let brief =
         db.render_attempt_brief(&project, record.attempt.as_str())?;
     let hides = launch_hides(&mut db, &project, &record.inputs.task)?;
-    let argv = command(profile, operation, &record.attempt, brief.prompt_chars, &project, route, &record.inputs, &state.events, &hides)?;
+    let contract = db.attempt_contract(record.inputs.task.as_str(), record.inputs.task_contract.as_ref())?;
+    let argv = command(profile, operation, &record.attempt, brief.prompt_chars, &project, route, &record.inputs, &state.events, &hides, contract.as_ref())?;
     executable(&profile.agent, deadline, &cancellation)?;
     let session = session_identity(Path::new(&route.socket))?;
     let mut api = Api {
@@ -1147,7 +1149,8 @@ pub fn release_gate(
         db.render_attempt_brief(&project, record.attempt.as_str())?;
     let worktrees=crate::worktree_preparation::verify_events_held(&project,&state.events,record,deadline,cancellation.clone(),guard.inherit()?)?;
     let hides = launch_hides(&mut db, &project, &record.inputs.task)?;
-    let argv = command(profile, operation, &record.attempt, brief.prompt_chars, &project, &target.route, &record.inputs, &state.events, &hides)?;
+    let contract = db.attempt_contract(record.inputs.task.as_str(), record.inputs.task_contract.as_ref())?;
+    let argv = command(profile, operation, &record.attempt, brief.prompt_chars, &project, &target.route, &record.inputs, &state.events, &hides, contract.as_ref())?;
     // The sandbox binds the attempt's spool and output directory writable
     // only when they exist, so they are created (owner-only) before release.
     crate::submission_spool::prepare(&project, &record.attempt)?;

@@ -83,7 +83,7 @@ pub struct Args {
     /// Projection sequence: answer from the cell's latest revision at or below it.
     #[arg(long)]
     pub as_of_seq: Option<i64>,
-    /// One bounded categorical dimension (`route`, `task_class`, `agent_kind`); identities are drill-downs, never labels.
+    /// One bounded categorical dimension (`route`, `task_class`, `agent_kind`, `profile`); identities are drill-downs, never labels.
     #[arg(long)]
     pub by: Option<String>,
     /// Assignment-cohort horizon after first assignment, ms; later outcomes are `unfinished`.

@@ -6,13 +6,15 @@ use std::{fs, path::PathBuf};
 use serde_json::{Value, json};
 use support::telemetry::*;
 
-fn claude() -> Fixture {
+fn claude() -> Fixture { claude_with_pins(None) }
+
+fn claude_with_pins(effort: Option<&str>) -> Fixture {
     let mut f = Fixture::new();
     let home = f.tmp.path().join("claude-execution-home");
     let mut profile = codex_profile(&f.config, "claude", "claude", Some(&home));
     profile.agent.version = "2.1.286".into();
     let path = f.project.join(".state/state.db");
-    plant_profile(&path, profile);
+    plant_profile_with_pins(&path, profile, None, effort);
     f.readmit("claude");
     let db = rusqlite::Connection::open(path).unwrap();
     (f.attempt, f.decided) = db.query_row("SELECT a.id,d.decided_unix_ms FROM attempts a JOIN dispatch_decisions d ON d.attempt_id=a.id WHERE a.state='reserved'",
@@ -58,7 +60,7 @@ fn native_claude_usage_tools_sidechains_and_privacy() {
     let ledger = f.cli_args(&["accounting", "entries"]).0;
     let entries = ledger["entries"].as_array().unwrap();
     assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0]["normalization_version"], "claude-code-v1");
+    assert_eq!(entries[0]["normalization_version"], "claude-code-v2");
     let normalized: Vec<Value> = entries.iter().map(|e| e["normalized"].clone()).collect();
     assert!(normalized.contains(&json!({"input_tokens":330,"cache_read_tokens":200,"new_input_tokens":100,"cache_write_tokens":30,
         "output_tokens":20,"reasoning_tokens":0,"total_tokens":350})));
@@ -91,7 +93,8 @@ fn native_claude_usage_tools_sidechains_and_privacy() {
     assert_eq!(adapter["certified_versions"], json!(["2.1.286"]));
     let live: Vec<&str> = adapter["fields"].as_array().unwrap().iter().filter(|f| f["certified"] == "live")
         .map(|f| f["field"].as_str().unwrap()).collect();
-    assert_eq!(live, ["sessionId", "timestamp", "cwd", "version", "type", "message.model", "message.id",
+    assert_eq!(live, ["sessionId", "timestamp", "cwd", "version", "type", "effort", "message.usage.output_tokens_details.thinking_tokens",
+        "message.usage.cache_creation.ephemeral_5m_input_tokens", "message.usage.cache_creation.ephemeral_1h_input_tokens", "message.model", "message.id",
         "message.usage.input_tokens", "message.usage.output_tokens", "message.usage.cache_creation_input_tokens",
         "message.usage.cache_read_input_tokens"]);
     assert!(adapter["fields"].as_array().unwrap().iter()
@@ -215,7 +218,7 @@ fn claude_upgrade_preserves_an_existing_codex_ledger() {
     let before = f.cli_args(&["accounting", "entries"]).1;
     // Reconstruct the historical v12 ledger constraints with real collected rows.
     let db = f.sidecar();
-    db.execute_batch("CREATE TEMP TABLE saved_entries AS SELECT * FROM usage_entries;
+    db.execute_batch("CREATE TEMP TABLE saved_entries AS SELECT entry_id,source,session_id,basis,scope,normalization_version,precedence,position,response_id,model,native,input_tokens,cache_read_tokens,new_input_tokens,cache_write_tokens,output_tokens,reasoning_tokens,total_tokens FROM usage_entries;
         CREATE TEMP TABLE saved_dispositions AS SELECT * FROM usage_dispositions;
         DELETE FROM usage_dispositions; DROP TABLE usage_entries;").unwrap();
     db.execute_batch(include_str!("../migrations/telemetry/accounting/0001_usage_ledger.sql")).unwrap();
@@ -225,7 +228,7 @@ fn claude_upgrade_preserves_an_existing_codex_ledger() {
     drop(db);
     // A writable public command upgrades; every Codex byte visible in the ledger stays.
     f.cli("collect");
-    assert_eq!(f.cli_args(&["accounting", "status"]).0["version"], 22);
+    assert_eq!(f.cli_args(&["accounting", "status"]).0["version"], 24);
     assert_eq!(f.cli_args(&["accounting", "entries"]).1, before);
     assert_eq!(attempt_usage(&f)["total_tokens"], 1680);
 }
@@ -646,4 +649,75 @@ fn owner_claude_coordinator_is_scoped_private_and_optional() {
         let output = String::from_utf8(doctor.stdout).unwrap();
         assert!(output.contains(&format!("coordinator usage: {} ({})", if enabled { "collected" } else { "disabled" }, path.parent().unwrap().display())), "{output}");
     }
+}
+
+/// Public collection, attempts, ledger and pricing over one isolated native transcript.
+#[test]
+fn claude_v2_thinking_effort_and_cache_tiers_survive_rebuild() {
+    let f = claude_with_pins(Some("medium"));
+    let path = transcript(&f, SID, &f.worktree(), "2.1.286", f.decided + 1000);
+    let lines: Vec<String> = fs::read_to_string(&path).unwrap().lines().map(|line| {
+        let mut v: Value = serde_json::from_str(line).unwrap();
+        if v["type"] == "assistant" && v["message"]["usage"].is_object() {
+            v["effort"] = json!("high");
+            v["message"]["usage"]["output_tokens_details"] = json!({"thinking_tokens":3});
+            let writes = v["message"]["usage"]["cache_creation_input_tokens"].as_i64().unwrap();
+            v["message"]["usage"]["cache_creation"] = json!({"ephemeral_5m_input_tokens":writes-1,"ephemeral_1h_input_tokens":1});
+        }
+        v.to_string()
+    }).collect();
+    fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
+    f.cli("collect");
+    assert_eq!(attempt_usage(&f)["reasoning_output_tokens"], 6);
+    assert_eq!(f.report()["metrics"]["M09"]["reasoning_output_tokens"], 6);
+    let attempts = f.cli_args(&["attempts", "--json"]).0;
+    let attempt = attempts["attempts"].as_array().unwrap().iter().find(|a| a["attempt_id"] == f.attempt).unwrap();
+    assert_eq!(attempt["effort_observed"], "high");
+    assert_eq!(attempt["reasoning_effort"], "medium");
+    f.cli_args(&["accounting", "sync"]);
+    let ledger = f.cli_args(&["accounting", "entries"]).0;
+    assert_eq!(ledger["entries"].as_array().unwrap().iter().map(|e| e["normalized"]["cache_write_5m_tokens"].as_i64().unwrap()).sum::<i64>(), 30);
+    assert_eq!(ledger["entries"].as_array().unwrap().iter().map(|e| e["normalized"]["cache_write_1h_tokens"].as_i64().unwrap()).sum::<i64>(), 2);
+    for (version, rates, expected) in [
+        (1, json!([{"category":"input","rate":"3"},{"category":"output","rate":"15"},{"category":"cache_read","rate":"0.3"},{"category":"cache_write","cache_tier":"5m","rate":"3.75"},{"category":"cache_write","cache_tier":"1h","rate":"6"}]), "0.0009015"),
+        (2, json!([{"category":"input","rate":"3"},{"category":"output","rate":"15"},{"category":"cache_read","rate":"0.3"},{"category":"cache_write","rate":"3.75"}]), "0.000897"),
+    ] {
+        let card = f.tmp.path().join("tier-card.json");
+        fs::write(&card, json!({"card_id":"synthetic-tiers","version":version,"provider":"anthropic","product":"claude-code",
+            "models":["claude-fixture-sonnet","claude-fixture-haiku"],"currency":"USD","rate_unit":1000000,"effective_from_unix_ms":0,
+            "includes":{"discounts":false,"taxes":false,"fees":false},"source":"INVENTED synthetic rates", "rates":rates}).to_string()).unwrap();
+        f.cli_args(&["accounting", "import-rate-card", card.to_str().unwrap()]);
+        f.cli_args(&["accounting", "reprice"]);
+        let cost = f.cli_args(&["accounting", "cost", "--json"]).0;
+        assert_eq!(cost["sessions"][0]["estimate"]["amount"], expected, "{cost}");
+    }
+    f.cli("collect");
+    assert_eq!(f.count("codex_quarantine"), 0);
+    // Reconstruct the persisted v1 layout and old digest after real collection.
+    // Upgrade through the CLI must discard only disposable mappings and replay.
+    let db = f.sidecar();
+    db.execute_batch("ALTER TABLE codex_usage DROP COLUMN cache_write_5m_tokens;
+        ALTER TABLE codex_usage DROP COLUMN cache_write_1h_tokens;
+        ALTER TABLE codex_usage DROP COLUMN reasoning_reported;
+        UPDATE codex_usage SET effort=NULL,reasoning_output_tokens=0,payload_digest='sha256:v1';").unwrap();
+    let old_envelopes = db.prepare("SELECT producer_epoch,producer_sequence,payload FROM source_observations WHERE event_kind='claude-code.claude_line.v1'").unwrap()
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+    assert!(!old_envelopes.is_empty());
+    for (source, sequence, payload) in old_envelopes {
+        let mut payload: Value = serde_json::from_str(&payload).unwrap();
+        for key in ["effort", "thinking_tokens", "cache_write_5m_tokens", "cache_write_1h_tokens"] { payload.as_object_mut().unwrap().remove(key); }
+        let payload = payload.to_string();
+        let digest = format!("sha256:{:x}", <sha2::Sha256 as sha2::Digest>::digest(payload.as_bytes()));
+        db.execute("UPDATE source_observations SET payload=?3,payload_digest=?4,measurement=json_set(measurement,'$.normalization_version',1) WHERE producer_epoch=?1 AND producer_sequence=?2",
+            rusqlite::params![source, sequence, payload, digest]).unwrap();
+    }
+    db.execute("UPDATE telemetry_streams SET version=13 WHERE stream='ingest'", []).unwrap();
+    drop(db);
+    f.cli("collect");
+    assert_eq!(f.count("codex_quarantine"), 0);
+    assert_eq!(f.count("ingest_quarantine"), 0);
+    assert_eq!(attempt_usage(&f)["reasoning_output_tokens"], 6);
+    f.cli_args(&["accounting", "sync"]);
+    assert_eq!(f.cli_args(&["accounting", "entries"]).0, ledger);
+    no_secrets(&f);
 }

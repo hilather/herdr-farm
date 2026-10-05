@@ -16,7 +16,7 @@ use std::path::Path;
 
 /// Evaluations kept in `health_evaluations`.
 pub const KEEP_EVALUATIONS: i64 = 1000;
-/// The ticker evaluates at most once per this interval, and only once an operator has run `health evaluate`.
+/// The ticker evaluates at most once per this interval, by default.
 pub const TICK_INTERVAL_MS: i64 = crate::timing::HEALTH_INTERVAL_MS;
 
 fn unavailable(reason: &str) -> Value { json!({"status": "unavailable", "reason": reason}) }
@@ -129,15 +129,21 @@ pub fn evaluate(project: &Path, source: &str, now: i64) -> Result<Value> {
         "opened": opened, "updated": updated, "resolved": resolved, "suppressed": suppressed, "states": states}))
 }
 
-/// Ticker: evaluate at most once per `TICK_INTERVAL_MS`, only once an operator has evaluated.
+/// Ticker: evaluate at most once per `TICK_INTERVAL_MS`, enabled by default.
 pub fn tick(project: &Path) -> Result<()> {
     let Some(db) = crate::telemetry::sidecar::read(project)? else { return Ok(()) };
     if !tables(&db)? { return Ok(()); }
+    if let Some(home) = std::env::var_os("HOME") {
+        let config_dir = crate::product_environment::config_dir_for_home(Path::new(&home));
+        if !crate::telemetry::views::telemetry_switch(&config_dir, "health_evaluation")? { return Ok(()); }
+    }
     let last: Option<i64> = db.query_row("SELECT max(evaluated_unix_ms) FROM health_evaluations", [], |r| r.get(0))?;
     drop(db);
     let now = jiff::Timestamp::now().as_millisecond();
-    match last {
-        Some(at) if now - at >= crate::timing::pass(std::time::Duration::from_millis(TICK_INTERVAL_MS as u64)).as_millis() as i64 => evaluate(project, "tick", now).map(drop),
-        _ => Ok(()),
+    let interval = crate::timing::pass(std::time::Duration::from_millis(TICK_INTERVAL_MS as u64)).as_millis() as i64;
+    if last.is_none_or(|at| now - at >= interval) {
+        evaluate(project, "tick", now).map(drop)
+    } else {
+        Ok(())
     }
 }

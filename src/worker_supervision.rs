@@ -1000,6 +1000,46 @@ impl Isolation {
         self.with_login_token_file(&crate::profile_config::claude_token_file(config)?)
     }
 
+    #[cfg(all(feature = "state-store", target_os = "linux"))]
+    pub(crate) fn with_acceptance_toolchains(mut self, project: &Path, contract: Option<&crate::domain::PreparedContract>) -> Result<Self> {
+        if let Some(contract) = contract {
+            for policy in &contract.acceptance_policies {
+                if crate::domain::verification_policy::ExecutionPolicy::parse(policy.text.as_bytes()).is_ok()
+                    && let Some(resolved) = crate::verification::toolchains::for_policy(project, policy.text.as_bytes())?
+                {
+                    self = self.with_toolchain(&resolved)?;
+                }
+            }
+        }
+        Ok(self)
+    }
+
+    /// Give canonical workers the signed acceptance toolchain environment.
+    #[cfg(all(feature = "state-store", target_os = "linux"))]
+    pub(crate) fn with_toolchain(mut self, resolved: &crate::verification::toolchains::Resolved) -> Result<Self> {
+        validate_thread_env(&resolved.toolchain.env)?;
+        for identity in &resolved.identities {
+            for path in forms(identity.path.to_str().context("toolchain path is not UTF-8")?) {
+                ensure!(!self.hide.iter().any(|hidden| forms(hidden).iter().any(|hidden| path.starts_with(hidden)))
+                    && (!path.starts_with(&self.root) || self.expose.iter().any(|exposed| path.starts_with(exposed))),
+                    "worker sandbox hides toolchain path {}; move the toolchain outside owner secrets and the projects root", path.display());
+                ensure!(!self.private.iter().any(|(dir, entries)| path.starts_with(dir)
+                    && !entries.iter().any(|entry| path.starts_with(entry))),
+                    "worker sandbox hides toolchain path {} in a private directory", path.display());
+            }
+        }
+        for entry in &resolved.toolchain.env {
+            let name = entry.split_once('=').unwrap().0;
+            if let Some(existing) = self.thread_env.iter().find(|value| value.split_once('=').unwrap().0 == name) {
+                ensure!(existing == entry, "conflicting worker toolchain environment {name}");
+            } else {
+                self.thread_env.push(entry.clone());
+            }
+        }
+        validate_thread_env(&self.thread_env)?;
+        Ok(self)
+    }
+
     /// Add validated owner environment overrides to a thread sandbox.
     pub fn with_thread_env(mut self, env: &[String]) -> Result<Self> {
         validate_thread_env(env)?;
@@ -1285,7 +1325,7 @@ pub fn validate_thread_env(env: &[String]) -> Result<()> {
     for entry in env {
         let (name, value) = entry.split_once('=').context("thread_env entries must be NAME=VALUE")?;
         ensure!(!name.is_empty() && name.bytes().enumerate().all(|(i, c)| c == b'_' || c.is_ascii_uppercase() || i > 0 && c.is_ascii_digit()), "invalid thread_env name");
-        ensure!(!["LD_", "CLAUDE_", "GIT_"].iter().any(|p| name.starts_with(p)) && !["PATH", "HOME", "BASH_ENV", "ENV"].contains(&name), "reserved thread_env name {name}");
+        ensure!(!["LD_", "CLAUDE_", "GIT_", "HP_VERIFY_", "HERDR_", "CODEX_"].iter().any(|p| name.starts_with(p)) && !["PATH", "HOME", "BASH_ENV", "ENV"].contains(&name), "reserved thread_env name {name}");
         ensure!(!value.contains('\0'), "thread_env contains NUL");
     }
     Ok(())

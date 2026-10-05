@@ -924,6 +924,15 @@ Status after the follow-up card in brackets.
    sandbox with explicit writable exposures (execution home, own worktrees,
    output dir, git common dir with `hooks/`, `config` and `info/` bound
    read-only), and give workers a private `/tmp`.
+2026-10-04 update: canonical Codex commands now use the proxy-backed
+`herdr-farm-worker` permission profile (`network_proxy = true`, network enabled
+in limited mode, no domain or local-binding grants). Command loopback works in
+Codex's private network namespace; host loopback and outbound remain denied.
+The outer agent supervisor still shares the host network for provider access,
+so the following residual risk applies to agents and commands outside that
+Codex command boundary. Toolchain acceptance with `network = false` uses its
+own network namespace with only loopback up.
+
 3. **[Open] Other reachable control channels.** The network namespace is shared:
    abstract Unix sockets (X11 `@/tmp/.X11-unix/*`, some D-Bus), localhost
    services, and sockets reachable through supplementary groups (e.g. a

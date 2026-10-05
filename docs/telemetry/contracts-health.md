@@ -127,9 +127,13 @@ notice_id}`.
 One evaluation reads every rule first (read-only), then writes in one
 immediate sidecar transaction. Without a sidecar `health evaluate` records
 nothing (`recorded: unavailable collection_not_run`) and creates none.
-**Ticker:** the lane `tick` hook evaluates at most once per 300 s, and only
-after an operator's first `health evaluate` (a `health_evaluations` row
-exists); it never notifies. The lane adds no `telemetry report` keys.
+**Ticker:** the lane `tick` hook evaluates by default when the sidecar and
+health tables exist, including when no evaluation rows remain after maintenance.
+It evaluates at most once per 300 s and never notifies. Owners can opt out with
+`[telemetry] health_evaluation = false` in owner `config.toml`; manual evaluation
+remains available. The lane adds no `telemetry report` keys. The L4 measurements
+in [certificate-scale.md](certificate-scale.md) include approximately 227 MB for
+`health evaluate` at 10,000 bindings; the 300 s interval is unchanged.
 
 ## 5. Advisory recommendations (`telemetry-recommendation.v1`)
 

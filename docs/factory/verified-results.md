@@ -239,8 +239,10 @@ names, no NUL values, and no loader, Git, shell startup, `PATH` or `HOME`
 overrides. Checks receive a cleared environment, fixed sandbox defaults and
 these entries. Verifier control variables are not passed to the test command.
 For toolchain policies, network access is disabled by default using a separate
-network namespace; `network = true` inherits network access. Policies without a
-toolchain retain their existing command admission, verifier environment, network
+network namespace with loopback brought up before checks. Tests can bind and
+connect to 127.0.0.1 within that namespace; outbound destinations and host
+loopback services remain unreachable. `network = true` inherits network access.
+Policies without a toolchain retain their existing command admission, verifier environment, network
 access and per-check timeout; integration retains its original lease margin.
 
 For generated code contracts, use repeatable
@@ -248,6 +250,16 @@ For generated code contracts, use repeatable
 This creates a policy with `version`, `toolchain`, `checks` and
 `toolchain_digest` before the contract is signed. Arguments support single and
 double quotes and backslash escaping; no shell expansion takes place.
+
+The worker also receives the selected toolchain's validated `env` entries in
+its cleared launch environment, so it can run the same test commands. Without
+an acceptance toolchain these entries are absent. Verifier control variables
+(`HP_VERIFY_*`) and worker/agent control variables are reserved. Profiles still
+cannot carry environment. Paths and resolved dependencies hidden by worker
+isolation (owner secrets, the projects root or private scratch locations) refuse
+the launch with a path-specific error; move tools into a readable location.
+Conflicting environment entries from multiple toolchains are refused.
+
 For hand-authored contracts, obtain the exact policy text before signing:
 
 ```sh

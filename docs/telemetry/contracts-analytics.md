@@ -8,9 +8,9 @@ are [contracts.md](contracts.md) §0. Code: `src/telemetry/analytics/`
 (TM4.3). Telemetry never grants launch, changes budgets or accepts results;
 nothing here writes `state.db`.
 
-## 1. Metric registry (`analytics-registry.v6`)
+## 1. Metric registry (`analytics-registry.v7`)
 
-Version history: v1 TM4.1; v2 adds `verification_flip_rate` (DG6, #198); v3 adds M30 `M30.submission-v1` (DG1, #202); v4 adds M10 `M10.v1` (DG2, #204); v5 adds M03 operating throughput (DG3); v6 adds M05 lifecycle tokens and specifies M19’s missing timed history.
+Version history: v1 TM4.1; v2 adds `verification_flip_rate` (DG6, #198); v3 adds M30 `M30.submission-v1` (DG1, #202); v4 adds M10 `M10.v1` (DG2, #204); v5 adds M03 operating throughput (DG3); v6 adds M05 lifecycle tokens and specifies M19’s missing timed history; v7 adds M13 never-running exclusions, M04/M05 partial values and M31 lifecycle sampling, M35 attempt-time concurrency and M40 reported/merged quota windows, plus the bounded lifecycle `profile` dimension (TFIX-4, no definition change). Previous M13.slice-v1, M04.cost-v1, M05.tokens-v1, M31.attention-v1, M35.fanout-v1 and M40.quota-windows-v1 definitions remain only as absent (`definition_superseded`).
 
 `telemetry <slug> metrics registry [--json]` prints one declared table
 (`registry.rs`) of every metric `telemetry report` or `query` can name:
@@ -124,11 +124,12 @@ Plan doc 07 §1. `T`/`A` evidence is exactly contracts §6 (`metrics::task_evide
   (`since_only`: `--from` is the lane's `--since`).
 - Dimensions for native definitions: `route`, `task_class` (latest
   classification, else `unclassified`), `agent_kind` (the attempts' effective
-  profile kind, `mixed`, `unknown` or `unassigned`). At most 64 cells.
+  profile kind, `mixed`, `unknown` or `unassigned`), and `profile` (effective
+  profile name, with the same mixed/unknown/unassigned rules). At most 64 cells.
 
 ### Lifecycle consumption and blocked time
 
-M05 (`M05.tokens-v1`, fixture certification) uses M04’s contracts §6 T/A
+M05 (`M05.tokens-v2`, fixture certification) uses M04’s contracts §6 T/A
 cohort and since-only window: a task qualifies when any attempt was decided
 at or after `since`; every attempt of that task contributes its full lifecycle
 input plus output tokens. Counted ledger normalization matches M08/M09;
@@ -137,8 +138,11 @@ children follow attempt ownership, including guardians and subagents;
 uncertified fork replay and unowned children stay excluded. Divide by count(A)
 as an exact unreduced `tokens/tasks` ratio. An empty A gives null with
 `empty_denominator`; any attempt missing counted usage gives
-`lifecycle_usage_incomplete`, with per-reason coverage and the observed
-numerator retained as a partial subtotal. `M05.v1` remains the historical
+`value: {status: partial, reason: lifecycle_usage_incomplete, tokens,
+denominator, attempts_without_usage}`, with per-reason coverage and the
+observed numerator retained as a subtotal. Never-running attempts without
+usage use M04’s exemption; bound usage still counts. Text explicitly labels
+the subtotal partial and gives its denominator and missing-attempt count. `M05.v1` remains the historical
 absent definition.
 
 M19 (`M19.blocked-v1`; historical `M19.v1` remains absent) would divide
@@ -176,7 +180,7 @@ Pending and unknown-policy cases stay outside the denominator and appear in
 submitted in-window). Empty denominators return null / `empty_denominator`,
 never zero. Dimensions include `policy` (sorted required policy IDs plus a digest of their
 immutable bodies) and
-`task_class`, plus `route` and `agent_kind`; native drill buckets and revision
+`task_class`, plus `route`, `agent_kind` and `profile`; native drill buckets and revision
 refresh/rebuild are supported. Report and export share this evaluation.
 
 `compare --metric M30 --by configuration` uses the same submission cohort;
@@ -404,3 +408,17 @@ mutation generations, checked-cell inputs and validated provider aggregates.
 Writable open checks trigger installation against `PRAGMA schema_version`
 even when all stream versions are current, so newly created source tables
 receive mutation triggers. Rebuild continues to bypass provider aggregates.
+
+### TFIX-4 lifecycle profile dimension
+
+`profile` reads the effective profile name from sealed `attempt_inputs`.
+Like `agent_kind`, a task with no attempts is `unassigned`, a missing name is
+`unknown`, and multiple distinct names across attempts are `mixed`. Names are
+bounded by the canonical profile contract; attempt IDs are never labels.
+The checked `lifecycle_attempts` query extracts kind and name in one indexed
+join. Maintained lifecycle bodies now encode a seventh attempt element;
+old six-element bodies fail decoding and fall back to the canonical load.
+The v7 registry stamp invalidates old maintained inputs; `analytics refresh`
+or `analytics rebuild` writes the new body. Historical revisions remain intact.
+Configuration comparisons retain content-addressed arms and their frozen
+profile/model/effort labels; a profile name does not replace configuration identity.

@@ -179,7 +179,7 @@ fn project_view_equals_query_and_pane() {
     assert_eq!(models["identity"]["reported_effective_model"], json!({"status": "unavailable", "reason": "no_certified_source"}));
     let models_text = r.text("demo", &["view", "models"]);
     for line in ["    M02 agent_kind=unknown: 2/3 (66.7%) · n=3", "    M07 agent_kind=unknown: 5/2 (= 2.5 attempts per accepted task) · n=2",
-        "  identity requested agent (profile kind): unknown 3 tasks; requested model name: n/a (not_in_query_service)",
+        "  identity requested agent (profile kind): unknown 3 tasks",
         "  identity reported effective model: n/a (no_certified_source)",
         "  M15 effective model reported: n/a (no_certified_source) · basis central_report · coverage unavailable · n=n/a · lag n/a (collection_not_run) · live"] {
         assert!(models_text.lines().any(|l| l == line), "{line:?} in\n{models_text}");
@@ -624,4 +624,66 @@ fn frozen_configuration_names_survive_profile_edits() {
     assert!(models.contains("configurations (profile (kind model effort) hash, first and last dispatch):"));
     assert!(models.contains("codex (codex unknown unknown)"));
     assert!(models.contains("claude-sonnet (claude sonnet medium)"));
+}
+
+#[test]
+fn models_profiles_keep_distinct_pins_and_rebuild_maintained_tasks() {
+    let f = Fixture::reserved();
+    let path = f.project.join(".state/state.db");
+    for (profile, model, effort) in [("sol-low", "gpt-6.1-sol", "low"), ("astra-ultra", "gpt-6-astra", "ultra")] {
+        let mut setup = codex_profile(&f.config, "codex", profile, Some(&f.home));
+        setup.definition_digest = hex(profile);
+        setup.arguments_digest = hex(model);
+        plant_profile_with_pins(&path, setup, Some(model), Some(effort));
+    }
+    let mut assigned = Vec::new();
+    for profile in ["sol-low", "astra-ultra"] {
+        f.readmit(profile);
+        let db = rusqlite::Connection::open(&path).unwrap();
+        let original: String = db.query_row("SELECT id FROM attempts WHERE state='reserved'", [], |r| r.get(0)).unwrap();
+        assigned.push((profile, original));
+    }
+    let db = rusqlite::Connection::open(&path).unwrap();
+    for (profile, original) in assigned {
+        plant(&db, profile, "failed", None, &[(profile, "failed", &[("reserved", 1000), ("failed", 2000)])], None, None);
+        db.execute("INSERT INTO operations(id,task_id,kind,target,payload_version,payload,payload_hash,expected_revision,due_unix_ms,idempotency_key)
+            SELECT ?1,?1,kind,target,payload_version,payload,payload_hash,expected_revision,due_unix_ms,?1 FROM operations WHERE id=(SELECT operation_id FROM attempt_inputs WHERE attempt_id=?2)", [profile, &original]).unwrap();
+        db.execute("INSERT INTO attempt_inputs(attempt_id,operation_id,payload,payload_hash) SELECT ?1,?1,payload,payload_hash FROM attempt_inputs WHERE attempt_id=?2", [profile, &original]).unwrap();
+        db.execute("INSERT INTO dispatch_decisions(attempt_id,task_id,task_revision,chosen_configuration_id,eligible,chooser_kind,chooser_principal,reason_codes,decided_unix_ms)
+            SELECT ?1,?1,1,chosen_configuration_id,eligible,chooser_kind,chooser_principal,reason_codes,1000 FROM dispatch_decisions WHERE attempt_id=?2", [profile, &original]).unwrap();
+    }
+    drop(db);
+    let check = || {
+        let view = f.cli_args(&["view", "models", "--json"]).0;
+        let cells = view["by_profile"][0]["cells"].as_array().unwrap();
+        for profile in ["sol-low", "astra-ultra"] {
+            let cell = cells.iter().find(|c| c["profile"] == profile).unwrap();
+            assert_eq!(cell["denominator"], 1);
+            let pin = &cell["pins"][0];
+            assert_eq!(pin["model"], if profile == "sol-low" { "gpt-6.1-sol" } else { "gpt-6-astra" });
+            assert_eq!(pin["reasoning_effort"], if profile == "sol-low" { "low" } else { "ultra" });
+        }
+        assert!(view["by_agent"][0]["cells"].as_array().unwrap().iter().any(|c| c["agent_kind"] == "codex" && c["denominator"] == 2));
+        view["by_profile"].clone()
+    };
+    let live = check();
+    let comparison = f.text(&["compare", "--metric", "M02"]);
+    assert!(comparison.contains("sol-low (codex gpt-6.1-sol low)"), "{comparison}");
+    assert!(comparison.contains("astra-ultra (codex gpt-6-astra ultra)"), "{comparison}");
+    let plans = f.cli_args(&["analytics", "plans"]).0;
+    let attempts = plans["plans"].as_array().unwrap().iter().find(|p| p["name"] == "lifecycle_attempts").unwrap();
+    assert_eq!(attempts["unexpected_scans"], json!([]));
+    f.cli("collect");
+    f.cli_args(&["analytics", "refresh"]);
+    assert_eq!(check(), live);
+    // A v1 disposable lifecycle body is intentionally invalid for this decoder.
+    let db = f.sidecar();
+    let body: String = db.query_row("SELECT body FROM analytics_provider_aggregates WHERE provider='lifecycle'", [], |r| r.get(0)).unwrap();
+    let mut body: Value = serde_json::from_str(&body).unwrap();
+    for task in body.as_array_mut().unwrap() { for attempt in task[7].as_array_mut().unwrap() { attempt.as_array_mut().unwrap().pop(); } }
+    db.execute("UPDATE analytics_provider_aggregates SET body=?1 WHERE provider='lifecycle'", [body.to_string()]).unwrap();
+    drop(db);
+    assert_eq!(check(), live);
+    f.cli_args(&["analytics", "rebuild"]);
+    assert_eq!(check(), live);
 }

@@ -17,8 +17,8 @@ use super::unavailable;
 /// An observation older than this at a dispatch decision is labeled `stale` (its value is still shown).
 pub const STALE_AFTER_MS: i64 = 900_000;
 /// What `account` identifies: the execution home's digest, not the provider
-/// login (credentials are never read). Two homes holding one login appear as
-/// two accounts; `shared_window_candidates` names them, nothing is merged.
+/// login (credentials are never read). Trusted matching provider windows
+/// merge homes for headroom, retaining their separate observation evidence.
 pub const ACCOUNT_BASIS: &str = "execution_home";
 /// Fixed-point places for native percent values (Codex prints at most a few).
 const PLACES: u32 = 12;
@@ -362,22 +362,33 @@ fn window(db: &Connection, account: &str, limit: &str, kind: &str, decided: i64)
         WHERE account=?1 AND limit_id=?2 AND window_kind=?3 AND observed_unix_ms<=?4 AND trust='trusted'
         ORDER BY observed_unix_ms DESC,session_id DESC,ordinal DESC LIMIT 1")?.query_row(params![account, limit, kind, decided],
         |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, r.get::<_, i64>(3)?, r.get::<_, String>(4)?, r.get::<_, String>(5)?))).optional()?;
-    let Some((window, observed, resets, minutes, used, remaining)) = trusted else {
+    let Some((mut window, mut observed, resets, minutes, mut used, mut remaining)) = trusted else {
         let latest: Option<String> = db.prepare_cached("SELECT trust FROM quota_window_observations WHERE account=?1 AND limit_id=?2 AND window_kind=?3 AND observed_unix_ms<=?4
             ORDER BY observed_unix_ms DESC,session_id DESC,ordinal DESC LIMIT 1")?
                 .query_row(params![account, limit, kind, decided], |r| r.get(0)).optional()?;
         let reason = match latest.as_deref() { Some("not_reported") => "not_reported", None => "not_collected", Some(_) => "no_trusted_observation" };
         return Ok(json!({"limit_id": limit, "window_kind": kind, "value": unavailable(reason)}));
     };
-    let age = decided - observed;
-    let mut entry = json!({"limit_id": limit, "window_kind": kind, "unit": "percent", "window_id": window, "window_minutes": minutes,
-        "resets_unix_ms": resets, "observed_unix_ms": observed, "age_ms": age});
-    // Other homes that reported this very window (same limit, kind, length and reset) by the decision:
-    // probably one login. Named, never merged; their values are not used here.
     let shared: Vec<String> = db.prepare_cached("SELECT DISTINCT account FROM quota_window_observations WHERE limit_id=?1 AND window_kind=?2 AND window_minutes=?3
         AND resets_unix_ms BETWEEN ?4-?6 AND ?4+?6 AND observed_unix_ms<=?5 AND trust='trusted' AND account IS NOT NULL ORDER BY account")?
         .query_map(params![limit, kind, minutes, resets, decided, RESETS_TOLERANCE_MS], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
-    if shared.iter().any(|a| a != account) { entry["shared_window_candidates"] = json!(shared); }
+    if shared.len() > 1 {
+        (window, observed, used, remaining) = db.prepare_cached("SELECT window_id,observed_unix_ms,used,remaining FROM quota_window_observations
+            WHERE limit_id=?1 AND window_kind=?2 AND window_minutes=?3 AND resets_unix_ms BETWEEN ?4-?6 AND ?4+?6
+            AND observed_unix_ms<=?5 AND trust='trusted' ORDER BY observed_unix_ms DESC,session_id DESC,ordinal DESC LIMIT 1")?
+            .query_row(params![limit, kind, minutes, resets, decided, RESETS_TOLERANCE_MS], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+    }
+    let latest_null: bool = db.prepare_cached("SELECT coalesce((SELECT trust='not_reported' FROM quota_window_observations WHERE account=?1 AND limit_id=?2 AND window_kind=?3 AND observed_unix_ms<=?4
+        ORDER BY observed_unix_ms DESC,session_id DESC,ordinal DESC LIMIT 1),0)")?.query_row(params![account, limit, kind, decided], |r| r.get(0))?;
+    if latest_null { return Ok(json!({"limit_id": limit, "window_kind": kind, "value": unavailable("not_reported")})); }
+    let age = decided - observed;
+    let mut entry = json!({"limit_id": limit, "window_kind": kind, "unit": "percent", "window_id": window, "window_minutes": minutes,
+        "resets_unix_ms": resets, "observed_unix_ms": observed, "age_ms": age});
+    if shared.len() > 1 {
+        entry["shared_window_candidates"] = json!(shared);
+        entry["merged"] = json!(true);
+        entry["merge_evidence"] = json!("same_limit_kind_minutes_resets");
+    }
     if decided >= resets {
         // The window reset after the snapshot: its remaining value no longer applies, and the new window's is unknown.
         entry["value"] = unavailable("window_reset_since_observation");
@@ -407,7 +418,11 @@ pub(crate) fn headroom(db: &Connection, home: &str, decided: i64) -> Result<Valu
     if limits.is_empty() { return Ok(json!({"account": account, "account_basis": ACCOUNT_BASIS, "value": unavailable("no_trusted_observation")})); }
     let mut windows = Vec::new();
     for limit in limits {
-        for kind in KINDS { windows.push(window(db, &account, &limit, kind, decided)?); }
+        for kind in KINDS {
+            let reported: bool = db.prepare_cached("SELECT EXISTS(SELECT 1 FROM quota_window_observations WHERE account=?1 AND limit_id=?2 AND window_kind=?3 AND trust='trusted')")?
+                .query_row(params![account, limit, kind], |r| r.get(0))?;
+            if reported { windows.push(window(db, &account, &limit, kind, decided)?); }
+        }
     }
     Ok(json!({"account": account, "account_basis": ACCOUNT_BASIS, "windows": windows}))
 }
@@ -467,7 +482,7 @@ pub(crate) fn stored_headroom(db: &Connection, attempt: &str, home: &str, decide
 /// M40 per dispatch decision. Read-only; `ledger_not_synced` before a sync.
 pub fn read(project: &Path, db: &Connection) -> Result<Value> {
     if !synced(db)? { return Ok(unavailable("ledger_not_synced")); }
-    let windows: Vec<Value> = db.prepare("SELECT window_id,account,limit_id,window_kind,unit,window_minutes,window_start_unix_ms,resets_unix_ms,start_evidence,
+    let mut windows: Vec<Value> = db.prepare("SELECT window_id,account,limit_id,window_kind,unit,window_minutes,window_start_unix_ms,resets_unix_ms,start_evidence,
         first_observed_unix_ms,last_observed_unix_ms,first_used,used,remaining,observed_increase,plan_type,observations,flagged
         FROM quota_windows ORDER BY account,limit_id,window_kind,resets_unix_ms")?
         .query_map([], |r| Ok(json!({"window_id": r.get::<_, String>(0)?, "service": "codex", "account": r.get::<_, String>(1)?, "limit_id": r.get::<_, String>(2)?,
@@ -494,8 +509,24 @@ pub fn read(project: &Path, db: &Connection) -> Result<Value> {
         members.sort();
         let (accounts, ids): (Vec<String>, Vec<String>) = members.into_iter().unzip();
         json!({"limit_id": limit, "window_kind": kind, "window_minutes": minutes, "resets_unix_ms": resets, "accounts": accounts, "window_ids": ids,
-            "evidence": "same_limit_kind_minutes_resets", "merged": false})
+            "evidence": "same_limit_kind_minutes_resets", "merged": true})
     }).collect();
+    let evidence_windows = windows.clone();
+    for group in &shared {
+        let ids: Vec<&str> = group["window_ids"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+        let members: Vec<Value> = windows.iter().filter(|w| ids.contains(&w["window_id"].as_str().unwrap_or(""))).cloned().collect();
+        let Some(mut latest) = members.into_iter().max_by_key(|w| w["last_observed_unix_ms"].as_i64()) else { continue };
+        windows.retain(|w| !ids.contains(&w["window_id"].as_str().unwrap_or("")));
+        latest["merged"] = json!(true);
+        latest["accounts"] = group["accounts"].clone();
+        latest["window_ids"] = group["window_ids"].clone();
+        latest["merge_evidence"] = group["evidence"].clone();
+        windows.push(latest);
+    }
+    windows.sort_by_key(|w| (w["account"].as_str().unwrap_or("").to_owned(), w["limit_id"].as_str().unwrap_or("").to_owned(),
+        w["window_kind"].as_str().unwrap_or("").to_owned(), w["resets_unix_ms"].as_i64().unwrap_or(0)));
+    let runway: Vec<Value> = windows.iter().map(|w| runway(db, w)).collect::<Result<_>>()?;
+    let not_reported = unreported(db)?;
     let mut trust = BTreeMap::<String, BTreeMap<String, i64>>::new();
     for row in db.prepare("SELECT window_kind,trust,count(*) FROM quota_window_observations GROUP BY window_kind,trust")?
         .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)))? {
@@ -524,16 +555,89 @@ pub fn read(project: &Path, db: &Connection) -> Result<Value> {
     let mut metrics = serde_json::Map::new();
     for (id, name, body) in availability_metrics() { metrics.insert(id.to_owned(), super::metric(id, name, body)); }
     let mut m40 = super::metric("M40", "quota_headroom_at_dispatch", json!({"decisions": list, "stale_after_ms": STALE_AFTER_MS}));
-    m40["definition"] = json!("M40.quota-windows-v1");
+    m40["definition"] = json!("M40.quota-windows-v2");
     metrics.insert("M40".to_owned(), m40);
-    Ok(json!({"semantics": "not_certified", "account_basis": ACCOUNT_BASIS, "windows": windows, "shared_window_candidates": shared, "observations": trust,
+    Ok(json!({"semantics": "not_certified", "account_basis": ACCOUNT_BASIS, "windows": windows, "evidence_windows": evidence_windows, "runway": runway, "not_reported": not_reported, "shared_window_candidates": shared, "observations": trust,
         "evidence": {"rate_limit_reached_type": {"snapshots": reached, "semantics": "not_certified", "certified": "fixture"}}, "metrics": metrics}))
+}
+
+/// Limit-level missing kinds, emitted once rather than once per dispatch.
+pub(crate) fn unreported(db: &Connection) -> Result<Vec<Value>> {
+    let mut result = Vec::new();
+    let limits = db.prepare("SELECT DISTINCT account,limit_id FROM quota_window_observations WHERE account IS NOT NULL AND limit_id IS NOT NULL ORDER BY account,limit_id")?
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    for (account, limit) in limits {
+        for kind in KINDS {
+            let (trusted, present): (bool, bool) = db.prepare_cached("SELECT EXISTS(SELECT 1 FROM quota_window_observations WHERE account=?1 AND limit_id=?2 AND window_kind=?3 AND trust='trusted'),
+                EXISTS(SELECT 1 FROM quota_window_observations WHERE account=?1 AND limit_id=?2 AND window_kind=?3)")?
+                .query_row(params![account, limit, kind], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            if !trusted {
+                let null: bool = db.prepare_cached("SELECT EXISTS(SELECT 1 FROM quota_window_observations WHERE account=?1 AND limit_id=?2 AND window_kind=?3 AND trust='not_reported')")?
+                    .query_row(params![account, limit, kind], |r| r.get(0))?;
+                result.push(json!({"account": account, "limit_id": limit, "window_kind": kind, "reason": if null { "not_reported" } else if present { "no_trusted_observation" } else { "not_collected" }}));
+            }
+        }
+    }
+    Ok(result)
+}
+
+/// Last 24 hours ending at the latest trusted reading, within this window.
+/// Attribution is observation-linked evidence, not a token-to-quota conversion.
+fn runway(db: &Connection, w: &Value) -> Result<Value> {
+    let end = w["last_observed_unix_ms"].as_i64().unwrap_or(0);
+    let floor = end - 86_400_000;
+    let ids: Vec<String> = w["window_ids"].as_array().map_or_else(|| vec![w["window_id"].as_str().unwrap_or("").to_owned()],
+        |ids| ids.iter().filter_map(Value::as_str).map(str::to_owned).collect());
+    let mut readings = Vec::<(i64, i128, bool)>::new();
+    for id in ids {
+        let rows = db.prepare_cached("SELECT q.observed_unix_ms,q.used,EXISTS(SELECT 1 FROM codex_usage u
+            JOIN usage_entries e ON e.session_id=u.session_id AND e.position=u.ordinal AND e.basis='delta'
+            JOIN codex_usage_times t ON t.session_id=u.session_id AND t.ordinal=u.ordinal
+            WHERE u.session_id=q.session_id AND u.accepted=1 AND t.record_unix_ms>=?2 AND t.record_unix_ms<=q.observed_unix_ms
+            AND t.record_unix_ms>coalesce((SELECT max(p.observed_unix_ms) FROM quota_window_observations p
+                WHERE p.session_id=q.session_id AND p.limit_id=q.limit_id AND p.window_kind=q.window_kind AND p.trust='trusted'
+                AND p.observed_unix_ms<q.observed_unix_ms),?2)
+            AND EXISTS(SELECT 1 FROM usage_dispositions d JOIN rollout_sources s USING(path_digest)
+                WHERE d.entry_id=e.entry_id AND d.disposition='accepted' AND s.binding='bound' AND s.home_digest=q.account))
+            FROM quota_window_observations q WHERE q.window_id=?1 AND q.trust='trusted' ORDER BY q.observed_unix_ms,q.session_id,q.ordinal")?
+            .query_map(params![id, floor], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, bool>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        for (at, used, own) in rows { if let Some(used) = percent(&used) { readings.push((at, used, own)); } }
+    }
+    readings.sort_by_key(|r| (r.0, r.1));
+    let (mut burn, mut own, mut high, mut previous_at) = (0i128, 0i128, None::<i128>, None::<i64>);
+    // No baseline before the floor? Start at the first reading; never infer
+    // consumption before an observation or prorate a straddling interval.
+    for (at, used, project) in readings {
+        if let Some(previous) = high {
+            let delta = (used - previous).max(0);
+            if at > floor && previous_at.is_some_and(|previous| previous >= floor) { burn += delta; if project { own += delta; } }
+        }
+        high = Some(high.map_or(used, |previous| previous.max(used)));
+        previous_at = Some(at);
+    }
+    let rational = |n: i128, d: i128| {
+        fn gcd(a: i128, b: i128) -> i128 { if b == 0 { a.abs() } else { gcd(b, a % b) } }
+        let g = gcd(n, d).max(1);
+        if d / g == 1 { (n / g).to_string() } else { format!("{}/{}", n / g, d / g) }
+    };
+    let remaining = percent(w["remaining"].as_str().unwrap_or("")).unwrap_or(0);
+    let reset = w["resets_unix_ms"].as_i64().unwrap_or(end);
+    Ok(json!({"window_id": w["window_id"], "as_of_unix_ms": end, "lookback_ms": 86_400_000,
+        "points_used": show(burn), "points_per_hour": rational(burn, 24 * 10i128.pow(PLACES)),
+        "project_points": show(own), "unattributed_points": show(burn - own),
+        "project_share": if burn > 0 { json!(rational(own, burn)) } else { unavailable("no_observed_burn") },
+        "unattributed_share": if burn > 0 { json!(rational(burn - own, burn)) } else { unavailable("no_observed_burn") },
+        "hours_to_exhaustion": if burn > 0 { json!(rational(remaining * 24, burn)) } else { unavailable("no_observed_burn") },
+        "hours_to_reset": rational((reset - end).max(0) as i128, 3_600_000),
+        "exhausts_before_reset": if burn > 0 { json!(remaining * 24 * 3_600_000 < burn * (reset - end).max(0) as i128) } else { Value::Null },
+        "attribution_basis": "counted_project_usage_since_previous_session_observation", "semantics": "not_certified"}))
 }
 
 /// Text view: one line per window, metric and decision window; unknown is `n/a (<reason>)`, never 0.
 pub fn text(value: &Value) -> String {
     let reason = |v: &Value| format!("n/a ({})", v["reason"].as_str().unwrap_or("unknown"));
     if value["status"] == "unavailable" { return reason(value) + "\n"; }
+    let show = |v: &Value| match v { Value::String(s) => s.clone(), Value::Object(_) => reason(v), other => other.to_string() };
     let mut out = String::new();
     for w in value["windows"].as_array().into_iter().flatten() {
         out += &format!("window {} {} {} reset {}: used {}% remaining {}% increase {}% ({} observations, {} flagged, {})\n",
@@ -543,8 +647,15 @@ pub fn text(value: &Value) -> String {
     }
     for c in value["shared_window_candidates"].as_array().into_iter().flatten() {
         let accounts: Vec<&str> = c["accounts"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
-        out += &format!("shared window candidate {} {} reset {}: accounts {} (execution homes; not merged, never summed)\n",
+        out += &format!("shared window {} {} reset {}: accounts {} (execution homes; merged, never summed)\n",
             c["limit_id"].as_str().unwrap_or(""), c["window_kind"].as_str().unwrap_or(""), c["resets_unix_ms"], accounts.join(", "));
+    }
+    for w in value["not_reported"].as_array().into_iter().flatten() {
+        out += &format!("limit {} {} {} n/a ({})\n", w["account"].as_str().unwrap_or(""), w["limit_id"].as_str().unwrap_or(""), w["window_kind"].as_str().unwrap_or(""), w["reason"].as_str().unwrap_or("not_reported"));
+    }
+    for r in value["runway"].as_array().into_iter().flatten() {
+        out += &format!("runway {} points/hour={} project_share={} unattributed_share={} hours_to_exhaustion={} hours_to_reset={}\n",
+            r["window_id"].as_str().unwrap_or(""), show(&r["points_per_hour"]), show(&r["project_share"]), show(&r["unattributed_share"]), show(&r["hours_to_exhaustion"]), show(&r["hours_to_reset"]));
     }
     for id in ["M38", "M39"] {
         let m = &value["metrics"][id];

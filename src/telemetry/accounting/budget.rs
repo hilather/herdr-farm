@@ -106,9 +106,7 @@ fn canonical(db: &Connection) -> Result<(Vec<Attempt>, Policies)> {
         ("LEFT JOIN attempt_inputs i ON i.attempt_id=a.id", "json_extract(i.payload,'$.inputs.budget.revision')", "json_extract(i.payload,'$.inputs.effective_profile.kind')")
     } else { ("", "NULL", "NULL") };
     let decided = if table("dispatch_decisions")? { "(SELECT decided_unix_ms FROM dispatch_decisions d WHERE d.attempt_id=a.id)" } else { "NULL" };
-    let never = if table("attempt_lifecycle")? {
-        "EXISTS(SELECT 1 FROM attempt_lifecycle l WHERE l.attempt_id=a.id AND l.state='reserved') AND NOT EXISTS(SELECT 1 FROM attempt_lifecycle l WHERE l.attempt_id=a.id AND l.state='running')"
-    } else { "0" };
+    let never = crate::telemetry::metrics::never_running_sql(db)?;
     let attempts = db.prepare(&format!("SELECT a.id,a.task_id,a.state,{kind},{pinned},{decided},{never} FROM attempts a {inputs} ORDER BY a.rowid"))?
         .query_map([], |r| Ok(Attempt { id: r.get(0)?, task: r.get(1)?, state: r.get(2)?, kind: r.get(3)?, pinned: r.get(4)?, decided: r.get(5)?, never_running: r.get(6)? }))?
         .collect::<rusqlite::Result<_>>()?;
@@ -331,11 +329,11 @@ fn worst<'a>(a: &'a str, b: &'a str) -> &'a str {
 
 /// M04 `cost_per_accepted_task` (doc 07, contracts §6 `T`/`A`): the full
 /// lifecycle estimate of every attempt of the terminal tasks (failed and
-/// cancelled attempts and child sessions included) / count(A). A value only
-/// when every such attempt is completely priced in one currency; otherwise
-/// `unavailable` with the priced subtotal labeled partial, never 0.
+/// cancelled attempts and child sessions included) / count(A). Incomplete
+/// coverage retains a one-currency subtotal as partial; no priced subtotal
+/// or mixed currencies remain unavailable.
 pub fn metrics(project: &Path, since: Option<i64>) -> Result<BTreeMap<String, Value>> {
-    let body = |extra: Value| BTreeMap::from([("M04".to_owned(), with(json!({"definition": "M04.cost-v1", "name": "cost_per_accepted_task",
+    let body = |extra: Value| BTreeMap::from([("M04".to_owned(), with(json!({"definition": "M04.cost-v2", "name": "cost_per_accepted_task",
         "basis": cost::BASIS, "rate_cards": "fixture_only", "never_added_to": "M11",
         "caveat": "published-rate estimates from fixture-only rate cards: only as real as the cards imported"}), extra))]);
     let state = project.join(".state/state.db");
@@ -372,7 +370,11 @@ pub fn metrics(project: &Path, since: Option<i64>) -> Result<BTreeMap<String, Va
     let value = if accepted == 0 {
         json!({"value": null, "reason": "empty_denominator"})
     } else if !unobserved.is_empty() || estimate["status"] != "complete" {
-        json!({"value": super::unavailable("lifecycle_cost_incomplete")})
+        if estimate["currency"].is_string() {
+            json!({"value": {"status": "partial", "reason": "lifecycle_cost_incomplete", "currency": estimate["currency"],
+                "priced_amount": estimate.get("priced_amount").unwrap_or(&estimate["amount"]), "denominator": accepted,
+                "attempts_without_usage": unobserved.values().sum::<usize>()}})
+        } else { json!({"value": super::unavailable("lifecycle_cost_incomplete")}) }
     } else {
         json!({"value": format!("{}/{accepted}", estimate["amount"].as_str().unwrap_or_default()), "currency": estimate["currency"]})
     };
@@ -421,11 +423,11 @@ pub fn token_metric(project: &Path, since: Option<i64>) -> Result<BTreeMap<Strin
             }
         }
     } else { missing.insert("collection_not_run".into(), cohort.len()); }
-    let mut body = json!({"definition": "M05.tokens-v1", "name": "tokens_per_accepted_task", "numerator": total,
+    let mut body = json!({"definition": "M05.tokens-v2", "name": "tokens_per_accepted_task", "numerator": total,
         "denominator": accepted, "coverage": {"attempts": cohort.len(), "attempts_without_usage": missing},
         "tasks": {"terminal": terminal.len(), "accepted": accepted}});
     if accepted == 0 { body["value"] = Value::Null; body["reason"] = json!("empty_denominator"); }
-    else if !missing.is_empty() { body["value"] = super::unavailable("lifecycle_usage_incomplete"); }
+    else if !missing.is_empty() { body["value"] = json!({"status": "partial", "reason": "lifecycle_usage_incomplete", "tokens": total, "denominator": accepted, "attempts_without_usage": missing.values().sum::<usize>()}); }
     else { body["value"] = json!(format!("{total}/{accepted}")); }
     Ok(BTreeMap::from([("M05".to_owned(), body)]))
 }

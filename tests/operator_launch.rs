@@ -382,6 +382,9 @@ fn launch_run_refuses_loudly_at_the_first_failing_step_and_changes_nothing() {
 #[test]
 fn verify_interaction_produces_launchable_evidence_for_codex_and_claude_from_the_cli() {
     let lab = Lab::new();
+    let old_home = lab.home.join("agent-home-codex/.codex");
+    fs::create_dir_all(&old_home).unwrap();
+    fs::write(old_home.join("config.toml"), "sandbox_mode='danger-full-access'\n[sandbox_workspace_write]\nnetwork_access=true\n[permissions.herdr-farm-worker.network]\ndomains=['example.com']\nallow_local_binding=true\n").unwrap();
     for (profile, kind, model) in [("codex-sol", "codex", "gpt-6.1-sol"), ("claude-sonnet", "claude", "claude-sonnet-5-5")] {
         let report = lab.verify(profile, kind);
         assert_eq!(report["preparation"]["launchable"], true, "{kind}: {report}");
@@ -395,6 +398,17 @@ fn verify_interaction_produces_launchable_evidence_for_codex_and_claude_from_the
         let home = lab.home.join(format!("agent-home-{kind}"));
         let work = home.join(".hp-verify-work");
         let config = fs::read_to_string(if kind == "codex" { home.join(".codex/config.toml") } else { home.join(".claude/settings.json") }).unwrap();
+        if kind == "codex" {
+            let config: toml::Value = toml::from_str(&config).unwrap();
+            assert_eq!(config["default_permissions"].as_str(), Some("herdr-farm-worker"));
+            assert_eq!(config["features"]["network_proxy"].as_bool(), Some(true));
+            let profile = &config["permissions"]["herdr-farm-worker"];
+            assert_eq!(profile["extends"].as_str(), Some(":workspace"));
+            assert_eq!(profile["network"]["enabled"].as_bool(), Some(true));
+            assert_eq!(profile["network"]["mode"].as_str(), Some("limited"));
+            for key in ["domains", "allow_local_binding"] { assert!(profile["network"].get(key).is_none()); }
+            for key in ["sandbox_mode", "sandbox_workspace_write"] { assert!(config.get(key).is_none()); }
+        }
         assert!(config.contains(model) && config.contains("low"), "{config}");
         let trust = fs::read_to_string(if kind == "codex" { home.join(".codex/config.toml") } else { home.join(".claude.json") }).unwrap();
         assert!(trust.contains(work.to_str().unwrap()), "{trust}");
@@ -1567,4 +1581,92 @@ fn canonical_owner_record_is_signed_idempotent_and_revises_the_same_key() {
     }
     fs::write(&body, "  ").unwrap();
     assert!(lab.fail(&args).contains("empty"));
+}
+
+/// socket: generated --accept policy supplies the real worker process's test
+/// environment; the same owner declaration alone grants no environment.
+#[test]
+fn code_launch_passes_only_selected_toolchain_environment_to_the_worker() {
+    struct FixtureTicker(std::process::Child);
+    impl Drop for FixtureTicker {
+        fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); }
+    }
+    for selected in [true, false] {
+        let lab = Lab::new();
+        let config = lab.home.join(".config/herdr-farm/config.toml");
+        let mut text = fs::read_to_string(&config).unwrap();
+        text.push_str("\n[verification.toolchains.shell]\npaths=['/bin/sh']\nenv=['TEST_MODE=acceptance']\nnetwork=false\n");
+        fs::write(&config, text).unwrap();
+        let source = agent_source("codex-cli 0.159.3", ".codex/auth.json", ".codex/config.toml")
+            .replace("loop{std::thread::park()}", "std::fs::write(cwd.join(\"worker-env.txt\"), std::env::var(\"TEST_MODE\").unwrap_or_else(|_| \"absent\".into())).unwrap(); loop{std::thread::park()}");
+        lab.build_agent("codex", &source);
+        lab.verify("codex-sol", "codex");
+        let prompt = lab.home.join("prompt.txt");
+        fs::write(&prompt, "Run the project's tests and write the deliverable.").unwrap();
+        let mut args = vec!["launch", "demo", "run", "--task", "code-env", "--profile", "codex-sol",
+            "--repository", lab.repo.to_str().unwrap(), "--write", "worker-env.txt", "--output", "worker-env.txt",
+            "--prompt-file", prompt.to_str().unwrap(), "--sign-with", lab.key.to_str().unwrap()];
+        if selected { args.extend(["--accept", "shell:/bin/sh -c true"]); }
+        let report = lab.ok(&args);
+        let attempt = report["attempt"].as_str().unwrap();
+        let output = Path::new(report["worktree"].as_str().unwrap()).join("worker-env.txt");
+        let mut ticker = FixtureTicker(Command::new(BIN).env_clear()
+            .env("HERDR_FARM_TEST_TIME_SCALE", include_str!("support/time-scale.txt").trim())
+            .env("HOME", &lab.home).env("HERDR_PROJECTS_OWNER_HOME", &lab.home)
+            .env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", lab.home.join("bin/herdr"))
+            .env("XDG_RUNTIME_DIR", lab.runtime.path())
+            .args(["--root", lab.root.to_str().unwrap(), "ticker", "run"])
+            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap());
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(90);
+        while !output.exists() || !herdr_farm::runtime::snapshot(&lab.project).unwrap().attempts.iter()
+            .any(|a| a.id.as_str() == attempt && a.state == AttemptState::Running)
+        {
+            assert!(std::time::Instant::now() < until, "worker did not start: {}", fs::read_to_string(lab.root.join(".ticker.log")).unwrap_or_default());
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert_eq!(fs::read_to_string(output).unwrap(), if selected { "acceptance" } else { "absent" });
+        ticker.0.kill().unwrap();
+        ticker.0.wait().unwrap();
+    }
+}
+
+#[test]
+fn code_launch_refuses_toolchain_paths_hidden_by_worker_isolation() {
+    let lab = Lab::with_herdr(STATIC_HERDR);
+    let hidden = lab.root.join("other-project/engine");
+    fs::create_dir_all(hidden.parent().unwrap()).unwrap();
+    fs::write(&hidden, "owner-declared tool data").unwrap();
+    let config_path = lab.home.join(".config/herdr-farm/config.toml");
+    let mut config = fs::read_to_string(&config_path).unwrap();
+    config.push_str(&format!("\n[verification.toolchains.hidden]\npaths=['/bin/sh',{:?}]\nenv=['TEST_MODE=acceptance']\n", hidden));
+    fs::write(config_path, config).unwrap();
+    lab.plant_launchable("codex-sol", "codex", "gpt-6.1-sol");
+    let prompt = lab.home.join("prompt.txt");
+    fs::write(&prompt, "Run tests.").unwrap();
+    let socket = lab.socket_inode_once("hidden-tool.sock");
+    let error = lab.fail(&["launch", "demo", "run", "--task", "hidden-tool", "--profile", "codex-sol",
+        "--repository", lab.repo.to_str().unwrap(), "--accept", "hidden:/bin/sh -c true",
+        "--write", "result.txt", "--output", "result.txt", "--prompt-file", prompt.to_str().unwrap(),
+        "--sign-with", lab.key.to_str().unwrap(), "--herdr-socket", socket.to_str().unwrap()]);
+    assert!(error.contains("worker sandbox hides toolchain path") && error.contains(hidden.to_str().unwrap()), "{error}");
+    assert!(herdr_farm::runtime::snapshot(&lab.project).unwrap().attempts.is_empty());
+}
+
+#[test]
+fn owner_toolchain_policy_refuses_verifier_control_environment() {
+    let lab = Lab::with_herdr(STATIC_HERDR);
+    let path = lab.home.join(".config/herdr-farm/config.toml");
+    let mut config = fs::read_to_string(&path).unwrap();
+    for (index, name) in ["HP_VERIFY_COMMIT", "HP_VERIFY_CHECK_ENV", "HP_VERIFY_DEADLINE_MONOTONIC_MS"].iter().enumerate() {
+        config.push_str(&format!("\n[verification.toolchains.control{index}]\npaths=['/bin/sh']\nenv=['{name}=override']\n"));
+    }
+    config.push_str("\n[verification.toolchains.tests]\npaths=['/bin/sh']\nenv=['GODOT=/absolute/engine']\n");
+    fs::write(path, config).unwrap();
+    for (index, name) in ["HP_VERIFY_COMMIT", "HP_VERIFY_CHECK_ENV", "HP_VERIFY_DEADLINE_MONOTONIC_MS"].iter().enumerate() {
+        let error = lab.fail(&["result", "demo", "toolchain-policy", &format!("control{index}"), "--", "/bin/sh", "-c", "true"]);
+        assert!(error.contains("reserved thread_env name") && error.contains(name), "{error}");
+    }
+    let policy = lab.ok(&["result", "demo", "toolchain-policy", "tests", "--", "/bin/sh", "-c", "true"]);
+    assert_eq!(policy["toolchain"], "tests");
+    assert_eq!(policy["checks"], serde_json::json!(["/bin/sh", "-c", "true"]));
 }

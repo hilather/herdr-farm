@@ -7,7 +7,8 @@ pub const FIXTURE_VERSIONS: &[&str] = &["2.1.3", "2.1.286"];
 pub const LIVE_VERSIONS: &[&str] = &["2.1.286"];
 const LIVE_FIELDS: &[&str] = &["sessionId", "timestamp", "cwd", "version", "type", "message.model", "message.id",
     "message.usage.input_tokens", "message.usage.output_tokens", "message.usage.cache_creation_input_tokens",
-    "message.usage.cache_read_input_tokens"];
+    "message.usage.cache_read_input_tokens", "effort", "message.usage.output_tokens_details.thinking_tokens",
+    "message.usage.cache_creation.ephemeral_5m_input_tokens", "message.usage.cache_creation.ephemeral_1h_input_tokens"];
 
 pub(super) fn walk(root: &Path, out: &mut Vec<PathBuf>) {
     if !root.parent().is_some_and(|p| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_dir()))
@@ -27,6 +28,8 @@ pub(super) fn walk(root: &Path, out: &mut Vec<PathBuf>) {
 pub fn capabilities() -> Value {
     use sanitize::Class::*;
     let source_fields = [("sessionId", Id), ("timestamp", Text), ("cwd", Path), ("version", Text), ("type", Tag),
+        ("effort", Tag), ("message.usage.output_tokens_details.thinking_tokens", Number),
+        ("message.usage.cache_creation.ephemeral_5m_input_tokens", Number), ("message.usage.cache_creation.ephemeral_1h_input_tokens", Number),
         ("message.model", ModelId), ("message.id", Id), ("isSidechain", Bool),
         ("message.usage.input_tokens", Number), ("message.usage.output_tokens", Number),
         ("message.usage.cache_creation_input_tokens", Number), ("message.usage.cache_read_input_tokens", Number),
@@ -35,7 +38,7 @@ pub fn capabilities() -> Value {
     let fields = source_fields.into_iter().map(|(field, class)| json!({"kind": "line", "field": field,
         "available": true, "basis": match class { Text | Tag => "reported_excerpt", Path => "binding_only_home_redacted", _ => "reported" },
         // Live run of 2.1.286 (docs/telemetry/claude-live-2.1.286.md) observed the
-        // binding inputs, line type, model, message id and the four usage counters.
+        // binding inputs, line type, model, message id, effort, thinking and cache tiers.
         // Tool and sidechain fields stay fixture: the live run used no tools.
         "certified": if LIVE_FIELDS.contains(&field) { "live" } else { "fixture" },
         "live_versions": if LIVE_FIELDS.contains(&field) { LIVE_VERSIONS } else { &[] as &[&str] },
@@ -50,6 +53,7 @@ pub fn capabilities() -> Value {
 pub fn allowlist() -> Vec<(String, sanitize::Class)> {
     use sanitize::Class::*;
     [("session_id", Id), ("timestamp", Text), ("version", Text), ("line_type", Tag), ("model", ModelId), ("message_id", Id),
+        ("effort", Tag), ("thinking_tokens", Number), ("cache_write_5m_tokens", Number), ("cache_write_1h_tokens", Number),
         ("isSidechain", Bool), ("input_tokens", Number), ("output_tokens", Number), ("cache_creation_input_tokens", Number),
         ("cache_read_input_tokens", Number), ("tool_use_ids", IdList), ("tool_names", IdList), ("tool_result_ids", IdList),
         ("tool_result_errors", Number), ("unmapped_count", Number), ("unmapped_keys", IdList)].into_iter().map(|(k, c)| (k.to_owned(), c)).collect()
@@ -99,10 +103,12 @@ pub(super) fn record_line(tx: &Transaction, ledger: &ingest::Ledger, at: u64, li
     let message = &raw["message"];
     let mut unknown = Vec::new();
     let mut unmapped_count = 0;
-    unmapped(&raw, "", &["type", "sessionId", "timestamp", "cwd", "version", "isSidechain", "message", "toolUseResult", "summary"], &mut unknown, &mut unmapped_count);
+    unmapped(&raw, "", &["type", "sessionId", "timestamp", "cwd", "version", "isSidechain", "effort", "message", "toolUseResult", "summary"], &mut unknown, &mut unmapped_count);
     unmapped(message, "message.", &["id", "model", "usage", "content"], &mut unknown, &mut unmapped_count);
     let usage = &message["usage"];
-    unmapped(usage, "message.usage.", &["input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"], &mut unknown, &mut unmapped_count);
+    unmapped(usage, "message.usage.", &["input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens_details", "cache_creation"], &mut unknown, &mut unmapped_count);
+    unmapped(&usage["output_tokens_details"], "message.usage.output_tokens_details.", &["thinking_tokens"], &mut unknown, &mut unmapped_count);
+    unmapped(&usage["cache_creation"], "message.usage.cache_creation.", &["ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens"], &mut unknown, &mut unmapped_count);
     if !matches!(kind, "assistant" | "user" | "summary" | "system") { unknown.push(format!("type:{kind}")); unmapped_count += 1; }
     let mut payload = json!({"session_id": session, "timestamp": timestamp, "version": raw["version"], "line_type": kind,
         "model": field(message, "model", sanitize::Class::ModelId), "message_id": id(message, "id"), "isSidechain": raw["isSidechain"].as_bool(),
@@ -110,6 +116,11 @@ pub(super) fn record_line(tx: &Transaction, ledger: &ingest::Ledger, at: u64, li
     for counter in ["input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"] {
         payload[counter] = field(usage, counter, sanitize::Class::Number);
     }
+    payload["effort"] = field(&raw, "effort", sanitize::Class::Tag);
+    payload["thinking_tokens"] = field(&usage["output_tokens_details"], "thinking_tokens", sanitize::Class::Number);
+    payload["cache_write_5m_tokens"] = field(&usage["cache_creation"], "ephemeral_5m_input_tokens", sanitize::Class::Number);
+    payload["cache_write_1h_tokens"] = field(&usage["cache_creation"], "ephemeral_1h_input_tokens", sanitize::Class::Number);
+    cursor.effort = payload["effort"].as_str().map(str::to_owned);
     cursor.model = payload["model"].as_str().map(str::to_owned);
     if kind == "assistant" && (usage.is_object() || super::super::version::nearest(&version).is_some()) {
         let reported_id = id(message, "id");
@@ -135,7 +146,9 @@ pub(super) fn record_line(tx: &Transaction, ledger: &ingest::Ledger, at: u64, li
             let record = json!({"type": "token_usage_record", "timestamp": timestamp, "payload": {"response_id": message_id,
                 "usage": {"input_tokens": input, "cached_input_tokens": number("cache_read_input_tokens"),
                     "cache_write_input_tokens": number("cache_creation_input_tokens"), "output_tokens": output,
-                    "reasoning_output_tokens": 0, "total_tokens": input.zip(output).and_then(|(i,o)| i.checked_add(o))}}});
+                    "reasoning_output_tokens": number("thinking_tokens").unwrap_or(0),
+                    "reasoning_reported": number("thinking_tokens").is_some(),
+                    "cache_write_5m_tokens": number("cache_write_5m_tokens"), "cache_write_1h_tokens": number("cache_write_1h_tokens"), "total_tokens": input.zip(output).and_then(|(i,o)| i.checked_add(o))}}});
             cursor.records = ordinal - 1;
             apply(tx, ledger, at, record, key, home, worktrees, cursor, now, done)?;
         }

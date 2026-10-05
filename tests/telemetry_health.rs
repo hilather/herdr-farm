@@ -110,6 +110,7 @@ fn task(db: &rusqlite::Connection, id: &str, outcome: &str, class: &str, attempt
         db.execute("INSERT INTO attempts(id,task_id,revision,state,reservation,termination_observed) VALUES(?1,?2,2,?3,?1,?4)",
             rusqlite::params![attempt, id, a.state, i64::from(a.state != "running")]).unwrap();
         db.execute("INSERT INTO attempt_lifecycle(attempt_id,state,attempt_revision,unix_ms,source) VALUES(?1,'reserved',1,?2,'fixture')", rusqlite::params![attempt, at]).unwrap();
+        db.execute("INSERT INTO attempt_lifecycle(attempt_id,state,attempt_revision,unix_ms,source) VALUES(?1,'running',2,?2,'fixture')", rusqlite::params![attempt, at + 1]).unwrap();
         if a.state != "running" {
             db.execute("INSERT INTO attempt_lifecycle(attempt_id,state,attempt_revision,unix_ms,source) VALUES(?1,?2,2,?3,'fixture')", rusqlite::params![attempt, a.state, at + 5]).unwrap();
         }
@@ -152,9 +153,9 @@ fn quota_window(sidecar: &rusqlite::Connection, remaining: &str, resets: i64, la
 // Outages and missing data: unknown with a reason, never ok, never a zero
 
 /// Drive complete foreground ticker passes over a temporary canonical project.
-/// Age only the operator evaluation fixture to exercise the 300 s boundary.
+/// Default evaluation, interval, retention recovery and owner opt-out via the CLI.
 #[test]
-fn ticker_health_requires_operator_opt_in_obeys_interval_and_never_notifies() {
+fn ticker_health_evaluates_by_default_obeys_interval_and_never_notifies() {
     use std::time::{Duration, Instant};
     let p = Planted::new();
     p.sidecar_created();
@@ -191,21 +192,21 @@ fn ticker_health_requires_operator_opt_in_obeys_interval_and_never_notifies() {
     };
     let pass = || pass_until(&|| true);
 
-    pass();
-    assert_eq!(evaluations(), (0, 0, 0));
-    assert_eq!(p.alerts()["last_evaluated_unix_ms"], Value::Null);
+    pass_until(&|| evaluations().2 >= 1);
+    assert_eq!(evaluations(), (1, 0, 1));
+    assert!(p.alerts()["last_evaluated_unix_ms"].is_i64());
 
     // A 20-minute-old collection is above the 15-minute warning threshold, below one hour.
     let now = unix_ms();
     p.sidecar().execute("INSERT INTO collect_offsets(path_digest,device,inode,byte_offset,records,rate_limits,model,effort,updated_unix_ms) VALUES('ticker-source',1,1,0,0,0,NULL,NULL,?1)", [now - 20 * MINUTE]).unwrap();
     assert_eq!(p.evaluate()["recorded"], true);
-    assert_eq!(evaluations(), (1, 1, 0));
+    assert_eq!(evaluations(), (2, 1, 1));
     assert_eq!(open_alert(&p.alerts(), "collector_stale").unwrap()["occurrences"], 1);
     // No health interval override exists. Seed an elapsed operator evaluation,
     // without waiting five minutes or changing the production clock.
     p.sidecar().execute("UPDATE health_evaluations SET evaluated_unix_ms=?1", [now - 300_001]).unwrap();
-    pass_until(&|| evaluations().2 >= 1);
-    assert_eq!(evaluations(), (2, 1, 1));
+    pass_until(&|| evaluations().2 >= 2);
+    assert_eq!(evaluations(), (3, 1, 2));
     let first_tick = p.alerts();
     assert!(first_tick["last_evaluated_unix_ms"].as_i64().unwrap() >= now);
     let alert = open_alert(&first_tick, "collector_stale").unwrap();
@@ -213,8 +214,17 @@ fn ticker_health_requires_operator_opt_in_obeys_interval_and_never_notifies() {
 
     pass();
     assert!(unix_ms() - first_tick["last_evaluated_unix_ms"].as_i64().unwrap() < 300_000);
-    assert_eq!(evaluations(), (2, 1, 1));
+    assert_eq!(evaluations(), (3, 1, 2));
     assert_eq!(p.alerts(), first_tick);
+    assert_eq!(inbox(), before_inbox);
+    p.sidecar().execute("DELETE FROM health_evaluations", []).unwrap();
+    fs::create_dir_all(p.config_dir()).unwrap();
+    fs::write(p.config_dir().join("config.toml"), "[telemetry]\nhealth_evaluation = false\n").unwrap();
+    pass();
+    assert_eq!(evaluations(), (0, 0, 0));
+    fs::write(p.config_dir().join("config.toml"), "[telemetry]\nhealth_evaluation = true\n").unwrap();
+    pass_until(&|| evaluations().2 == 1);
+    assert_eq!(evaluations(), (1, 0, 1));
     assert_eq!(inbox(), before_inbox);
 }
 
@@ -289,8 +299,8 @@ fn coverage_loss_grades_usage_coverage_exactly() {
     assert_eq!((&s["state"], &s["evidence"]["value"], &s["evidence"]["numerator"], &s["evidence"]["denominator"]), (&json!("warn"), &json!("1/2"), &json!(1), &json!(2)), "{s}");
     assert_eq!(s["evidence"]["incomplete"], json!({"not_bound": 1}));
     assert_eq!(codes(s), vec!["coverage_loss"]);
-    assert_eq!(s["metric"]["definition"], "M13.slice-v1");
-    assert_eq!(s["metric"]["registry"], "analytics-registry.v6");
+    assert_eq!(s["metric"]["definition"], "M13.slice-v2");
+    assert_eq!(s["metric"]["registry"], "analytics-registry.v7");
 
     p.sidecar().execute_batch("DELETE FROM codex_usage; DELETE FROM rollout_sources;").unwrap();
     let out = p.evaluate();
@@ -764,7 +774,7 @@ fn recommendation_carries_evidence_and_goes_stale_after_a_configuration_change()
     assert_eq!((&rec["contract"], &rec["status"], &rec["role"]), (&json!("telemetry-recommendation.v1"), &json!("recommended"), &json!("code")), "{rec}");
     assert_eq!(rec["advisory"], json!({"advisory": true, "authority": "none", "writes": "none",
         "routing": "advisory only: a person decides; nothing here is read by dispatch or admission, and it changes no authority, profile, model access, spending limit or acceptance check"}));
-    assert_eq!(rec["metric"], json!({"metric_id": "M02", "definition": "M02.cohort-v1", "higher_is_better": true, "registry": "analytics-registry.v6",
+    assert_eq!(rec["metric"], json!({"metric_id": "M02", "definition": "M02.cohort-v1", "higher_is_better": true, "registry": "analytics-registry.v7",
         "comparison": "analytics-comparison.v2", "freshness": "M50.recommendation-v1"}));
     assert_eq!(rec["evidence_window"], json!({"cohort": "terminal_cohort", "from_unix_ms": null, "to_unix_ms": null, "semantics": "half_open", "time_basis": "task_terminal_time"}));
     assert_eq!(rec["recommendation"]["configuration_id"], json!(codex));

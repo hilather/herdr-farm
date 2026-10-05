@@ -163,9 +163,31 @@ pub(crate) fn migrate(db: &mut Connection) -> Result<()> {
     let mut upgraded = false;
     for (stream, migrations) in streams() {
         let from = versions.get(stream).copied().unwrap_or(0);
+        // A lost logical inventory can rerun older table rebuilds. Their row
+        // shape predates the optional Claude columns; retain those columns in
+        // TEMP storage inside this same transaction and restore them afterwards.
+        let native_extensions = stream == "codex" && from < 5 && has_column(&tx, "codex_usage", "reasoning_reported")?;
+        let mut ledger_extensions = false;
+        if native_extensions {
+            tx.execute_batch("CREATE TEMP TABLE claude_native_extensions AS SELECT session_id,ordinal,cache_write_5m_tokens,cache_write_1h_tokens,reasoning_reported FROM codex_usage;
+                CREATE UNIQUE INDEX claude_native_extensions_key ON claude_native_extensions(session_id,ordinal);
+                ALTER TABLE codex_usage DROP COLUMN cache_write_5m_tokens;
+                ALTER TABLE codex_usage DROP COLUMN cache_write_1h_tokens;
+                ALTER TABLE codex_usage DROP COLUMN reasoning_reported;")?;
+        }
         if from > 0 { tx.execute("INSERT OR IGNORE INTO telemetry_streams(stream,version) VALUES(?1,?2)", rusqlite::params![stream, from])?; }
         for (index, migration) in migrations.iter().enumerate().skip(from) {
             upgraded = true;
+            // Wait until preceding migrations recreate a missing accounting
+            // frontier: SQLite ALTER validates triggers referencing that table.
+            if !ledger_extensions && stream == "accounting" && matches!(index + 1, 13 | 14 | 18 | 19 | 20)
+                && has_column(&tx, "usage_entries", "cache_write_5m_tokens")? {
+                ledger_extensions = true;
+                tx.execute_batch("CREATE TEMP TABLE claude_ledger_extensions AS SELECT entry_id,cache_write_5m_tokens,cache_write_1h_tokens FROM usage_entries;
+                    CREATE UNIQUE INDEX claude_ledger_extensions_key ON claude_ledger_extensions(entry_id);
+                    ALTER TABLE usage_entries DROP COLUMN cache_write_5m_tokens;
+                    ALTER TABLE usage_entries DROP COLUMN cache_write_1h_tokens;")?;
+            }
             // These storage migrations are already installed when a legacy
             // stream inventory was lost. Keep the logical views and their rows.
             let compact = match (stream, index + 1) {
@@ -173,7 +195,9 @@ pub(crate) fn migrate(db: &mut Connection) -> Result<()> {
                 ("analytics", 4) => Some("analytics_lineage"),
                 _ => None,
             };
-            let installed = compact.map(|name| tx.query_row(
+            let installed = matches!((stream, index + 1), ("ingest", 14)) && has_column(&tx, "codex_usage", "reasoning_reported")?
+                || matches!((stream, index + 1), ("accounting", 24)) && has_column(&tx, "usage_entries", "cache_write_5m_tokens")?
+                || compact.map(|name| tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='view' AND name=?1)",
                 [name], |r| r.get::<_, bool>(0))).transpose()?.unwrap_or(false);
             if !installed {
@@ -200,6 +224,17 @@ pub(crate) fn migrate(db: &mut Connection) -> Result<()> {
             }
             tx.execute("INSERT INTO telemetry_streams(stream,version) VALUES(?1,?2) ON CONFLICT(stream) DO UPDATE SET version=excluded.version",
                 rusqlite::params![stream, index + 1])?;
+        }
+        if native_extensions {
+            tx.execute_batch("ALTER TABLE codex_usage ADD COLUMN cache_write_5m_tokens INTEGER CHECK (cache_write_5m_tokens BETWEEN 0 AND 9007199254740992);
+                ALTER TABLE codex_usage ADD COLUMN cache_write_1h_tokens INTEGER CHECK (cache_write_1h_tokens BETWEEN 0 AND 9007199254740992);
+                ALTER TABLE codex_usage ADD COLUMN reasoning_reported INTEGER NOT NULL DEFAULT 0 CHECK (reasoning_reported IN (0,1));
+                UPDATE codex_usage SET (cache_write_5m_tokens,cache_write_1h_tokens,reasoning_reported)=(SELECT cache_write_5m_tokens,cache_write_1h_tokens,reasoning_reported FROM claude_native_extensions x WHERE x.session_id=codex_usage.session_id AND x.ordinal=codex_usage.ordinal) WHERE EXISTS(SELECT 1 FROM claude_native_extensions x WHERE x.session_id=codex_usage.session_id AND x.ordinal=codex_usage.ordinal);
+                DROP TABLE claude_native_extensions;")?;
+        }
+        if ledger_extensions {
+            tx.execute_batch("UPDATE usage_entries SET (cache_write_5m_tokens,cache_write_1h_tokens)=(SELECT cache_write_5m_tokens,cache_write_1h_tokens FROM claude_ledger_extensions x WHERE x.entry_id=usage_entries.entry_id);
+                DROP TABLE claude_ledger_extensions;")?;
         }
     }
     if !compact_capture_current(&tx)? {
@@ -526,7 +561,7 @@ fn primary_attempt_usage(db: &Connection, attempt: &str) -> Result<Value> {
             for (sum, value) in sums.iter_mut().zip(&row[1..]) { *sum += value; }
         }
     }
-    let reasoning = if bound.iter().any(|s| s.0.starts_with("claude-code:") || s.0.starts_with("otlp:claude-code:")) { unavailable("reasoning_tokens_not_reported") } else { json!(sums[4]) };
+    let reasoning = if bound.iter().filter(|s| !losing.contains(&s.0)).map(|s| reasoning_missing(db, &s.0)).collect::<rusqlite::Result<Vec<_>>>()?.into_iter().any(|missing| missing) { unavailable("reasoning_tokens_not_reported") } else { json!(sums[4]) };
     let mut usage = json!({"input_tokens": sums[0], "cached_input_tokens": sums[1], "cache_write_input_tokens": sums[2],
         "output_tokens": sums[3], "reasoning_output_tokens": reasoning, "total_tokens": sums[5], "records": records});
     if let Some((_, version, ..)) = bound.iter().find(|s| super::version::nearest(&s.1).is_some()) {
@@ -537,4 +572,17 @@ fn primary_attempt_usage(db: &Connection, attempt: &str) -> Result<Value> {
 
 fn unavailable(reason: &str) -> Value {
     json!({"status": "unavailable", "reason": reason})
+}
+
+/// Missing reasoning metadata is not a reported zero, including legacy sidecars.
+pub(crate) fn reasoning_missing(db: &Connection, session: &str) -> rusqlite::Result<bool> {
+    if session.starts_with("otlp:claude-code:") { return Ok(true); }
+    if !session.starts_with("claude-code:") { return Ok(false); }
+    if !has_column(db, "codex_usage", "reasoning_reported")? { return Ok(true); }
+    db.query_row("SELECT EXISTS(SELECT 1 FROM codex_usage WHERE session_id=?1 AND accepted=1 AND reasoning_reported=0)", [session], |r| r.get(0))
+}
+
+/// Legacy sidecars remain readable without a writable schema upgrade.
+pub(crate) fn has_column(db: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
+    db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name=?2)", [table, column], |r| r.get(0))
 }

@@ -62,12 +62,15 @@ impl Input {
             (m.dev(), m.ino()) == self.identity && self.project.canonicalize()? == self.project,
             "attempt token project changed"
         );
-        ensure!(
-            herdr_farm::canonical_worker::session_identity(Path::new(
-                &self.binding.identity.socket
-            ))? == self.started.session,
-            "attempt token session changed"
-        );
+        let session = match herdr_farm::canonical_worker::session_identity(Path::new(
+            &self.binding.identity.socket,
+        )) {
+            Ok(session) => session,
+            Err(error) if error.downcast_ref::<std::io::Error>()
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        ensure!(session == self.started.session, "attempt token session changed");
         ensure!(
             herdr_farm::migration::config_reference(Path::new(&self.config.path))?
                 == self.config,
@@ -83,7 +86,8 @@ impl Input {
         let state = rows(&self.project, Some(&self.binding.id), control)?;
         let entry = state
             .entries
-            .first()
+            .iter()
+            .find(|entry| entry.binding.id == self.binding.id)
             .context("attempt token binding missing")?;
         ensure!(
             entry.binding == self.binding,
@@ -308,7 +312,9 @@ fn execute(input: &Input, control: &Control, memory: &Arc<Mutex<Hints>>) -> Resu
         input.project.is_absolute() && input.ownership.origin == "launched",
         "invalid attempt token input"
     );
+    let binding_key = (input.project.clone(), input.binding.id.clone());
     if input.current(control)?.is_none() {
+        memory.lock().unwrap_or_else(|e| e.into_inner()).published.remove(&binding_key);
         return Ok(());
     }
     let slug = input
@@ -331,9 +337,9 @@ fn execute(input: &Input, control: &Control, memory: &Arc<Mutex<Hints>>) -> Resu
     );
     control.check()?;
     let Some(publishing) = input.current(control)? else {
+        memory.lock().unwrap_or_else(|e| e.into_inner()).published.remove(&binding_key);
         return Ok(());
     };
-    let binding_key = (input.project.clone(), input.binding.id.clone());
     if !publishing && !memory.lock().unwrap_or_else(|e| e.into_inner()).published.get(&binding_key)
         .is_some_and(|at| at.elapsed() < crate::coordinator::TOKEN_TTL) { return Ok(()); }
     let key = crate::thread::sha256_hex(&serde_json::to_vec(input)?);

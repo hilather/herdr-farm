@@ -102,6 +102,19 @@ fn inputs(
     ensure!(paths.len() <= 64, "too many bound repositories");
     ensure!(contract.is_none_or(|c| paths.contains(Path::new(&c.repository))), "contract repository is missing from launch selections");
     let repositories = paths.iter().map(|p|repository(proof,p,contract)).collect::<Result<Vec<_>>>()?;
+    if let Some(home) = &profile.execution_home
+        && contract.is_some_and(|contract| contract.acceptance_policies.iter().any(|policy|
+            crate::domain::verification_policy::ExecutionPolicy::parse(policy.text.as_bytes())
+                .is_ok_and(|policy| policy.toolchain.is_some())))
+    {
+        let project = proof.store_path().parent().and_then(Path::parent).context("project store has no project")?;
+        let repositories = paths.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+        crate::worker_supervision::Isolation::for_agent(
+            project, Path::new(home), cwd, Path::new(&profile.agent.path),
+            &repositories, &[], Some(Path::new(&profile.config.path)),
+            Some(Path::new(&route.socket)), &crate::profile_config::frozen_isolation_hides(&profile)?,
+        )?.with_acceptance_toolchains(project, contract)?;
+    }
     // The grant covers these exact bindings; a still-blocked dependent is not drafted.
     let dependencies = state.dependencies.clone().context("task dependency is not satisfied; the task is not released")?;
     Ok(LaunchInputs {

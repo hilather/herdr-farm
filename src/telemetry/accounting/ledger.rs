@@ -25,6 +25,7 @@ pub struct Entry {
     pub position: i64,
     response_id: Option<String>,
     pub model: Option<String>,
+    pub cache_write_tiers: Option<[i64; 2]>,
     native: [Option<i64>; 6],
     /// `NORMALIZED` order; `None` when the native fields do not satisfy `codex-v1`.
     pub normalized: Option<[i64; 7]>,
@@ -63,9 +64,10 @@ fn derive_scoped(db: &Connection, scoped: bool) -> Result<Vec<Entry>> {
     let mut entries = Vec::new();
     let mut others = db.prepare("SELECT path_digest FROM rollout_sources WHERE session_id=?1 AND path_digest<>?2 AND records>=?3 ORDER BY path_digest")?;
     let filter = if scoped { " WHERE u.session_id IN (SELECT session_id FROM accounting_selected)" } else { "" };
+    let tiers = if crate::telemetry::sidecar::has_column(db, "codex_usage", "cache_write_5m_tokens")? { "u.cache_write_5m_tokens,u.cache_write_1h_tokens" } else { "NULL,NULL" };
     let mut stmt = db.prepare(&format!("SELECT u.session_id,u.ordinal,u.path_digest,u.response_id,u.model,u.accepted,u.reason,u.input_tokens,u.cached_input_tokens,
         u.cache_write_input_tokens,u.output_tokens,u.reasoning_output_tokens,u.total_tokens,
-        EXISTS(SELECT 1 FROM codex_quarantine q WHERE q.session_id=u.session_id AND q.ordinal=u.ordinal),u.payload_digest FROM codex_usage u{filter} ORDER BY u.session_id,u.ordinal"))?;
+        EXISTS(SELECT 1 FROM codex_quarantine q WHERE q.session_id=u.session_id AND q.ordinal=u.ordinal),u.payload_digest,{tiers} FROM codex_usage u{filter} ORDER BY u.session_id,u.ordinal"))?;
     let mut rows = stmt.query([])?;
     // Accepted `(session, response_id)` → payload digest, first ordinal first.
     let mut responses = BTreeMap::<(String, String), String>::new();
@@ -92,7 +94,7 @@ fn derive_scoped(db: &Connection, scoped: bool) -> Result<Vec<Entry>> {
             provenance.push((other?, disposition, reason));
         }
         entries.push(Entry { id: format!("{}:{session}:{ordinal}", source(&session)), session, basis: "delta", scope: "request", precedence: 1, position: ordinal,
-            response_id: r.get(3)?, model: r.get(4)?, native, normalized, provenance });
+            response_id: r.get(3)?, model: r.get(4)?, cache_write_tiers: r.get::<_, Option<i64>>(15)?.zip(r.get(16)?).map(|(a,b)| [a,b]), native, normalized, provenance });
     }
     // Cumulative thread totals (secondary basis, reconciliation only): per
     // session by position, a total above the high-water mark is accepted, an
@@ -114,7 +116,7 @@ fn derive_scoped(db: &Connection, scoped: bool) -> Result<Vec<Entry>> {
             (Some(total), _) => { high = Some((session.clone(), total)); ("accepted", None) }
         };
         entries.push(Entry { id: format!("codex:{session}:thread:{path}"), session, basis: "cumulative", scope: "thread", precedence: 2, position,
-            response_id: None, model: None, native, normalized, provenance: vec![(path, disposition, reason.map(str::to_owned))] });
+            response_id: None, model: None, cache_write_tiers: None, native, normalized, provenance: vec![(path, disposition, reason.map(str::to_owned))] });
     }
     super::otlp::apply_precedence(db, &mut entries)?;
     Ok(entries)
@@ -220,10 +222,10 @@ fn sync_with_wait(db: &mut Connection, wait: &mut crate::telemetry::writer::Writ
     for (e, native) in entries.iter().zip(&native) {
         let n = e.normalized.map(|n| n.map(Some)).unwrap_or([None; 7]);
         tx.prepare_cached("INSERT INTO usage_entries(entry_id,source,session_id,basis,scope,normalization_version,precedence,position,response_id,model,native,
-            input_tokens,cache_read_tokens,new_input_tokens,cache_write_tokens,output_tokens,reasoning_tokens,total_tokens)
-            VALUES(?1,?18,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)")?
-                .execute(params![e.id, e.session, e.basis, e.scope, if e.session.starts_with("otlp:devin:") { "otlp-devin-exclusive-v1" } else if e.session.starts_with("otlp:") { "otlp-inclusive-v1" } else if e.session.starts_with("muse:") { "muse-v1" } else if e.session.starts_with("opencode:") { "opencode-v1" } else if e.session.starts_with("claude-code:") { "claude-code-v1" } else { NORMALIZATION }, e.precedence, e.position, e.response_id, e.model, native,
-                n[0], n[1], n[2], n[3], n[4], n[5], n[6], source(&e.session)])?;
+            input_tokens,cache_read_tokens,new_input_tokens,cache_write_tokens,output_tokens,reasoning_tokens,total_tokens,cache_write_5m_tokens,cache_write_1h_tokens)
+            VALUES(?1,?18,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?19,?20)")?
+                .execute(params![e.id, e.session, e.basis, e.scope, if e.session.starts_with("otlp:devin:") { "otlp-devin-exclusive-v1" } else if e.session.starts_with("otlp:") { "otlp-inclusive-v1" } else if e.session.starts_with("muse:") { "muse-v1" } else if e.session.starts_with("opencode:") { "opencode-v1" } else if e.session.starts_with("claude-code:") { "claude-code-v2" } else { NORMALIZATION }, e.precedence, e.position, e.response_id, e.model, native,
+                n[0], n[1], n[2], n[3], n[4], n[5], n[6], source(&e.session), e.cache_write_tiers.map(|s| s[0]), e.cache_write_tiers.map(|s| s[1])])?;
         for (path, disposition, reason) in &e.provenance {
             tx.prepare_cached("INSERT INTO usage_dispositions(entry_id,path_digest,disposition,reason) VALUES(?1,?2,?3,?4)")?
                 .execute(params![e.id, path, disposition, reason])?;
@@ -351,15 +353,19 @@ pub fn read(db: &Connection) -> Result<Value> {
         }
         provenance.entry(entry).or_default().push(item);
     }
-    let mut stmt = db.prepare("SELECT entry_id,session_id,basis,scope,normalization_version,precedence,position,response_id,model,native,
-        input_tokens,cache_read_tokens,new_input_tokens,cache_write_tokens,output_tokens,reasoning_tokens,total_tokens FROM usage_entries ORDER BY entry_id")?;
+    let tiers = if crate::telemetry::sidecar::has_column(db, "usage_entries", "cache_write_5m_tokens")? { "cache_write_5m_tokens,cache_write_1h_tokens" } else { "NULL,NULL" };
+    let mut stmt = db.prepare(&format!("SELECT entry_id,session_id,basis,scope,normalization_version,precedence,position,response_id,model,native,
+        input_tokens,cache_read_tokens,new_input_tokens,cache_write_tokens,output_tokens,reasoning_tokens,total_tokens,{tiers} FROM usage_entries ORDER BY entry_id"))?;
     let mut entries = Vec::new();
     let mut rows = stmt.query([])?;
     while let Some(r) = rows.next()? {
         let id: String = r.get(0)?;
         let counters: Vec<Option<i64>> = (10..17).map(|i| r.get(i)).collect::<rusqlite::Result<_>>()?;
-        let normalized = if counters.iter().all(Option::is_some) { Value::Object(NORMALIZED.iter().zip(&counters).map(|(k, v)| ((*k).to_owned(), json!(v))).collect()) }
+        let mut normalized = if counters.iter().all(Option::is_some) { Value::Object(NORMALIZED.iter().zip(&counters).map(|(k, v)| ((*k).to_owned(), json!(v))).collect()) }
             else { super::unavailable("not_normalized") };
+        if counters.iter().all(Option::is_some) && let (Some(five), Some(hour)) = (r.get::<_, Option<i64>>(17)?, r.get::<_, Option<i64>>(18)?) {
+            normalized["cache_write_5m_tokens"] = json!(five); normalized["cache_write_1h_tokens"] = json!(hour);
+        }
         entries.push(json!({"entry_id": id, "source": source(&r.get::<_, String>(1)?), "session_id": r.get::<_, String>(1)?, "basis": r.get::<_, String>(2)?, "scope": r.get::<_, String>(3)?,
             "normalization_version": r.get::<_, String>(4)?, "precedence": r.get::<_, i64>(5)?, "position": r.get::<_, i64>(6)?,
             "response_id": r.get::<_, Option<String>>(7)?, "model": r.get::<_, Option<String>>(8)?,

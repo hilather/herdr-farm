@@ -107,6 +107,11 @@ fn enter(parsed: &Args) -> i32 {
     }
     let scratch = PathBuf::from(scratch);
     if parsed.toolchain.as_ref().is_some_and(|r| !super::toolchains::unchanged(r)) { return EXIT_POLICY; }
+    if parsed.toolchain.as_ref().is_some_and(|r| !r.toolchain.network)
+        && let Err(error) = enable_loopback()
+    {
+        return fail("loopback", error);
+    }
     let libraries = match Command::new("/usr/bin/ldd").arg(&parsed.git).output_gated() {
         Ok(output) if output.status.success() => {
             super::manifest::parse_ldd(&String::from_utf8_lossy(&output.stdout))
@@ -579,5 +584,26 @@ fn drop_privileges() -> bool {
     unsafe {
         libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0
             && libc::syscall(libc::SYS_capset, &header, data.as_ptr()) == 0
+    }
+}
+
+/// Called only in the fresh network namespace, before dropping capabilities.
+fn enable_loopback() -> Result<(), i32> {
+    // SAFETY: socket has no pointer arguments; ifreq is zeroed and contains
+    // a NUL-terminated interface name. ioctl receives a live ifreq pointer.
+    unsafe {
+        let fd = libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0);
+        if fd < 0 { return Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO)); }
+        let mut request: libc::ifreq = std::mem::zeroed();
+        request.ifr_name[0] = b'l' as libc::c_char;
+        request.ifr_name[1] = b'o' as libc::c_char;
+        let result = if libc::ioctl(fd, libc::SIOCGIFFLAGS, &mut request) < 0 {
+            Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO))
+        } else {
+            request.ifr_ifru.ifru_flags |= libc::IFF_UP as libc::c_short;
+            if libc::ioctl(fd, libc::SIOCSIFFLAGS, &request) < 0 { Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO)) } else { Ok(()) }
+        };
+        libc::close(fd);
+        result
     }
 }

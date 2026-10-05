@@ -10,9 +10,9 @@ through `HERDR_LIVE_TOKEN_FILE` / `CLAUDE_CODE_OAUTH_TOKEN` to the Claude
 process only. The owner's OAuth credentials were never copied. The home was
 deleted after the run.
 
-Normalization (`claude-code-v1`, DG4b): total input = native `input_tokens` +
-`cache_read_input_tokens` + `cache_creation_input_tokens`. Reasoning is not
-reported by Claude Code and stays `not_reported`, never zero-as-measured.
+Original normalization (`claude-code-v1`, DG4b): total input = native `input_tokens` +
+`cache_read_input_tokens` + `cache_creation_input_tokens`. Mapping v2 now reads reported thinking counters; absent counters remain
+`reasoning_tokens_not_reported`, never zero-as-measured.
 
 | | Input (total) | Cache read | Cache write | Output | Total |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -25,7 +25,7 @@ reported by Claude Code and stays `not_reported`, never zero-as-measured.
 Model `claude-haiku-4-5-20251001` was preserved verbatim (LC3-b `ModelId`). Binding was
 `bound`. The privacy marker scan over telemetry.db, including
 WAL/SHM, found 0 hits. Unmapped stdout usage keys (keys only):
-`cache_creation`, `fallback_credit`, `inference_geo`, `iterations`, `output_tokens_details`, `server_tool_use`, `service_tier`, `speed`.
+`fallback_credit`, `inference_geo`, `iterations`, `server_tool_use`, `service_tier`, `speed`.
 
 ## Findings this certification fixed
 
@@ -45,3 +45,11 @@ WAL/SHM, found 0 hits. Unmapped stdout usage keys (keys only):
 (binding only), `version`, `type`, `message.model`, `message.id` and the four
 `message.usage` counters. Tool-use and tool-result fields and `isSidechain`
 remain fixture-certified, because this run used no tools or subagents.
+
+TFIX-4 mapping v2 adds the live-observed metadata paths `effort`,
+`message.usage.output_tokens_details.thinking_tokens`,
+`message.usage.cache_creation.ephemeral_5m_input_tokens` and
+`message.usage.cache_creation.ephemeral_1h_input_tokens` to `LIVE_FIELDS`.
+These metadata keys are now mapped rather than listed as unmapped; this does
+not certify thinking content or add a new live run. See the collection contract
+for the migration/rebuild of v1 sessions.

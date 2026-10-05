@@ -195,8 +195,9 @@ fn finish_start(
         && delivery.state == crate::operations::DeliveryState::Ambiguous
     {
         let diagnostic = format!(
-            "start_unnamed: the launch claim expired before a naming intent was recorded, so worker pane {} was never named and recovery has no authority to name it; the worker keeps running and holding capacity; reconcile it with `hp task <slug> cancel-attempt {}`",
+            "start_unnamed: the launch claim expired before a naming intent was recorded, so worker pane {} was never named and recovery has no authority to name it; the worker keeps running and holding capacity; reconcile it with `herdr-farm task {} cancel-attempt {} --expected-revision R --expected-head H --reason TEXT`",
             target.route.pane_id,
+            project.file_name().unwrap_or_default().to_string_lossy(),
             record.attempt.as_str()
         );
         db.block_unnamed_start(operation, delivery.revision, &diagnostic, now())?;

@@ -1,11 +1,11 @@
-//! The TM4.1 metric registry `analytics-registry.v6` (docs/telemetry/contracts-analytics.md §1):
+//! The TM4.1 metric registry `analytics-registry.v7` (docs/telemetry/contracts-analytics.md §1):
 //! one declared, read-only table of every metric the report or the query
 //! service can name, with its definition versions, family, cohorts, window
 //! semantics, unit, certification and activation. A change here is a new
 //! registry version, never an edit in place of a published definition.
 use serde_json::{Value, json};
 
-pub const VERSION: &str = "analytics-registry.v6";
+pub const VERSION: &str = "analytics-registry.v7";
 
 /// The TM3.5 quality certificate. Without it every validated-quality family is
 /// `unavailable: awaiting_quality_certificate`; landing or withdrawing it is
@@ -125,7 +125,7 @@ const TA: &[Cohort] = &[Cohort::Terminal, Cohort::Assignment];
 const A: &[Cohort] = &[Cohort::Activity];
 const AS: &[Cohort] = &[Cohort::Assignment];
 /// Bounded categorical dimensions of the native lifecycle definitions (doc 07 §1).
-pub const LIFECYCLE_DIMENSIONS: &[&str] = &["agent_kind", "route", "task_class"];
+pub const LIFECYCLE_DIMENSIONS: &[&str] = &["agent_kind", "profile", "route", "task_class"];
 /// Identities that belong in drill-down, never in a metric label.
 pub const HIGH_CARDINALITY: &[&str] = &["task_id", "attempt_id", "session_id", "invocation_id", "finding_id", "submission_id", "entry_id"];
 
@@ -158,8 +158,8 @@ pub const METRICS: &[Metric] = &[
     m!("M02", "task_acceptance_rate", Lifecycle, "ratio", [native("M02.cohort-v1", TA, "task_terminal_time"),
         central("M02.slice-v1", T, "attempt_decided_at_or_after_since")], "certified-fixture", CORE, None),
     m!("M03", "accepted_throughput", Lifecycle, "tasks_per_hour", [Version { dimensions: &[], ..native("M03.operating-v1", A, "task_acceptance_time_and_observed_operating_intervals") }, absent("M03.v1", A, "operating_hours_not_recorded")], "fixture", "tests/telemetry_query.rs (DG3)", Some("project operating time; observation gaps and open tails are censored")),
-    m!("M04", "cost_per_accepted_task", Cost, "currency_per_task", [lane("accounting", "M04.cost-v1", T, "attempt_decided_at_or_after_since")], "certified-fixture", CORE, Some("R1 fixture-only rate cards; R5 shadow budget")),
-    m!("M05", "tokens_per_accepted_task", Lifecycle, "tokens_per_task", [lane("accounting", "M05.tokens-v1", T, "attempt_decided_at_or_after_since"), absent("M05.v1", T, "no_producer")], "fixture", "tests/telemetry_accounting.rs", None),
+    m!("M04", "cost_per_accepted_task", Cost, "currency_per_task", [lane("accounting", "M04.cost-v2", T, "attempt_decided_at_or_after_since"), absent("M04.cost-v1", T, "definition_superseded")], "certified-fixture", CORE, Some("R1 fixture-only rate cards; R5 shadow budget")),
+    m!("M05", "tokens_per_accepted_task", Lifecycle, "tokens_per_task", [lane("accounting", "M05.tokens-v2", T, "attempt_decided_at_or_after_since"), absent("M05.tokens-v1", T, "definition_superseded"), absent("M05.v1", T, "no_producer")], "fixture", "tests/telemetry_accounting.rs", None),
     m!("M06", "task_lead_time_p95", Lifecycle, "milliseconds", [native("M06.cohort-v1", T, "task_terminal_time")], "fixture", QUERY, None),
     m!("M07", "attempt_amplification", Lifecycle, "attempts_per_accepted_task", [native("M07.cohort-v1", TA, "task_terminal_time"),
         central("M07.slice-v1", T, "attempt_decided_at_or_after_since")], "certified-fixture", CORE, None),
@@ -168,7 +168,7 @@ pub const METRICS: &[Metric] = &[
     m!("M10", "cache_read_share", Consumption, "ratio", [lane("accounting", "M10.v1", A, "session_start")], "certified-fixture", "docs/telemetry/contracts-accounting.md §17 (DG2 fixture workflow)", Some("compatible normalized input only; non-Codex fixture-only")),
     m!("M11", "reported_spend_subtotal", Cost, "currency", [lane("accounting", "M11.charges-v1", A, "charge_period")], "certified-fixture", CORE, Some("R2 no provider billing source")),
     m!("M12", "repriced_estimated_spend", Cost, "currency", [lane("accounting", "M12.cost-v1", A, "usage_time")], "certified-fixture", CORE, Some("R1 fixture-only rate cards")),
-    m!("M13", "usage_coverage", Consumption, "ratio", [central("M13.slice-v1", A, "attempt_decided")], "certified-live", CORE, None),
+    m!("M13", "usage_coverage", Consumption, "ratio", [central("M13.slice-v2", A, "attempt_decided"), absent("M13.slice-v1", A, "definition_superseded")], "certified-live", CORE, None),
     m!("M14", "cost_coverage", Cost, "ratio", [lane("accounting", "M14.cost-v1", A, "usage_time")], "certified-fixture", CORE, Some("R1 fixture-only rate cards")),
     m!("M15", "effective_model_coverage", Consumption, "ratio", [central("M15.slice-v1", A, "session_start")], "certified-live", CORE, None),
     m!("M16", "tool_call_volume", Tools, "calls", [lane("accounting", "M16.tools-v1", A, "call_time")], "certified-live", CORE, None),
@@ -186,16 +186,16 @@ pub const METRICS: &[Metric] = &[
     m!("M28", "skeptical_incremental_yield", ReviewQuality, "findings_per_opportunity", [lane("review", "M28.v1", A, "opportunity")], "certified-fixture", QUALITY, Some("descriptive only: no preregistered randomized experiment")),
     m!("M29", "quality_attribution_coverage", ReviewQuality, "ratio", [lane("review", "M29.v1", A, "credit")], "certified-fixture", QUALITY, None),
     m!("M30", "first_candidate_verification_rate", ReviewQuality, "ratio", [Version { dimensions: &["agent_kind", "route", "task_class", "policy"], ..native("M30.submission-v1", A, "first_submission_time") }, absent("M30.v1", A, "no_producer")], "fixture", QUERY, None),
-    m!("M31", "human_interventions_per_accepted_task", Attention, "interventions_per_task", [lane("accounting", "M31.attention-v1", T, "attention_interval")], "certified-live", CORE, None),
+    m!("M31", "human_interventions_per_accepted_task", Attention, "interventions_per_task", [lane("accounting", "M31.attention-v2", T, "attention_interval"), absent("M31.attention-v1", T, "definition_superseded")], "certified-live", CORE, None),
     m!("M32", "waiting_on_you_share", Attention, "ratio", [lane("accounting", "M32.attention-v1", AS, "attention_interval")], "certified-live", CORE, None),
     m!("M33", "permission_prompts_per_attempt", Attention, "prompts_per_attempt", [lane("accounting", "M33.attention-v1", A, "attention_interval")], "restricted", CORE, Some("attention_reason_not_exposed")),
     m!("M34", "coordinator_overhead", Fleet, "ratio", [lane("accounting", "M34.fleet-v1", A, "usage_time")], "certified-fixture", CORE, Some("R6 coordinator observed as Codex or scoped Claude Code")),
-    m!("M35", "fan_out_efficiency", Fleet, "ratio", [lane("accounting", "M35.fanout-v1", A, "active_attempts")], "certified-fixture", CORE, None),
+    m!("M35", "fan_out_efficiency", Fleet, "ratio", [lane("accounting", "M35.fanout-v2", A, "task_attempt_running_time"), absent("M35.fanout-v1", A, "definition_superseded")], "certified-fixture", CORE, None),
     m!("M36", "integration_conflict_rate", Fleet, "ratio", [lane("accounting", "M36.integration-v1", A, "integration")], "certified-fixture", CORE, None),
     m!("M37", "overlap_waste_share", Fleet, "ratio", [lane("accounting", "M37.fleet-v1", A, "usage_time")], "certified-fixture", CORE, None),
     m!("M38", "throttled_time_share", Services, "ratio", [lane("accounting", "M38.slice-v1", A, "availability_interval")], "restricted", CORE, Some("throttling_not_certified")),
     m!("M39", "provider_error_rate", Services, "ratio", [lane("accounting", "M39.slice-v1", A, "invocation")], "restricted", CORE, Some("provider_errors_not_certified")),
-    m!("M40", "quota_headroom_at_dispatch", Services, "native_units", [central("M40.quota-windows-v1", A, "attempt_decided")], "certified-live", CORE, Some("R7 a quota account is an execution home")),
+    m!("M40", "quota_headroom_at_dispatch", Services, "native_units", [central("M40.quota-windows-v2", A, "attempt_decided"), absent("M40.quota-windows-v1", A, "definition_superseded")], "certified-live", CORE, Some("R7 matching trusted provider windows merge execution homes")),
     m!("M41", "candidate_win_rate", PairedQuality, "ratio", [lane("quality", "M41.v1", A, "group_closed")], "certified-fixture", QUALITY, Some("minimum 10 closed groups (registry.v1)")),
     m!("M42", "paired_acceptance_difference", PairedQuality, "percentage_points", [lane("quality", "M42.v1", A, "group_closed")], "certified-fixture", QUALITY, Some("task_family unavailable; minimum 10 closed groups")),
     m!("M43", "seeded_recall", SeededQuality, "ratio", [lane("review", "M43.v1", A, "opportunity")], "certified-fixture", QUALITY, Some("minimum 20 trials")),

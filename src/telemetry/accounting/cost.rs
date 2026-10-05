@@ -441,6 +441,7 @@ fn price<'a>(
     provider: Option<&str>,
     (from, to): (i64, i64),
     q: [i64; 4],
+    tiers: Option<[i64; 2]>,
 ) -> std::result::Result<(&'a Card, Dec, BTreeMap<String, String>), &'static str> {
     let mut overlapping: Vec<&Card> = cards
         .iter()
@@ -479,6 +480,20 @@ fn price<'a>(
                 });
             }
             Some([(_, rate)]) => *rate,
+            Some(rates) if category == "cache_write" => {
+                let split = tiers.filter(|s| s[0].checked_add(s[1]) == Some(tokens)).ok_or("cache_tier_unknown")?;
+                let mut amount = Dec::ZERO;
+                for (tier, quantity) in [("5m", split[0]), ("1h", split[1])] {
+                    if quantity == 0 { continue; }
+                    let rate = rates.iter().find(|(t, _)| t == tier).ok_or("cache_tier_unknown")?.1;
+                    let part = rate.times(quantity, card.places);
+                    amount = amount.add(part).map_err(|_| "amount_overflow")?;
+                    components.insert(format!("cache_write_{tier}"), part.to_string());
+                }
+                total = total.add(amount).map_err(|_| "amount_overflow")?;
+                components.insert(category.to_owned(), amount.to_string());
+                continue;
+            }
             Some(_) => return Err("cache_tier_unknown"),
         };
         let amount = rate.times(tokens, card.places);
@@ -500,6 +515,8 @@ struct Input {
     model: Option<String>,
     /// `[new_input, cache_read, cache_write, output]` as normalized.
     q: [Option<i64>; 4],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tiers: Option<[i64; 2]>,
     counted: bool,
     role: String,
     attempt_id: Option<String>,
@@ -510,19 +527,20 @@ struct Input {
 }
 
 fn inputs(db: &Connection) -> Result<Vec<Input>> {
-    let mut stmt = db.prepare("SELECT e.entry_id,e.session_id,e.source,e.model,e.new_input_tokens,e.cache_read_tokens,e.cache_write_tokens,e.output_tokens,
+    let tiers = if crate::telemetry::sidecar::has_column(db, "usage_entries", "cache_write_5m_tokens")? { "e.cache_write_5m_tokens,e.cache_write_1h_tokens" } else { "NULL,NULL" };
+    let mut stmt = db.prepare(&format!("SELECT e.entry_id,e.session_id,e.source,e.model,e.new_input_tokens,e.cache_read_tokens,e.cache_write_tokens,e.output_tokens,
         EXISTS(SELECT 1 FROM usage_dispositions d WHERE d.entry_id=e.entry_id AND d.disposition='accepted'),
         coalesce((SELECT g.role FROM session_graph_nodes g WHERE g.session_id=e.session_id LIMIT 1),'primary'),
-        s.attempt_id,s.session_unix_ms,u.observed_unix_ms,t.record_unix_ms,m.model_provider
+        s.attempt_id,s.session_unix_ms,u.observed_unix_ms,t.record_unix_ms,m.model_provider,{tiers}
         FROM usage_entries e LEFT JOIN codex_usage u ON u.session_id=e.session_id AND u.ordinal=e.position
         LEFT JOIN rollout_sources s ON s.path_digest=u.path_digest
         LEFT JOIN codex_usage_times t ON t.session_id=e.session_id AND t.ordinal=e.position
         LEFT JOIN rollout_metadata m ON m.path_digest=u.path_digest WHERE e.basis='delta'
-        AND NOT EXISTS(SELECT 1 FROM usage_dispositions d WHERE d.entry_id=e.entry_id AND (d.reason=?1 OR d.reason='native_surface_precedence')) ORDER BY e.entry_id")?;
+        AND NOT EXISTS(SELECT 1 FROM usage_dispositions d WHERE d.entry_id=e.entry_id AND (d.reason=?1 OR d.reason='native_surface_precedence')) ORDER BY e.entry_id"))?;
     // A repeated response (ledger `REPEATED`) is not usage: it is never valued.
     let rows = stmt.query_map([super::ledger::REPEATED], |r| Ok(Input { entry_id: r.get(0)?, session_id: r.get(1)?, source: r.get(2)?, model: r.get(3)?,
         q: [r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?], counted: r.get(8)?, role: r.get(9)?, attempt_id: r.get(10)?, start: r.get(11)?,
-        observed: r.get(12)?, record: r.get(13)?, provider: r.get(14)? }))?;
+        observed: r.get(12)?, record: r.get(13)?, provider: r.get(14)?, tiers: r.get::<_, Option<i64>>(15)?.zip(r.get(16)?).map(|(a,b)| [a,b]) }))?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
@@ -556,7 +574,7 @@ fn value(cards: &[(String, BTreeSet<String>, Card)], input: &Input) -> Row {
         (false, ..) | (_, None, ..) => Err("usage_not_counted"),
         (_, _, None, _) => Err("model_unknown"),
         (_, _, _, None) => Err("usage_time_unknown"),
-        (true, Some(q), Some(model), Some(usage)) => price(cards, &input.source, model, input.provider.as_deref(), usage, q),
+        (true, Some(q), Some(model), Some(usage)) => price(cards, &input.source, model, input.provider.as_deref(), usage, q, input.tiers),
     };
     match result {
         Ok((card, amount, components)) => {

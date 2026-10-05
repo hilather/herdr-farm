@@ -2801,7 +2801,7 @@ fn workers_sharing_one_herdr_server_are_named_independently_and_recover_unapplie
             assert_eq!(delivery.state, DeliveryState::PermanentFailure);
             match &delivery.last_outcome {
                 Some(crate::operations::Outcome::PermanentFailure { diagnostic }) => {
-                    assert!(diagnostic.starts_with("start_unnamed:") && diagnostic.contains(&format!("cancel-attempt {}", attempt.as_str())), "{diagnostic}");
+                    assert!(diagnostic.starts_with("start_unnamed:") && diagnostic.contains(&format!("herdr-farm task {} cancel-attempt {} --expected-revision R --expected-head H --reason TEXT", b.project.file_name().unwrap().to_string_lossy(), attempt.as_str())), "{diagnostic}");
                 }
                 other => panic!("{other:?}"),
             }

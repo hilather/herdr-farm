@@ -273,8 +273,9 @@ sys.stdout.buffer.write(json.dumps({'result':json.loads(reply)['result']}).encod
     }
     fn count(&self, method: &str) -> usize { self.requests().iter().filter(|(m, _)| m == method).count() }
     fn attempt(&self, id: &AttemptId) -> Attempt { self.state().attempts.into_iter().find(|a| &a.id == id).unwrap() }
-    fn spawn(&self) -> Ticker {
-        Ticker(Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", &self.herdr)
+    fn spawn(&self) -> Ticker { self.spawn_attention_interval("300") }
+    fn spawn_attention_interval(&self, interval: &str) -> Ticker {
+        Ticker(Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", &self.herdr).env("HERDR_FARM_TELEMETRY_COLLECT_SECS", interval)
             .args(["--root", self.path("root").to_str().unwrap(), "ticker", "run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap())
     }
     fn wait(&self, ticker: &mut Ticker, seconds: u64, predicate: &dyn Fn() -> bool) {
@@ -757,14 +758,27 @@ fn accepted_editing_worker_completes_automatically_after_integration() {
 #[test]
 fn accepted_verify_only_editing_worker_completes_without_integration_automation() {
     let (mut lab, attempt, _) = editing_submission_lab("verify_only", WORK_POLICY, true, false);
+    lab.ok(&["telemetry", "demo", "collect"]);
     lab.serve();
-    let mut ticker = lab.spawn();
+    let mut ticker = lab.spawn_attention_interval("3600");
     lab.wait_for(&mut ticker, "verify-only automatic completion", &attempt, 120, &|| lab.attempt(&attempt).termination_observed);
     assert_eq!(lab.attempt(&attempt).state, AttemptState::Completed);
     assert!(!lab.attempt(&attempt).retains_capacity());
     assert_eq!(lab.state().tasks.iter().find(|t| t.id.as_str() == "work").unwrap().state, TaskState::Succeeded);
     assert!(!lab.git_ok(&["rev-parse", "--verify", "-q", "integration^2"]));
     lab.stop(ticker);
+    let db = rusqlite::Connection::open(lab.project.join(".state/telemetry.db")).unwrap();
+    let samples: Vec<(i64, Option<String>, Option<String>)> = db.prepare("SELECT observed_unix_ms,state,gap FROM attention_samples WHERE attempt_id=?1 ORDER BY rowid").unwrap()
+        .query_map([attempt.as_str()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap().map(Result::unwrap).collect();
+    assert!(!samples.is_empty(), "running observation: {samples:?}");
+    assert!(samples.iter().all(|(_, state, gap)| state.is_some() && gap.is_none()), "{samples:?}");
+    let canonical = rusqlite::Connection::open(lab.project.join(".state/state.db")).unwrap();
+    let ended: i64 = canonical.query_row("SELECT unix_ms FROM attempt_lifecycle WHERE attempt_id=?1 AND state='completed'", [attempt.as_str()], |r| r.get(0)).unwrap();
+    let interval: i64 = db.query_row("SELECT interval_ms FROM attention_samples WHERE attempt_id=?1 ORDER BY observed_unix_ms LIMIT 1", [attempt.as_str()], |r| r.get(0)).unwrap();
+    assert!(ended - samples[0].0 < 2 * interval);
+    let m31 = lab.ok(&["telemetry", "demo", "report", "--json"])["metrics"]["M31"].clone();
+    assert_eq!(m31["coverage"], json!({"attempts": 1, "complete": 1, "not_observed": 0, "with_gaps": 0}));
+    assert_eq!(m31["value"], "0/1");
 }
 
 #[test]
@@ -1640,7 +1654,7 @@ const CODEX_AGENT: &str = r#"
 use std::{fs, process::Command};
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.first().map(String::as_str) == Some("--version") { println!("codex-cli 0.154.0"); return }
+    if args.first().map(String::as_str) == Some("--version") { println!("codex-cli 0.159.3"); return }
     let mut report: String = args.iter().map(|a| format!("arg {a}\n")).collect();
     let mut overrides = Vec::new();
     let mut i = 0;
@@ -1650,7 +1664,7 @@ fn main() {
         for (name, set) in [("control", vec![CONTROL.to_owned()]), ("product", overrides.clone())] {
             fs::write(name, "x\n").unwrap();
             let mut command = Command::new(REAL_CODEX);
-            command.args(["sandbox", "-c", "sandbox_mode=\"workspace-write\""]);
+            command.arg("sandbox");
             for o in &set { command.args(["-c", o]); }
             command.args(["--", "/bin/sh", "-c", &format!("git add {name} && git -c user.name=w -c user.email=w@example.invalid commit -qm {name} && echo COMMITTED")]);
             let out = match command.output() { Ok(out) => format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)), Err(e) => e.to_string() };
@@ -1665,14 +1679,14 @@ fn main() {
 "#;
 
 /// F-commit (certificate-live.md §2.2): an isolated Codex attempt gets, before
-/// its profile's own arguments, one `-c sandbox_workspace_write.writable_roots`
+/// its profile's own arguments, one `-c permissions.herdr-farm-worker.filesystem`
 /// override naming the Git common directory, the worktree's administrative
 /// directory `<common>/worktrees/<id>` (Codex binds a linked worktree's gitdir
 /// read-only unless it is a writable root itself), its spool and its output
 /// directory; the start observation still identifies the agent (it runs), and
 /// the product binary's directory leads the agent's PATH.
 ///
-/// With `HP_CODEX_SANDBOX_BIN` naming a real Codex 0.154.0 binary, the worker
+/// With `HP_CODEX_SANDBOX_BIN` naming a real Codex 0.159.3 binary, the worker
 /// also commits through Codex's own `workspace-write` sandbox inside the
 /// product sandbox, no model call: with only the common directory writable
 /// (the live run's configuration) Git fails on the administrative
@@ -1684,7 +1698,7 @@ fn an_isolated_codex_worker_commits_through_codex_workspace_write_sandbox() {
     let mut lab = Lab::of_kind("codex", "unknown_usage='allow_with_warning'", |repo| repo.to_owned());
     let real = std::env::var("HP_CODEX_SANDBOX_BIN").unwrap_or_default();
     let common = lab.repo.canonicalize().unwrap().join(".git");
-    let control = format!("sandbox_workspace_write.writable_roots=[{:?}]", common.to_str().unwrap());
+    let control = format!("permissions.herdr-farm-worker.filesystem={{ {:?} = \"write\" }}", common.to_str().unwrap());
     lab.build_agent(&format!("{CODEX_AGENT}\nconst REAL_CODEX: &str = {real:?};\nconst CONTROL: &str = {control:?};\n"));
     let base = lab.git(&["rev-parse", "HEAD"]);
     let (_, attempt) = lab.reserve("Retained instructions");
@@ -1700,7 +1714,12 @@ fn an_isolated_codex_worker_commits_through_codex_workspace_write_sandbox() {
     let roots = [common.display().to_string(), gitdir.clone(), format!("{}/.state/spool/{}", project.display(), attempt.as_str()),
         format!("{}/.state/worker-output/{}", project.display(), attempt.as_str())];
     let args: Vec<&str> = report.lines().filter_map(|l| l.strip_prefix("arg ")).collect();
-    assert_eq!(args, ["-c".to_owned(), format!("sandbox_workspace_write.writable_roots={}", serde_json::to_string(&roots).unwrap())], "{report}");
+    assert_eq!(args.len(), 2, "{report}");
+    assert_eq!(args[0], "-c");
+    let settings: toml::Value = toml::from_str(args[1]).unwrap();
+    let grants = settings["permissions"]["herdr-farm-worker"]["filesystem"].as_table().unwrap();
+    assert_eq!(grants.len(), roots.len());
+    for root in roots { assert_eq!(grants[&root].as_str(), Some("write"), "{report}"); }
     let product = std::path::Path::new(BIN).canonicalize().unwrap();
     assert!(report.contains(&format!("\npath {}:/usr/bin:/bin\n", product.parent().unwrap().display())), "{report}");
     if real.is_empty() { return; }
@@ -2401,6 +2420,45 @@ fn canonical_attempt_sidebar_clears_after_termination_in_an_active_project() {
     lab.stop(ticker);
 }
 
+/// Both running bindings publish, and a retired missing server is harmless
+/// across subsequent passes in the same ticker process.
+#[test]
+fn concurrent_attempt_tokens_publish_and_missing_retired_server_stays_quiet() {
+    let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+    lab.ok(&["scheduler", "demo", "policy", "--max-active-workers", "2", "--max-attempts-per-task", "3", "--expected-revision", &lab.state().scheduler.unwrap().policy.revision.to_string(), "--expected-head", &lab.head().to_string()]);
+    lab.ok(&["task", "demo", "add", "next", "--title", "next", "--expected-head", &lab.head().to_string()]);
+    lab.ok(&["task", "demo", "queue", "next", "--input-file", lab.path("queue.json").to_str().unwrap(), "--expected-revision", "1", "--expected-head", &lab.head().to_string()]);
+    fs::create_dir(lab.path("next-server")).unwrap();
+    let socket = lab.path("next-server/native.sock");
+    let id = TaskId::new("next").unwrap();
+    let revision = lab.state().tasks.iter().find(|t| t.id == id).unwrap().revision;
+    let route = RuntimeRoute { socket: socket.display().to_string(), cwd: lab.repo.canonicalize().unwrap().display().to_string(), ..Default::default() };
+    let binding = runtime::create_binding(&lab.project, Some(&id), Some(revision), lab.head(), &route).unwrap().binding.id;
+    lab.resume();
+    let (_, first) = lab.reserve("First instructions");
+    let selection = lab.selection_for("next", &binding, "Second instructions");
+    let (_, second) = lab.reserve_selection(&selection);
+    lab.serve();
+    let mut server = Ticker(Command::new("/usr/bin/python3").args(["-c", SERVER]).arg(&socket).spawn().unwrap());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !socket.exists() { assert!(Instant::now() < deadline); std::thread::sleep(Duration::from_millis(10)); }
+    let second_metadata = || fs::read_to_string(lab.path("next-server/requests")).unwrap_or_default().lines().filter_map(|line| serde_json::from_str::<Value>(line).ok()).any(|v| v["method"] == "pane.report_metadata" && v["params"]["tokens"]["telemetry"] == "claude ○");
+    let mut ticker = lab.spawn();
+    lab.wait(&mut ticker, 120, &|| lab.attempt(&first).state == AttemptState::Running && lab.attempt(&second).state == AttemptState::Running && second_metadata() && lab.requests().iter().any(|(m,p)| m == "pane.report_metadata" && p["tokens"]["telemetry"] == "claude ○"));
+    lab.ok_live(&|| { let a = lab.attempt(&second); ["task", "demo", "cancel-attempt", second.as_str(), "--expected-revision", &a.revision.to_string(), "--expected-head", &lab.head().to_string(), "--reason", "missing server cleanup"].map(String::from).to_vec() });
+    lab.wait(&mut ticker, 90, &|| lab.attempt(&second).termination_observed);
+    server.0.kill().unwrap();
+    server.0.wait().unwrap();
+    fs::remove_file(&socket).unwrap();
+    for _ in 0..3 {
+        let observed = lab.state().observations.iter().map(|o| o.observed_unix_ms).max().unwrap();
+        lab.wait(&mut ticker, 90, &|| lab.state().observations.iter().any(|o| o.observed_unix_ms > observed));
+    }
+    lab.stop(ticker);
+    let log = fs::read_to_string(lab.path("root/.ticker.log")).unwrap_or_default();
+    assert!(!log.contains("attempt token binding changed") && !log.contains("attempt token: No such file") && !log.contains(&format!("attempt token {}:", second.as_str())), "{log}");
+}
+
 /// A restarted ticker must not discover historical cleanup work, even when
 /// a cancelled worker's retained pane is still present.
 #[test]
@@ -2698,4 +2756,33 @@ fn submit_captured_retains_remember_from_the_attempt_report_and_replays_once() {
     fs::write(output.join("report.md"),"## Results\nSame recovered edit\n\n## Remember\n\n").unwrap();
     lab.ok(&["result","demo","submit-captured",attempt.as_str()]);
     assert_eq!(lab.ok(&["memory","demo","list"]).as_array().unwrap().len(),1);
+}
+
+/// A failed mid-run observation remains a gap even when both lifecycle hooks
+/// succeed. All operations use the CLI and an isolated local Herdr fixture.
+#[test]
+fn attention_mid_run_failure_remains_incomplete_at_termination() {
+    let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+    let (_, attempt) = lab.reserve("Attention observation lab");
+    lab.ok(&["telemetry", "demo", "collect"]);
+    lab.serve();
+    let mut ticker = lab.spawn_attention_interval("3600");
+    lab.wait_for(&mut ticker, "running observation", &attempt, 120, &|| lab.attempt(&attempt).state == AttemptState::Running);
+    lab.stop(ticker);
+    fs::write(lab.path("lab/agent-status"), "unknown").unwrap();
+    let out = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim())
+        .env("HOME", lab.home.path()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", &lab.herdr).env("HERDR_FARM_TELEMETRY_COLLECT_SECS", "3600")
+        .args(["--root", lab.path("root").to_str().unwrap(), "telemetry", "demo", "accounting", "observe-attention"]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let observed: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(observed["gaps"]["state_unknown"], 1);
+    fs::remove_file(lab.path("lab/agent-status")).unwrap();
+    let running = lab.attempt(&attempt);
+    lab.ok(&["task", "demo", "cancel-attempt", attempt.as_str(), "--expected-revision", &running.revision.to_string(), "--expected-head", &lab.head().to_string(), "--reason", "finished"]);
+    let mut ticker = lab.spawn_attention_interval("3600");
+    lab.wait_for(&mut ticker, "terminal observation", &attempt, 120, &|| lab.attempt(&attempt).termination_observed);
+    lab.stop(ticker);
+    let m31 = lab.ok(&["telemetry", "demo", "report", "--json"])["metrics"]["M31"].clone();
+    assert_eq!(m31["value"], json!({"status": "unavailable", "reason": "incomplete_observation"}));
+    assert_eq!(m31["coverage"]["with_gaps"], 1);
 }
