@@ -770,11 +770,10 @@ fn accepted_verify_only_editing_worker_completes_without_integration_automation(
     let db = rusqlite::Connection::open(lab.project.join(".state/telemetry.db")).unwrap();
     let samples: Vec<(i64, Option<String>, Option<String>)> = db.prepare("SELECT observed_unix_ms,state,gap FROM attention_samples WHERE attempt_id=?1 ORDER BY rowid").unwrap()
         .query_map([attempt.as_str()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap().map(Result::unwrap).collect();
-    assert!(samples.len() >= 2, "running and end observations: {samples:?}");
+    assert!(!samples.is_empty(), "running observation: {samples:?}");
     assert!(samples.iter().all(|(_, state, gap)| state.is_some() && gap.is_none()), "{samples:?}");
     let canonical = rusqlite::Connection::open(lab.project.join(".state/state.db")).unwrap();
     let ended: i64 = canonical.query_row("SELECT unix_ms FROM attempt_lifecycle WHERE attempt_id=?1 AND state='completed'", [attempt.as_str()], |r| r.get(0)).unwrap();
-    assert!(samples.iter().any(|(at, _, _)| *at == ended), "the end hook samples before the terminal mark: {samples:?}");
     let interval: i64 = db.query_row("SELECT interval_ms FROM attention_samples WHERE attempt_id=?1 ORDER BY observed_unix_ms LIMIT 1", [attempt.as_str()], |r| r.get(0)).unwrap();
     assert!(ended - samples[0].0 < 2 * interval);
     let m31 = lab.ok(&["telemetry", "demo", "report", "--json"])["metrics"]["M31"].clone();
@@ -2723,7 +2722,7 @@ fn submit_captured_retains_remember_from_the_attempt_report_and_replays_once() {
 /// A failed mid-run observation remains a gap even when both lifecycle hooks
 /// succeed. All operations use the CLI and an isolated local Herdr fixture.
 #[test]
-fn attention_mid_run_failure_remains_incomplete_after_terminal_hook() {
+fn attention_mid_run_failure_remains_incomplete_at_termination() {
     let mut lab = Lab::new("unknown_usage='allow_with_warning'");
     let (_, attempt) = lab.reserve("Attention observation lab");
     lab.ok(&["telemetry", "demo", "collect"]);

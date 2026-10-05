@@ -345,8 +345,13 @@ impl SqliteStore {
         super::consumer_bindings::reconcile_active(&tx)?;
         if let Some(budget)=budget {budget.check()?;}
         tx.commit()?;
+        // Best-effort telemetry sample, off the caller's thread: the caller may
+        // still hold the project's operation locks, and the Herdr call must not
+        // extend them. A process that exits first simply loses the sample.
         if let Some(project) = self.connection.path().and_then(|p| Path::new(p).parent()).and_then(Path::parent) {
-            crate::telemetry::accounting::attention::observe_selected(project, &std::collections::BTreeSet::from([attempt.id.as_str().to_owned()]));
+            let (project, ids) = (project.to_owned(), std::collections::BTreeSet::from([attempt.id.as_str().to_owned()]));
+            let _ = std::thread::Builder::new().name("attention-sample".into())
+                .spawn(move || crate::telemetry::accounting::attention::observe_selected(&project, &ids));
         }
         Ok(result)
     }

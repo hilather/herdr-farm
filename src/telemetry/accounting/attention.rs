@@ -141,17 +141,13 @@ fn classify(b: &Bound, agents: &[Value]) -> std::result::Result<&'static str, &'
 /// Herdr is queried before the sidecar transaction; writes only the sidecar.
 pub fn observe(project: &Path, db: &mut Connection, budget: crate::telemetry::codex::Budget) -> Result<Value> {
     let bound: Vec<Bound> = bindings(project)?.into_iter().filter(|b| b.open).collect();
-    observe_bound(db, budget, bound, jiff::Timestamp::now().as_millisecond(), false, CALL_TIMEOUT)
+    observe_bound(db, budget, bound, jiff::Timestamp::now().as_millisecond(), CALL_TIMEOUT)
 }
 
-/// Best-effort lifecycle observation. Never creates or migrates a sidecar and
-/// never waits for its writer. End-of-life pane disappearance adds no gap;
-/// earlier failures and stale observation spans still fail completeness.
+/// Best-effort observation of selected attempts after they reach `running`.
+/// Never creates or migrates a sidecar and never waits for its writer.
 pub fn observe_selected(project: &Path, ids: &BTreeSet<String>) {
-    observe_selected_at(project, ids, jiff::Timestamp::now().as_millisecond(), false);
-}
-
-pub(crate) fn observe_selected_at(project: &Path, ids: &BTreeSet<String>, now: i64, ending: bool) {
+    let now = jiff::Timestamp::now().as_millisecond();
     let _ = (|| -> Result<()> {
         let path = crate::telemetry::sidecar::path(project);
         if !path.is_file() { return Ok(()); }
@@ -163,13 +159,13 @@ pub(crate) fn observe_selected_at(project: &Path, ids: &BTreeSet<String>, now: i
         // Acquire before the external call: contention skips the entire hook.
         let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let bound = bindings_filtered(project, Some(ids), false, true)?.into_iter().filter(|b| b.open).collect();
-        observe_bound(&tx, crate::telemetry::codex::Budget { bytes: MAX_REPLY }, bound, now, ending, LIFECYCLE_CALL_TIMEOUT)?;
+        observe_bound(&tx, crate::telemetry::codex::Budget { bytes: MAX_REPLY }, bound, now, LIFECYCLE_CALL_TIMEOUT)?;
         tx.commit()?;
         Ok(())
     })();
 }
 
-fn observe_bound(db: &Connection, budget: crate::telemetry::codex::Budget, bound: Vec<Bound>, now: i64, ending: bool, timeout: Duration) -> Result<Value> {
+fn observe_bound(db: &Connection, budget: crate::telemetry::codex::Budget, bound: Vec<Bound>, now: i64, timeout: Duration) -> Result<Value> {
     let (interval, bin) = (interval_ms(), herdr_bin());
     let mut remaining = budget.bytes;
     let mut replies: BTreeMap<String, std::result::Result<Vec<Value>, &'static str>> = BTreeMap::new();
@@ -184,7 +180,6 @@ fn observe_bound(db: &Connection, budget: crate::telemetry::codex::Budget, bound
                 }
                 match &replies[&b.socket] { Err(reason) => Err(*reason), Ok(agents) => classify(b, agents) }
             };
-        if ending && sample == Err("agent_absent") { continue; }
         samples.push((b.attempt.as_str(), sample));
     }
     let owned = db.is_autocommit().then(|| db.unchecked_transaction()).transpose()?;

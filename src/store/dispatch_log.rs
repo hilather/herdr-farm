@@ -11,10 +11,6 @@ fn invalid(message:&str)->StoreError {StoreError::Invalid(message.into())}
 pub(super) fn mark(tx:&Connection,attempt:&Attempt,now:i64,source:&str)->Result<()> {
     let version:u32=tx.query_row("PRAGMA user_version",[],|r|r.get(0))?;
     if version<51 {return Ok(());}
-    if matches!(attempt.state, AttemptState::Completed | AttemptState::Failed | AttemptState::Cancelled | AttemptState::Lost)
-        && let Some(project) = tx.path().and_then(|p| Path::new(p).parent()).and_then(Path::parent) {
-        crate::telemetry::accounting::attention::observe_selected_at(project, &std::collections::BTreeSet::from([attempt.id.as_str().to_owned()]), now, true);
-    }
     tx.execute("INSERT INTO attempt_lifecycle VALUES(?1,?2,?3,?4,?5) ON CONFLICT(attempt_id,state) DO NOTHING",
         params![attempt.id.as_str(),attempt.state.as_str(),integer(attempt.revision)?,now,source])?;
     Ok(())

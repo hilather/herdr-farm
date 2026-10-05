@@ -637,15 +637,17 @@ that gap may be the same wait: kept, `counted: false`
 censored waits is excluded). An attempt with no successful sample is
 `unavailable not_observed` with its gaps, never 0.
 
-Lifecycle sampling also runs after the worker brief commits `running` and
-immediately before a terminal lifecycle mark for a launched attempt. These
-hooks never create or migrate a sidecar, skip a busy writer without waiting,
-and bound each Herdr call to 500 ms with a 1 MiB reply budget. They reuse the
-same bindings, labels and insertion as periodic observation. A terminal
-`agent_absent` is omitted: the pane may already be gone, and a recent successful
-sample still covers a short trailing span under the unchanged two-interval
-rule. Other failures remain gaps, including genuine mid-run failures; no
-state is inferred at termination and long unsampled tails remain incomplete.
+Lifecycle sampling also runs once after the worker brief commits `running`,
+so an attempt shorter than two sampling intervals has a sample near its start
+and no leading or trailing gap under the unchanged two-interval rule; longer
+attempts are covered by periodic observation. The hook runs on its own
+thread after the canonical commit (never inside a store transaction or under
+the caller's operation locks; a process that exits first loses the sample),
+never creates or
+migrates a sidecar, skips a busy writer without waiting, and bounds the Herdr
+call to 500 ms with a 1 MiB reply budget. It reuses the same bindings, labels
+and insertion as periodic observation. Failures remain gaps, including genuine
+mid-run failures; no state is inferred at termination.
 
 **`accounting attention [--json]`** (read-only): `signal`, per launched
 attempt `{attempt_id, task_id, state: open|ended, launched_unix_ms,
