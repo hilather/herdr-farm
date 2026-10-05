@@ -1798,3 +1798,37 @@ spools and terminated CLI processes can lose samples. Worker samples are
 untrusted reports, with validated command names and forced worker labels;
 they cannot grant authority. The bounded metadata table follows
 `sidecar.cli_invocations` retention and full telemetry backup.
+
+### Claude coordinator turns (M34 detail)
+
+`accounting coordinator` prints the turn view as JSON, even before pricing
+(unpriced requests remain explicit), with a `summary` across all coordinator
+sessions that preserves currencies and session identity. `accounting fleet --json` also exposes `metrics.M34.coordinator.turn_sessions`.
+Each non-tool-result user line opens a turn; following assistant, system and
+tool-result lines belong to it until the next prompt. Lines before the first
+prompt are not assigned a synthetic turn. Unknown timestamps remain null.
+The view reports distinct usage-bearing requestId values (API message id fallback) as requests, input
+including cache per-request maximum and sum, 5m/1h cache writes, published-rate
+cost by currency with unpriced request counts, wall duration (reported system
+duration when present, otherwise observed timestamp span), and AskUserQuestion
+call-to-result wait. Stop reasons count reported assistant line tags.
+
+Trigger precedence: scheduled_wakeup (tags scheduled_wakeup, scheduled, timer,
+wakeup); subagent (subagent, subagent_notification); background_task (a preceding
+tool-result backgroundTaskId, or background_task/background_task_notification);
+bootstrap (bootstrap, startup, init); queued_owner (preceding enqueue operation,
+or queued_owner, queue, queued); owner_typed (owner_typed, user, owner, typed,
+cli); other. Tags are matched against turnOrigin and promptSource. Queue and
+background evidence is consumed by the next prompt; dequeue clears queue
+evidence. This is a metadata heuristic, not an assertion about prompt content.
+
+Summaries report costs by trigger class, turns issuing no tool calls, and idle
+gaps from the previous turn's last observed line before cache rewrites. A
+full-context rewrite is flagged when a request reports zero cache reads and
+positive cache creation (a rewrite of the reusable prefix); the exact quantities remain visible. Missing
+cache tier counters make the corresponding tier sum null; cost coverage
+remains explicit. Turns issuing no tools are candidates for no-op wake-ups,
+not proof that their output was useless.
+
+`attempts --json` exposes worker prompt count as `turns` and reported assistant
+`stop_reasons` counts. These do not enter worker token totals or M35.

@@ -89,6 +89,7 @@ migrated sidecar.
   namespaces, fork points and fork reconciliation, 0009 terminated turns,
   0010 Claude Code message identity and reported tool outcomes (DG4b);
   0011 OpenCode native message/tool metadata (DG4d);
+  ingest 0015 Claude turn metadata (session-retained, full backup);
   accounting 0013 adds Claude ledger source/cache normalization, 0014 adds OpenCode,
   0015 adds maintained read aggregates,
   contracts-collection.md A6–A9 and DG4b/DG4d), mode 0600, created on first collect. No
@@ -647,6 +648,16 @@ ended-attempt spool removal. Busy ingestion defers removal to a later pass;
 absent or old sidecars receive no rows. The table is bounded to 90 days and
 100,000 newest rows, classified as `sidecar.cli_invocations`, included in full
 backups, retention planning/apply, restore loss counts and tombstone enforcement.
+
+Claude turn metadata adds exactly these leaves: non-tool-result user lines
+`turnOrigin`, `promptSource` (enum tags), `turnPosition.promptIndex`,
+`turnPosition.turnIndex` (numbers), `promptId` (id); assistant lines
+`requestId` (id), `message.stop_reason` (enum tag); system lines `subtype`
+(enum tag), `durationMs` (number); tool results
+`toolUseResult.backgroundTaskId` (id only); queue-operation lines `operation`
+(enum tag only). Enum values must match `^[a-z][a-z0-9_-]{0,31}$`;
+all other strings become `other`. These are metadata, never message content.
+No other leaf inside `toolUseResult` is read, stored or hashed.
 
 Allowed free text is limited to **excerpts** of: verification/integration
 `reason` (≤128 already), operator dispatch `note`, finding titles when that

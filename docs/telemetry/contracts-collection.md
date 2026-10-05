@@ -1411,6 +1411,16 @@ are namespaced `claude-code:<sessionId>` and stored versions are qualified
 `claude-code/<version>` so neither can collide with Codex. `originator` is
 `claude-code`; source trust remains `collector_observed`.
 
+Claude turn metadata adds exactly these leaves: non-tool-result user lines
+`turnOrigin`, `promptSource` (enum tags), `turnPosition.promptIndex`,
+`turnPosition.turnIndex` (numbers), `promptId` (id); assistant lines
+`requestId` (id), `message.stop_reason` (enum tag); system lines `subtype`
+(enum tag), `durationMs` (number); tool results
+`toolUseResult.backgroundTaskId` (id only); queue-operation lines `operation`
+(enum tag only). Enum values must match `^[a-z][a-z0-9_-]{0,31}$`;
+all other strings become `other`. These are metadata, never message content.
+No other leaf inside `toolUseResult` is read, stored or hashed.
+
 Privacy allowlist: session id, timestamp, cwd for binding (then the same
 home-redacted source/digested source identity as Codex), version, model,
 API message id, the four native token counts, sidechain flag, tool-use ids
@@ -1422,13 +1432,13 @@ are preserved verbatim unless they have a recognized secret-token prefix
 Line-type counts and unknown field/type counts are
 obtained from these envelopes; unmapped entries retain **keys only** (up to
 128 names per line, plus the full unmapped count). Unknown
-subtrees are not traversed. The 2.1.286 `queue-operation`, `attachment`,
+subtrees are not traversed. The 2.1.286 `attachment`,
 `atis-latch`, `last-prompt`, `cost-state` and `mode` types remain unmapped,
 with keys/type names only. Their content, lastPrompt, attachment bodies and
 free text are discarded. `cost-state.modelUsage` is not collected: cumulative
 snapshots overlap assistant usage and add no independent accounting source.
 Prompts, text, thinking, input, result content,
-`toolUseResult` and summary text are never persisted or hashed. Conformance
+`toolUseResult` siblings of backgroundTaskId and summary text are never persisted or hashed. Conformance
 plants `CLAUDE_SECRET_*` strings in every forbidden category and scans the
 sidecar including WAL/SHM after collection and replay.
 
@@ -2848,3 +2858,10 @@ the dispatcher retains optional Claude columns in indexed transaction-local
 TEMP tables while replaying older table rebuilds, then restores them. Already
 installed ingest-14 columns skip that mapping reset. No retained compatibility
 table or new retention class is introduced.
+
+
+Ingest **0015** adds `claude_turn_lines`, keyed by session, source digest and
+line byte offset. It belongs to `sidecar.normalized_sessions`, follows session
+retention/tombstones, and is included in full backups and row inventories.
+Claude offsets replay from zero; envelope normalization v3 supersedes v2.
+Workers and coordinators use the same mapping.

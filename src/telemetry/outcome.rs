@@ -46,6 +46,21 @@ fn project_attempts(project: &Path, selected: Option<&std::collections::BTreeSet
     let mut records = records;
     if let Some(sidecar) = super::sidecar::read(project)? {
         let children = super::sidecar::child_index(&sidecar)?;
+        let turn_table: bool = sidecar.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='claude_turn_lines')", [], |r| r.get(0))?;
+        if turn_table {
+            for record in &mut records {
+                let attempt = record["attempt_id"].as_str().unwrap_or_default();
+                let count: i64 = sidecar.query_row("SELECT count(*) FROM claude_turn_lines t WHERE is_prompt=1 AND session_id IN
+                    (SELECT session_id FROM rollout_sources WHERE attempt_id=?1 AND binding='bound')", [attempt], |r| r.get(0))?;
+                let stops: std::collections::BTreeMap<String,i64> = sidecar.prepare("SELECT json_extract(metadata,'$.stop_reason'),count(*) FROM claude_turn_lines
+                    WHERE json_extract(metadata,'$.stop_reason') IS NOT NULL AND session_id IN
+                    (SELECT session_id FROM rollout_sources WHERE attempt_id=?1 AND binding='bound') GROUP BY 1")?
+                    .query_map([attempt], |r| Ok((r.get(0)?,r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+                record["turns"] = json!(count);
+                record["stop_reasons"] = json!(stops);
+            }
+        }
+
         for record in &mut records {
             let efforts = sidecar.prepare_cached("SELECT DISTINCT u.effort FROM codex_usage u JOIN rollout_sources s ON s.path_digest=u.path_digest WHERE s.attempt_id=?1 AND s.binding='bound' AND u.accepted=1 AND u.effort IS NOT NULL AND NOT EXISTS(SELECT 1 FROM codex_quarantine q WHERE q.session_id=u.session_id AND q.ordinal=u.ordinal) ORDER BY u.effort")?
                 .query_map([record["attempt_id"].as_str().unwrap_or_default()], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;

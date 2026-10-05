@@ -15,6 +15,8 @@ pub enum Class {
     Text,
     /// A string, or the first key of an object (Codex `source`), then as `Text`.
     Tag,
+    /// Metadata enum: strict lowercase ASCII tag, otherwise "other".
+    EnumTag,
     /// A path: rule 2 only (contracts §7 stores `cwd` so), ≤1024 chars.
     Path,
     /// An integer stays an integer; any other number becomes its decimal text.
@@ -125,6 +127,11 @@ fn keep(value: &Value, class: Class) -> Value {
             if valid { Value::String(s.into()) } else { text(value) }
         }),
         Class::Text => text(value),
+        Class::EnumTag => value.as_str().map_or(Value::Null, |s| {
+            let valid = (1..=32).contains(&s.len()) && s.as_bytes()[0].is_ascii_lowercase()
+                && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-');
+            Value::String(if valid { s } else { "other" }.to_owned())
+        }),
         Class::Tag => match value {
             Value::Object(map) => map.keys().next().map_or(Value::Null, |key| Value::String(excerpt(key))),
             other => text(other),

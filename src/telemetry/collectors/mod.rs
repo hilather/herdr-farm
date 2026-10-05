@@ -21,7 +21,8 @@ pub const MIGRATIONS: &[&str] = &[include_str!("../../../migrations/telemetry/in
     include_str!("../../../migrations/telemetry/ingest/0011_opencode.sql"),
     include_str!("../../../migrations/telemetry/ingest/0012_compact_envelopes.sql"),
     include_str!("../../../migrations/telemetry/ingest/0013_muse.sql"),
-    include_str!("../../../migrations/telemetry/ingest/0014_claude_mapping_v2.sql")];
+    include_str!("../../../migrations/telemetry/ingest/0014_claude_mapping_v2.sql"),
+    include_str!("../../../migrations/telemetry/ingest/0015_claude_turns.sql")];
 
 /// `herdr-farm telemetry <slug> collectors ...`
 #[derive(clap::Subcommand)]
@@ -306,7 +307,7 @@ fn capabilities(project: &Path) -> Result<Value> {
         let basis = match (f.kind, class) {
             ("line", _) => "reported",
             (_, None) => "unavailable",
-            (_, Some(Class::ModelId | Class::Id | Class::Number | Class::Bool | Class::IdList)) => "reported",
+            (_, Some(Class::ModelId | Class::Id | Class::EnumTag | Class::Number | Class::Bool | Class::IdList)) => "reported",
             (_, Some(Class::Text | Class::Tag)) => "reported_excerpt",
             (_, Some(Class::Path)) => "reported_home_redacted",
         };

@@ -53,3 +53,17 @@ TFIX-4 mapping v2 adds the live-observed metadata paths `effort`,
 These metadata keys are now mapped rather than listed as unmapped; this does
 not certify thinking content or add a new live run. See the collection contract
 for the migration/rebuild of v1 sessions.
+
+## Newly mapped turn keys (synthetic certification)
+
+Claude turn metadata adds exactly these leaves: non-tool-result user lines
+`turnOrigin`, `promptSource` (enum tags), `turnPosition.promptIndex`,
+`turnPosition.turnIndex` (numbers), `promptId` (id); assistant lines
+`requestId` (id), `message.stop_reason` (enum tag); system lines `subtype`
+(enum tag), `durationMs` (number); tool results
+`toolUseResult.backgroundTaskId` (id only); queue-operation lines `operation`
+(enum tag only). Enum values must match `^[a-z][a-z0-9_-]{0,31}$`;
+all other strings become `other`. These are metadata, never message content.
+No other leaf inside `toolUseResult` is read, stored or hashed.
+
+These leaves are fixture-certified; no additional owner transcript or live agent probe was used.

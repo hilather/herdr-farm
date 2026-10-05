@@ -436,6 +436,7 @@ $ herdr-farm telemetry demo backup restore --from <tmp>/backup-2026-09-30 --forc
     "claude_messages": 0,
     "claude_tool_results": 0,
     "cli_invocations": 3,
+    "claude_turn_lines": 0,
     "codex_usage": 0,
     "fx_tables": 0,
     "gemini_file_cursors": 0,

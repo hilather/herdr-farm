@@ -550,7 +550,7 @@ enum Scope { Worker(String), Coordinator, Unattributed, Outside }
 
 /// A collected Codex session in the latest valuation revision (§4), or
 /// collected with records the revision has not valued yet (`valued` false).
-struct Session { scope: Scope, start: Option<i64>, valued: bool, entries: Vec<Entry> }
+struct Session { turns: Value, scope: Scope, start: Option<i64>, valued: bool, entries: Vec<Entry> }
 
 /// Every collected session with its scope: bound to a known attempt (worker),
 /// in a task worktree but not bound (or bound to an unknown attempt:
@@ -585,6 +585,7 @@ fn sessions(project: &Path, attempts: &BTreeSet<String>) -> Result<std::result::
             entries.push(Entry { priced, interval: i["from_unix_ms"].as_i64().zip(i["to_unix_ms"].as_i64()), record_time: i["basis"] == "record_time" });
         }
     }
+    let turn_views: BTreeMap<String, Value> = sources.keys().map(|id| Ok((id.clone(), super::claude_turns::read(&db, id, &cost)?))).collect::<Result<_>>()?;
     Ok(Ok(sources.into_iter().map(|(id, (bound, worktree, root, start, records))| {
         let scope = match bound {
             Some(a) if attempts.contains(&a) => Scope::Worker(a),
@@ -594,7 +595,7 @@ fn sessions(project: &Path, attempts: &BTreeSet<String>) -> Result<std::result::
             None => Scope::Outside,
         };
         let entries = valued.remove(&id);
-        Session { scope, start, valued: entries.is_some() || records == 0, entries: entries.unwrap_or_default() }
+        Session { turns: turn_views.get(&id).cloned().unwrap_or(Value::Null), scope, start, valued: entries.is_some() || records == 0, entries: entries.unwrap_or_default() }
     }).collect()))
 }
 
@@ -695,9 +696,11 @@ fn m34(f: Option<&Fleet>, usage: &std::result::Result<Vec<Session>, &'static str
     }
     workers.not_observed = ran(f, since).difference(&observed).count();
     body["coordinator"] = json!({"sessions": coordinator.len(), "estimate": coord.estimate(), "coverage": coord.coverage()});
+    let turn_sessions: Vec<&Value> = coordinator.iter().map(|s| &s.turns).filter(|t| t["turns"].is_array()).collect();
+    if !turn_sessions.is_empty() { body["coordinator"]["turn_sessions"] = json!(turn_sessions); }
     if coordinator.is_empty() {
         body["value"] = unavailable("coordinator_usage_not_observed");
-        body["detail"] = json!("no collected Codex session is in the coordinator scope: a coordinator run by another agent kind, or from an execution home that is not scanned, is not observed; never 0");
+        body["detail"] = json!("no collected native session is in the coordinator scope: a coordinator run by another agent kind, or from an execution home that is not scanned, is not observed; never 0");
         return body;
     }
     let mut total = coord.clone();
@@ -989,4 +992,18 @@ pub fn supersede(project: &Path, request: crate::store::SupersessionRequest) -> 
     refuse_worker_context(project)?;
     let record = crate::store::SqliteStore::open(&path)?.record_attempt_supersession(&request, "operator:cli", now())?;
     Ok(json!({"supersession": record}))
+}
+
+
+/// Metadata remains available before pricing; missing valuations stay explicit.
+pub fn coordinator_turns(project: &Path) -> Result<Value> {
+    let Some(db) = crate::telemetry::sidecar::read(project)? else { return Ok(unavailable("collection_not_run")); };
+    let dir = std::fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf()).to_string_lossy().into_owned();
+    let redacted = crate::telemetry::sanitize::home_prefix(&dir);
+    let ids = db.prepare("SELECT DISTINCT s.session_id FROM rollout_sources s WHERE s.session_id LIKE 'claude-code:%' AND s.cwd IN (?1,?2)
+        AND NOT EXISTS(SELECT 1 FROM rollout_sources x WHERE x.session_id=s.session_id AND (x.binding!='unbound' OR x.cwd_attempt IS NOT NULL))
+        ORDER BY s.session_id")?.query_map([dir,redacted], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let cost = super::cost::cost(&db,None,None)?;
+    let sessions = ids.iter().map(|id| super::claude_turns::read(&db,id,&cost)).collect::<Result<Vec<_>>>()?;
+    Ok(json!({"scope":COORDINATOR_SCOPE,"summary":super::claude_turns::summarize(&sessions)?,"sessions":sessions}))
 }

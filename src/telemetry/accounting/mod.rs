@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 pub mod attention;
+mod claude_turns;
 pub mod budget;
 pub(crate) mod cache;
 pub mod charges;
@@ -57,6 +58,8 @@ pub enum Command {
     Cli,
     /// Stream version of this lane's sidecar tables. Read-only.
     Status,
+    /// Claude coordinator turn metadata and costs, printed as JSON. Read-only.
+    Coordinator,
     /// Sync changed sessions and quota accounts; rebuild after invalidation. Writes only the sidecar.
     Sync,
     /// The synced usage ledger: entries with their provenance. Read-only.
@@ -287,6 +290,7 @@ pub fn run(project: &Path, command: Command) -> Result<String> {
             if !json { return Ok(tools::text(&value)); }
             value
         }
+        Command::Coordinator => fleet::coordinator_turns(project)?,
         Command::Fleet { json, window_minutes } => {
             let value = fleet::read(project, window_minutes)?;
             if !json { return Ok(fleet::text(&value) + &super::configuration_names::project_text(project)?); }
