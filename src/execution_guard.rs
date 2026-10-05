@@ -111,21 +111,34 @@ impl ForegroundWait {
 impl Drop for ForegroundWait { fn drop(&mut self) { FOREGROUND.set(self.0); } }
 
 /// Retry the complete acquisition, releasing all partially acquired locks
-/// before sleeping. Never wait when the caller already owns another lock.
-pub fn retry_open<T>(mut acquire: impl FnMut() -> Result<T>) -> Result<T> {
+/// before sleeping. Explicit callers (coordinator `open`) may already hold
+/// their own intent lock: that ordering is deliberate, so they always wait.
+pub fn retry_open<T>(acquire: impl FnMut() -> Result<T>) -> Result<T> {
+    if ACQUIRING.get() { let mut acquire = acquire; return acquire(); }
+    bounded_wait(acquire)
+}
+/// The implicit wait of interactive commands: only on an interactive CLI
+/// thread, and never while this thread already owns another lock (no new
+/// lock-order risk). Background threads and the ticker never wait here.
+pub(crate) fn foreground_acquire<T>(acquire: impl FnMut() -> Result<T>) -> Result<T> {
     let owns_lock = HELD.with_borrow_mut(|held| {
         held.retain(|lock| lock.strong_count() != 0);
         !held.is_empty()
     });
-    if ACQUIRING.get() || owns_lock { return acquire(); }
+    if !FOREGROUND.get() || ACQUIRING.get() || owns_lock { let mut acquire = acquire; return acquire(); }
+    bounded_wait(acquire)
+}
+fn bounded_wait<T>(mut acquire: impl FnMut() -> Result<T>) -> Result<T> {
     struct Acquisition;
     impl Drop for Acquisition { fn drop(&mut self) { ACQUIRING.set(false); } }
     ACQUIRING.set(true);
     let _acquisition = Acquisition;
-    let seconds = std::env::var("HERDR_FARM_LOCK_WAIT_SECS").ok()
-        .and_then(|value| value.parse::<u64>().ok()).unwrap_or(30);
+    // An explicit override is taken literally; the 30 s default is scaled in
+    // test labs like every other product wait.
+    let bound = std::env::var("HERDR_FARM_LOCK_WAIT_SECS").ok().and_then(|value| value.parse::<u64>().ok())
+        .map_or_else(|| crate::timing::retry(std::time::Duration::from_secs(30)), std::time::Duration::from_secs);
     let started = std::time::Instant::now();
-    let bound = std::time::Duration::from_secs(seconds);
+    let poll = crate::timing::retry(std::time::Duration::from_millis(100));
     let mut notified = false;
     loop {
         match acquire() {
@@ -146,13 +159,10 @@ pub fn retry_open<T>(mut acquire: impl FnMut() -> Result<T>) -> Result<T> {
                     eprintln!("waiting for {lock} held by another operation…");
                     notified = true;
                 }
-                std::thread::sleep(std::time::Duration::from_millis(100).min(bound - elapsed));
+                std::thread::sleep(poll.min(bound - elapsed));
             }
         }
     }
-}
-pub(crate) fn foreground_acquire<T>(acquire: impl FnMut() -> Result<T>) -> Result<T> {
-    if FOREGROUND.get() { retry_open(acquire) } else { let mut acquire = acquire; acquire() }
 }
 
 /// How long a root-exclusive effect waits for shared holders to finish.
