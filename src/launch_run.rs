@@ -33,6 +33,9 @@ pub struct Args {
     pub plan_output: Option<String>,
     pub review_of: Option<String>,
     pub fixes_review: Option<String>,
+    pub work_item: Option<String>,
+    pub role: Option<String>,
+    pub supersedes: Option<String>,
     pub fixes: Vec<String>,
     pub review_kind: String,
     pub review_scope: String,
@@ -535,6 +538,15 @@ pub fn run(ctx: &Ctx, slug: &str, mut args: Args) -> Result<Value> {
     // File locks do not alter SQLite bytes and span the entire multi-step launch.
     let memory_launch_guard = fs::File::open(project.join(".state/state.db"))?;
     memory_launch_guard.try_lock_shared().context("memory adoption is in progress; retry launch after it finishes")?;
+    if args.work_item.is_some() || args.role.is_some() || args.supersedes.is_some() {
+        ensure!(runtime::snapshot(&project)?.schema_version >= 72, "launch lineage requires upgrade-store to schema 72");
+    }
+    let role = args.role.clone().unwrap_or_else(|| {
+        if args.review_of.is_some() && args.review_kind == "code" { "review" }
+        else if args.review_of.is_some() && args.review_kind == "skeptical" { "skeptic" }
+        else if args.fixes_review.is_some() || !args.fixes.is_empty() { "fix" }
+        else if args.plan_output.is_some() { "plan" } else { "build" }.into()
+    });
     if args.review_of.is_some() {
         if args.output.is_empty() && args.write.is_empty() && args.plan_output.is_none() && args.contract_file.is_none() {
             args.plan_output = Some(format!("docs/reviews/{}.md", args.task));
@@ -547,6 +559,15 @@ pub fn run(ctx: &Ctx, slug: &str, mut args: Args) -> Result<Value> {
         if let Some(task) = runtime::snapshot(&project)?.tasks.iter().find(|t| t.id.as_str() == args.task) { context.push_str(&task.title); }
         migration::open_active(&project)?.check_review_run(&args.task, args.review_of.as_deref().unwrap(), &args.review_kind, &args.review_scope, &args.profile, &context)?;
     }
+    // Like the other preflight checks, hold the store only for this check.
+    let work_item = {
+        let mut store = migration::open_active(&project)?;
+        let work_item = store.resolve_launch_work_item(&args.task, args.work_item.as_deref(), args.review_of.as_deref().or(args.fixes_review.as_deref()), &args.fixes)?;
+        store.check_task_lineage(&args.task, &work_item, &role, args.supersedes.as_deref())?;
+        work_item
+    };
+    args.work_item = Some(work_item);
+    args.role = Some(role);
     migration::open_active(&project)?.check_fix_run(&args.task, args.fixes_review.as_deref(), &args.fixes, &args.profile)?;
     eprintln!("launch run: preflight");
     let pinned = migration::status(&project)?.plan.config.context("migration has no pinned config")?;
@@ -830,6 +851,7 @@ fn steps(run: &mut Run, args: &Args, plan: ProfilePlan) -> Result<Value> {
     eprintln!("launch run: reconcile_and_activate");
     activate(run, "reconcile_and_activate", created)?;
 
+    migration::open_active(&project)?.prepare_task_lineage(&args.task, args.work_item.as_deref().context("work item missing")?, args.role.as_deref().context("role missing")?, args.supersedes.as_deref())?;
     if args.fixes_review.is_some() || !args.fixes.is_empty() {
         migration::open_active(&project)?.prepare_fix_run(&args.task, args.fixes_review.as_deref(), &args.fixes, &args.profile, jiff::Timestamp::now().as_millisecond())?;
     }

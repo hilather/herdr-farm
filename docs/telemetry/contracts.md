@@ -80,7 +80,7 @@ migrated sidecar.
   (RFC 8785 subset, as doc 03 §4). Digests are `sha256:` + lowercase hex.
 - **Time.** Unix milliseconds from the controller's `now` at the transition.
   Codex times are kept as reported and never reorder canonical events.
-- **Stores.** Canonical: `<project>/.state/state.db`, migrations 0049–0071 (0052 collector bindings, contracts-collection.md; 0053 candidate groups, contracts-quality.md §3; 0054 review capture, contracts-review.md; 0055 finding triage and duplicate history, contracts-review.md §5; 0056 fix attribution, regressions and role credit, contracts-review.md §6; 0057 review protocols, passes and preregistered experiments, contracts-review.md §7; 0058 seeded defects, recall and the seeded-candidate integration guard, contracts-review.md §8; 0059 review ledger, contracts-review.md §9; 0060 accepted supersession reasons, contracts-accounting.md §10; 0061 delegated code_review authority, review acceptance decisions and revocations, contracts-review.md §10; 0062 review launch: blind review briefs bound to review tasks, review sessions recorded by the reservation that launches them, and delegated decisions in the shared review ledger, contracts-review.md §11; 0063 review opportunity openings and assignments in the shared review ledger, so every `--as-of` review, seed and protocol view replays them, contracts-review.md §9; 0065 assignment-policy settings, owner-signed `randomized_assignment` grants and the policy record of assigned decisions, contracts-evaluation.md §9; 0064 replay suite registry, hidden checks and replay candidates, contracts-replay.md; 0066 owner-signed revocations of randomized-assignment grants, contracts-evaluation.md §9; 0067 read indexes for the telemetry projections, `verified_results(submission_id)` and `result_submissions(attempt_id)`, certificate-scale.md §5; 0068 verifier-owned run metadata: load context and bounded test names/outcomes, contracts-quality.md §6; 0069 exact owner requests, decisions and one-shot cap consumption, docs/operations.md “Owner requests in coordinator chat”; 0070 multi-finding fix launch bindings and per-repair attempt/submission linking, contracts-review.md §6/§13; 0071 canonical Remember candidates, per-attempt content provenance and coordinator decisions with atomic owner notification intents, docs/memory-store.md “Canonical Remember capture and delegated decisions”).
+- **Stores.** Canonical: `<project>/.state/state.db`, migrations 0049–0072 (0052 collector bindings, contracts-collection.md; 0053 candidate groups, contracts-quality.md §3; 0054 review capture, contracts-review.md; 0055 finding triage and duplicate history, contracts-review.md §5; 0056 fix attribution, regressions and role credit, contracts-review.md §6; 0057 review protocols, passes and preregistered experiments, contracts-review.md §7; 0058 seeded defects, recall and the seeded-candidate integration guard, contracts-review.md §8; 0059 review ledger, contracts-review.md §9; 0060 accepted supersession reasons, contracts-accounting.md §10; 0061 delegated code_review authority, review acceptance decisions and revocations, contracts-review.md §10; 0062 review launch: blind review briefs bound to review tasks, review sessions recorded by the reservation that launches them, and delegated decisions in the shared review ledger, contracts-review.md §11; 0063 review opportunity openings and assignments in the shared review ledger, so every `--as-of` review, seed and protocol view replays them, contracts-review.md §9; 0065 assignment-policy settings, owner-signed `randomized_assignment` grants and the policy record of assigned decisions, contracts-evaluation.md §9; 0064 replay suite registry, hidden checks and replay candidates, contracts-replay.md; 0066 owner-signed revocations of randomized-assignment grants, contracts-evaluation.md §9; 0067 read indexes for the telemetry projections, `verified_results(submission_id)` and `result_submissions(attempt_id)`, certificate-scale.md §5; 0068 verifier-owned run metadata: load context and bounded test names/outcomes, contracts-quality.md §6; 0069 exact owner requests, decisions and one-shot cap consumption, docs/operations.md “Owner requests in coordinator chat”; 0070 multi-finding fix launch bindings and per-repair attempt/submission linking, contracts-review.md §6/§13; 0071 canonical Remember candidates, per-attempt content provenance and coordinator decisions with atomic owner notification intents, docs/memory-store.md “Canonical Remember capture and delegated decisions”; 0072 event times and launch lineage, §4).
   Sidecar: `<project>/.state/telemetry.db`, own sequence under
   `migrations/telemetry/` (per-lane streams; see the lane contracts: e.g.
     `ingest` 0006 tool/exec metadata, 0007 subagent detail, per-source ingest
@@ -278,6 +278,27 @@ S2 refinements:
 - A store at schema 49 reserving before upgrade writes the classification only.
 
 ## 4. AttemptOutcome record
+
+Migration 0072 adds append-only `event_times(sequence, recorded_unix_ms)` and
+`task_lineage(task_id, work_item, role, supersedes_task, recorded_unix_ms)`.
+The events insert trigger records SQLite wall-clock milliseconds; pre-0072
+events have no time and are never backfilled. Times are informational: sequence
+remains the order, including when the clock moves backward. SQLite's clock can
+skew from Rust producer timestamps; readers must not depend on cross-clock
+joins for ordering or fixture cohorts. Both tables retain for the project
+lifetime and are included in canonical backups.
+
+Launch preflight checks lineage without mutations; atomic preparation freezes
+it after activation, before reservation. Work-item ids use the task identifier
+bounds (1–128 ASCII letters, digits, `-`, `_`, `.`, `:`). Default identity is
+the task id; reviews and fixes inherit their target's work item. Roles are
+`build`, `fix`, `review`, `skeptic`, `recheck`, `merge`, `plan`, `other`.
+`--supersedes` requires a different task of the same work item without an
+active attempt. Retried launches must match retained lineage exactly. Signed
+contract JSON and the Event structure do not include lineage or event times.
+`attempts --json` adds `lineage {work_item, role, supersedes}`; historical
+unbound attempts return `unavailable: lineage_not_recorded`.
+
 
 **Lifecycle marks** (migration 0051): `attempt_lifecycle(attempt_id,
 state, attempt_revision, unix_ms, source)`, PK `(attempt_id, state)`, written

@@ -1,11 +1,11 @@
-//! The TM4.1 metric registry `analytics-registry.v7` (docs/telemetry/contracts-analytics.md §1):
+//! The TM4.1 metric registry `analytics-registry.v8` (docs/telemetry/contracts-analytics.md §1):
 //! one declared, read-only table of every metric the report or the query
 //! service can name, with its definition versions, family, cohorts, window
 //! semantics, unit, certification and activation. A change here is a new
 //! registry version, never an edit in place of a published definition.
 use serde_json::{Value, json};
 
-pub const VERSION: &str = "analytics-registry.v7";
+pub const VERSION: &str = "analytics-registry.v8";
 
 /// The TM3.5 quality certificate. Without it every validated-quality family is
 /// `unavailable: awaiting_quality_certificate`; landing or withdrawing it is
@@ -125,7 +125,7 @@ const TA: &[Cohort] = &[Cohort::Terminal, Cohort::Assignment];
 const A: &[Cohort] = &[Cohort::Activity];
 const AS: &[Cohort] = &[Cohort::Assignment];
 /// Bounded categorical dimensions of the native lifecycle definitions (doc 07 §1).
-pub const LIFECYCLE_DIMENSIONS: &[&str] = &["agent_kind", "profile", "route", "task_class"];
+pub const LIFECYCLE_DIMENSIONS: &[&str] = &["agent_kind", "profile", "route", "task_class", "role"];
 /// Identities that belong in drill-down, never in a metric label.
 pub const HIGH_CARDINALITY: &[&str] = &["task_id", "attempt_id", "session_id", "invocation_id", "finding_id", "submission_id", "entry_id"];
 
@@ -174,7 +174,7 @@ pub const METRICS: &[Metric] = &[
     m!("M16", "tool_call_volume", Tools, "calls", [lane("accounting", "M16.tools-v1", A, "call_time")], "certified-live", CORE, None),
     m!("M17", "tool_execution_success", Tools, "ratio", [lane("accounting", "M17.tools-v1", A, "call_time")], "certified-live", CORE, None),
     m!("M18", "tool_latency_p95", Tools, "milliseconds", [lane("accounting", "M18.tools-v1", A, "call_time")], "restricted", CORE, Some("execution_duration_not_exposed")),
-    m!("M19", "blocked_time_share", Lifecycle, "ratio", [absent("M19.blocked-v1", AS, "blocked_intervals_not_recorded"), absent("M19.v1", AS, "no_producer")], "absent", "task.changed events have no transition timestamps", None),
+    m!("M19", "blocked_time_share", Lifecycle, "ratio", [absent("M19.blocked-v1", AS, "blocked_intervals_not_recorded"), absent("M19.v1", AS, "no_producer")], "absent", "historical blocked intervals lack complete timed history", None),
     m!("M20", "review_completion", ReviewQuality, "ratio", [lane("review", "M20.v1", AS, "opportunity_assigned")], "certified-fixture", QUALITY, Some("basis declared: worker-declared completions without acceptance")),
     m!("M21", "validated_unique_findings", ReviewQuality, "findings", [lane("review", "M21.v1", A, "discovery")], "certified-fixture", QUALITY, None),
     m!("M22", "proposal_validation_rate", ReviewQuality, "ratio", [lane("review", "M22.v1", A, "submission")], "certified-fixture", QUALITY, None),
@@ -192,7 +192,7 @@ pub const METRICS: &[Metric] = &[
     m!("M34", "coordinator_overhead", Fleet, "ratio", [lane("accounting", "M34.fleet-v1", A, "usage_time")], "certified-fixture", CORE, Some("R6 coordinator observed as Codex or scoped Claude Code")),
     m!("M35", "fan_out_efficiency", Fleet, "ratio", [lane("accounting", "M35.fanout-v2", A, "task_attempt_running_time"), absent("M35.fanout-v1", A, "definition_superseded")], "certified-fixture", CORE, None),
     m!("M36", "integration_conflict_rate", Fleet, "ratio", [lane("accounting", "M36.integration-v1", A, "integration")], "certified-fixture", CORE, None),
-    m!("M37", "overlap_waste_share", Fleet, "ratio", [lane("accounting", "M37.fleet-v1", A, "usage_time")], "certified-fixture", CORE, None),
+    m!("M37", "overlap_waste_share", Fleet, "ratio", [lane("accounting", "M37.lineage-v2", A, "usage_time"), absent("M37.fleet-v1", A, "definition_superseded")], "certified-fixture", CORE, None),
     m!("M38", "throttled_time_share", Services, "ratio", [lane("accounting", "M38.slice-v1", A, "availability_interval")], "restricted", CORE, Some("throttling_not_certified")),
     m!("M39", "provider_error_rate", Services, "ratio", [lane("accounting", "M39.slice-v1", A, "invocation")], "restricted", CORE, Some("provider_errors_not_certified")),
     m!("M40", "quota_headroom_at_dispatch", Services, "native_units", [central("M40.quota-windows-v2", A, "attempt_decided"), absent("M40.quota-windows-v1", A, "definition_superseded")], "certified-live", CORE, Some("R7 matching trusted provider windows merge execution homes")),

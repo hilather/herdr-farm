@@ -3233,3 +3233,50 @@ fn attempt_totals_include_only_native_separate_children() {
 
 
 }
+
+/// Canonical public launch preparation plus collected local usage: replacement
+/// task ids account for real ended effort without rewriting operator evidence.
+#[test]
+fn task_supersession_prices_ended_effort_and_work_items_without_double_counting() {
+    use herdr_farm::domain::{Commit,Mutation,Task,TaskId,TaskState};
+    let f = Fixture::with_lineage("piece-1");
+    priced_rollout(&f.home,"lineage","00000000-0000-4000-8000-00000000a072",&f.worktree(),f.decided+1,"gpt-5.5");
+    f.cli("collect");
+    let card = f.tmp.path().join("lineage-rates.json");
+    fs::write(&card,json!({"card_id":"synthetic-lineage","version":1,"provider":"synthetic","product":"codex","models":["gpt-5.5"],
+        "currency":"USD","rate_unit":1_000_000,"effective_from_unix_ms":0,"includes":{"discounts":false,"taxes":false,"fees":false},
+        "source":"INVENTED local lineage fixture rates","rates":[{"category":"input","rate":"2000"},{"category":"output","rate":"4000"}]}).to_string()).unwrap();
+    f.cli_args(&["accounting","import-rate-card",card.to_str().unwrap()]);
+    assert_eq!(fleet_after_reprice(&f)["metrics"]["M37"]["value"],"0");
+    let mut store = herdr_farm::store::SqliteStore::open(&f.project.join(".state/state.db")).unwrap();
+    let state = store.read_snapshot(None).unwrap();
+    let attempt = state.attempts.iter().find(|a| a.id.as_str()==f.attempt).unwrap();
+    assert!(store.cancel_attempt(&attempt.id,attempt.revision,state.head,"never launched fixture",unix_ms()).unwrap().released);
+    for task in ["replacement","replacement-again"] {
+        let state = store.read_snapshot(None).unwrap();
+        store.commit(Commit {expected_head:state.head,mutations:vec![Mutation::Task {expected:None,next:Task {
+            id:TaskId::new(task).unwrap(),revision:1,state:TaskState::Draft,title:task.into(),active_attempt:None}}]}).unwrap();
+        store.prepare_task_lineage(task,"piece-1","build",Some("work")).unwrap();
+    }
+    let fleet = f.cli_args(&["accounting","fleet","--json"]).0;
+    let m37 = &fleet["metrics"]["M37"];
+    assert_eq!(m37["definition"],"M37.lineage-v2");
+    assert_eq!(m37["value"],"1");
+    assert_eq!(m37["buckets"]["sibling_changed_same_area"]["attempts"],1);
+    assert_eq!(m37["buckets"]["sibling_changed_same_area"]["estimate"]["amount"],"4");
+    let detail = f.cli_args(&["accounting","work-items","--json"]).0;
+    assert_eq!(detail["work_items"][0]["attempt_count"],1);
+    assert_eq!(detail["work_items"][0]["superseded_count"],1);
+    assert_eq!(detail["work_items"][0]["spend"]["estimate"],json!({"status":"complete","currency":"USD","amount":"4"}));
+    assert_eq!(f.cli_args(&["attempts","--json"]).0["attempts"][0]["lineage"],json!({"work_item":"piece-1","role":"build","supersedes":null}));
+    let role_query = ["query","--metric","M07","--cohort","assignment_cohort","--by","role","--json"];
+    let live = f.cli_args(&role_query).0;
+    assert_eq!(live["results"][0]["cells"][0]["dimension"]["role"],"build");
+    f.cli_args(&["analytics","refresh","--metric","M07","--cohort","assignment_cohort","--by","role"]);
+    let maintained = f.cli_args(&role_query).0;
+    assert_eq!(maintained["results"][0]["cells"],live["results"][0]["cells"]);
+    f.cli_args(&["accounting","supersede",&f.attempt,"--outcome","superseded","--reason","other","--evidence","task:replacement"]);
+    let explicit = f.cli_args(&["accounting","fleet","--json"]).0;
+    assert_eq!(explicit["metrics"]["M37"]["value"],"0");
+    assert_eq!(explicit["metrics"]["M37"]["buckets"]["other"]["attempts"],1);
+}

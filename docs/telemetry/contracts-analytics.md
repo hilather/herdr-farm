@@ -8,9 +8,9 @@ are [contracts.md](contracts.md) §0. Code: `src/telemetry/analytics/`
 (TM4.3). Telemetry never grants launch, changes budgets or accepts results;
 nothing here writes `state.db`.
 
-## 1. Metric registry (`analytics-registry.v7`)
+## 1. Metric registry (`analytics-registry.v8`)
 
-Version history: v1 TM4.1; v2 adds `verification_flip_rate` (DG6, #198); v3 adds M30 `M30.submission-v1` (DG1, #202); v4 adds M10 `M10.v1` (DG2, #204); v5 adds M03 operating throughput (DG3); v6 adds M05 lifecycle tokens and specifies M19’s missing timed history; v7 adds M13 never-running exclusions, M04/M05 partial values and M31 lifecycle sampling, M35 attempt-time concurrency and M40 reported/merged quota windows, plus the bounded lifecycle `profile` dimension (TFIX-4, no definition change). Previous M13.slice-v1, M04.cost-v1, M05.tokens-v1, M31.attention-v1, M35.fanout-v1 and M40.quota-windows-v1 definitions remain only as absent (`definition_superseded`).
+Version history: v8 adds bounded lifecycle `role` and M37.lineage-v2 (LINEAGE-1); M37.fleet-v1 remains absent as `definition_superseded`. v1 TM4.1; v2 adds `verification_flip_rate` (DG6, #198); v3 adds M30 `M30.submission-v1` (DG1, #202); v4 adds M10 `M10.v1` (DG2, #204); v5 adds M03 operating throughput (DG3); v6 adds M05 lifecycle tokens and specifies M19’s missing timed history; v7 adds M13 never-running exclusions, M04/M05 partial values and M31 lifecycle sampling, M35 attempt-time concurrency and M40 reported/merged quota windows, plus the bounded lifecycle `profile` dimension (TFIX-4, no definition change). Previous M13.slice-v1, M04.cost-v1, M05.tokens-v1, M31.attention-v1, M35.fanout-v1 and M40.quota-windows-v1 definitions remain only as absent (`definition_superseded`).
 
 `telemetry <slug> metrics registry [--json]` prints one declared table
 (`registry.rs`) of every metric `telemetry report` or `query` can name:
@@ -148,7 +148,8 @@ absent definition.
 M19 (`M19.blocked-v1`; historical `M19.v1` remains absent) would divide
 assignment-cohort task time spent blocked by total observed task time, censoring open tails and observation gaps like attention intervals.
 It remains unavailable with `blocked_intervals_not_recorded`: canonical
-`task.changed` events retain state and sequence but no transition timestamp;
+`task.changed` events before 0072 retain state and sequence but no transition timestamp;
+0072 records informational insertion times for new events only;
 attempt lifecycle timestamps do not record task blocked entry/exit, and
 attention samples describe agent activity, not task state. A future producer
 needs durable timestamped task state transitions, a known initial state and
@@ -422,3 +423,8 @@ The v7 registry stamp invalidates old maintained inputs; `analytics refresh`
 or `analytics rebuild` writes the new body. Historical revisions remain intact.
 Configuration comparisons retain content-addressed arms and their frozen
 profile/model/effort labels; a profile name does not replace configuration identity.
+
+Schema 72 supplies event insertion times going forward. M19 remains unavailable:
+historical blocked intervals still lack complete timed history; no historical
+times are inferred. Lifecycle `--by role` uses immutable launch lineage and
+labels tasks without it `unknown`.

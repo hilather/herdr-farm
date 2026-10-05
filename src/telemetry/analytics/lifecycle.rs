@@ -23,6 +23,7 @@ pub struct Task {
     pub accepted_at: Option<i64>,
     pub route: Option<String>,
     pub class: Option<String>,
+    pub role: Option<String>,
     pub attempts: Vec<Attempt>,
     /// A replay candidate (`replay_candidates`): outside every lifecycle cohort.
     pub replay: bool,
@@ -51,6 +52,7 @@ impl Task {
         match name {
             "policy" => self.first_candidate.as_ref().map(|f| format!("{}@{}", f.policy, f.policy_digest)).unwrap_or_else(|| "unknown".into()),
             "route" => self.route.clone().unwrap_or_else(|| "none".into()),
+            "role" => self.role.clone().unwrap_or_else(|| "unknown".into()),
             "task_class" => self.class.clone().unwrap_or_else(|| "unclassified".into()),
             "profile" | "agent_kind" => {
                 let kinds: BTreeSet<&str> = self.attempts.iter().map(|a| (if name == "profile" { &a.profile } else { &a.kind }).as_deref().unwrap_or("unknown")).collect();
@@ -61,7 +63,7 @@ impl Task {
     }
     fn attrs(&self) -> Value {
         json!({"disposition": self.disposition(), "terminal_unix_ms": self.terminal_at(), "assigned_unix_ms": self.assigned_at(), "attempts": self.attempts.len(),
-            "profile": self.dimension("profile"), "route": self.dimension("route"), "agent_kind": self.dimension("agent_kind"), "task_class": self.dimension("task_class")})
+            "profile": self.dimension("profile"), "route": self.dimension("route"), "agent_kind": self.dimension("agent_kind"), "task_class": self.dimension("task_class"), "role": self.dimension("role")})
     }
 }
 
@@ -92,6 +94,9 @@ pub fn queries(db: &Connection) -> Result<Vec<(&'static str, String)>> {
     if table(db, "task_classifications")? {
         out.push(("lifecycle_classes", "SELECT task_id,class FROM task_classifications ORDER BY task_id,created_unix_ms,revision".to_owned()));
     }
+    if table(db, "task_lineage")? {
+        out.push(("lifecycle_lineage", "SELECT task_id,role FROM task_lineage ORDER BY task_id".to_owned()));
+    }
     out.extend([("first_candidate_submissions", FIRST_SUBMISSIONS.to_owned()),
         ("first_candidate_policies", FIRST_POLICIES.to_owned()),
         ("first_candidate_verdicts", FIRST_VERDICTS.to_owned())]);
@@ -111,6 +116,10 @@ pub fn load(project: &Path) -> Result<Vec<Task>> {
     let routes: BTreeMap<String, String> = db.prepare(&sql("lifecycle_contracts").unwrap_or_default())?.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
     let times: BTreeMap<String, (Option<i64>, Option<i64>)> = db.prepare(&sql("lifecycle_acceptance_times").unwrap_or_default())?
         .query_map([], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?))))?.collect::<rusqlite::Result<_>>()?;
+    let roles: BTreeMap<String,String> = match sql("lifecycle_lineage") {
+        Some(sql) => db.prepare(&sql)?.query_map([], |r| Ok((r.get(0)?,r.get(1)?)))?.collect::<rusqlite::Result<_>>()?,
+        None => BTreeMap::new(),
+    };
     let mut classes = BTreeMap::new();
     if let Some(sql) = sql("lifecycle_classes") {
         for row in db.prepare(&sql)?.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? { let (task, class) = row?; classes.insert(task, class); }
@@ -122,7 +131,7 @@ pub fn load(project: &Path) -> Result<Vec<Task>> {
     Ok(evidence.into_iter().map(|(id, state, accepted)| {
         let route = routes.get(&id).cloned();
         let accepted_at = accepted.then(|| times.get(&id).and_then(|(verified, integrated)| if route.as_deref() == Some("verify_only") { *verified } else { *integrated })).flatten();
-        Task { first_candidate: None, attempts: attempts.remove(&id).unwrap_or_default(), class: classes.get(&id).cloned(), route, accepted, accepted_at, replay: replay.contains(&id), state, id }
+        Task { first_candidate: None, attempts: attempts.remove(&id).unwrap_or_default(), class: classes.get(&id).cloned(), role: roles.get(&id).cloned(), route, accepted, accepted_at, replay: replay.contains(&id), state, id }
     }).collect())
 }
 
@@ -131,7 +140,7 @@ pub fn load(project: &Path) -> Result<Vec<Task>> {
 /// returns tasks equal to `load`'s.
 pub(crate) fn encode(tasks: &[Task]) -> Value {
     Value::Array(tasks.iter().map(|t| json!([t.id, t.state, t.accepted, t.accepted_at, t.route, t.class, t.replay,
-        t.attempts.iter().map(|a| json!([a.id, a.state, a.decided, a.reserved, a.ended, a.kind, a.profile])).collect::<Vec<_>>()])).collect())
+        t.attempts.iter().map(|a| json!([a.id, a.state, a.decided, a.reserved, a.ended, a.kind, a.profile])).collect::<Vec<_>>(), t.role])).collect())
 }
 
 /// `None` when the body is not the shape `encode` writes.
@@ -140,13 +149,13 @@ pub(crate) fn decode(body: &Value) -> Option<Vec<Task>> {
     let maybe_text = |v: &Value| if v.is_null() { Some(None) } else { v.as_str().map(|s| Some(s.to_owned())) };
     let maybe_int = |v: &Value| if v.is_null() { Some(None) } else { v.as_i64().map(Some) };
     body.as_array()?.iter().map(|row| {
-        let row = row.as_array().filter(|r| r.len() == 8)?;
+        let row = row.as_array().filter(|r| r.len() == 9)?;
         let attempts = row[7].as_array()?.iter().map(|a| {
             let a = a.as_array().filter(|a| a.len() == 7)?;
             Some(Attempt { id: text(&a[0])?, state: text(&a[1])?, decided: maybe_int(&a[2])?, reserved: maybe_int(&a[3])?, ended: maybe_int(&a[4])?, kind: maybe_text(&a[5])?, profile: maybe_text(&a[6])? })
         }).collect::<Option<Vec<_>>>()?;
         Some(Task { id: text(&row[0])?, state: text(&row[1])?, accepted: row[2].as_bool()?, accepted_at: maybe_int(&row[3])?, route: maybe_text(&row[4])?,
-            class: maybe_text(&row[5])?, replay: row[6].as_bool()?, attempts, first_candidate: None })
+            class: maybe_text(&row[5])?, role: maybe_text(&row[8])?, replay: row[6].as_bool()?, attempts, first_candidate: None })
     }).collect()
 }
 
@@ -206,7 +215,7 @@ pub(crate) fn first_candidate_report(db: &Connection, evidence: &[(String, Strin
     let mut firsts = first_candidates(db)?;
     let tasks: Vec<Task> = evidence.iter().map(|(id, state, accepted)| Task {
         id: id.clone(), state: state.clone(), accepted: *accepted, accepted_at: None,
-        route: None, class: None, attempts: Vec::new(), replay: replay.contains(id), first_candidate: firsts.remove(id),
+        route: None, class: None, role: None, attempts: Vec::new(), replay: replay.contains(id), first_candidate: firsts.remove(id),
     }).collect();
     let (mut body, _) = evaluate(&tasks, &Request { metric: "M30", cohort: Cohort::Activity, from: since, to: None, horizon: None, by: None });
     body["definition"] = json!("M30.submission-v1");
@@ -216,11 +225,12 @@ pub(crate) fn first_candidate_report(db: &Connection, evidence: &[(String, Strin
 
 /// Canonical input digest of the extracted rows: the lifecycle source watermark.
 pub fn digest(tasks: &[Task]) -> String {
-    // The replay mark is appended only when set, so a project without replay keeps its digest.
+    // Optional replay and launch lineage marks preserve historical digests when absent.
     let rows: Vec<Value> = tasks.iter().map(|t| {
         let mut row = json!([t.id, t.state, t.accepted, t.accepted_at, t.route, t.class,
             t.attempts.iter().map(|a| json!([a.id, a.state, a.decided, a.reserved, a.ended, a.kind, a.profile])).collect::<Vec<_>>()]);
         if t.replay && let Value::Array(row) = &mut row { row.push(json!("replay_candidate")); }
+        if let Some(role) = &t.role && let Value::Array(row) = &mut row { row.push(json!({"role": role})); }
         row
     }).collect();
     super::sha256(serde_json::to_string(&rows).unwrap_or_default().as_bytes())

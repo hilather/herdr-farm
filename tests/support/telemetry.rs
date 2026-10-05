@@ -38,7 +38,15 @@ impl Fixture {
     }
 
     /// Like `new`, without a collector binding: the attempt is only reserved.
-    pub fn reserved() -> Self {
+    pub fn reserved() -> Self { Self::reserved_with_lineage(None) }
+
+    pub fn with_lineage(work_item: &str) -> Self {
+        let f = Self::reserved_with_lineage(Some(work_item));
+        f.bind();
+        f
+    }
+
+    fn reserved_with_lineage(work_item: Option<&str>) -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let base = fs::canonicalize(tmp.path()).unwrap();
         let (root, home) = (base.join("root"), base.join("codex-home"));
@@ -70,6 +78,9 @@ impl Fixture {
         SqliteStore::open(&db_path).unwrap().record_native_capability_evidence(unix_ms(), unix_ms() + 3_600_000).unwrap();
         // Fixture only. Production code has no writer for this column.
         rusqlite::Connection::open(&db_path).unwrap().execute("UPDATE project_control SET factory_admission='on' WHERE singleton=1", []).unwrap();
+        if let Some(work_item) = work_item {
+            SqliteStore::open(&db_path).unwrap().prepare_task_lineage("work", work_item, "build", None).unwrap();
+        }
         worker_snapshots(&project, None);
         let inputs = herdr_farm::admission::prepared_admission_inputs(&project).unwrap().expect("a ready candidate");
         insert_grant(&db_path, &inputs);
