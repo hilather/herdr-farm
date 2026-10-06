@@ -48,11 +48,41 @@ pub fn checkpoint_sizes(project:&Path)->Result<Option<crate::domain::CheckpointS
     crate::memory::last_checkpoint_sizes(project)
 }
 pub fn context_snapshot(project:&Path)->Result<(String,u64,Vec<String>)> {
+    context_snapshot_configured(project,None)
+}
+/// As [`context_snapshot`]; with the owner `config` path a paused project's
+/// blockers are evaluated against the current configuration digest.
+pub fn context_snapshot_configured(project:&Path,config:Option<&Path>)->Result<(String,u64,Vec<String>)> {
     let snapshot=snapshot(project)?;
-    context_from_snapshot(project, &snapshot)
+    context_from_snapshot_configured(project,&snapshot,config)
 }
 pub(crate) fn context_from_snapshot(project:&Path,snapshot:&crate::domain::Snapshot)->Result<(String,u64,Vec<String>)> {
-    let control=snapshot.control.as_ref().map(|c|format!("{:?}; epoch {}; reconciliation required: {}",c.state,c.epoch,c.reconciliation_required)).unwrap_or_else(||"schema upgrade required".into());
+    context_from_snapshot_configured(project,snapshot,None)
+}
+/// The control line names why a paused project is paused and what clears it.
+fn control_line(project:&Path,snapshot:&crate::domain::Snapshot,config:Option<&Path>)->String {
+    let Some(c)=snapshot.control.as_ref() else {return "schema upgrade required".into()};
+    let mut line=format!("{:?}; epoch {}; reconciliation required: {}",c.state,c.epoch,c.reconciliation_required);
+    if c.state!=crate::domain::ProjectState::Paused {return line;}
+    let slug=project.file_name().map(|n|n.to_string_lossy().into_owned()).unwrap_or_default();
+    let reasons=pause_reasons(project,config).unwrap_or_else(|error|vec![format!("blockers unavailable: {error:#}")]);
+    if automatically_paused(snapshot) {
+        let observed=snapshot.events.iter().rev().find(|e|matches!(e.kind.as_str(),"project.control_changed"|"project.reconciliation_invalidated"|"project.launch_run_paused"))
+            .is_some_and(|e|e.kind=="project.reconciliation_invalidated"&&e.payload["cause"].as_str()==Some(crate::store::WORKER_RESOURCES_CHANGED));
+        let blockers=if reasons.is_empty() {"nothing blocks admission".to_owned()} else {format!("blockers: {}",reasons.join(" | "))};
+        if observed {
+            line.push_str(&format!("; automatic pause (a worker's pane or worktree changed before its end was recorded); {blockers}; the ticker re-activates it on its first pass with no blockers (a worker's end is recorded by the ticker; a cancelled attempt ends when its worker is stopped), or run `open {slug}`"));
+        } else {
+            line.push_str(&format!("; automatic pause (a rebind, an adoption or an owner config edit); {blockers}; run `open {slug}` or `launch run` to re-activate once nothing blocks, or `runtime {slug} state active --expected-revision {} --expected-head {}`",c.revision,snapshot.head));
+        }
+    } else {
+        line.push_str(&format!("; paused by the owner; resume with `runtime {slug} state active --expected-revision {} --expected-head {}`",c.revision,snapshot.head));
+        if !reasons.is_empty() {line.push_str(&format!(" once these clear: {}",reasons.join(" | ")));}
+    }
+    line
+}
+fn context_from_snapshot_configured(project:&Path,snapshot:&crate::domain::Snapshot,config:Option<&Path>)->Result<(String,u64,Vec<String>)> {
+    let control=control_line(project,snapshot,config);
     let memory_owner=migration::read_format(project).ok().map(|f|f.memory).unwrap_or_else(||"legacy-markdown".into());
     let memory_line=if memory_owner=="sqlite-v1" {
         "Memory owner: SQLite. MEMORY.md and memory/*.md are generated projections; do not edit them as live state. Use `memory PROJECT import/preview/cutover` for memory mutations."
@@ -200,6 +230,34 @@ pub fn rebind(project:&Path,id:&str,expected_revision:u64,expected_head:u64,rout
 }
 
 
+/// Re-activate a project paused by the observation pass (an owned worker's
+/// pane or worktree changed before its end was recorded) once nothing blocks
+/// admission: the same gate `launch run` and `open` apply, without an
+/// operator command. Owner pauses, archives and the invalidations of an
+/// adoption, a rebind or a config edit are never touched. `Ok(None)` means
+/// nothing was done (not such a pause, still blocked, or moved by another
+/// writer); `Ok(Some)` carries the new control state.
+pub fn reactivate_automatic_pause(project:&Path,config:&Path)->Result<Option<crate::domain::ControlChange>> {
+    let digest=migration::config_reference(config)?.digest;
+    let (control,report)={
+        let mut db=migration::open_active_read_only(project)?;
+        let Some(control)=db.worker_resources_pause()? else {return Ok(None)};
+        let report=db.admission_report(jiff::Timestamp::now().as_millisecond(),digest.as_deref())?;
+        (control,report)
+    };
+    if !report.blockers.is_empty() {return Ok(None);}
+    match set_state(project,report.head,control.revision,crate::domain::ProjectState::Active,config) {
+        Ok(change)=>Ok(Some(change)),
+        Err(error) if matches!(error.downcast_ref::<crate::store::StoreError>(),Some(crate::store::StoreError::Conflict|crate::store::StoreError::Invalid(_)))=>Ok(None),
+        Err(error)=>Err(error),
+    }
+}
+/// Why a paused project cannot admit work, for `context`: the admission
+/// blockers (empty when only the automatic re-activation is still due).
+pub fn pause_reasons(project:&Path,config:Option<&Path>)->Result<Vec<String>> {
+    let digest=match config {Some(config)=>migration::config_reference(config)?.digest,None=>None};
+    Ok(migration::open_active_read_only(project)?.admission_report(jiff::Timestamp::now().as_millisecond(),digest.as_deref())?.blockers)
+}
 pub fn admission(project:&Path,config:&Path)->Result<crate::domain::AdmissionReport> {
     let config=migration::config_reference(config)?;
     Ok(migration::open_active(project)?.admission_report(jiff::Timestamp::now().as_millisecond(),config.digest.as_deref())?)

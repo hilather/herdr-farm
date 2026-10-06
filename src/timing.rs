@@ -51,6 +51,19 @@ pub fn cadence(duration: Duration) -> Duration {
     }
 }
 
+/// The claim lease of one canonical launch, across all its durable stages.
+/// Each stage retakes the exclusive root with a short wait; an operator
+/// command that holds the root for its whole preparation (profile evidence,
+/// minutes) must not outlast the lease, or the naming intent is never
+/// recorded (`start_unnamed`). A dead launch is still recovered at expiry.
+/// Labs keep the historical 30 s; `HERDR_FARM_LAUNCH_LEASE_SECS` overrides
+/// explicitly (1..=300 s).
+pub fn launch_lease() -> Duration {
+    if let Some(seconds) = std::env::var("HERDR_FARM_LAUNCH_LEASE_SECS").ok().and_then(|v| v.parse::<u64>().ok()).filter(|s| (1..=300).contains(s)) {
+        return Duration::from_secs(seconds);
+    }
+    scaled(Duration::from_secs(180), Duration::from_secs(30))
+}
 /// Second-resolution historical timestamps use the shared cadence quantum.
 pub fn seconds(seconds: i64) -> i64 {
     let duration = cadence(Duration::from_secs(seconds.max(0) as u64));

@@ -475,7 +475,7 @@ fn create_resource_inner(
             expected_revision,
             &PreparedLaunchCreation { intent: creation.clone() },
             now(),
-            30_000,
+            i64::try_from(crate::timing::launch_lease().as_millis()).unwrap_or(30_000),
         )?
     };
     if !continuing { crate::telemetry::operations::sample_launch(&project, record.attempt.as_str()); }

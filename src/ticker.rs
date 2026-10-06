@@ -607,6 +607,7 @@ pub fn tick(ctx: &Ctx, log: &Log, memory: &mut Memory) -> bool {
                         entry.1=entry.1.saturating_add(1);
                         if entry.0.elapsed()>=Duration::from_secs(60) {log.line(&format!("{slug}: canonical service contention: {error} (count={})",entry.1));entry.0=Instant::now();entry.1=0;}
                     }
+                    for notice in &result.notices {log.line(&format!("{slug}: {notice}"));}
                     if let Some(error)=result.operation_error {log.error(&format!("{slug}: canonical operation: {error}"));}
                 }
                 Err(error)=>{
@@ -900,6 +901,10 @@ fn integrity_pass(ctx:&Ctx,log:&Log,slug:&str) {
     match check {Ok(check)=>{running.insert(project,check);},Err(error)=>log.error(&format!("{}: store integrity check: {error}",project.display()))}
 }
 fn drain_executor(root:&Path,log:&Log,memory:&mut Memory)->Result<()> {
+    // Work that completed since the last pass is settled and logged before the
+    // executor stops: a termination recorded in the last inter-pass gap must
+    // not lose its `termination recording succeeded` line to a stop request.
+    if let Some(queue)=memory.copy_jobs.as_mut() {for line in queue.drain() {log.error(&line);}}
     let result=memory.pr_reads.as_mut().expect("ticker shared executor").stop();
     publish_executor_metrics(root,log,memory);
     #[cfg(feature="state-store")]

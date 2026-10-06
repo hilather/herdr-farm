@@ -1,5 +1,6 @@
 use super::*;
 use crate::{operations::DeliveryState,reconcile::ResourceState};
+use rusqlite::OptionalExtension;
 
 pub(super) fn read(db:&Connection)->Result<ProjectControl> {read_with_budget(db,None)}
 pub(super) fn read_with_budget(db:&Connection,budget:Option<&read_budget::ReadBudget>)->Result<ProjectControl> {
@@ -83,6 +84,23 @@ impl SqliteStore {
         if version<7 {return Ok(None);}Ok(Some(read(&self.connection)?))
     }
 
+    /// The control state when the project's current pause is the one the
+    /// observation pass writes when an owned worker's pane or worktree changed
+    /// before its end was recorded (payload cause `worker_resources_changed`):
+    /// the ticker may re-activate it once `admission_report` lists no
+    /// blockers. Owner pauses, archives and the invalidations of an adoption,
+    /// a rebind or a config edit are never lifted here; `launch run`, `open`
+    /// or `runtime state active` clear those.
+    pub fn worker_resources_pause(&self)->Result<Option<ProjectControl>> {
+        check_schema(&self.connection)?;let version:u32=self.connection.query_row("PRAGMA user_version",[],|r|r.get(0))?;
+        if version<7 {return Ok(None);}
+        let control=read(&self.connection)?;
+        if control.state!=ProjectState::Paused||!control.reconciliation_required {return Ok(None);}
+        let latest:Option<(String,String)>=self.connection.query_row("SELECT kind,payload FROM events WHERE kind IN ('project.control_changed','project.reconciliation_invalidated','project.launch_run_paused') ORDER BY sequence DESC LIMIT 1",[],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+        let observed=latest.is_some_and(|(kind,payload)|kind=="project.reconciliation_invalidated"
+            &&serde_json::from_str::<serde_json::Value>(&payload).ok().is_some_and(|p|p["cause"].as_str()==Some(WORKER_RESOURCES_CHANGED)));
+        Ok(observed.then_some(control))
+    }
     pub fn admission_report(&mut self,now:i64,config:Option<&str>)->Result<AdmissionReport> {
         let tx=self.connection.transaction()?;schema(&tx)?;let report=AdmissionReport{head:head(&tx)?,blockers:blockers(&tx,now,config)?};tx.commit()?;Ok(report)
     }
@@ -125,13 +143,31 @@ impl SqliteStore {
 pub(super) fn invalidate(db:&Connection)->Result<()> {
     invalidate_by(db,"project.reconciliation_invalidated")
 }
-fn invalidate_by(db:&Connection,kind:&str)->Result<()> {
+/// The payload cause of an invalidation the observation pass writes when an
+/// owned worker's pane or worktree changed before its end was recorded. Only
+/// this pause is lifted automatically once nothing blocks admission.
+pub const WORKER_RESOURCES_CHANGED:&str="worker_resources_changed";
+/// [`invalidate`] from the observation pass, carrying its cause.
+pub(super) fn invalidate_for_worker_resources(db:&Connection)->Result<()> {
+    invalidate_with_cause(db,"project.reconciliation_invalidated",Some(WORKER_RESOURCES_CHANGED))
+}
+fn invalidate_by(db:&Connection,kind:&str)->Result<()> {invalidate_with_cause(db,kind,None)}
+fn invalidate_with_cause(db:&Connection,kind:&str,cause:Option<&str>)->Result<()> {
     let version:u32=db.query_row("PRAGMA user_version",[],|r|r.get(0))?;
     if version>=7 {
         let mut control=read(db)?;
         control.reconciliation_required=true;control.config_digest=None;
         if control.state==ProjectState::Active{control.state=ProjectState::Paused;}
-        control.revision=increment(control.revision)?;control.epoch=increment(control.epoch)?;write(db,&control,kind)?;
+        control.revision=increment(control.revision)?;control.epoch=increment(control.epoch)?;
+        match cause {
+            None=>write(db,&control,kind)?,
+            Some(cause)=>{
+                db.execute("UPDATE project_control SET revision=?1,epoch=?2,state=?3,reconciliation_required=?4,config_digest=?5 WHERE singleton=1",params![integer(control.revision)?,integer(control.epoch)?,control.state.as_str(),control.reconciliation_required,control.config_digest])?;
+                let mut payload=serde_json::to_value(&control).map_err(|e|StoreError::Invalid(e.to_string()))?;
+                payload["cause"]=serde_json::Value::String(cause.into());
+                db.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES(?1,'project',?2,1,?3)",params![kind,integer(control.revision)?,payload.to_string()])?;
+            }
+        }
     }
     Ok(())
 }

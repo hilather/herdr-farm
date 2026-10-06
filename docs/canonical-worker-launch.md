@@ -1054,6 +1054,17 @@ transaction records quiescence, preservation, terminal attempt state, capacity
 release and the usual coordinator ended notice atomically, making replay idempotent.
 The ticker logs project and attempt on contention deferral and successful recording.
 
+The launch claim lease is 180 s (`timing::launch_lease`; labs keep 30 s,
+`HERDR_FARM_LAUNCH_LEASE_SECS` overrides within 1..=300 s). Every launch stage
+retakes the exclusive root with a two-second wait, and an operator command that
+holds the root for its whole preparation (`launch run` refreshing profile evidence
+runs an agent probe for up to two minutes) made the historical 30 s lease expire
+before the naming intent was recorded, closing the launch as `start_unnamed`
+(LAUNCH-STALL-1). A launch whose ticker really died is still recovered at lease
+expiry, as before. The server sweep leaves the dedicated server of a queued task,
+a task with an active attempt or a pending launch delivery in place; cancelled,
+finished and superseded tasks still have theirs retired.
+
 A long isolated verification or integration check (minutes for a Godot test run)
 holds the shared check lock `.check.lock`, not the root barrier, so termination,
 launch and brief stages take the exclusive root beside it instead of deferring

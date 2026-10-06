@@ -148,7 +148,7 @@ impl SqliteStore {
                 let payload=serde_json::json!({"ownership":owned,"reason":"worker termination proven; its pane and agent are absent","resources_removed":false,"termination":receipt});
                 tx.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES('runtime.relinquished',?1,?2,1,?3)",params![owned.binding,integer(owned.revision)?,payload.to_string()])?;
             }
-            if changed {super::control::invalidate(&tx)?;}
+            if changed {super::control::invalidate_for_worker_resources(&tx)?;}
         }
         let result=head(&tx)?;tx.commit()?;Ok(result)
     }
