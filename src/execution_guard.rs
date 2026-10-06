@@ -9,6 +9,10 @@
 //! after the root. Maintenance and cleanup therefore stay refused while a
 //! check runs, while the staged effects of `RootGuard::exclusive_by` (launch,
 //! brief, termination) proceed beside it. Every acquisition is a try-lock.
+//! One acquisition runs the other way: `CheckGuard::widen` retakes the shared
+//! root while still holding the check lock shared. The only exclusive holder
+//! of the check lock also owns the root exclusively, so widening's bounded
+//! retry outlasts it and no cycle can form.
 use std::{fs::{File,OpenOptions},mem::ManuallyDrop,os::{fd::{AsRawFd,RawFd},unix::fs::{DirBuilderExt,OpenOptionsExt,MetadataExt}},path::{Path,PathBuf},
     process::{Child,Command,ExitStatus,Output,Stdio},sync::{PoisonError,RwLock,atomic::{AtomicBool,Ordering}}};
 use anyhow::{Result,Context,ensure};
