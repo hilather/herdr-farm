@@ -94,6 +94,15 @@ pub fn collection_interval(duration: Duration) -> Duration {
     pass(duration).max(advisory_pass())
 }
 
+/// A worker idle stretch is sampled on resting passes, so after an advisory
+/// batch it is next sampled only once that quiet window has passed. The notice
+/// threshold must outlive the window and the passes around it, or a restarted
+/// ticker's first re-sample would already qualify.
+pub fn worker_idle_threshold(duration: Duration) -> Duration {
+    if scale().is_none() { return duration; }
+    pass(duration).max(advisory_pass() + 2 * tick())
+}
+
 // Default policies live here so CLI and ticker comparisons cannot drift.
 pub const STARTING_TIMEOUT_SECS: i64 = 300;
 pub const BLOCKED_DEBOUNCE_SECS: i64 = 30;

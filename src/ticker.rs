@@ -638,9 +638,6 @@ pub fn tick(ctx: &Ctx, log: &Log, memory: &mut Memory) -> bool {
                     Err(error) => log.error(&format!("{slug}: memory-review remind: {error:#}")),
                 }
             }
-            if let Err(error) = crate::reconcile_live::worker_attention(ctx, &ctx.root.join(slug), memory.worker_idle.entry(slug.clone()).or_default()) {
-                log.error(&format!("{slug}: worker attention: {error:#}"));
-            }
             integrity_pass(ctx,log,slug);
         }
         admit_background(ctx,log,memory,canonical.iter().map(|slug|ctx.root.join(slug)).collect());
@@ -686,6 +683,21 @@ pub fn tick(ctx: &Ctx, log: &Log, memory: &mut Memory) -> bool {
                         match queue.submit_advisory(request) {Ok(ticket)=>memory.attempt_token_tickets.push((identity, ticket)),Err(error) if error.to_string().contains("executor queue is full")=>{},Err(error)=>log.error(&format!("{slug}: attempt token admission: {error:#}"))}
                     }},
                     Err(error)=>log.error(&format!("{slug}: attempt token admission: {error:#}"))
+                }
+            }
+        }
+        // Worker attention is advisory and probes Herdr on this thread. It runs
+        // only on a pass that is about to rest, after the advisory admission
+        // above. While a canonical effect is due the controller keeps its short
+        // cadence, and every running attempt re-offers a termination
+        // observation after its recovery backoff: a probe on each such pass
+        // lengthened the effect/maintenance cycle past that backoff, so the
+        // attempt-token window above never opened and no sidebar token was
+        // ever published.
+        if !memory.copy_jobs.as_ref().is_some_and(|q|q.canonical_work_pending()) {
+            for slug in &canonical {
+                if let Err(error) = crate::reconcile_live::worker_attention(ctx, &ctx.root.join(slug), memory.worker_idle.entry(slug.clone()).or_default()) {
+                    log.error(&format!("{slug}: worker attention: {error:#}"));
                 }
             }
         }

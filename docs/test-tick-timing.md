@@ -51,6 +51,7 @@ values, doctor diagnostics, normal draining, and the unset 15-second cadence.
 | Telemetry scan/operating slots | Nominal pass | Derive slots using nanoseconds, safe below one second |
 | Telemetry collection / attention interval | 300 s (or configured collection interval) | Scale consistently in collection scheduling and stored attention sample interval; both retain at least the native-call quiet window (15.5 s at test scale) |
 | Analytics / health refresh interval | 60 s / 300 s | Scale elapsed-time eligibility |
+| Worker idle notice threshold | 600 s | Scale; at least the native-call quiet window plus two nominal passes (16.5 s at test scale), since idle is sampled on resting passes only |
 
 Coordinator priming, launch, and legacy brief/notification delivery advance on
 scaled passes and queue retries. Their external Herdr API acknowledgement call

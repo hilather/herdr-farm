@@ -211,7 +211,7 @@ pub fn worker_attention(ctx: &Ctx, project: &Path, stretches: &mut BTreeMap<(Str
             stretch.generation = stretch.generation.saturating_add(1);
             stretch.since = Some(now);
         }
-        let threshold = herdr_farm::timing::pass(Duration::from_secs(600)).as_millis() as i64;
+        let threshold = herdr_farm::timing::worker_idle_threshold(Duration::from_secs(600)).as_millis() as i64;
         if idle == Some(true) && !stretch.notified && stretch.since.is_some_and(|since| now - since >= threshold) {
             migration::open_active_unchecked(project)?.notify_worker_idle(snapshot.head, &attempt.id, attempt.revision, stretch.since.unwrap(), now)?;
             stretch.notified = true;
