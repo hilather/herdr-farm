@@ -3261,37 +3261,39 @@ fn a_worker_that_exits_during_its_own_verification_ends_after_the_verdict_withou
 
 // ---- Launch stall and automatic pause recovery (LAUNCH-STALL-1, PAUSE-RECOVERY-1) ----
 
-/// An operator command (`launch run` refreshing profile evidence) takes the
-/// exclusive root right after this launch's gate release and keeps it for
-/// most of a minute. The launch's remaining stage, naming the started agent,
-/// retakes the root with a short wait on every retry; its claim lease must
-/// outlast the holder, or the claim expires before a naming intent exists and
-/// recovery closes the launch as `start_unnamed`, leaving an unnamed worker
-/// holding capacity. The lab lease is the production one.
+/// Every launch stage retakes the exclusive root with a two-second wait. An
+/// operator command that holds the root for most of a minute (a `launch run`
+/// preparing the next task refreshes profile evidence under it) blocks the
+/// stages after workspace creation; the historical 30 s claim lease then
+/// expired before a naming intent was recorded and recovery closed the launch
+/// as `start_unnamed`, leaving an unnamed worker holding capacity. With the
+/// production lease the stages resume once the holder lets go and the worker
+/// reaches Running.
 #[test]
-fn a_launch_outlasts_an_operator_holding_the_root_after_its_gate_release() {
+fn a_launch_outlasts_an_operator_holding_the_root_after_its_workspace_creation() {
     let mut lab = Lab::new("unknown_usage='allow_with_warning'");
     let (_, attempt) = lab.reserve("Retained instructions");
     lab.serve();
     let mut ticker = lab.spawn_with_env("300", &[("HERDR_FARM_LAUNCH_LEASE_SECS", "180")]);
-    lab.wait_for(&mut ticker, "the gate release", &attempt, 120, &|| !lab.events("runtime.launch_release").is_empty());
+    lab.wait_for(&mut ticker, "workspace creation", &attempt, 120, &|| !lab.events("runtime.launch_creation").is_empty());
+    // Queued in the kernel: granted the moment the creating stage lets go.
     let file = fs::OpenOptions::new().read(true).write(true).open(lab.path("root/.execution.lock")).unwrap();
     file.lock().unwrap();
     let held = Instant::now();
-    // The historical 30 s lease would expire during this hold.
     while held.elapsed() < Duration::from_secs(45) {
         assert!(ticker.0.try_wait().unwrap().is_none(), "ticker exited");
-        assert_ne!(lab.attempt(&attempt).state, AttemptState::Running, "named while the root was held exclusively");
+        assert_ne!(lab.attempt(&attempt).state, AttemptState::Running, "ran while the root was held exclusively");
         std::thread::sleep(Duration::from_millis(500));
     }
     file.unlock().unwrap();
-    lab.wait_for(&mut ticker, "Running once the holder released the root", &attempt, 120, &|| lab.attempt(&attempt).state == AttemptState::Running);
+    lab.wait_for(&mut ticker, "Running once the holder released the root", &attempt, 150, &|| lab.attempt(&attempt).state == AttemptState::Running);
     lab.stop(ticker);
     let log = fs::read_to_string(lab.path("root/.ticker.log")).unwrap_or_default();
     assert!(!log.contains("start_unnamed"), "{log}");
+    assert!(log.lines().any(|l| l.contains("canonical-launch:") && l.contains(".execution.lock; retry")), "no launch stage waited for the root: {log}");
     let launch = lab.state().deliveries.into_iter().find(|d| d.operation.as_str().starts_with("launch-")).unwrap();
     assert_eq!((launch.state, launch.attempts), (DeliveryState::Confirmed, 1));
-    assert_eq!(lab.events("runtime.launch_started").len(), 1);
+    assert_eq!((lab.events("runtime.launch_started").len(), lab.count("workspace.create_command")), (1, 1));
 }
 
 /// A worker's pane and agent vanish while its process lives: the observation
