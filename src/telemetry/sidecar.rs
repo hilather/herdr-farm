@@ -94,6 +94,16 @@ pub fn path(project: &Path) -> PathBuf {
 
 /// Open and migrate the sidecar. Absent and `create` false → `None`. Created mode 0600.
 pub fn open(project: &Path, create: bool) -> Result<Option<Connection>> {
+    open_with_wait(project, create, std::time::Duration::from_secs(5))
+}
+
+/// Best-effort recorders must spend their wait budget on the record write,
+/// rather than separately waiting for WAL setup or migration admission.
+pub(crate) fn open_nowait(project: &Path, create: bool) -> Result<Option<Connection>> {
+    open_with_wait(project, create, std::time::Duration::ZERO)
+}
+
+fn open_with_wait(project: &Path, create: bool, wait: std::time::Duration) -> Result<Option<Connection>> {
     let path = path(project);
     match std::fs::symlink_metadata(&path) {
         Ok(meta) if !meta.is_file() => bail!("telemetry sidecar is not a regular file"),
@@ -116,7 +126,7 @@ pub fn open(project: &Path, create: bool) -> Result<Option<Connection>> {
         Err(error) => return Err(error.into()),
     }
     let mut db = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_NOFOLLOW)?;
-    db.busy_timeout(std::time::Duration::from_secs(5))?;
+    db.busy_timeout(wait)?;
     // New stores can enable page reclamation without a rewriting VACUUM.
     // Existing stores retain their mode; switching them remains an operator
     // maintenance operation because it rewrites the entire file.
@@ -131,7 +141,7 @@ pub fn open(project: &Path, create: bool) -> Result<Option<Connection>> {
         match db.pragma_update(None, "journal_mode", "WAL") {
             Ok(()) => break,
             Err(error) if matches!(error.sqlite_error_code(), Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked))
-                && started.elapsed() < std::time::Duration::from_secs(5) => {
+                && started.elapsed() < wait => {
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 },
             Err(error) => return Err(error).context("configure telemetry WAL"),

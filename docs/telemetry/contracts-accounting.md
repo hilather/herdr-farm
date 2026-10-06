@@ -1952,3 +1952,41 @@ M93 uses canonical lifecycle wall-time unions, M94 exact published-rate
 attempt spend per submitted changed line, and M95 canonical proposal,
 consumer-snapshot and Remember counts. Missing evidence remains unavailable.
 Accounting stream and canonical schema versions are unchanged.
+
+## Coordinator host checks
+
+`result PROJECT host-check --task TASK [--submission ID] [--name NAME]
+[--cwd DIR] [--timeout SECONDS] [--log FILE] -- COMMAND [ARGS...]` records
+coordinator checks on the host. This is not a sandbox or acceptance evidence;
+it runs with the caller's environment and privileges.
+
+Accounting v26's `host_checks` has indexed `run_id` (primary key), `task`,
+`started_unix_ms`, `finished_unix_ms` and a JSON `payload` containing project,
+submission/attempt IDs (or `no_submission` / `ambiguous_submissions`), HEAD,
+dirty state, cwd, name, argv/digest, times/duration, exit code/signal, outcome,
+log path/size/digest, caller/trust from CLI self-observation, verification host
+load sample, product version and recorder PID/start time. The task's latest
+submission is bound only when its creation timestamp uniquely identifies one;
+explicit submission must belong to the task. No output bytes are stored.
+
+Durable outcomes are `running`, `pass`, `fail`, `timeout`, `interrupted` and
+`spawn_failed`. A running recorder whose PID/start time is gone reads as
+`abandoned`. Signal exits use 128+n. Each write opens/releases the sidecar
+and uses a short IMMEDIATE transaction with a five-second busy timeout.
+Task/submission linkage uses one short canonical read transaction, released
+before spawning. No canonical/sidecar transaction or store lock spans the
+command. WAL/migration setup is zero-wait for recorders; only the record
+transaction waits up to five seconds. Per-run spool file locks span append
+and replay snapshots only; SQLite replay runs after releasing the file lock. Failed writes append JSON lines in
+`.state/host-check-spool/`; host-check and collect replay by run ID. Completed
+rows cannot be overwritten by stale running rows. Retention tombstones in
+`sidecar.cli_invocations` suppress replay of deleted history. Host rows share
+that class's 90-day policy, aged from start time, and full backup classification;
+logs and pending spools are not part of a SQLite backup.
+
+`telemetry PROJECT host-checks [--task TASK] [--json]` returns `runs` newest
+first and `tasks`, keyed by task, with `runs`, `first_run_outcome`,
+`total_minutes`, `latest_outcome`. Collect/usage JSON also includes this
+object as `host_checks`. `telemetry PROJECT accounting host-checks [--task TASK]`
+exports the same JSON through the accounting lane. This supplies data for later metrics without changing
+the metric registry or signed acceptance decisions.

@@ -594,3 +594,39 @@ historical exits with unreadable frozen definitions record `process_exit`. The
 coordinator receives the usual
 `attempt.ended_without_submission` inbox notice exactly once when no result was
 submitted. Cancellation and accepted completion keep their usual causes.
+
+## Coordinator host checks
+
+Wrap the project's test script with:
+
+```sh
+herdr-farm result PROJECT host-check --task TASK --name NAME --log FILE -- ./tools/run-tests.sh
+herdr-farm telemetry PROJECT host-checks --task TASK --json
+```
+
+This records what the coordinator checked with the caller's environment and
+privileges on the host. It is **not a sandbox and not acceptance evidence**.
+Unknown tasks and invalid submissions are refused before spawning. `--cwd`
+defaults to the caller's directory; `--timeout SECONDS` forwards TERM to the
+process group, then KILL after a two-second grace period. SIGINT and SIGTERM
+are forwarded to the group. The CLI returns the command's exit code (or
+128 + signal). Without a timeout there is no execution deadline.
+
+Output passes through stdout/stderr; `--log FILE` additionally saves their
+combined bytes, replacing that file. The sidecar stores metadata only: argv
+and its SHA-256, task/submission linkage, Git HEAD and dirty state, timing,
+outcome, caller classification, initial host load and product version. It
+stores only the log's absolute path, size and SHA-256, never output content.
+Argv can contain sensitive values; use environment variables or files for
+secrets. The log remains the coordinator's responsibility.
+
+A running row is written before spawn with the recorder PID and Linux process
+start time; a dead recorder reads as `abandoned`. Metadata writes use short
+transactions and a busy wait of at most five seconds each, never a database
+handle held across execution. Failed writes append project-local JSON lines
+under `.state/host-check-spool/`; the next host check or `telemetry PROJECT
+collect` replays them idempotently. Recording errors warn but preserve the
+check's exit status. Empty spool files remain to avoid append/replay races.
+`host-checks --json` and the `host_checks` field in collect/usage JSON expose
+runs newest first and per-task runs, first-run outcome, total minutes and
+latest outcome. These are observations; no new registry metrics are added.

@@ -22,6 +22,7 @@ pub mod tools;
 pub(crate) mod otlp;
 
 pub mod cli_invocations;
+pub mod host_checks;
 
 pub const STREAM: &str = "accounting";
 /// `include_str!` of `migrations/telemetry/accounting/`, in order; index + 1 is the stream version.
@@ -49,13 +50,16 @@ pub const MIGRATIONS: &[&str] = &[include_str!("../../../migrations/telemetry/ac
     include_str!("../../../migrations/telemetry/accounting/0022_spawn_not_fork.sql"),
     include_str!("../../../migrations/telemetry/accounting/0023_concurrency_headroom.sql"),
     include_str!("../../../migrations/telemetry/accounting/0024_claude_cache_tiers.sql"),
-    include_str!("../../../migrations/telemetry/accounting/0025_cli_invocations.sql")];
+    include_str!("../../../migrations/telemetry/accounting/0025_cli_invocations.sql"),
+    include_str!("../../../migrations/telemetry/accounting/0026_host_checks.sql")];
 
 /// `herdr-farm telemetry <slug> accounting ...`
 #[derive(clap::Subcommand)]
 pub enum Command {
     /// Product CLI invocations by caller and fixed command path. Read-only JSON.
     Cli,
+    /// Coordinator host checks and task totals as JSON; observational only.
+    HostChecks { #[arg(long)] task: Option<String> },
     /// Work-item roles, fix rounds, supersessions, lifecycle duration and spend. Read-only.
     WorkItems { #[arg(long)] json: bool },
     /// Stream version of this lane's sidecar tables. Read-only.
@@ -201,6 +205,7 @@ fn unavailable(reason: &str) -> Value {
 pub fn run(project: &Path, command: Command) -> Result<String> {
     let value = match command {
         Command::Cli => cli_invocations::read(project)?,
+        Command::HostChecks { task } => host_checks::read(project, task.as_deref())?,
         Command::Status => {
             let mut value = super::sidecar::status(project, STREAM)?;
             if value["version"] == MIGRATIONS.len() && let Some(db) = super::sidecar::read(project)? && let Some(status) = ledger::status(&db)? {
