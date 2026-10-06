@@ -274,8 +274,12 @@ sys.stdout.buffer.write(json.dumps({'result':json.loads(reply)['result']}).encod
     fn count(&self, method: &str) -> usize { self.requests().iter().filter(|(m, _)| m == method).count() }
     fn attempt(&self, id: &AttemptId) -> Attempt { self.state().attempts.into_iter().find(|a| &a.id == id).unwrap() }
     fn spawn(&self) -> Ticker { self.spawn_attention_interval("300") }
-    fn spawn_attention_interval(&self, interval: &str) -> Ticker {
-        Ticker(Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", &self.herdr).env("HERDR_FARM_TELEMETRY_COLLECT_SECS", interval)
+    fn spawn_attention_interval(&self, interval: &str) -> Ticker { self.spawn_with_env(interval, &[]) }
+    /// `spawn` with extra ticker environment (a product knob under test).
+    fn spawn_with_env(&self, interval: &str, extra: &[(&str, &str)]) -> Ticker {
+        let mut command = Command::new(BIN);
+        for (name, value) in extra { command.env(name, value); }
+        Ticker(command.env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", &self.herdr).env("HERDR_FARM_TELEMETRY_COLLECT_SECS", interval)
             .args(["--root", self.path("root").to_str().unwrap(), "ticker", "run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap())
     }
     fn wait(&self, ticker: &mut Ticker, seconds: u64, predicate: &dyn Fn() -> bool) {
@@ -3253,4 +3257,112 @@ fn a_worker_that_exits_during_its_own_verification_ends_after_the_verdict_withou
     assert!(matches!(events[0].payload["cause"].as_str(), Some("process_exit" | "completion")), "{}", events[0].payload);
     assert_eq!(lab.log_lines(&attempt, "termination recording deferred by contention"), 0);
     assert!(lab.log_lines(&attempt, "termination recording succeeded") >= 1);
+}
+
+// ---- Launch stall and automatic pause recovery (LAUNCH-STALL-1, PAUSE-RECOVERY-1) ----
+
+/// An operator command (`launch run` refreshing profile evidence) takes the
+/// exclusive root right after this launch's gate release and keeps it for
+/// most of a minute. The launch's remaining stage, naming the started agent,
+/// retakes the root with a short wait on every retry; its claim lease must
+/// outlast the holder, or the claim expires before a naming intent exists and
+/// recovery closes the launch as `start_unnamed`, leaving an unnamed worker
+/// holding capacity. The lab lease is the production one.
+#[test]
+fn a_launch_outlasts_an_operator_holding_the_root_after_its_gate_release() {
+    let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+    let (_, attempt) = lab.reserve("Retained instructions");
+    lab.serve();
+    let mut ticker = lab.spawn_with_env("300", &[("HERDR_FARM_LAUNCH_LEASE_SECS", "180")]);
+    lab.wait_for(&mut ticker, "the gate release", &attempt, 120, &|| !lab.events("runtime.launch_release").is_empty());
+    let file = fs::OpenOptions::new().read(true).write(true).open(lab.path("root/.execution.lock")).unwrap();
+    file.lock().unwrap();
+    let held = Instant::now();
+    // The historical 30 s lease would expire during this hold.
+    while held.elapsed() < Duration::from_secs(45) {
+        assert!(ticker.0.try_wait().unwrap().is_none(), "ticker exited");
+        assert_ne!(lab.attempt(&attempt).state, AttemptState::Running, "named while the root was held exclusively");
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    file.unlock().unwrap();
+    lab.wait_for(&mut ticker, "Running once the holder released the root", &attempt, 120, &|| lab.attempt(&attempt).state == AttemptState::Running);
+    lab.stop(ticker);
+    let log = fs::read_to_string(lab.path("root/.ticker.log")).unwrap_or_default();
+    assert!(!log.contains("start_unnamed"), "{log}");
+    let launch = lab.state().deliveries.into_iter().find(|d| d.operation.as_str().starts_with("launch-")).unwrap();
+    assert_eq!((launch.state, launch.attempts), (DeliveryState::Confirmed, 1));
+    assert_eq!(lab.events("runtime.launch_started").len(), 1);
+}
+
+/// A worker's pane and agent vanish while its process lives: the observation
+/// pass pauses the project for reconciliation. `context` names the automatic
+/// pause and its blockers. The owner cancels the attempt; the ticker stops the
+/// worker and records its end, nothing blocks admission any more, and the
+/// ticker re-activates the project by itself, logging one line.
+#[test]
+fn an_automatic_pause_names_its_blockers_and_lifts_itself_once_they_clear() {
+    let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+    let (_, attempt) = lab.reserve("Retained instructions");
+    lab.serve();
+    let mut ticker = lab.spawn();
+    lab.wait_for(&mut ticker, "the worker to run", &attempt, 120, &|| lab.attempt(&attempt).state == AttemptState::Running);
+    fs::write(lab.path("lab/vanish"), b"").unwrap();
+    let paused = || lab.state().control.is_some_and(|c| c.state == ProjectState::Paused && c.reconciliation_required);
+    lab.wait_for(&mut ticker, "the automatic pause", &attempt, 60, &|| paused());
+    assert!(lab.events("project.reconciliation_invalidated").len() >= 1);
+    let instructions = fs::read_to_string(lab.project.join("PROJECT.md")).unwrap();
+    fs::write(lab.project.join("PROJECT.md"), format!("+++\nname = \"demo\"\n+++\n{instructions}")).unwrap();
+    let context = lab.cli(&["context", "demo"]);
+    assert!(context.status.success(), "{}", String::from_utf8_lossy(&context.stderr));
+    let text = String::from_utf8(context.stdout).unwrap();
+    let control = text.lines().find(|l| l.contains("Paused")).unwrap_or("").to_owned();
+    assert!(control.contains("automatic pause") && control.contains("blockers:") && control.contains("attempt termination remains unobserved"), "{text}");
+    // Live worker, vanished pane: the pause holds across passes.
+    let since = Instant::now();
+    while since.elapsed() < Duration::from_secs(3) {
+        assert!(paused(), "re-activated while the attempt still retained capacity");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let running = lab.attempt(&attempt);
+    lab.ok_live(&|| ["task", "demo", "cancel-attempt", attempt.as_str(), "--expected-revision", &lab.attempt(&attempt).revision.to_string(), "--expected-head", &lab.head().to_string(), "--reason", "operator stop"].map(String::from).to_vec());
+    assert_eq!(running.state, AttemptState::Running);
+    lab.wait_for(&mut ticker, "the termination record", &attempt, 60, &|| lab.attempt(&attempt).termination_observed);
+    lab.wait_for(&mut ticker, "automatic re-activation", &attempt, 60, &|| lab.state().control.is_some_and(|c| c.state == ProjectState::Active && !c.reconciliation_required));
+    lab.stop(ticker);
+    let log = fs::read_to_string(lab.path("root/.ticker.log")).unwrap_or_default();
+    assert_eq!(log.lines().filter(|l| l.contains("control re-activated automatically")).count(), 1, "{log}");
+    let last = lab.state().events.into_iter().filter(|e| e.kind.starts_with("project.")).last().unwrap();
+    assert_eq!((last.kind.as_str(), last.payload["state"].as_str()), ("project.control_changed", Some("active")));
+    let context = lab.ok(&["context", "demo"]);
+    let _ = context;
+}
+
+/// An owner pause is never lifted by the ticker, even with nothing blocking.
+#[test]
+fn an_owner_pause_is_not_lifted_by_the_ticker() {
+    let lab = Lab::new("unknown_usage='allow_with_warning'");
+    let control = lab.state().control.unwrap();
+    lab.ok(&["runtime", "demo", "state", "paused", "--expected-revision", &control.revision.to_string(), "--expected-head", &lab.head().to_string()]);
+    lab.run_quiet(4);
+    let control = lab.state().control.unwrap();
+    assert_eq!((control.state, control.reconciliation_required), (ProjectState::Paused, true));
+    assert!(!fs::read_to_string(lab.path("root/.ticker.log")).unwrap_or_default().contains("re-activated automatically"));
+    let instructions = fs::read_to_string(lab.project.join("PROJECT.md")).unwrap();
+    fs::write(lab.project.join("PROJECT.md"), format!("+++\nname = \"demo\"\n+++\n{instructions}")).unwrap();
+    let text = String::from_utf8(lab.cli(&["context", "demo"]).stdout).unwrap();
+    assert!(text.lines().any(|l| l.contains("Paused") && l.contains("paused by the owner") && l.contains("runtime demo state active")), "{text}");
+}
+
+/// A queued task's dedicated server exists before its attempt does; the sweep
+/// leaves it alone. The finished-task case is `ticker_stops_the_dedicated_herdr_server_of_a_finished_task`.
+#[test]
+fn the_server_sweep_spares_a_queued_task_without_an_attempt() {
+    let lab = Lab::new("unknown_usage='allow_with_warning'");
+    let dir = lab.path("root/.herdr-run/demo-work/herdr");
+    fs::create_dir_all(&dir).unwrap();
+    let record = json!({"project":"demo","task":"work","pid":1,"socket":lab.path("lab/never.sock"),"managed_by":"herdr-farm"}).to_string();
+    fs::write(dir.join("server.json"), &record).unwrap();
+    assert_eq!(lab.state().tasks.iter().find(|t| t.id.as_str() == "work").unwrap().state, TaskState::Queued);
+    lab.run_quiet(4);
+    assert!(dir.join("server.json").is_file(), "the queued task's server record was retired: {}", fs::read_to_string(lab.path("root/.ticker.log")).unwrap_or_default());
 }

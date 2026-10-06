@@ -1938,7 +1938,7 @@ pub fn run(#[cfg(feature="state-store")] capture: &mut crate::cli_invocation::Ca
                     let planner_config=paths::read_control_text(&config,1024*1024)?.map(|text|toml::from_str::<toml::Value>(&text)).transpose()?;
                     let has_planner=planner_config.as_ref().and_then(|v|v.get("profiles")).and_then(|v|v.get("planner")).is_some();
                     if profile.is_none() && session.is_none() && !has_planner {
-                        let (text, head, unseen)=herdr_farm::runtime::context_snapshot(&dir)?;
+                        let (text, head, unseen)=herdr_farm::runtime::context_snapshot_configured(&dir,Some(&config))?;
                         print!("{text}");
                         println!("{}", crate::canonical_coordinator::surface(&ctx, &slug)?);
                         if !peek && !unseen.is_empty() { herdr_farm::runtime::update_inbox(&dir,head,&unseen,false)?; }

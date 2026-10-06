@@ -1,5 +1,6 @@
 use super::*;
 use crate::{operations::DeliveryState,reconcile::ResourceState};
+use rusqlite::OptionalExtension;
 
 pub(super) fn read(db:&Connection)->Result<ProjectControl> {read_with_budget(db,None)}
 pub(super) fn read_with_budget(db:&Connection,budget:Option<&read_budget::ReadBudget>)->Result<ProjectControl> {
@@ -83,6 +84,19 @@ impl SqliteStore {
         if version<7 {return Ok(None);}Ok(Some(read(&self.connection)?))
     }
 
+    /// The control state when the project is paused automatically (a
+    /// reconciliation invalidation, not an owner pause or an archive):
+    /// `launch run`, `open` and the ticker may re-activate it once
+    /// `admission_report` lists no blockers.
+    pub fn automatic_pause(&self)->Result<Option<ProjectControl>> {
+        check_schema(&self.connection)?;let version:u32=self.connection.query_row("PRAGMA user_version",[],|r|r.get(0))?;
+        if version<7 {return Ok(None);}
+        let control=read(&self.connection)?;
+        if control.state!=ProjectState::Paused||!control.reconciliation_required {return Ok(None);}
+        let owner:Option<String>=self.connection.query_row("SELECT payload FROM events WHERE kind='project.control_changed' ORDER BY sequence DESC LIMIT 1",[],|r|r.get(0)).optional()?;
+        let explicit=owner.and_then(|p|serde_json::from_str::<serde_json::Value>(&p).ok()).and_then(|p|p["state"].as_str().map(|s|s=="paused"||s=="archived")).unwrap_or(false);
+        Ok((!explicit).then_some(control))
+    }
     pub fn admission_report(&mut self,now:i64,config:Option<&str>)->Result<AdmissionReport> {
         let tx=self.connection.transaction()?;schema(&tx)?;let report=AdmissionReport{head:head(&tx)?,blockers:blockers(&tx,now,config)?};tx.commit()?;Ok(report)
     }

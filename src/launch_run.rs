@@ -723,7 +723,7 @@ pub fn run(ctx: &Ctx, slug: &str, mut args: Args) -> Result<Value> {
         Err(error) => {
             let failed = run.steps.len() + 1;
             let done: Vec<String> = run.steps.iter().map(|s| format!("{} ({})", s.name, s.outcome)).collect();
-            bail!("launch run stopped at step {failed} ({error:#}); completed before it: [{}]. Fix the cause and rerun the same command; finished steps are skipped.", done.join(", "))
+            bail!("launch run stopped at step {failed} (launch failed: {error:#}); completed before it: [{}]. Fix the cause and rerun the same command; finished steps are skipped.", done.join(", "))
         }
     }
 }
@@ -1126,6 +1126,14 @@ pub fn sweep_servers(ctx: &Ctx, slug: &str) -> Vec<String> {
         if snapshot.attempts.iter().any(|a| a.task.as_str() == task && a.retains_capacity()) {
             continue;
         }
+        // A launch in flight has a server before it has an attempt: a queued
+        // task, one with an active attempt, or one whose launch delivery is
+        // still pending keeps its server. Cancelled, finished and superseded
+        // tasks lose theirs as before.
+        let launching = snapshot.tasks.iter().any(|t| t.id.as_str() == task && (t.state == herdr_farm::domain::TaskState::Queued || t.active_attempt.is_some()))
+            || snapshot.operations.iter().any(|o| o.kind == "runtime.launch" && o.task.as_ref().is_some_and(|t| t.as_str() == task)
+                && snapshot.deliveries.iter().any(|d| d.operation == o.id && matches!(d.state, herdr_farm::operations::DeliveryState::Pending | herdr_farm::operations::DeliveryState::Claimed | herdr_farm::operations::DeliveryState::Ambiguous)));
+        if launching { continue; }
         match stop(ctx, slug, task, false) {
             Ok(report) if report["stopped"] == true => lines.push(format!("stopped the dedicated Herdr server of finished task {task}")),
             Ok(_) => {}

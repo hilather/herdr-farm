@@ -607,6 +607,7 @@ pub fn tick(ctx: &Ctx, log: &Log, memory: &mut Memory) -> bool {
                         entry.1=entry.1.saturating_add(1);
                         if entry.0.elapsed()>=Duration::from_secs(60) {log.line(&format!("{slug}: canonical service contention: {error} (count={})",entry.1));entry.0=Instant::now();entry.1=0;}
                     }
+                    for notice in &result.notices {log.line(&format!("{slug}: {notice}"));}
                     if let Some(error)=result.operation_error {log.error(&format!("{slug}: canonical operation: {error}"));}
                 }
                 Err(error)=>{

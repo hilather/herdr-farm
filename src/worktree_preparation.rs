@@ -489,7 +489,7 @@ pub fn prepare(
                 intent: intent.clone(),
             },
             crate::canonical_worker::now(),
-            30_000,
+            i64::try_from(crate::timing::launch_lease().as_millis()).unwrap_or(30_000),
         )?;
         git.deadline = git.deadline.min(
             Instant::now()

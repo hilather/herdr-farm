@@ -16,7 +16,9 @@ const PREPARED_LAUNCH_DISPATCH_ENABLED: bool = true;
 pub(crate) fn launch_dispatch_enabled()->bool { PREPARED_LAUNCH_DISPATCH_ENABLED }
 
 
-pub struct PollResult {pub reachable:bool,pub scheduled_work:bool,pub unknown_effects:bool,pub operation_error:Option<String>,pub admission_log:Option<String>,pub service_lock_errors:Vec<String>,pub services_contended:Option<bool>}
+pub struct PollResult {pub reachable:bool,pub scheduled_work:bool,pub unknown_effects:bool,pub operation_error:Option<String>,pub admission_log:Option<String>,pub service_lock_errors:Vec<String>,pub services_contended:Option<bool>,
+    /// Lines worth one log entry each, such as an automatic re-activation.
+    pub notices:Vec<String>}
 struct ProbeBudget<'a> {runner:&'a dyn crate::runner::Runner,deadline:std::time::Instant}
 impl crate::runner::Runner for ProbeBudget<'_> {
     fn run(&self,cmd:&crate::runner::Cmd)->Result<crate::runner::Output> {
@@ -121,13 +123,24 @@ fn finish_poll(ctx:&Ctx,path:&Path,turn:u64,reachable:bool,observation_error:Opt
             Err(error)=>{let text=format!("result completion service: {error:#}");if service_lock_contention(&error){service_lock_errors.push(text);}else{errors.push(text);}true},
         }
     };
+    // An automatic pause (a pane lost before its worker's end was recorded, a
+    // rebind, an adoption) is lifted here once nothing blocks admission: the
+    // gate `launch run` and `open` apply. Owner pauses stay.
+    let mut notices=Vec::new();
+    if !root_owned {
+        match herdr_farm::runtime::reactivate_automatic_pause(path,&ctx.config_dir.join("config.toml")) {
+            Ok(Some(change))=>notices.push(format!("control re-activated automatically: the pause's blockers cleared (epoch {})",change.control.epoch)),
+            Ok(None)=>{},
+            Err(error)=>{let text=format!("re-activation service: {error:#}");if service_lock_contention(&error){service_lock_errors.push(text);}else{errors.push(text);}},
+        }
+    }
     let routine_work=match scheduled {Ok(report)=>{if let Some(error)=report.diagnostic {errors.push(format!("routine scheduling: {error}"));}report.active},Err(error)=>{errors.push(format!("routine scheduling: {error:#}"));false}};
     // An admission failure is diagnostic only. Already-prepared dispatch still runs.
     let (progress,unknown_effects)=match result {
         Ok((progress,admission))=>{if let Some(error)=admission {errors.push(format!("admission: {error}"));}(progress,false)}
         Err(error)=>{errors.push(format!("{error:#}"));(false,queued)}
     };
-    Ok(PollResult{reachable:reachable||progress,scheduled_work:routine_work||wait_work||stop_work||replan_work||verification_work||integration_work||completion_work,unknown_effects,operation_error:(!errors.is_empty()).then(||errors.join("; ")),admission_log,services_contended:(!root_owned).then_some(!service_lock_errors.is_empty()),service_lock_errors})
+    Ok(PollResult{reachable:reachable||progress,scheduled_work:routine_work||wait_work||stop_work||replan_work||verification_work||integration_work||completion_work,unknown_effects,operation_error:(!errors.is_empty()).then(||errors.join("; ")),admission_log,services_contended:(!root_owned).then_some(!service_lock_errors.is_empty()),service_lock_errors,notices})
 }
 // Only actual effect.lock contention grants a service priority turn.
 fn service_lock_contention(error:&anyhow::Error)->bool {
