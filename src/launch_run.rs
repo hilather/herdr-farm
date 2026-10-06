@@ -1136,23 +1136,7 @@ pub fn sweep_servers(ctx: &Ctx, slug: &str) -> Vec<String> {
 }
 
 fn split_command(raw: &str) -> Result<Vec<String>> {
-    let mut args = Vec::new();
-    let mut word = String::new();
-    let mut quote = None;
-    let mut escape = false;
-    let mut started = false;
-    for c in raw.chars() {
-        if escape { word.push(c); escape = false; started = true; continue; }
-        if c == '\\' && quote != Some('\'') { escape = true; started = true; continue; }
-        if let Some(q) = quote { if c == q { quote = None; } else { word.push(c); } }
-        else if c == '\'' || c == '"' { quote = Some(c); started = true; }
-        else if c.is_whitespace() { if started { args.push(std::mem::take(&mut word)); started = false; } }
-        else { word.push(c); started = true; }
-    }
-    ensure!(quote.is_none() && !escape, "unclosed quote or escape in --accept");
-    if started { args.push(word); }
-    ensure!(!args.is_empty(), "empty --accept command");
-    Ok(args)
+    herdr_farm::verification::toolchains::split_accept_command(raw)
 }
 
 /// Owner convenience command shares launch's signer discovery and spawn gate.

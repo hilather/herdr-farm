@@ -34,6 +34,8 @@ fn pressure(kind: &str) -> Value {
 pub(super) struct Execution {
     _slot: Option<fs::File>,
     load: Value,
+    started: std::time::Instant,
+    duration_ms: Option<u64>,
 }
 impl Execution {
     pub(super) fn start(store: &Path) -> Self {
@@ -42,6 +44,8 @@ impl Execution {
             .and_then(|s| s.split_whitespace().next().and_then(number));
         Self {
             _slot: slot,
+            started: std::time::Instant::now(),
+            duration_ms: None,
             load: json!({"sampled_unix_ms": jiff::Timestamp::now().as_millisecond(),
             "host_load_1m": average, "host_load_reason": average.is_none().then_some("unreadable_or_invalid"),
             "project_concurrent_runs": concurrent, "concurrency_reason": concurrent.is_none().then_some("execution_slots_unavailable"),
@@ -49,10 +53,11 @@ impl Execution {
         }
     }
     pub(super) fn completed(&mut self) {
+        self.duration_ms = Some(self.started.elapsed().as_millis() as u64);
         self._slot.take();
     }
     pub(super) fn metadata(&self, output: &str, truncated: bool) -> Value {
-        json!({"version": "verification-metadata.v1", "load": self.load, "tests": if truncated { json!({"status": "unavailable", "reason": "output_limit", "results": []}) } else { test_results(output) }})
+        json!({"version": "verification-metadata.v1", "load": self.load, "duration_ms": self.duration_ms, "tests": if truncated { json!({"status": "unavailable", "reason": "output_limit", "results": []}) } else { test_results(output) }})
     }
 }
 fn slots(store: &Path) -> std::io::Result<(Option<fs::File>, Option<u32>)> {

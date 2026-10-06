@@ -121,7 +121,7 @@ fn nd(m: &Value) -> (Value, Value, Value) { (m["numerator"].clone(), m["denomina
 fn registry_declares_every_metric_and_gates_families() {
     let p = Planted::new();
     let registry = p.json(&["metrics", "registry", "--json"]);
-    assert_eq!(registry["registry"], "analytics-registry.v11");
+    assert_eq!(registry["registry"], "analytics-registry.v12");
     assert_eq!(registry["rejected_cohorts"], json!({"completed_task": "ambiguous_cohort"}));
     let metrics = registry["metrics"].as_array().unwrap();
     let ids: Vec<&str> = metrics.iter().map(|m| m["id"].as_str().unwrap()).collect();
@@ -130,12 +130,16 @@ fn registry_declares_every_metric_and_gates_families() {
     expected.extend((70..=77).map(|n| format!("M{n}")));
     expected.extend((80..=87).map(|n| format!("M{n}")));
     expected.extend((90..=95).map(|n| format!("M{n}")));
+    expected.extend((100..=103).map(|n| format!("M{n}")));
     expected.push("flaky_tests".into());
     expected.push("verification_flip_rate".into());
-    expected.sort();
-    assert_eq!(ids, expected, "M01-M58, M60-M69 and the lane C proxies, once each, in order");
+    // Numeric metric suffixes have no fixed width; named proxies sort after them.
+    let order = |id: &str| (id.strip_prefix('M').and_then(|n| n.parse::<u32>().ok()).unwrap_or(u32::MAX), id.to_owned());
+    expected.sort_by_key(|id| order(id));
+    assert_eq!(ids, expected, "every declared metric once, in numeric registry order");
     let report = p.json(&["report", "--json"]);
-    let report_ids: Vec<&str> = report["metrics"].as_object().unwrap().keys().map(String::as_str).collect();
+    let mut report_ids: Vec<&str> = report["metrics"].as_object().unwrap().keys().map(String::as_str).collect();
+    report_ids.sort_by_key(|id| order(id));
     assert_eq!(report_ids, ids);
     let text = String::from_utf8(p.raw(&["report"])).unwrap();
     let text_ids: Vec<&str> = text.lines().filter_map(|line| line.split_whitespace().next()).filter(|id| ids.contains(id)).collect();

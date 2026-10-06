@@ -21,6 +21,7 @@ pub mod store;
 mod stored_metrics;
 mod worker_metrics;
 mod launch_metrics;
+mod verification_metrics;
 
 pub const STREAM: &str = "analytics";
 /// `include_str!` of `migrations/telemetry/analytics/`, in order; index + 1 is the stream version.
@@ -141,6 +142,7 @@ pub fn metrics(project: &Path, since: Option<i64>) -> Result<BTreeMap<String, Va
     metrics.extend(worker_metrics::metrics(project, since)?);
     metrics.extend(crate::telemetry::accounting::coordinator_metrics::metrics(project, since)?);
     metrics.extend(launch_metrics::metrics(project, since)?);
+    metrics.extend(verification_metrics::metrics(project, since)?);
     Ok(metrics)
 }
 

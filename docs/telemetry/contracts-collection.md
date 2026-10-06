@@ -2923,3 +2923,28 @@ context fill and coordinator reaction latency. The full definitions and
 unavailable reasons are in [contracts-analytics.md](contracts-analytics.md#met-worker-1-worker-and-command-friction-registry-v10).
 M78–M79 remain reserved until definitions are supplied. No prompts, commands,
 arguments, answers or result message contents enter these metrics.
+
+## A11: Project test classification (ingest 0017, MET-VERIFY-1)
+
+The A10 worker-session reader transiently examines `CommandExecution.command`
+argv to match the attempt's installed executable acceptance policies (including
+signed toolchain and owner-default policies), or readable owner
+`verification.defaults` accept entries. Declarations use the same quote/escape
+parser as launch. Matching is exact argv equality; shell expansion, basename
+and substring guesses are unsupported. No command bytes, prompts, output,
+transcripts or code are retained or exposed in telemetry.
+
+Only `class = project_test` or null, classification availability, session ID and
+item ID enter `codex_exec_classes`. M101 requires a matching exec item's observed
+exit status, including nonzero. Missing/unsupported commands or declarations
+retain unavailable coverage. Readers of older physical schemas remain available
+with precise missing-input reasons; they never query absent exec tables.
+
+The class table follows native-session retention, forget-session deletion and
+full telemetry backup. The first collect after upgrading to ingest 0017 replays
+all retained Codex sessions once. Owner defaults and canonical acceptance policies
+are read once per collect before rollout write transactions; parsed declarations
+are reused for every command item of an attempt. First physical installation
+replays retained Codex rollouts; logical stream rollback with the class table still installed preserves
+existing offsets and coverage gaps. Classification dedupes by session/item ID.
+Metric definitions and windows are in contracts-analytics.md section 13.

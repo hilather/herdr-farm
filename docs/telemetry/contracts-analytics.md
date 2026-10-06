@@ -8,13 +8,13 @@ are [contracts.md](contracts.md) §0. Code: `src/telemetry/analytics/`
 (TM4.3). Telemetry never grants launch, changes budgets or accepts results;
 nothing here writes `state.db`.
 
-## 1. Metric registry (`analytics-registry.v11`)
+## 1. Metric registry (`analytics-registry.v12`)
 
-Version history: v11 adds MET-COORD-1 M80–M87 (contracts-accounting.md; M88–M89 reserved) and MET-LAUNCH-1 M90–M95 (section 12; M96–M99 reserved). v10 adds MET-REWORK-1 M65–M69 (section 10) and MET-WORKER-1 M70–M77; M78–M79 are reserved pending definitions. v8 adds bounded lifecycle `role` and M37.lineage-v2 (LINEAGE-1); M37.fleet-v1 remains absent as `definition_superseded`. v1 TM4.1; v2 adds `verification_flip_rate` (DG6, #198); v3 adds M30 `M30.submission-v1` (DG1, #202); v4 adds M10 `M10.v1` (DG2, #204); v5 adds M03 operating throughput (DG3); v6 adds M05 lifecycle tokens and specifies M19’s missing timed history; v7 adds M13 never-running exclusions, M04/M05 partial values and M31 lifecycle sampling, M35 attempt-time concurrency and M40 reported/merged quota windows, plus the bounded lifecycle `profile` dimension (TFIX-4, no definition change). Previous M13.slice-v1, M04.cost-v1, M05.tokens-v1, M31.attention-v1, M35.fanout-v1 and M40.quota-windows-v1 definitions remain only as absent (`definition_superseded`). v9 adds MET-NOW-A `M51.v1`–`M58.v1` and MET-NOW-B `M60`–`M64` (sections 8 and 9).
+Version history: v12 adds MET-VERIFY-1 M100–M103 (section 13). v11 adds MET-COORD-1 M80–M87 (contracts-accounting.md; M88–M89 reserved) and MET-LAUNCH-1 M90–M95 (section 12; M96–M99 reserved). v10 adds MET-REWORK-1 M65–M69 (section 10) and MET-WORKER-1 M70–M77; M78–M79 are reserved pending definitions. v8 adds bounded lifecycle `role` and M37.lineage-v2 (LINEAGE-1); M37.fleet-v1 remains absent as `definition_superseded`. v1 TM4.1; v2 adds `verification_flip_rate` (DG6, #198); v3 adds M30 `M30.submission-v1` (DG1, #202); v4 adds M10 `M10.v1` (DG2, #204); v5 adds M03 operating throughput (DG3); v6 adds M05 lifecycle tokens and specifies M19’s missing timed history; v7 adds M13 never-running exclusions, M04/M05 partial values and M31 lifecycle sampling, M35 attempt-time concurrency and M40 reported/merged quota windows, plus the bounded lifecycle `profile` dimension (TFIX-4, no definition change). Previous M13.slice-v1, M04.cost-v1, M05.tokens-v1, M31.attention-v1, M35.fanout-v1 and M40.quota-windows-v1 definitions remain only as absent (`definition_superseded`). v9 adds MET-NOW-A `M51.v1`–`M58.v1` and MET-NOW-B `M60`–`M64` (sections 8 and 9).
 
 `telemetry <slug> metrics registry [--json]` prints one declared table
 (`registry.rs`) of every metric `telemetry report` or `query` can name:
-M01–M58, M60–M69, M70–M77, M80–M87, M90–M95 and lane C's `flaky_tests` and `verification_flip_rate`. A change is a new registry version, never
+M01–M58, M60–M69, M70–M77, M80–M87, M90–M95, M100–M103 and lane C's `flaky_tests` and `verification_flip_rate`. A change is a new registry version, never
 an edit in place of a published definition. Per metric:
 
 | field | meaning |
@@ -626,3 +626,40 @@ sidecars/upgrades arise from normal explicit collection, never launch alone.
 Full telemetry backups include all three tables. Targets cascade with CLI
 row pruning and are orphan-pruned by capture. Retention classes declare
 CLI targets with CLI history and retained ticker/diff metadata separately.
+
+
+## 13. MET-VERIFY-1 verification metadata (registry v12)
+
+M100–M103 use `.v1` definitions, certification **fixture**, evidence
+`tests/telemetry_verification.rs`, activity-window cohorts and since-only
+windows. `telemetry PROJECT report` and `query --metric M100,M101,M102,M103`
+serve the same exact ratios, with unreduced integer numerators and denominators.
+M96–M99 remain reserved. Metric IDs are resolved through the registry without
+assuming a two-digit suffix. These metrics never affect acceptance or admission.
+
+| ID / name | Definition and window basis |
+|---|---|
+| M100 `independent_first_pass_rate` | Submissions placed by submission time. Earliest completed independent run per submission, ordered by run start time (sandbox load sample, falling back to canonical recording time) then run ID, across linked host checks and canonical `accept-N` / `accept-default-N` runs carrying toolchain metadata. Host checks without a submission link may bind by the same attempt including checks before submission; attempt-only links apply to every submission of that attempt. Excluded run reasons count each run once even when an attempt link covers multiple submissions. Green first runs / submissions with a counted first run. Later green cannot replace earlier red. Timeout, interrupted, spawn_failed, abandoned, running and other non-verdict outcomes are excluded and counted by reason; submissions without a counted run are counted separately. `by_profile`, LINEAGE `by_role` (unknown when unbound), and `by_source` (host/sandbox) use the same observed-run denominator. |
+| M101 `worker_self_check_rate` | With `--since`, attempts placed by their first submission time; attempts without submission time are excluded as `submission_time_unknown`, earlier submissions as `outside_window`. An unbounded report includes every attempt, also counting `without_submission_time`. Attempts with an exact declared project-test argv match and an observed exit code (including nonzero) / attempts in the cohort. Commands are classified transiently during Codex item collection against installed signed acceptance policies, including toolchain policies and materialized owner default accept policies, plus readable owner `verification.defaults` accept entries. Matching uses launch’s quote/escape parser without shell expansion; raw argv and declaration text are discarded. File-presence policies do not classify project tests. Only `project_test` or null and classification availability survive; command text, arguments and output never enter telemetry. An observed session with no exec items counts as no self-check. Unsupported/missing argv or policy metadata makes coverage unavailable rather than zero. `observed_share` retains the known-attempt subtotal. |
+| M102 `verification_minutes_per_accepted_task` | Tasks placed by first acceptance evidence time for their current contract (verification for verify-only routes, integration otherwise). Sum all retained host-check and executable acceptance run durations across those tasks (including red and timeout runs), divided by accepted tasks. Host/sandbox totals and shares are separate; integer milliseconds / (60000 × accepted tasks) is exact minutes/task. Distribution uses complete task duration totals, arithmetic median (even samples retain the exact midpoint as summed milliseconds/120000) and nearest-rank p90, with sample count. Runs outside the acceptance window still contribute to an included task; this is a task cohort, not a run activity window. |
+| M103 `final_report_quality` | Submissions placed by submission time. Nonempty claimed-check lists / submissions, plus count of entries. `claimed_without_agreement` is claimed submissions whose first counted independent run is red or absent / claimed submissions. Only SQLite array lengths are read; claimed-check text never enters telemetry. |
+
+Missing evidence: `empty_denominator`, `no_independent_runs`,
+`no_host_checks_recorded`, `no_executable_policies`, `no_executable_runs`,
+`first_run_metadata_missing`,
+`executable_run_metadata_missing`, `verification_duration_missing`, `verification_not_observed`,
+`no_complete_duration_samples`, `session_metadata_not_collected`,
+`worker_session_stream_before_v17`, `project_test_classification_incomplete`.
+Old executable runs lacking toolchain metadata are counted in coverage and
+cannot prove a first verdict; old durations cannot become zero minutes.
+Known duration subtotals remain available when the overall mean or a source split is unavailable. Earlier missing executable metadata suppresses first-verdict and claimed-without-agreement ratios instead of treating a later observed green as first.
+Host metadata is retained observation history, so absence cannot prove that
+no host check was ever executed. Submission/attempt IDs in drill-down are
+local typed metadata; no prompts, transcripts, code or command output are read.
+
+No canonical migration or SCHEMA bump. Ingest stream v17 adds
+`codex_exec_classes`, classified as native-session metadata for retention,
+forget-session deletion and full telemetry backup. Migration replays retained
+Codex rollouts when the physical class table is newly installed, preserving
+existing offsets after logical stream rollback; deduplication remains by session/item ID.
+New verifier executions retain `duration_ms` in the existing metadata payload.

@@ -329,6 +329,7 @@ impl<'a> Sources<'a> {
                     },
                     Provider::Lane("accounting") => crate::telemetry::accounting::metric_group_uncached(self.project, group, since, self.use_aggregates)?,
                     Provider::Lane("analytics") if group == "coordinator" => crate::telemetry::accounting::coordinator_metrics::metrics(self.project, since)?,
+                    Provider::Lane("analytics") if group == "verification" => super::verification_metrics::metrics(self.project, since)?,
                     Provider::Lane("analytics") if group == "launch" => super::launch_metrics::metrics(self.project, since)?,
                     Provider::Lane("analytics") if group == "worker" => super::worker_metrics::metrics(self.project, since)?,
                     Provider::Lane("analytics") => super::stored_metrics::metrics(self.project, since)?,

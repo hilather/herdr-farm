@@ -298,6 +298,7 @@ pub fn collect(project: &Path, budget: Budget, create: bool) -> Result<Option<Co
     let tombstones = super::maintenance::Tombstones::of(project)?;
     let project = std::fs::canonicalize(project)?;
     let worktrees = format!("{}/.state/worktrees/", project.display());
+    let mut test_classes = ProjectTestClasses::load(&project);
     let mut done = Collected::default();
     let mut remaining = budget.bytes;
     let reread = reread(&db)?;
@@ -339,7 +340,7 @@ pub fn collect(project: &Path, budget: Budget, create: bool) -> Result<Option<Co
                 break;
             }
             let mut span = (0, 0);
-            let read = match tail(&mut db, &file, &home_key, &worktrees, remaining, budget.bytes <= Budget::TICK.bytes, &from_start, &tombstones, &mut done, &mut span, owner_source || file.starts_with(Path::new(home).join(".claude/projects")), owner_source, native.get(&file), muse_sources.get(&file)) {
+            let read = match tail(&mut db, &file, &home_key, &worktrees, remaining, budget.bytes <= Budget::TICK.bytes, &from_start, &tombstones, &mut done, &mut span, owner_source || file.starts_with(Path::new(home).join(".claude/projects")), owner_source, native.get(&file), muse_sources.get(&file), &mut test_classes) {
                 Ok(read) => read,
                 // The pass rolled back: its range is a coverage gap and later
                 // sources wait for the next collect (contracts-collection.md A2).
@@ -664,7 +665,8 @@ struct ToolOutput {
     #[serde(default)]
     call_id: Lax,
 }
-/// `event_msg/item_completed`: never the item's command, cwd, parsed command,
+/// `event_msg/item_completed`: command argv is reduced transiently to a class; never retained.
+/// Never the item's cwd, parsed command,
 /// output, process id, content, client id or phase; never an MCP call's
 /// `arguments` or `result.content`, a subagent's `agent_path`, or a collab
 /// call's `receiver_agents` or `agents_states` (A8).
@@ -681,6 +683,9 @@ struct ItemCompleted {
 struct Item {
     #[serde(default)]
     changes: EntryCount,
+    /// Transient argv, reduced to a class before creating the sanitized record.
+    #[serde(default)]
+    command: Value,
     #[serde(rename = "type", default)]
     kind: Lax,
     #[serde(default)]
@@ -875,13 +880,13 @@ fn final_event(tx: &Transaction, ledger: &ingest::Ledger, key: &str, cursor: &Cu
 /// pass resumes at the last committed prefix, with the same native identities.
 #[allow(clippy::too_many_arguments)]
 fn tail(db: &mut Connection, file: &Path, home: &str, worktrees: &str, allowance: u64, bounded: bool, reread: &std::collections::BTreeSet<String>,
-    tombstones: &super::maintenance::Tombstones, done: &mut Collected, span: &mut (u64, u64), claude: bool, scoped: bool, gemini: Option<&gemini::Source>, muse: Option<&muse::Source>) -> Result<u64> {
+    tombstones: &super::maintenance::Tombstones, done: &mut Collected, span: &mut (u64, u64), claude: bool, scoped: bool, gemini: Option<&gemini::Source>, muse: Option<&muse::Source>, test_classes: &mut ProjectTestClasses) -> Result<u64> {
     let mut observed = None;
     let (mut pulled, files) = (0, done.files);
     let empty = std::collections::BTreeSet::new();
     loop {
         let (read, more) = tail_batch(db, file, home, worktrees, allowance - pulled, bounded,
-            if pulled == 0 { reread } else { &empty }, tombstones, done, span, &mut observed, claude, scoped, gemini, muse)?;
+            if pulled == 0 { reread } else { &empty }, tombstones, done, span, &mut observed, claude, scoped, gemini, muse, test_classes)?;
         pulled += read;
         // Public collect counts files, not transaction batches.
         if done.files > files { done.files = files + 1; }
@@ -895,7 +900,7 @@ fn tail(db: &mut Connection, file: &Path, home: &str, worktrees: &str, allowance
 /// Keeping a line atomic preserves malformed/oversized/partial-line semantics.
 #[allow(clippy::too_many_arguments)]
 fn tail_batch(db: &mut Connection, file: &Path, home: &str, worktrees: &str, allowance: u64, bounded: bool, reread: &std::collections::BTreeSet<String>,
-    tombstones: &super::maintenance::Tombstones, done: &mut Collected, span: &mut (u64, u64), observed: &mut Option<i64>, claude: bool, scoped: bool, gemini: Option<&gemini::Source>, muse: Option<&muse::Source>) -> Result<(u64, bool)> {
+    tombstones: &super::maintenance::Tombstones, done: &mut Collected, span: &mut (u64, u64), observed: &mut Option<i64>, claude: bool, scoped: bool, gemini: Option<&gemini::Source>, muse: Option<&muse::Source>, test_classes: &mut ProjectTestClasses) -> Result<(u64, bool)> {
     let key = digest(file.as_os_str().as_encoded_bytes());
     let Ok(mut handle) = (if scoped { self::claude::open_scoped(file, false) } else { std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(file) }) else { return Ok((0, false)) };
     let meta = handle.metadata()?;
@@ -1047,7 +1052,7 @@ fn tail_batch(db: &mut Connection, file: &Path, home: &str, worktrees: &str, all
             continue;
         };
         let mut observed = None;
-        if !record(&tx, &ledger, at, &tag, &line, &key, home, worktrees, &mut cursor, now, done, &mut observed)? {
+        if !record_with_classes(&tx, &ledger, at, &tag, &line, &key, home, worktrees, &mut cursor, now, done, &mut observed, test_classes)? {
             ledger.malformed(&tx, at, "record_malformed", n, now)?;
             continue;
         }
@@ -1117,6 +1122,14 @@ fn tail_batch(db: &mut Connection, file: &Path, home: &str, worktrees: &str, all
 #[allow(clippy::too_many_arguments)]
 fn record(tx: &Transaction, ledger: &ingest::Ledger, at: u64, tag: &Tag, line: &[u8], key: &str, home: &str, worktrees: &str, cursor: &mut Cursor, now: i64,
     done: &mut Collected, observed: &mut Option<Value>) -> Result<bool> {
+    // Other adapters use this entry point only to record synthetic session metadata.
+    record_with_classes(tx, ledger, at, tag, line, key, home, worktrees, cursor, now,
+        done, observed, &mut ProjectTestClasses::default())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_with_classes(tx: &Transaction, ledger: &ingest::Ledger, at: u64, tag: &Tag, line: &[u8], key: &str, home: &str, worktrees: &str, cursor: &mut Cursor, now: i64,
+    done: &mut Collected, observed: &mut Option<Value>, test_classes: &mut ProjectTestClasses) -> Result<bool> {
     let inner = tag.payload.as_ref().and_then(|p| p.kind.as_deref());
     match (tag.kind.as_deref(), inner) {
         (Some("session_meta"), _) if cursor.session.is_none() => {
@@ -1311,6 +1324,7 @@ fn record(tx: &Transaction, ledger: &ingest::Ledger, at: u64, tag: &Tag, line: &
         (Some("event_msg"), Some("item_completed")) => {
             let Ok(Envelope { payload: completed }) = serde_json::from_slice::<Envelope<ItemCompleted>>(line) else { return Ok(false) };
             let item = completed.item.0;
+            let classification = item.as_ref().filter(|i| i.kind.0 == "CommandExecution").map(|i| test_classes.classify(tx, key, &i.command));
             let kind = item.as_ref().map_or(Value::Null, |i| i.kind.0.clone());
             // Each typed item keeps its own allowlisted fields; any other item only its type.
             let fields = match (item, kind.as_str()) {
@@ -1343,6 +1357,8 @@ fn record(tx: &Transaction, ledger: &ingest::Ledger, at: u64, tag: &Tag, line: &
                 let (thread, turn, at) = (text("thread_id", sanitize::Class::Id), text("turn_id", sanitize::Class::Id), ms(tag.timestamp.as_deref()));
                 match kind.as_str() {
                     Some("CommandExecution") => {
+                        let (available, class) = classification.unwrap_or((false, None));
+                        tx.execute("INSERT OR IGNORE INTO codex_exec_classes(session_id,item_id,class,classification_available) VALUES(?1,?2,?3,?4)",params![session,item_id,class,available])?;
                         tx.execute("INSERT OR IGNORE INTO codex_exec_items(session_id,item_id,thread_id,turn_id,status,source,exit_code,startup_duration_secs,
                             startup_duration_nanos,completed_unix_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)", params![session, item_id, thread, turn,
                             text("item.status", sanitize::Class::Tag), text("item.source", sanitize::Class::Tag), number("item.exit_code"),
@@ -1646,4 +1662,108 @@ fn bind(db: &mut Connection, attempts: &[CanonicalAttempt]) -> Result<()> {
         after = next;
     }
     Ok(())
+}
+
+/// Per-collect declarations: owner configuration and canonical reads precede all
+/// rollout write transactions. Source metadata may first appear inside a batch,
+/// so its attempt lookup stays there, once per source (including failed reads).
+// An invalid declaration remains in order: a preceding exact match still wins,
+// while reaching the invalid declaration preserves unavailable coverage.
+type DeclaredPolicies = std::collections::BTreeMap<String, Vec<Option<Vec<Vec<String>>>>>;
+
+#[derive(Default)]
+struct ProjectTestClasses {
+    defaults: Vec<Option<Vec<String>>>,
+    policies: Option<DeclaredPolicies>,
+    sources: std::collections::BTreeMap<String, Option<String>>,
+}
+
+impl ProjectTestClasses {
+    fn load(project: &Path) -> Self {
+        let defaults = crate::verification::toolchains::default_accept(project)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|entry| {
+                entry.split_once(':').and_then(|(_, command)| {
+                    crate::verification::toolchains::split_accept_command(command).ok()
+                })
+            })
+            .collect();
+        let policies = (|| -> Result<_> {
+            let db = super::read_only(&project.join(".state/state.db"))?;
+            let mut policies = DeclaredPolicies::new();
+            let mut statement = db.prepare("SELECT a.id,p.body FROM acceptance_policies p JOIN attempts a ON a.task_id=p.task_id WHERE p.contract_revision=(SELECT max(contract_revision) FROM task_contracts WHERE task_id=a.task_id)")?;
+            let rows = statement.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            for row in rows {
+                let (attempt, body) = row?;
+                let commands = crate::domain::verification_policy::ExecutionPolicy::parse(body.as_bytes())
+                    .ok().map(|policy| if policy.file_presence_only() { Vec::new() }
+                        else { policy.commands().map(<[String]>::to_vec).collect() });
+                policies.entry(attempt).or_default().push(commands);
+            }
+            Ok(policies)
+        })().ok();
+        Self {
+            defaults,
+            policies,
+            sources: Default::default(),
+        }
+    }
+
+    /// Exact declared argv matching only: no shell expansion or substring guesses.
+    fn classify(
+        &mut self,
+        tx: &Transaction,
+        key: &str,
+        command: &Value,
+    ) -> (bool, Option<&'static str>) {
+        let mut classify = || -> Option<bool> {
+            let argv = command
+                .as_array()?
+                .iter()
+                .map(Value::as_str)
+                .collect::<Option<Vec<_>>>()?;
+            if argv.is_empty() || argv.len() > 32 {
+                return None;
+            }
+            let attempt = self
+                .sources
+                .entry(key.to_owned())
+                .or_insert_with(|| {
+                    tx.query_row(
+                        "SELECT cwd_attempt FROM rollout_sources WHERE path_digest=?1",
+                        [key],
+                        |r| r.get(0),
+                    )
+                    .ok()
+                    .flatten()
+                })
+                .as_ref()?;
+            for declared in &self.defaults {
+                if declared
+                    .as_ref()?
+                    .iter()
+                    .map(String::as_str)
+                    .eq(argv.iter().copied())
+                {
+                    return Some(true);
+                }
+            }
+            let policies = self.policies.as_ref()?.get(attempt)?;
+            for commands in policies {
+                if commands
+                    .as_ref()?
+                    .iter()
+                    .any(|args| args.iter().map(String::as_str).eq(argv.iter().copied()))
+                {
+                    return Some(true);
+                }
+            }
+            Some(false)
+        };
+        match classify() {
+            Some(yes) => (true, yes.then_some("project_test")),
+            None => (false, None),
+        }
+    }
 }
