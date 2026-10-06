@@ -560,6 +560,9 @@ After a ticker restart the idle stretch starts again, so at most one extra notic
 can be delivered for the same stretch per restart. Stable inbox ids deduplicate delivery retries.
 Unavailable observations defer notices and do not rearm an already delivered one. Inspect the attempt and nudge, stop or relaunch as appropriate, then
 mark the inbox item done. An inbox acknowledgment alone does not reset a stretch.
+The agent-status sample runs only on a resting ticker pass (no canonical effect
+due), like attempt-token decoration, so it never lengthens the controller's
+effect cadence.
 
 Collection delivers `attempt.worker_question` for a bound Codex worker session's
 `request_user_input` or `request_user_input_async` call, once per native call.
