@@ -526,7 +526,26 @@ impl SqliteStore {
                 serde_json::json!({"state": state, "reason": reason, "submission_id": target.submission_id}).to_string()
             ],
         )?;
-        super::inbox::result_notice(&tx, if state == "accepted" { "verification.accepted" } else if state == "rejected" { "verification.rejected" } else { "verification.errored" }, &run_id, &target.task_id, &target.attempt_id, &format!("{} / {}", target.submission_id, result_id.as_deref().unwrap_or(&run_id)), reason.unwrap_or(""))?;
+        let details: serde_json::Value = metadata.as_deref().and_then(|m| serde_json::from_str(m).ok()).unwrap_or_default();
+        let policy: serde_json::Value = serde_json::from_str(&target.policy_body).unwrap_or_default();
+        let toolchain = details["toolchain"]["name"].as_str().or_else(|| policy["toolchain"].as_str()).map(|name| format!(", toolchain {name}")).unwrap_or_default();
+        let exit = exit_status.map(|code| code.to_string()).unwrap_or_else(|| "unavailable".into());
+        let mut feedback = format!("policy {}{toolchain}: {state}; reason {}; checks exited {exit}", target.policy_id, reason.unwrap_or("none"));
+        if reason == Some("tampered_tree") {
+            let changes = &details["tree_changes"];
+            let count = changes["count"].as_u64().unwrap_or(0);
+            let mut names = Vec::new();
+            if let Some(paths) = changes["paths"].as_array() {
+                for path in paths {
+                    let name = path["path"].as_str().unwrap_or("");
+                    if names.iter().map(String::len).sum::<usize>() + name.len() > 1200 { break; }
+                    names.push(name.to_owned());
+                }
+            }
+            let more = count.saturating_sub(names.len() as u64);
+            feedback.push_str(&format!("; checks exited {exit}, but the run modified {count} tracked/unignored files: {}{}", names.join(", "), if more > 0 { format!(" (+{more} more)") } else { String::new() }));
+        }
+        super::inbox::result_notice(&tx, if state == "accepted" { "verification.accepted" } else if state == "rejected" { "verification.rejected" } else { "verification.errored" }, &run_id, &target.task_id, &target.attempt_id, &format!("{} / {}", target.submission_id, result_id.as_deref().unwrap_or(&run_id)), &feedback)?;
         tx.commit()?;
         let returned = if state == "accepted" {
             draft.receipt

@@ -161,6 +161,7 @@ fn enter(parsed: &Args) -> i32 {
     eprintln!("hp-verify commit={seen_commit}");
     eprintln!("hp-verify tree={seen_tree}");
     if seen_commit != commit || seen_tree != tree {
+        clean_tree(&parsed.git, &parsed.checkout);
         return EXIT_TAMPER;
     }
     // Both the index and worktree must match HEAD before executing checks.
@@ -215,6 +216,7 @@ fn enter(parsed: &Args) -> i32 {
     // not proof that HEAD, the index, and tracked inputs still match the pin.
     if git_line(&parsed.git,&parsed.checkout,&["rev-parse","HEAD"]).as_deref()!=Some(commit.as_str())
         || git_line(&parsed.git,&parsed.checkout,&["rev-parse","HEAD^{tree}"]).as_deref()!=Some(tree.as_str()) {
+        clean_tree(&parsed.git, &parsed.checkout);
         return EXIT_TAMPER;
     }
     match clean_tree(&parsed.git,&parsed.checkout) {
@@ -248,34 +250,32 @@ fn git_line(git: &Path, checkout: &Path, args: &[&str]) -> Option<String> {
 }
 
 fn clean_tree(git: &Path, checkout: &Path) -> Option<bool> {
-    let index = Command::new(git)
-        .args(["-c","core.hooksPath=/dev/null","-C"]).arg(checkout)
-        .args(["diff","--cached","--quiet","--no-ext-diff","HEAD"]).status_gated().ok()?.code()?;
-    if index==1 {return Some(false);}
-    if index!=0 {return None;}
-    let diff = Command::new(git)
-        .args(["-c", "core.hooksPath=/dev/null", "-C"])
-        .arg(checkout)
-        .args(["diff", "--quiet", "--no-ext-diff", "HEAD"])
-        .status_gated()
-        .ok()?
-        .code()?;
-    if diff == 1 {
-        return Some(false);
+    // Porcelain -z preserves repository paths without Git's quoting rules.
+    let output = Command::new(git)
+        .args(["-c", "core.hooksPath=/dev/null", "-C"]).arg(checkout)
+        .args(["status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all", "--ignore-submodules=none"])
+        .output_gated().ok()?;
+    if !output.status.success() { return None; }
+    let records = output.stdout.split(|b| *b == 0).filter(|r| !r.is_empty());
+    let mut count = 0usize;
+    for record in records {
+        if record.len() < 4 { return None; }
+        let status = &record[..2];
+        let kind = if status == b"??" { "added-untracked" }
+            else if status.contains(&b'D') { "deleted" } else { "modified" };
+        count += 1;
+        if count <= 50 {
+            let path = String::from_utf8_lossy(&record[3..]);
+            // Escape protocol separators; report names only, never file contents.
+            let path = path.replace('%', "%25").replace('\n', "%0A").replace('\r', "%0D").replace('\t', "%09");
+            let mut end = path.len().min(300);
+            while !path.is_char_boundary(end) { end -= 1; }
+            if end < path.len() { eprintln!("hp-verify changed-truncated=true"); }
+            eprintln!("hp-verify changed={kind}\t{}", &path[..end]);
+        }
     }
-    if diff != 0 {
-        return None;
-    }
-    let untracked = Command::new(git)
-        .args(["-c", "core.hooksPath=/dev/null", "-C"])
-        .arg(checkout)
-        .args(["ls-files", "--others", "--exclude-standard"])
-        .output_gated()
-        .ok()?;
-    if !untracked.status.success() {
-        return None;
-    }
-    Some(untracked.stdout.is_empty())
+    eprintln!("hp-verify changed-count={count}");
+    Some(count == 0)
 }
 
 fn sha256(bytes: &[u8]) -> String {
