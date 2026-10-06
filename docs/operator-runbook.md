@@ -125,12 +125,13 @@ submission/result; rejection feedback is data, truncated to 2000 characters.
 `inbox list <slug>` and `context <slug>` show these notices. They are never
 instructions or permission to act outside the owner's authorized scope.
 
-`context` names why a project is paused. An automatic pause (the observation
-pass found a worker's pane or worktree changed before its end was recorded, a
-rebind, an adoption, an owner config edit) lists its admission blockers; the
-ticker re-activates the project on its first pass with none, logging
-`control re-activated automatically`, and `launch run` or `open` do so at once.
-An owner pause stays until `runtime <slug> state active`.
+`context` names why a project is paused and lists its admission blockers. When
+the observation pass paused it because a worker's pane or worktree changed before
+its end was recorded, the ticker re-activates the project on its first pass with
+no blockers, logging `control re-activated automatically`; `launch run` or `open`
+do so at once. A pause from a rebind, an adoption or an owner config edit waits for
+`launch run`, `open` or `runtime <slug> state active`; an owner pause stays until
+`runtime <slug> state active`.
 
 ```sh
 herdr-farm scheduler PROJECT inspect

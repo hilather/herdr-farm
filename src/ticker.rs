@@ -901,6 +901,10 @@ fn integrity_pass(ctx:&Ctx,log:&Log,slug:&str) {
     match check {Ok(check)=>{running.insert(project,check);},Err(error)=>log.error(&format!("{}: store integrity check: {error}",project.display()))}
 }
 fn drain_executor(root:&Path,log:&Log,memory:&mut Memory)->Result<()> {
+    // Work that completed since the last pass is settled and logged before the
+    // executor stops: a termination recorded in the last inter-pass gap must
+    // not lose its `termination recording succeeded` line to a stop request.
+    if let Some(queue)=memory.copy_jobs.as_mut() {for line in queue.drain() {log.error(&line);}}
     let result=memory.pr_reads.as_mut().expect("ticker shared executor").stop();
     publish_executor_metrics(root,log,memory);
     #[cfg(feature="state-store")]

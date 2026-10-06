@@ -512,6 +512,7 @@ mod finalization;
 
 pub(crate) mod ownership;
 pub use ownership::OwnershipChange;
+pub use control::WORKER_RESOURCES_CHANGED;
 
 mod scheduler;
 

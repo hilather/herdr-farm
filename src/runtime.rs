@@ -67,11 +67,13 @@ fn control_line(project:&Path,snapshot:&crate::domain::Snapshot,config:Option<&P
     let slug=project.file_name().map(|n|n.to_string_lossy().into_owned()).unwrap_or_default();
     let reasons=pause_reasons(project,config).unwrap_or_else(|error|vec![format!("blockers unavailable: {error:#}")]);
     if automatically_paused(snapshot) {
-        line.push_str("; automatic pause (a worker's pane or worktree changed before its end was recorded, a rebind, an adoption or a config edit)");
-        if reasons.is_empty() {
-            line.push_str(&format!("; nothing blocks admission: the ticker re-activates it on its next pass, or run `open {slug}`"));
+        let observed=snapshot.events.iter().rev().find(|e|matches!(e.kind.as_str(),"project.control_changed"|"project.reconciliation_invalidated"|"project.launch_run_paused"))
+            .is_some_and(|e|e.kind=="project.reconciliation_invalidated"&&e.payload["cause"].as_str()==Some(crate::store::WORKER_RESOURCES_CHANGED));
+        let blockers=if reasons.is_empty() {"nothing blocks admission".to_owned()} else {format!("blockers: {}",reasons.join(" | "))};
+        if observed {
+            line.push_str(&format!("; automatic pause (a worker's pane or worktree changed before its end was recorded); {blockers}; the ticker re-activates it on its first pass with no blockers (a worker's end is recorded by the ticker; a cancelled attempt ends when its worker is stopped), or run `open {slug}`"));
         } else {
-            line.push_str(&format!("; blockers: {}; the ticker re-activates it once these clear (a worker's end is recorded by the ticker; a cancelled attempt ends when its worker is stopped)",reasons.join(" | ")));
+            line.push_str(&format!("; automatic pause (a rebind, an adoption or an owner config edit); {blockers}; run `open {slug}` or `launch run` to re-activate once nothing blocks, or `runtime {slug} state active --expected-revision {} --expected-head {}`",c.revision,snapshot.head));
         }
     } else {
         line.push_str(&format!("; paused by the owner; resume with `runtime {slug} state active --expected-revision {} --expected-head {}`",c.revision,snapshot.head));
@@ -228,16 +230,18 @@ pub fn rebind(project:&Path,id:&str,expected_revision:u64,expected_head:u64,rout
 }
 
 
-/// Re-activate an automatically paused project once nothing blocks admission:
-/// the same gate `launch run` and `open` apply, without an operator command.
-/// Owner pauses and archived projects are never touched. `Ok(None)` means
-/// nothing was done (not automatically paused, still blocked, or moved by
-/// another writer); `Ok(Some)` carries the new control state.
+/// Re-activate a project paused by the observation pass (an owned worker's
+/// pane or worktree changed before its end was recorded) once nothing blocks
+/// admission: the same gate `launch run` and `open` apply, without an
+/// operator command. Owner pauses, archives and the invalidations of an
+/// adoption, a rebind or a config edit are never touched. `Ok(None)` means
+/// nothing was done (not such a pause, still blocked, or moved by another
+/// writer); `Ok(Some)` carries the new control state.
 pub fn reactivate_automatic_pause(project:&Path,config:&Path)->Result<Option<crate::domain::ControlChange>> {
     let digest=migration::config_reference(config)?.digest;
     let (control,report)={
         let mut db=migration::open_active_read_only(project)?;
-        let Some(control)=db.automatic_pause()? else {return Ok(None)};
+        let Some(control)=db.worker_resources_pause()? else {return Ok(None)};
         let report=db.admission_report(jiff::Timestamp::now().as_millisecond(),digest.as_deref())?;
         (control,report)
     };

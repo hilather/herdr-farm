@@ -1127,10 +1127,11 @@ pub fn sweep_servers(ctx: &Ctx, slug: &str) -> Vec<String> {
             continue;
         }
         // A launch in flight has a server before it has an attempt: a queued
-        // task, one with an active attempt, or one whose launch delivery is
-        // still pending keeps its server. Cancelled, finished and superseded
-        // tasks lose theirs as before.
-        let launching = snapshot.tasks.iter().any(|t| t.id.as_str() == task && (t.state == herdr_farm::domain::TaskState::Queued || t.active_attempt.is_some()))
+        // task or one whose launch delivery is still pending keeps its server.
+        // The task's active-attempt pointer can be stale after an end, so
+        // retention uses attempt state (above) and deliveries, never it.
+        // Cancelled, finished and superseded tasks lose theirs as before.
+        let launching = snapshot.tasks.iter().any(|t| t.id.as_str() == task && t.state == herdr_farm::domain::TaskState::Queued)
             || snapshot.operations.iter().any(|o| o.kind == "runtime.launch" && o.task.as_ref().is_some_and(|t| t.as_str() == task)
                 && snapshot.deliveries.iter().any(|d| d.operation == o.id && matches!(d.state, herdr_farm::operations::DeliveryState::Pending | herdr_farm::operations::DeliveryState::Claimed | herdr_farm::operations::DeliveryState::Ambiguous)));
         if launching { continue; }
