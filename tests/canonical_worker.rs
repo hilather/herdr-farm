@@ -700,6 +700,10 @@ fn main() {
 "#;
 
 fn editing_submission_lab(route: &str, policy: &str, verify: bool, integrate: bool) -> (Lab, AttemptId, PathBuf) {
+    editing_submission_lab_with(route, policy, verify, integrate, SUBMITTING_EDITING_AGENT)
+}
+/// As `editing_submission_lab`, with the worker built from `agent`.
+fn editing_submission_lab_with(route: &str, policy: &str, verify: bool, integrate: bool, agent: &str) -> (Lab, AttemptId, PathBuf) {
     let mut lab = Lab::new("unknown_usage='allow_with_warning'\n");
     if !integrate {
         lab.git(&["config", "user.name", "Repository worker"]);
@@ -709,7 +713,7 @@ fn editing_submission_lab(route: &str, policy: &str, verify: bool, integrate: bo
     // Reservation freezes the executable digest. Supply attempt-specific data
     // through a fixture file instead of rebuilding the worker afterward.
     let template_path = lab.path("submission-template.json");
-    lab.write_agent(SUBMITTING_EDITING_AGENT, &[("ROOT", lab.path("root").canonicalize().unwrap().display().to_string()), ("TEMPLATE_PATH", template_path.display().to_string())]);
+    lab.write_agent(agent, &[("ROOT", lab.path("root").canonicalize().unwrap().display().to_string()), ("TEMPLATE_PATH", template_path.display().to_string())]);
     let (_, attempt) = lab.reserve("Retained instructions");
     let worktree = lab.planned_worktree(&attempt);
     let repository = lab.repo.canonicalize().unwrap().display().to_string();
@@ -2979,4 +2983,274 @@ fn wall_budget_termination(contended: bool, change_definition: bool) {
     assert_eq!(notices.as_array().unwrap().iter().filter(|item| item["content"]["kind"] == "attempt.ended_without_submission").count(), 1, "{notices}");
     let log = fs::read_to_string(lab.path("root/.ticker.log")).unwrap();
     assert!(log.lines().any(|line| line.contains("termination recording succeeded") && line.contains(attempt.as_str())), "{log}");
+}
+
+// ---- Termination beside a long isolated check (TERM-RECORD-1, SILENT-DEATH-1) ----
+
+/// A git-protocol fixture on localhost whose acceptance policy's one check,
+/// `git ls-remote`, is held open until `release`, as a long test run would be;
+/// `started` is the number of checks that have connected. The sandbox root
+/// holds only `git`, so a blocking check must be a git command.
+struct HeldCheck { policy: String, started: std::sync::Arc<std::sync::atomic::AtomicUsize>, release: std::sync::Arc<std::sync::atomic::AtomicBool> }
+impl HeldCheck {
+    fn new() -> Self {
+        use std::{io::{Read, Write}, sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}}};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (started, release) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicBool::new(false)));
+        {
+            let (started, release) = (started.clone(), release.clone());
+            std::thread::spawn(move || for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                started.fetch_add(1, Ordering::SeqCst);
+                let release = release.clone();
+                std::thread::spawn(move || {
+                    let mut buffer = [0u8; 4096];
+                    let _ = stream.read(&mut buffer);
+                    while !release.load(Ordering::SeqCst) { std::thread::sleep(Duration::from_millis(10)); }
+                    let _ = stream.write_all(b"0000");
+                    let _ = stream.read(&mut buffer);
+                });
+            });
+        }
+        let policy = format!(r#"{{"version":1,"checks":["/usr/bin/git","ls-remote","git://127.0.0.1:{port}/fixture"]}}"#);
+        HeldCheck { policy, started, release }
+    }
+    fn started(&self) -> bool { self.started.load(std::sync::atomic::Ordering::SeqCst) >= 1 }
+    fn released(&self) -> bool { self.release.load(std::sync::atomic::Ordering::SeqCst) }
+    fn release(&self) { self.release.store(true, std::sync::atomic::Ordering::SeqCst); }
+}
+
+/// A child CLI command killed when dropped (a failed wait must not leave it behind).
+struct Background(Option<Child>);
+impl Background {
+    fn running(&mut self) -> bool { matches!(self.0.as_mut().unwrap().try_wait(), Ok(None)) }
+    /// Its output once it ends on its own.
+    fn finish(mut self) -> Output { self.0.take().unwrap().wait_with_output().unwrap() }
+}
+impl Drop for Background { fn drop(&mut self) { if let Some(child) = &mut self.0 { let _ = child.kill(); let _ = child.wait(); } } }
+
+/// Like `SUBMITTING_EDITING_AGENT`, but one submission, then the process
+/// exits (status 0) once the owner marker `die` appears in the worktree.
+const SUBMIT_THEN_EXIT_AGENT: &str = r#"
+use std::{fs, path::Path, process::Command, time::Duration};
+fn git(args: &[&str]) -> String {
+    let out = Command::new("/usr/bin/git").args(args).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8(out.stdout).unwrap().trim().to_owned()
+}
+fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--version") { println!("2.1.0 (Claude Code)"); return }
+    let output = std::path::PathBuf::from(std::env::var("HERDR_FARM_WORKER_OUTPUT").unwrap());
+    fs::write(output.join("report.md"), "Submitted, then exited\n").unwrap();
+    fs::write("work.txt", "worker change\n").unwrap();
+    git(&["add", "work.txt"]); git(&["commit", "-qm", "worker change"]);
+    let candidate = git(&["rev-parse", "HEAD"]);
+    let blob = git(&["rev-parse", "HEAD:work.txt"]);
+    let objects = git(&["rev-list", "--objects", "HEAD"]).lines().map(|line| {
+        let oid = line.split_whitespace().next().unwrap();
+        format!("{{\"oid\":\"{oid}\",\"relative_path\":\"{}/{}\"}}", &oid[..2], &oid[2..])
+    }).collect::<Vec<_>>().join(",");
+    let template = fs::read_to_string(TEMPLATE_PATH).unwrap();
+    let document = template.replace("CANDIDATE", &candidate).replace("BLOB", &blob)
+        .replace("\"OBJECTS\"", &format!("[{objects}]")).replace("KEY", "exit-0");
+    fs::write("submission.json", document).unwrap();
+    let mut submitted = false;
+    for _ in 0..200 {
+        let out = Command::new("herdr-farm").args(["--root", ROOT, "result", "demo", "submit", "--input-file", "submission.json"]).output().unwrap();
+        if out.status.success() { submitted = true; break }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(submitted);
+    fs::write("submitted-0", "ok").unwrap();
+    while !Path::new("die").exists() { std::thread::sleep(Duration::from_millis(50)); }
+    std::process::exit(0)
+}
+"#;
+
+/// A worker that edits its deliverable without committing or submitting and
+/// dies (status 1) once the owner marker `die` appears in the worktree.
+const EDIT_THEN_DIE_AGENT: &str = r#"
+use std::{fs, path::Path, time::Duration};
+fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--version") { println!("2.1.0 (Claude Code)"); return }
+    fs::write("work.txt", "worker change\n").unwrap();
+    while !Path::new("die").exists() { std::thread::sleep(Duration::from_millis(50)); }
+    std::process::exit(1)
+}
+"#;
+
+impl Lab {
+    /// `cli` started in the background with captured output.
+    fn spawn_cli(&self, args: &[&str]) -> Background {
+        Background(Some(Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!("support/time-scale.txt").trim()).env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin")
+            .args(["--root", self.path("root").to_str().unwrap()]).args(args).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap()))
+    }
+    /// Recorded verification runs, read without taking any lock.
+    fn verification_runs(&self) -> u64 {
+        let db = rusqlite::Connection::open_with_flags(self.project.join(".state/state.db"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX).unwrap();
+        db.busy_timeout(Duration::from_secs(5)).unwrap();
+        db.query_row("SELECT count(*) FROM verification_runs", [], |row| row.get(0)).unwrap()
+    }
+    /// Another attempt's submission to verify: the ended attempt `AUTHOR_ATTEMPT`
+    /// of task `authored`, whose owner-signed contract carries `policy` as
+    /// its one acceptance policy `clean`. Returns the submission id.
+    fn plant_foreign_submission(&self, policy: &str) -> String {
+        let head = self.head().to_string();
+        self.ok(&["task", "demo", "add", "authored", "--title", AUTHOR_TITLE, "--expected-head", &head]);
+        let base = self.git(&["rev-parse", "HEAD"]);
+        self.git(&["checkout", "-qb", "author"]);
+        fs::write(self.repo.join("lib.rs"), "pub fn answer() -> u32 { 42 }\n").unwrap();
+        self.git(&["add", "."]);
+        self.git(&["commit", "-qm", "candidate"]);
+        let candidate = self.git(&["rev-parse", "HEAD"]);
+        self.git(&["checkout", "-q", "-"]);
+        let repository = self.repo.canonicalize().unwrap().display().to_string();
+        let store = self.project.join(".state/state.db").canonicalize().unwrap().display().to_string();
+        let mut document = serde_json::to_vec_pretty(&json!({
+            "version": 3, "outputs": [{"path": "lib.rs", "kind": "git_file"}], "scope": {"paths": [{"path": "lib.rs", "access": "write"}]},
+            "project_store": store, "expected_head": self.head(), "task_id": "authored", "contract_revision": 1, "deliverable": "answer", "non_goals": "none",
+            "acceptance_policies": [{"id": "clean", "text": policy}], "repository": repository, "base_oid": base,
+            "object_format": "sha256", "dependencies": [], "capability_flags": [], "profile_kind": "codex", "retry_class": "none", "result_schema_id": "result-v1",
+            "route": "verify_only", "authority": authority::policy_reference(&self.project).unwrap()})).unwrap();
+        document.push(b'\n');
+        let contract = self.path("authored-contract.json");
+        fs::write(&contract, &document).unwrap();
+        assert!(Command::new("/usr/bin/ssh-keygen").args(["-Y", "sign", "-f"]).arg(&self.key).args(["-n", authority::CONTRACT_SIGNATURE_NAMESPACE]).arg(&contract).output().unwrap().status.success());
+        let installed = self.ok(&["task", "demo", "contract", "put", "--input-file", contract.to_str().unwrap(), "--signature", self.path("authored-contract.json.sig").to_str().unwrap()]);
+        let db = rusqlite::Connection::open(self.project.join(".state/state.db")).unwrap();
+        db.execute("INSERT INTO attempts(id,task_id,revision,state,snapshot,reservation,termination_observed) VALUES(?1,'authored',1,'completed',NULL,?1,1)", [AUTHOR_ATTEMPT]).unwrap();
+        drop(db);
+        let objects: Vec<Value> = self.git(&["rev-list", "--objects", "--all"]).lines()
+            .map(|line| { let oid = line.split_whitespace().next().unwrap(); json!({"oid": oid, "relative_path": format!("{}/{}", &oid[..2], &oid[2..])}) }).collect();
+        let result = self.path("authored-result.json");
+        fs::write(&result, json!({"idempotency_key": "authored-key", "task_id": "authored", "contract_revision": 1, "contract_digest": installed["digest"],
+            "attempt_id": AUTHOR_ATTEMPT, "repository": repository, "base_oid": base, "candidate_oid": candidate, "object_format": "sha256",
+            "artifact_manifest": [{"path": "lib.rs", "oid": candidate}], "claimed_checks": [], "objects": objects}).to_string()).unwrap();
+        self.ok(&["result", "demo", "submit", "--input-file", result.to_str().unwrap()])["submission_id"].as_str().unwrap().to_owned()
+    }
+    /// The ticker log lines about `attempt` containing `text`.
+    fn log_lines(&self, attempt: &AttemptId, text: &str) -> usize {
+        fs::read_to_string(self.path("root/.ticker.log")).unwrap_or_default().lines().filter(|line| line.contains(attempt.as_str()) && line.contains(text)).count()
+    }
+}
+
+/// A worker's process ends while an isolated check of another attempt's
+/// submission runs for minutes, as a Godot test run does. The check holds
+/// only the check lock, so the ticker takes the exclusive root beside it and
+/// records the termination within its usual retry cadence, with no cancel,
+/// no `launch stop --force` and no wait for the check to end.
+/// With `submits`, the worker submitted first and then exited (TERM-RECORD-1);
+/// otherwise it edited without committing and died (SILENT-DEATH-1): the
+/// `attempt.ended_without_submission` notice lands and the uncommitted edit
+/// is preserved under `.state/worktree-file-snapshots`.
+fn termination_beside_a_foreign_check(submits: bool) {
+    let held = HeldCheck::new();
+    let policy = held.policy.clone();
+    let (mut lab, attempt, worktree) = if submits { editing_submission_lab_with("verify_only", WORK_POLICY, false, false, SUBMIT_THEN_EXIT_AGENT) } else {
+        let mut lab = Lab::new("unknown_usage='allow_with_warning'\n");
+        lab.write_agent(EDIT_THEN_DIE_AGENT, &[]);
+        let (_, attempt) = lab.reserve("Retained instructions");
+        let worktree = lab.planned_worktree(&attempt);
+        (lab, attempt, worktree)
+    };
+    let foreign = lab.plant_foreign_submission(&policy);
+    let policy_file = lab.path("blocking-policy.json");
+    fs::write(&policy_file, &policy).unwrap();
+    lab.serve();
+    let mut ticker = lab.spawn();
+    let edited = || fs::read_to_string(worktree.join("work.txt")).is_ok_and(|t| t == "worker change\n");
+    if submits {
+        lab.wait_for(&mut ticker, "the worker to run and submit", &attempt, 120, &|| worktree.join("submitted-0").exists() && lab.attempt(&attempt).state == AttemptState::Running);
+        lab.wait_for(&mut ticker, "the submission notice", &attempt, 60, &|| lab.state().inbox.iter().any(|i| i.content.kind == "result.submitted"));
+    } else {
+        lab.wait_for(&mut ticker, "the worker to run and edit work.txt", &attempt, 120, &|| edited() && lab.attempt(&attempt).state == AttemptState::Running);
+    }
+    let live = lab.attempt(&attempt);
+    assert!(live.state == AttemptState::Running && !live.termination_observed, "{live:?}\n{}", fs::read_to_string(lab.path("root/.ticker.log")).unwrap_or_default());
+    // The operator check of the other attempt's submission starts and stays running.
+    let mut check = lab.spawn_cli(&["result", "demo", "verify", &foreign, "--policy-id", "clean", "--policy-file", policy_file.to_str().unwrap(),
+        "--idempotency-key", "operator-foreign", "--work-dir", lab.path("verify-work").to_str().unwrap(), "--timeout-seconds", "300"]);
+    lab.wait_for(&mut ticker, "the foreign check to start", &attempt, 60, &|| held.started());
+    assert_eq!(lab.verification_runs(), 0);
+    // The worker's process ends under the running check.
+    fs::write(worktree.join("die"), b"").unwrap();
+    lab.wait_for(&mut ticker, "termination recorded beside the running check", &attempt, 60, &|| lab.attempt(&attempt).termination_observed);
+    assert!(!held.released() && lab.verification_runs() == 0, "the check had already ended");
+    let ended = lab.attempt(&attempt);
+    assert!(!ended.retains_capacity(), "{ended:?}");
+    let events = lab.events("runtime.worker_terminated");
+    assert_eq!((events.len(), &events[0].payload["cause"]), (1, &json!("process_exit")));
+    assert!(lab.log_lines(&attempt, "termination recording succeeded") >= 1);
+    assert_ne!(ended.state, AttemptState::Cancelled);
+    let notices = lab.ok(&["inbox", "list", "demo"]);
+    let ended_without_submission = notices.as_array().unwrap().iter().filter(|item| item["content"]["kind"] == "attempt.ended_without_submission").count();
+    if submits {
+        assert_eq!(ended_without_submission, 0, "{notices}");
+        assert_eq!(ended.state, AttemptState::Failed, "a process exit before a verdict leaves the attempt failed, the submission intact");
+    } else {
+        assert_eq!(ended_without_submission, 1, "{notices}");
+        // The uncommitted edit is preserved with the termination.
+        let snapshots = lab.project.join(".state/worktree-file-snapshots").join(attempt.as_str());
+        let digests: Vec<PathBuf> = fs::read_dir(&snapshots).unwrap().map(|e| e.unwrap().path()).collect();
+        assert!(!digests.is_empty(), "no checkout snapshot under {}", snapshots.display());
+        let preserved = digests.iter().any(|dir| fs::read_to_string(dir.join("manifest.json")).is_ok_and(|m| m.contains("work.txt"))
+            && fs::read_dir(dir).unwrap().any(|e| fs::read(e.unwrap().path()).is_ok_and(|b| b == b"worker change\n")));
+        assert!(preserved, "the uncommitted work.txt is not in any snapshot of {}", snapshots.display());
+        assert!(!events[0].payload["repository_snapshots"].as_array().unwrap().is_empty(), "{}", events[0].payload);
+    }
+    // Only then does the check end, recording its verdict on an unchanged target.
+    assert!(check.running(), "the foreign check ended early");
+    held.release();
+    let out = check.finish();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let verdict: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(verdict["state"], "accepted", "{verdict}");
+    lab.stop(ticker);
+}
+
+#[test]
+fn a_worker_that_exits_after_submitting_is_recorded_terminated_while_another_attempts_check_runs() {
+    termination_beside_a_foreign_check(true);
+}
+
+#[test]
+fn a_worker_that_dies_without_submitting_is_noticed_and_preserved_while_another_attempts_check_runs() {
+    termination_beside_a_foreign_check(false);
+}
+
+/// A worker exits right after submitting, while the automatic verification
+/// of its own submission is still running. Recording the termination at once
+/// would move the task revision the check is fenced on and the check would
+/// end without a verdict, so the attempt stays open — without contending
+/// for the root — until the verdict lands; then it ends on its own.
+#[test]
+fn a_worker_that_exits_during_its_own_verification_ends_after_the_verdict_without_contention() {
+    let held = HeldCheck::new();
+    let (mut lab, attempt, worktree) = editing_submission_lab_with("verify_only", &held.policy, true, false, SUBMIT_THEN_EXIT_AGENT);
+    lab.serve();
+    let mut ticker = lab.spawn();
+    lab.wait_for(&mut ticker, "the submission's own check to start", &attempt, 120, &|| held.started());
+    fs::write(worktree.join("die"), b"").unwrap();
+    // Several termination observations pass while the check runs: none records, none contends.
+    let began = Instant::now();
+    while began.elapsed() < Duration::from_secs(4) {
+        assert!(ticker.0.try_wait().unwrap().is_none(), "ticker exited");
+        assert!(!lab.attempt(&attempt).termination_observed, "terminated under its own running check");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert_eq!(lab.log_lines(&attempt, "termination recording deferred by contention"), 0, "{}", fs::read_to_string(lab.path("root/.ticker.log")).unwrap_or_default());
+    held.release();
+    lab.wait_for(&mut ticker, "the verdict", &attempt, 120, &|| lab.state().inbox.iter().any(|i| i.content.kind == "verification.accepted"));
+    lab.wait_for(&mut ticker, "termination after the verdict", &attempt, 60, &|| lab.attempt(&attempt).termination_observed);
+    lab.stop(ticker);
+    let kinds: Vec<String> = lab.state().inbox.iter().map(|i| i.content.kind.clone()).collect();
+    assert!(!kinds.iter().any(|k| k == "verification.errored"), "{kinds:?}");
+    assert_eq!(lab.verification_runs(), 1);
+    // The verdict may have requested completion before the exit was recorded.
+    let events = lab.events("runtime.worker_terminated");
+    assert_eq!(events.len(), 1);
+    assert!(matches!(events[0].payload["cause"].as_str(), Some("process_exit" | "completion")), "{}", events[0].payload);
+    assert_eq!(lab.log_lines(&attempt, "termination recording deferred by contention"), 0);
+    assert!(lab.log_lines(&attempt, "termination recording succeeded") >= 1);
 }

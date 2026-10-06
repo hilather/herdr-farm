@@ -656,6 +656,13 @@ pub fn reconcile_termination(
         SupervisorObservation::recover_exited(&identity)?,
         "worker termination is still unresolved"
     );
+    // An exited worker whose submission is still being verified or integrated
+    // keeps its attempt open until that verdict is recorded: the termination
+    // moves the task revision the running check is fenced on. The next
+    // observation records it; the job lease bounds the wait.
+    if !cancelled && !state.completion && state.verdict_pending {
+        return Ok(None);
+    }
     // Do not require the old control epoch or grant to be renewed to acknowledge
     // an existing stop. The atomic store service checks exact retained ownership.
     let host_reboot=SupervisorObservation::observe_reboot(&identity)?;

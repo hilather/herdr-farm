@@ -1053,3 +1053,13 @@ hints from the store and the exact retained supervisor identities. The successfu
 transaction records quiescence, preservation, terminal attempt state, capacity
 release and the usual coordinator ended notice atomically, making replay idempotent.
 The ticker logs project and attempt on contention deferral and successful recording.
+
+A long isolated verification or integration check (minutes for a Godot test run)
+holds the shared check lock `.check.lock`, not the root barrier, so termination,
+launch and brief stages take the exclusive root beside it instead of deferring
+until the check ends (TERM-RECORD-1). Root maintenance and cleanup still refuse to
+run beside a check. One ordering rule remains: an exited worker whose own
+submission is still being verified or integrated keeps its attempt open until that
+verdict is recorded, because the termination moves the task revision the running
+check is fenced on; the next observation after the verdict records it, with no
+contention and no cancel.

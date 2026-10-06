@@ -257,8 +257,12 @@ Recorded here rather than folded into the card that found them.
 - **The verifier holds project ownership for the whole check** — done
   (this PR). An automatic verification job now holds exclusive project
   ownership only to load and fence its inputs, claim, prepare scratch and
-  record. The isolated check runs under a `CheckGuard`: the shared root (so
-  migration and cleanup are still refused) plus a `scratch` resource fence on
+  record. The isolated check runs under a `CheckGuard`: the shared check
+  lock `.check.lock` beside the root (so migration and cleanup, which take
+  it exclusively after the root, are still refused, while the staged worker
+  effects — launch, brief, termination — take the root beside a running
+  check instead of waiting minutes for it; TERM-RECORD-1) plus a `scratch`
+  resource fence on
   the job's scratch directory, which observation also takes before removing
   it. Afterwards the job regains ownership (retrying until its deadline),
   revalidates the claim (lease and task revision) and reloads the target; if

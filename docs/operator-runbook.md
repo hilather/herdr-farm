@@ -584,6 +584,11 @@ execution barrier, `.ticker.log` names the project and attempt with
 capacity until the ticker proves both recorded supervisor processes ended and
 commits preservation and termination. Later passes retry; a ticker restart also
 reconstructs this work. No fresh launch approval is needed to record an existing end.
+A running verification or integration check does not hold that barrier, so an
+exited worker is recorded within a few retries while another attempt's check runs
+for minutes; it is not necessary to cancel the attempt or stop its server. An exited
+worker whose own submission is still being checked stays Running until the verdict
+lands, then ends on its own.
 
 Successful recording logs `termination recording succeeded`, changes an unrequested
 attempt to Failed, blocks its task and releases capacity. Schema 72 uses the
