@@ -237,7 +237,16 @@ fn session_classifier_collects_only_class_and_observed_exit_status() {
     ] {
         text.push_str(&(json!({"timestamp":timestamp,"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","id":id,"command":command,"exit_code":exit,"stdout":"PRIVATE OUTPUT"}}}).to_string()+"\n"));
     }
+    // One public collect classifies a large same-attempt rollout, including
+    // exact-match misses; declarations and raw commands never enter the sidecar.
+    for index in 0..256 {
+        let command = if index % 2 == 0 { json!(["/bin/true"]) }
+            else { json!(["/bin/true", "PRIVATE COMMAND"]) };
+        text.push_str(&(json!({"timestamp":timestamp,"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","id":format!("bulk-{index:03}"),"command":command}}}).to_string()+"\n"));
+    }
     fs::write(&path, &text).unwrap();
+    f.cli("collect");
+    // Repeated collection preserves all classifications and native identities.
     f.cli("collect");
     assert_eq!(metric(&f, "M101")["value"], "0/1");
     text.push_str(&(json!({"timestamp":timestamp,"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","id":"test-result","command":["/bin/true"],"exit_code":1}}}).to_string()+"\n"));
@@ -252,14 +261,10 @@ fn session_classifier_collects_only_class_and_observed_exit_status() {
         .unwrap()
         .collect::<rusqlite::Result<_>>()
         .unwrap();
-    assert_eq!(
-        rows,
-        vec![
-            (None, 1),
-            (Some("project_test".into()), 1),
-            (Some("project_test".into()), 1)
-        ]
-    );
+    let mut expected: Vec<_> = (0..256).map(|index|
+        ((index % 2 == 0).then(|| "project_test".into()), 1)).collect();
+    expected.extend([(None, 1), (Some("project_test".into()), 1), (Some("project_test".into()), 1)]);
+    assert_eq!(rows, expected);
     for file in [
         f.project.join(".state/telemetry.db"),
         f.project.join(".state/telemetry.db-wal"),
@@ -283,7 +288,7 @@ fn session_classifier_collects_only_class_and_observed_exit_status() {
     .unwrap();
     f.cli("collect");
     assert_eq!(metric(&f, "M101")["value"], "1/1");
-    assert_eq!(f.count("codex_exec_classes"), 3);
+    assert_eq!(f.count("codex_exec_classes"), 259);
     db.execute("DROP TABLE codex_exec_items", []).unwrap();
     assert_eq!(
         metric(&f, "M101")["reason"],

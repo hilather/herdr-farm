@@ -2941,7 +2941,10 @@ retain unavailable coverage. Readers of older physical schemas remain available
 with precise missing-input reasons; they never query absent exec tables.
 
 The class table follows native-session retention, forget-session deletion and
-full telemetry backup. First physical installation replays retained Codex
-rollouts; logical stream rollback with the class table still installed preserves
+full telemetry backup. The first collect after upgrading to ingest 0017 replays
+all retained Codex sessions once. Owner defaults and canonical acceptance policies
+are read once per collect before rollout write transactions; parsed declarations
+are reused for every command item of an attempt. First physical installation
+replays retained Codex rollouts; logical stream rollback with the class table still installed preserves
 existing offsets and coverage gaps. Classification dedupes by session/item ID.
 Metric definitions and windows are in contracts-analytics.md section 13.
