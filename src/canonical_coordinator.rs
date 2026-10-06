@@ -869,6 +869,7 @@ Record explicit owner decisions after adoption: {p} memory {slug} record --title
 {p} result {slug} submit-captured ATTEMPT\n\
 {p} result {slug} show\n\
 {p} result {slug} jobs\n\
+Wrap host checks so they are recorded (not acceptance evidence): {p} result {slug} host-check --task TASK --name NAME --log FILE -- ./tools/run-tests.sh\n\
 {p} memory {slug} list\n\
 {p} memory {slug} show CANDIDATE\n\
 {p} memory {slug} approve CANDIDATE --reason REASON\n\

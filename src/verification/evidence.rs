@@ -376,7 +376,7 @@ fn entities(mut text: &str) -> Result<String, &'static str> {
 
 /// Samples inside the existing verifier namespace; project slots are held by
 /// the parent and unavailable in the private root.
-pub(super) fn repetition_load() -> Value {
+pub fn repetition_load() -> Value {
     let average = read_small(Path::new("/proc/loadavg"))
         .and_then(|s| s.split_whitespace().next().and_then(number));
     json!({"sampled_unix_ms": jiff::Timestamp::now().as_millisecond(),

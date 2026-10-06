@@ -76,6 +76,7 @@ herdr-farm launch <slug> view --task TASK
 herdr-farm result <slug> submit-captured ATTEMPT
 herdr-farm result <slug> show
 herdr-farm result <slug> jobs
+herdr-farm result <slug> host-check --task TASK --name NAME --log FILE -- ./tools/run-tests.sh
 herdr-farm result <slug> verify SUBMISSION --policy-id POLICY --policy-file /absolute/policy.json --idempotency-key KEY --work-dir /absolute/new-scratch
 herdr-farm result <slug> integrate RESULT --repository /absolute/repo --idempotency-key KEY --work-dir /absolute/new-scratch
 herdr-farm operations <slug> inspect
@@ -358,3 +359,5 @@ stop or relaunch as appropriate. `attempt.worker_question` names a worker's
 user-input tool call, never its private question text. Isolated workers get no
 owner answers: direct them to record assumptions in their report. Handle these
 advisories and mark the inbox items done; neither notice proves termination.
+
+Wrap coordinator host checks with `result PROJECT host-check --task TASK --name NAME --log FILE -- ./tools/run-tests.sh` (or the project script) so they are recorded. This runs with your environment and privileges on the host: it is not a sandbox or acceptance evidence.

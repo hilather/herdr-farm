@@ -1138,6 +1138,27 @@ impl SqliteStore {
         Ok(rows)
     }
 
+    /// One read snapshot for observational host-check linkage. No evidence or
+    /// canonical mutation is created, and the transaction ends before execution.
+    pub(crate) fn host_check_binding(&mut self, task: &str, submission: Option<&str>) -> Result<serde_json::Value> {
+        let tx = self.connection.transaction()?;
+        schema26(&tx)?;
+        let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?1)", [task], |r| r.get(0))?;
+        if !exists { return Err(invalid(&format!("unknown task {task}"))); }
+        let path = store_path(&tx)?;
+        let rows = tx.prepare("SELECT submission_id,attempt_id FROM result_submissions WHERE project_store=?1 AND task_id=?2 AND (?3 IS NULL OR submission_id=?3) AND (?3 IS NOT NULL OR created_unix_ms=(SELECT max(created_unix_ms) FROM result_submissions WHERE project_store=?1 AND task_id=?2))")?
+            .query_map(params![path.to_string_lossy(),task,submission], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if submission.is_some() && rows.len()!=1 { return Err(invalid(&format!("submission does not uniquely identify a result for task {task}"))); }
+        let binding = if rows.len()==1 {
+            serde_json::json!({"submission_id":rows[0].0,"attempt_id":rows[0].1,"submission_reason":null})
+        } else {
+            serde_json::json!({"submission_id":null,"attempt_id":null,"submission_reason":if rows.is_empty(){"no_submission"}else{"ambiguous_submissions"}})
+        };
+        tx.commit()?;
+        Ok(binding)
+    }
+
     pub fn show_results(&mut self, id: Option<&str>) -> Result<Vec<ResultView>> {
         let path = store_path(&self.connection)?;
         let tx = self.connection.transaction()?;

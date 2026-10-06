@@ -868,6 +868,9 @@ enum WaitCommand {
 #[cfg(feature="state-store")]
 #[derive(Subcommand)]
 enum ResultCommand {
+    /// Record what the coordinator checked on the host, with caller environment and privileges. NOT a sandbox or acceptance evidence.
+    #[cfg(target_os="linux")]
+    HostCheck(herdr_farm::telemetry::accounting::host_checks::Args),
     /// Configure an existing, unchecked-out local integration branch (immutable target).
     #[cfg(target_os="linux")]
     ConfigureIntegration { #[arg(long)] repository: PathBuf, #[arg(long)] reference: String },
@@ -968,6 +971,8 @@ enum OperationsCommand { Inspect,
 #[cfg(feature="state-store")]
 #[derive(Subcommand)]
 enum TelemetryCommand {
+    /// Coordinator host checks and per-task totals; observational, never acceptance evidence.
+    HostChecks { #[arg(long)] task: Option<String>, #[arg(long)] json: bool },
     /// Authenticated loopback OTLP/HTTP JSON receiver (explicit opt-in).
     Otlp { #[command(subcommand)] command: herdr_farm::telemetry::otlp::Command },
     /// One outcome record per canonical attempt (lifecycle, result, verification, integration)
@@ -1446,6 +1451,17 @@ pub fn run(#[cfg(feature="state-store")] capture: &mut crate::cli_invocation::Ca
             }Ok(())
         },
         #[cfg(feature="state-store")]
+        Command::Telemetry{slug,command:TelemetryCommand::HostChecks{task,json}}=>{
+            project::validate_slug(&slug)?;
+            let report=herdr_farm::telemetry::accounting::host_checks::read(&ctx.root.join(&slug),task.as_deref())?;
+            if json { println!("{}",serde_json::to_string_pretty(&report)?); }
+            else {
+                for run in report["runs"].as_array().unwrap() { println!("{} {} {} {}",run["run_id"].as_str().unwrap_or(""),run["task"].as_str().unwrap_or(""),run["name"].as_str().unwrap_or(""),run["outcome"].as_str().unwrap_or("")); }
+                println!("Per-task totals: {}",report["tasks"]);
+            }
+            Ok(())
+        },
+        #[cfg(feature="state-store")]
         Command::Telemetry{slug,command:TelemetryCommand::Attempts{json}}=>{
             project::validate_slug(&slug)?;
             let report=herdr_farm::telemetry::outcome::attempts(&ctx.root.join(slug))?;
@@ -1557,10 +1573,12 @@ pub fn run(#[cfg(feature="state-store")] capture: &mut crate::cli_invocation::Ca
             use herdr_farm::telemetry::{codex,sidecar};
             let mut report=serde_json::json!({});
             if let TelemetryCommand::Collect=command {
+                herdr_farm::telemetry::accounting::host_checks::ingest(&dir);
                 let collected=codex::collect(&dir,codex::Budget::CLI,true)?;
                 report["collected"]=serde_json::to_value(collected)?;
             }
             let usage=sidecar::report(&dir)?;
+            report["host_checks"]=herdr_farm::telemetry::accounting::host_checks::read(&dir,None)?;
             report["attempts"]=usage["attempts"].clone();report["sessions"]=usage["sessions"].clone();
             if let TelemetryCommand::Usage{json:false}=command {print!("{}",sidecar::text(&report));} else {println!("{}",serde_json::to_string_pretty(&report)?);}
             Ok(())
@@ -1642,6 +1660,13 @@ pub fn run(#[cfg(feature="state-store")] capture: &mut crate::cli_invocation::Ca
             project::validate_slug(&slug)?;
             let dir=ctx.root.join(&slug);
             match command {
+                #[cfg(target_os="linux")]
+                ResultCommand::HostCheck(args) => {
+                    let (caller, trust) = capture.caller();
+                    let code = herdr_farm::telemetry::accounting::host_checks::run(&dir,args,caller,trust)?;
+                    capture.finish(if code==0 {"ok"} else {"error"},code);
+                    std::process::exit(code);
+                },
                 #[cfg(target_os="linux")]
                 ResultCommand::ToolchainPolicy{toolchain,checks}=>println!("{}",herdr_farm::verification::toolchains::policy(&dir,&toolchain,checks)?),
                 #[cfg(target_os="linux")]

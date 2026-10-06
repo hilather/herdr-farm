@@ -971,3 +971,13 @@ and [accounting](contracts-accounting.md#met-launch-1-metadata-projections).
 New tables are classified in telemetry maintenance and included in full
 sidecar backups. No canonical schema change. Existing verifier metadata
 retains counts when a sidecar was absent at verification time.
+
+### HOST-RUNS-1 accounting migration
+
+Accounting stream **v26**, `migrations/telemetry/accounting/0026_host_checks.sql`,
+adds `host_checks` and its task/time index. Canonical schema is unchanged.
+See [contracts-accounting.md](contracts-accounting.md#coordinator-host-checks).
+The table is source-of-truth metadata in the `sidecar.cli_invocations` retention
+class (90 days, host age from `started_unix_ms`), included in full sidecar
+backups and restore tombstones. External log contents are excluded. Pending
+project-local JSONL spools must be replayed before backup to include their data.

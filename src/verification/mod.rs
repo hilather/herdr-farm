@@ -5,6 +5,7 @@
 //! ```
 mod checkout;
 mod evidence;
+pub use evidence::repetition_load as host_load;
 mod manifest;
 pub mod toolchains;
 mod setup;

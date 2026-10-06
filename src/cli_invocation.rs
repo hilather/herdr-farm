@@ -57,6 +57,10 @@ pub struct Capture {
 }
 
 impl Capture {
+    pub fn caller(&self) -> (&str, &str) {
+        self.row.as_ref().map_or(("operator", "local"), |r| (r.caller.as_str(), r.trust.as_str()))
+    }
+
     pub fn start() -> Self {
         let started = Instant::now();
         // Disable clap's early exits only in this metadata projection. Its
