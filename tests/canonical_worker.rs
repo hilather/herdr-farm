@@ -2054,6 +2054,57 @@ fn a_worker_branch_reaching_a_corrupt_quarantined_object_is_refused() {
     lab.git(&["fsck", "--strict", "--no-dangling"]);
 }
 
+/// The rendered prefix also works before dispatch, using a real sealed attempt.
+#[test]
+fn rendered_memory_commands_read_the_reserved_attempt() {
+    let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+    let (_, attempt) = lab.reserve("Retained instructions");
+    let brief = lab.ok(&["memory", "demo", "attempt-brief", "--attempt", attempt.as_str()]);
+    let text = brief["text"].as_str().unwrap();
+    let card = text.split("## Worker commands").nth(1).unwrap().split("```sh\n").nth(1).unwrap().split("```").next().unwrap();
+    let setup = card.split("$M attempt-brief").next().unwrap();
+    drop(herdr_farm::telemetry::sidecar::open(&lab.project, true).unwrap());
+    herdr_farm::submission_spool::prepare(&lab.project, &attempt).unwrap();
+    let spool = lab.project.join(".state/spool").join(attempt.as_str());
+    let script = format!("{setup}\nset -e\n$M attempt-brief --attempt $A\n$M attempt-input --attempt $A\n$M receipts --attempt $A\nif $M attempt-input --attempt; then exit 42; fi\n");
+    let out = Command::new("/bin/bash").env_clear()
+        .env("HERDR_FARM_TEST_TIME_SCALE", include_str!("support/time-scale.txt").trim())
+        .env("HOME", lab.home.path())
+        .env("HERDR_FARM_SUBMISSION_SPOOL", &spool)
+        .env("HERDR_FARM_WORKER_OUTPUT", lab.project.join(".state/worker-output").join(attempt.as_str()))
+        .env("PATH", format!("{}:/usr/bin:/bin", std::path::Path::new(BIN).parent().unwrap().display()))
+        .current_dir(&lab.repo).args(["-c", &script]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let values = serde_json::Deserializer::from_slice(&out.stdout).into_iter::<Value>()
+        .collect::<Result<Vec<_>, _>>().unwrap();
+    assert_eq!(values.len(), 3);
+    assert_eq!(values[0], brief);
+    assert_eq!(values[1]["attempt_id"], attempt.as_str());
+    assert!(values[1]["text"].as_str().unwrap().contains("Retained instructions"));
+    assert!(values[2].is_array());
+    // Reproduce the former card with the same valid attempt: quotes inside a
+    // variable survive word splitting and become part of the root argument.
+    let old_prefix = format!("M=\"herdr-farm --root '{}' memory demo\"; A={}; $M attempt-brief --attempt $A",
+        lab.path("root").display(), attempt.as_str());
+    let old = Command::new("/bin/bash").env_clear()
+        .env("HERDR_FARM_TEST_TIME_SCALE", include_str!("support/time-scale.txt").trim())
+        .env("HOME", lab.home.path()).env("HERDR_FARM_SUBMISSION_SPOOL", &spool)
+        .env("PATH", format!("{}:/usr/bin:/bin", std::path::Path::new(BIN).parent().unwrap().display()))
+        .current_dir(&lab.repo).args(["-c", &old_prefix]).output().unwrap();
+    assert!(!old.status.success());
+    assert!(String::from_utf8_lossy(&old.stderr).contains("uses legacy-markdown memory"),
+        "{}", String::from_utf8_lossy(&old.stderr));
+    herdr_farm::submission_spool::ingest_with_cli_paths(&lab.project,
+        &["memory attempt-brief".into(), "memory attempt-input".into(), "memory receipts".into()]).unwrap();
+    let sidecar = rusqlite::Connection::open(herdr_farm::telemetry::sidecar::path(&lab.project)).unwrap();
+    let failures:i64 = sidecar.query_row("SELECT count(*) FROM cli_invocations WHERE command_path='memory attempt-input' AND caller='worker' AND trust='worker_reported' AND error_class='usage' AND outcome='usage_error'", [], |r| r.get(0)).unwrap();
+    assert_eq!(failures, 1);
+    let missing:i64 = sidecar.query_row("SELECT count(*) FROM cli_invocations WHERE command_path='memory attempt-brief' AND caller='worker' AND trust='worker_reported' AND error_class='precondition' AND outcome='error'", [], |r| r.get(0)).unwrap();
+    assert_eq!(missing, 1);
+    let successes:i64 = sidecar.query_row("SELECT count(*) FROM cli_invocations WHERE caller='worker' AND trust='worker_reported' AND outcome='ok' AND error_class IS NULL", [], |r| r.get(0)).unwrap();
+    assert_eq!(successes, 3);
+}
+
 /// Probe for the submission spool: reports which `.state` paths it can
 /// write, copies the host's planted requests (and links) into its own spool
 /// as `plan.txt` lists them, then runs `result submit` twice.
@@ -2072,6 +2123,9 @@ fn main() {
         ("own-output", format!("{STATE}/worker-output/{own}/report.md")), ("own-spool", format!("{spool}/.probe"))] {
         report += &format!("write {label} {}\n", create(&path));
     }
+    while !Path::new("memory-card.sh").exists() { std::thread::sleep(Duration::from_millis(50)); }
+    let out = Command::new("/bin/bash").env("HERDR_FARM_TEST_TIME_SCALE", TEST_TIME_SCALE).arg("memory-card.sh").output().unwrap();
+    publish("memory-card-result.txt", &format!("{}\n{}{}", out.status.success(), String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)));
     publish("probe-1.txt", &report);
     while !Path::new("plan.txt").exists() { std::thread::sleep(Duration::from_millis(50)); }
     for line in fs::read_to_string("plan.txt").unwrap().lines() {
@@ -2178,9 +2232,23 @@ fn an_isolated_worker_submits_only_through_its_own_spool() {
     let (_, attempt) = lab.reserve("Retained instructions");
     let worktree = lab.planned_worktree(&attempt);
     let spool = state.join("spool").join(attempt.as_str());
+    let brief = lab.ok(&["memory", "demo", "attempt-brief", "--attempt", attempt.as_str()]);
+    let text = brief["text"].as_str().unwrap();
+    let card = text.split("## Worker commands").nth(1).unwrap().split("```sh\n").nth(1).unwrap().split("```").next().unwrap();
+    let setup = card.split("$M attempt-brief").next().unwrap();
+    let script = format!("{setup}\nset -e\n$M attempt-brief --attempt $A > brief.json\n$M attempt-input --attempt $A > input.json\n$M receipts --attempt $A > receipts.json\nif $M attempt-input --attempt; then exit 42; fi\n");
     lab.serve();
     let mut ticker = lab.spawn();
+    lab.wait(&mut ticker, 120, &|| worktree.is_dir());
+    fs::write(worktree.join("memory-card.sh"), script).unwrap();
     lab.wait(&mut ticker, 120, &|| worktree.join("probe-1.txt").exists());
+    let command_result = fs::read_to_string(worktree.join("memory-card-result.txt")).unwrap();
+    assert!(command_result.starts_with("true\n"), "{command_result}");
+    let read_json = |name| serde_json::from_slice::<Value>(&fs::read(worktree.join(name)).unwrap()).unwrap();
+    assert_eq!(read_json("brief.json"), brief);
+    assert_eq!(read_json("input.json")["attempt_id"], attempt.as_str());
+    assert!(read_json("input.json")["text"].as_str().unwrap().contains("Retained instructions"));
+    assert!(read_json("receipts.json").is_array());
     let report = fs::read_to_string(worktree.join("probe-1.txt")).unwrap();
     assert!(report.starts_with(&format!("spool {}\n", spool.display())), "{report}");
     for label in ["store-write", "write state", "write objects", "write other-spool", "write other-output"] {
@@ -2254,6 +2322,8 @@ fn an_isolated_worker_submits_only_through_its_own_spool() {
     let telemetry=rusqlite::Connection::open_with_flags(herdr_farm::telemetry::sidecar::path(&lab.project),rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY|rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW).unwrap();
     let submissions:i64=telemetry.query_row("SELECT count(*) FROM cli_invocations WHERE command_path='result submit' AND caller='worker' AND trust='worker_reported' AND outcome='ok'",[],|r|r.get(0)).unwrap();
     assert_eq!(submissions,2,"both sandbox submissions are observed before ended-attempt spool removal");
+    let failures:i64=telemetry.query_row("SELECT count(*) FROM cli_invocations WHERE command_path='memory attempt-input' AND caller='worker' AND trust='worker_reported' AND error_class='usage'",[],|r|r.get(0)).unwrap();
+    assert_eq!(failures,1);
 }
 
 /// D9's worker channel through the spool: a sandboxed reviewing worker (the

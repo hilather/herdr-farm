@@ -983,3 +983,9 @@ The table is source-of-truth metadata in the `sidecar.cli_invocations` retention
 class (90 days, host age from `started_unix_ms`), included in full sidecar
 backups and restore tombstones. External log contents are excluded. Pending
 project-local JSONL spools must be replayed before backup to include their data.
+
+Accounting stream **v27**, `migrations/telemetry/accounting/0027_cli_error_class.sql`,
+adds nullable fixed-enum `cli_invocations.error_class` for worker CLI diagnosis.
+No message text is retained. It uses the existing `sidecar.cli_invocations`
+retention/backup class and tombstones; the canonical schema is unchanged.
+See [accounting contracts](contracts-accounting.md#worker-cli-failure-classes-memory-brief-cli-1).

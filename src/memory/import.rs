@@ -556,8 +556,7 @@ pub(crate) fn render_knowledge_snapshot_budgeted(project: &Path, id: &str, db: &
 /// Render launch knowledge solely from sealed attempt inputs and retained bytes.
 /// This does not launch a worker or turn profile probes into execution authority.
 pub fn render_attempt_knowledge(project:&Path,attempt:&str)->Result<serde_json::Value> {
-    let _guard=super::mutation_guard(project)?;
-    let mut db=migration::open_active(project)?;
+    let mut db=migration::open_active_read_only(project)?;
     render_attempt_knowledge_held(project,attempt,&mut db)
 }
 /// Caller retains project or root execution ownership across rendering and use.

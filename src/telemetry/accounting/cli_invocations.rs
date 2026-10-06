@@ -8,12 +8,43 @@ use std::{collections::BTreeMap, path::Path, time::Duration};
 pub const MAX_ROWS: i64 = 100_000;
 pub const MAX_AGE_MS: i64 = 90 * 86_400_000;
 
+/// Closed metadata vocabulary; diagnostics and argv are never retained.
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorClass { Usage, Precondition, NotFound, StoreBusy, Internal }
+impl ErrorClass {
+    pub fn as_str(self) -> &'static str {
+        match self { Self::Usage => "usage", Self::Precondition => "precondition", Self::NotFound => "not_found", Self::StoreBusy => "store_busy", Self::Internal => "internal" }
+    }
+    pub fn classify(error: &anyhow::Error) -> Self {
+        for cause in error.chain() {
+            if let Some(error) = cause.downcast_ref::<crate::store::StoreError>() {
+                return match error {
+                    crate::store::StoreError::Busy => Self::StoreBusy,
+                    crate::store::StoreError::Invalid(_) | crate::store::StoreError::Conflict | crate::store::StoreError::StalePlanParent(_) => Self::Precondition,
+                    _ => Self::Internal,
+                };
+            }
+            if let Some(error) = cause.downcast_ref::<std::io::Error>() {
+                return match error.kind() {
+                    std::io::ErrorKind::NotFound => Self::NotFound,
+                    std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem => Self::Precondition,
+                    _ => Self::Internal,
+                };
+            }
+        }
+        Self::Precondition
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Invocation {
     pub invocation_id: String,
     pub command_path: String,
     pub outcome: String,
+    #[serde(default)]
+    pub error_class: Option<ErrorClass>,
     pub exit_code: i32,
     pub duration_ms: i64,
     pub project_slug: Option<String>,
@@ -70,7 +101,7 @@ pub fn write(project: &Path, rows: &[Invocation]) -> Result<bool> {
             continue;
         }
         tx.execute(
-            "INSERT OR IGNORE INTO cli_invocations VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            "INSERT OR IGNORE INTO cli_invocations VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
             params![
                 row.invocation_id,
                 row.command_path,
@@ -80,7 +111,8 @@ pub fn write(project: &Path, rows: &[Invocation]) -> Result<bool> {
                 row.project_slug,
                 row.caller,
                 row.trust,
-                row.recorded_unix_ms
+                row.recorded_unix_ms,
+                row.error_class.map(ErrorClass::as_str)
             ],
         )?;
     }

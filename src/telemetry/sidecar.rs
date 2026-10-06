@@ -212,6 +212,7 @@ pub(crate) fn migrate(db: &mut Connection) -> Result<()> {
             };
             let installed = matches!((stream, index + 1), ("ingest", 14)) && has_column(&tx, "codex_usage", "reasoning_reported")?
                 || matches!((stream, index + 1), ("accounting", 24)) && has_column(&tx, "usage_entries", "cache_write_5m_tokens")?
+                || matches!((stream, index + 1), ("accounting", 27)) && has_column(&tx, "cli_invocations", "error_class")?
                 || compact.map(|name| tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='view' AND name=?1)",
                 [name], |r| r.get::<_, bool>(0))).transpose()?.unwrap_or(false);

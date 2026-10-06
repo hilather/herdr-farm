@@ -1990,3 +1990,18 @@ first and `tasks`, keyed by task, with `runs`, `first_run_outcome`,
 object as `host_checks`. `telemetry PROJECT accounting host-checks [--task TASK]`
 exports the same JSON through the accounting lane. This supplies data for later metrics without changing
 the metric registry or signed acceptance decisions.
+
+## Worker CLI failure classes (MEMORY-BRIEF-CLI-1)
+
+Accounting v27 adds nullable `cli_invocations.error_class`: `usage`,
+`precondition`, `not_found`, `store_busy`, or `internal`. Clap failures use
+`usage`; typed store and I/O causes distinguish busy, missing paths and
+preconditions; other execution failures retain only a fixed class. No diagnostic
+text or arguments are stored. Old worker spool rows deserialize with no class;
+new classes use a closed enum and survive idempotent worker replay. This column
+shares the row's existing `sidecar.cli_invocations` retention, tombstones, and
+full-backup classification; no new table or canonical schema is introduced.
+
+Worker command cards use a shell function so quoted root paths survive `$M`
+expansion. Attempt brief/input reads open the published store read-only without
+acquiring mutation locks, while preserving sealed-input and live-binding checks.

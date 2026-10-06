@@ -185,6 +185,7 @@ impl Capture {
                 invocation_id: id,
                 command_path: path,
                 outcome: "ok".into(),
+                error_class: None,
                 exit_code: 0,
                 duration_ms: 0,
                 project_slug: slug,
@@ -195,6 +196,12 @@ impl Capture {
         }
     }
 
+    pub fn failure(&mut self, error: &anyhow::Error) {
+        if let Some(row) = &mut self.row {
+            row.error_class = Some(cli_invocations::ErrorClass::classify(error));
+        }
+    }
+
     /// Called only after command execution has unwound its project guards;
     /// parse exits call this before clap exits, having acquired no guards.
     pub fn finish(&mut self, outcome: &str, code: i32) {
@@ -202,6 +209,11 @@ impl Capture {
             return;
         };
         row.outcome = outcome.into();
+        if outcome == "usage_error" {
+            row.error_class = Some(cli_invocations::ErrorClass::Usage);
+        } else if code != 0 && row.error_class.is_none() {
+            row.error_class = Some(cli_invocations::ErrorClass::Internal);
+        }
         row.exit_code = code;
         row.duration_ms = self.started.elapsed().as_millis().min(i64::MAX as u128) as i64;
         #[cfg(target_os = "linux")]
