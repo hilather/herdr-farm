@@ -245,6 +245,28 @@ loopback services remain unreachable. `network = true` inherits network access.
 Policies without a toolchain retain their existing command admission, verifier environment, network
 access and per-check timeout; integration retains its original lease margin.
 
+
+The owner can apply the real test command to every generated code launch:
+
+```toml
+[verification.defaults."/absolute/canonical/project/path"]
+accept = ["godot:./tools/run-tests.sh --headless"]
+```
+
+Use the same canonical project path key as `[safety."..."]` in the external
+owner config; project-local config cannot declare defaults. At most four
+commands are allowed, using the same quoted-argument syntax as `--accept`.
+Generated build/fix contracts with `--write` carry `accept-default-N` policies;
+plan, review, skeptic and `--contract-file` launches do not. Explicit `--accept`
+policies keep `accept-N` ids and replace identical defaults (same toolchain and
+parsed argv). `--no-default-accept` skips defaults for one launch. Launch output
+lists policy ids and, for acceptance commands, the toolchain and argv. The
+coordinator command list names configured defaults, or shows an `--accept`
+example when none are configured. Invalid defaults fail preflight with their
+owner-config entry. Outputs, defaults and explicit accepts together must fit
+32 policies for `verify_only` or six for `verify_then_integrate`; excessive
+counts fail before launch, with no truncation.
+
 For generated code contracts, use repeatable
 `launch PROJECT run --write … --output … --accept 'godot:./tools/run-tests.sh --headless'`.
 This creates a policy with `version`, `toolchain`, `checks` and

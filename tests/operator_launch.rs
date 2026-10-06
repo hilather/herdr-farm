@@ -1383,6 +1383,9 @@ fn owner_rejection_and_expiry_preserve_repository_and_capacity() {
 #[test]
 fn launch_run_records_reviews_and_skeptical_yield_and_refuses_without_writes() {
     let lab = Lab::with_herdr(STATIC_HERDR);
+    let config_path = lab.home.join(".config/herdr-farm/config.toml");
+    let config = fs::read_to_string(&config_path).unwrap();
+    fs::write(&config_path, format!("{config}\n[verification.toolchains.shell]\npaths=['/bin/sh']\n[verification.defaults.{:?}]\naccept=['shell:/bin/sh -c true']\n", lab.project.canonicalize().unwrap().to_string_lossy())).unwrap();
     lab.plant_launchable("codex-sol", "codex", "gpt-6.1-sol");
     let prompt = lab.home.join("review-instructions.txt");
     fs::write(&prompt, "Inspect edge cases and explain the evidence.").unwrap();
@@ -1416,6 +1419,7 @@ fn launch_run_records_reviews_and_skeptical_yield_and_refuses_without_writes() {
     for (args, refs) in [(code, vec!["finding:first", "finding:second"]), (launch("skeptic", "author", "skeptical", "codex-sol"), vec!["finding:new"])] {
         let argv = args.iter().map(String::as_str).collect::<Vec<_>>();
         let report = lab.ok(&argv);
+        assert!(report["acceptance_policies"].as_array().unwrap().iter().all(|p| !p["id"].as_str().unwrap().starts_with("accept-default")));
         let attempt = report["attempt"].as_str().unwrap();
         let before = lab.ok(&["telemetry", "demo", "review", "show"]);
         assert_eq!(lab.ok(&argv)["attempt"], report["attempt"]);
@@ -1771,4 +1775,90 @@ fn launch_run_busy_execution_lock_exhaustion_keeps_the_resumable_step_report() {
     assert!(error.contains("rerun the same command"), "{error}");
     assert!(!error.contains("waiting for "), "{error}");
     assert_eq!(herdr_farm::runtime::snapshot(&lab.project).unwrap(), before);
+}
+
+
+#[test]
+fn owner_default_acceptance_is_visible_and_can_be_overridden() {
+    for (task, extra, expected) in [
+        ("defaults", vec![], "accept-default-1"),
+        ("opt-out", vec!["--no-default-accept"], ""),
+        ("dedup", vec!["--accept", "shell:./tools/run-tests.sh \"quoted argument\""], "accept-1"),
+        ("plan-defaults", vec!["--plan-output", "docs/plan.md"], ""),
+        ("local-defaults", vec![], ""),
+    ] {
+        let lab = Lab::with_herdr(STATIC_HERDR);
+        let config_path = lab.home.join(".config/herdr-farm/config.toml");
+        let mut config = fs::read_to_string(&config_path).unwrap();
+        config.push_str(&format!("\n[verification.toolchains.shell]\npaths=['/bin/sh']\n[verification.defaults.{:?}]\naccept=[\"shell:./tools/run-tests.sh 'quoted argument'\"]\n", lab.project.canonicalize().unwrap().to_string_lossy()));
+        if task == "local-defaults" {
+            fs::write(lab.project.join("config.toml"), config).unwrap();
+        } else {
+            fs::write(config_path, config).unwrap();
+        }
+        let context = lab.cli(&["context", "demo", "--peek"]);
+        assert!(context.status.success(), "{}", String::from_utf8_lossy(&context.stderr));
+        let context = String::from_utf8(context.stdout).unwrap();
+        if task == "local-defaults" {
+            assert!(context.contains("--accept TOOLCHAIN:COMMAND") && !context.contains("automatically carry owner acceptance defaults"), "{context}");
+        } else {
+            assert!(context.contains("automatically carry owner acceptance defaults: shell:./tools/run-tests.sh 'quoted argument'") && context.contains("--no-default-accept"), "{context}");
+        }
+        lab.plant_launchable("codex-sol", "codex", "gpt-6.1-sol");
+        let socket = lab.socket_inode_once("defaults.sock");
+        let mut args = vec!["launch", "demo", "run", "--task", task, "--profile", "codex-sol", "--repository", lab.repo.to_str().unwrap(), "--sign-with", lab.key.to_str().unwrap(), "--herdr-socket", socket.to_str().unwrap(), "--prepare-only"];
+        if task != "plan-defaults" { args.extend(["--write", "tools/", "--output", "tools/run-tests.sh"]); }
+        args.extend(extra);
+        let report = lab.ok(&args);
+        let shown = lab.ok(&["task", "demo", "show", task]);
+        let policies = shown["contract"]["acceptance_policies"].as_array().unwrap();
+        let accepts: Vec<_> = policies.iter().filter(|p| p["id"].as_str().unwrap().starts_with("accept")).collect();
+        if expected.is_empty() {
+            assert!(accepts.is_empty(), "{shown}");
+        } else {
+            assert_eq!(accepts.len(), 1);
+            assert_eq!(accepts[0]["id"], expected);
+            let policy: Value = serde_json::from_str(accepts[0]["text"].as_str().unwrap()).unwrap();
+            assert_eq!(policy["toolchain"], "shell");
+            assert_eq!(policy["checks"], serde_json::json!(["./tools/run-tests.sh", "quoted argument"]));
+            assert_eq!(report["acceptance_policies"][1], serde_json::json!({"id":expected,"toolchain":"shell","command":["./tools/run-tests.sh","quoted argument"]}));
+        }
+    }
+}
+
+#[test]
+fn owner_default_acceptance_refuses_invalid_entries_and_policy_overflow_before_writing() {
+    let lab = Lab::with_herdr(STATIC_HERDR);
+    let config_path = lab.home.join(".config/herdr-farm/config.toml");
+    let original = fs::read_to_string(&config_path).unwrap();
+    let key = lab.project.canonicalize().unwrap().to_string_lossy().into_owned();
+    let base = ["launch", "demo", "run", "--task", "invalid-defaults", "--profile", "codex-sol", "--repository", lab.repo.to_str().unwrap(), "--write", "tools/", "--output", "tools/one"];
+    for (defaults, extra, message) in [
+        (vec!["missing:./tools/tests"], vec![], "undeclared verification toolchain"),
+        (vec!["shell:"], vec![], "command"),
+        (vec!["shell:/bin/sh -c true"; 5], vec![], "at most 4"),
+        (vec!["shell:/bin/sh -c true", "shell:/bin/sh -c false"], vec!["--output", "tools/two", "--output", "tools/three", "--output", "tools/four", "--output", "tools/five", "--integration-ref", "integration"], "5 outputs + 2 defaults + 0 explicit accepts"),
+    ] {
+        fs::write(&config_path, format!("{original}\n[verification.toolchains.shell]\npaths=['/bin/sh']\n[verification.defaults.{key:?}]\naccept={}\n", serde_json::to_string(&defaults).unwrap())).unwrap();
+        let before = herdr_farm::runtime::snapshot(&lab.project).unwrap();
+        let mut args = base.to_vec(); args.extend(extra);
+        let error = lab.fail(&args);
+        assert!(error.contains(message), "{error}");
+        assert!(error.contains("verification.defaults") || error.contains("--no-default-accept"), "{error}");
+        assert_eq!(herdr_farm::runtime::snapshot(&lab.project).unwrap(), before);
+    }
+    fs::write(&config_path, format!("{original}\n[verification.toolchains.shell]\npaths=['/bin/sh']\n[verification.defaults.{key:?}]\naccept=['shell:/bin/sh -c true']\n")).unwrap();
+    let before = herdr_farm::runtime::snapshot(&lab.project).unwrap();
+    let mut args = base.to_vec();
+    for _ in 0..31 { args.extend(["--accept", "shell:/bin/sh -c false"]); }
+    let error = lab.fail(&args);
+    assert!(error.contains("1 outputs + 1 defaults + 31 explicit accepts") && error.contains("verify_only route limit of 32") && error.contains("--no-default-accept"), "{error}");
+    assert_eq!(herdr_farm::runtime::snapshot(&lab.project).unwrap(), before);
+    // A project-local lookalike cannot add policies to the external owner's config.
+    fs::write(&config_path, original).unwrap();
+    fs::write(lab.project.join("config.toml"), format!("[verification.defaults.{key:?}]\naccept=['missing:./tools/tests']\n")).unwrap();
+    let context = lab.cli(&["context", "demo", "--peek"]);
+    assert!(context.status.success(), "{}", String::from_utf8_lossy(&context.stderr));
+    let context = String::from_utf8(context.stdout).unwrap();
+    assert!(context.contains("--accept TOOLCHAIN:COMMAND") && !context.contains("automatically carry owner acceptance defaults"), "{context}");
 }

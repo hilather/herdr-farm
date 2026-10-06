@@ -318,7 +318,29 @@ Do not wrap owner commands in env, a shell, or another command wrapper.
 Requests expire after 24 hours. A cap approval applies to one reservation of the
 named task and exact contract decisions; it does not change the worker cap.
 
-For a code task, add the project's real acceptance command with repeatable
+
+The owner can apply the real test command to every generated code launch:
+
+```toml
+[verification.defaults."/absolute/canonical/project/path"]
+accept = ["godot:./tools/run-tests.sh --headless"]
+```
+
+Use the same canonical project path key as `[safety."..."]` in the external
+owner config; project-local config cannot declare defaults. At most four
+commands are allowed, using the same quoted-argument syntax as `--accept`.
+Generated build/fix contracts with `--write` carry `accept-default-N` policies;
+plan, review, skeptic and `--contract-file` launches do not. Explicit `--accept`
+policies keep `accept-N` ids and replace identical defaults (same toolchain and
+parsed argv). `--no-default-accept` skips defaults for one launch. Launch output
+lists policy ids and, for acceptance commands, the toolchain and argv. The
+coordinator command list names configured defaults, or shows an `--accept`
+example when none are configured. Invalid defaults fail preflight with their
+owner-config entry. Outputs, defaults and explicit accepts together must fit
+32 policies for `verify_only` or six for `verify_then_integrate`; excessive
+counts fail before launch, with no truncation.
+
+For a code task without owner defaults, add the project's real acceptance command with repeatable
 `launch PROJECT run --write … --output … --accept 'godot:./tools/run-tests.sh --headless'`.
 The owner declares `[verification.toolchains.godot]` once in their external
 `config.toml`, including `/bin/sh`, `/usr/bin/env` when used, and the absolute

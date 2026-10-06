@@ -843,6 +843,14 @@ pub fn open(ctx: &Ctx, slug: &str, options: &OpenOptions) -> Result<()> {
 
 pub fn commands(root: &Path, slug: &str) -> Result<String> {
     let p = coordinator::current_prefix(root)?;
+    // The command list stays available when the owner config cannot be read; launch reports the error.
+    let defaults = herdr_farm::verification::toolchains::default_accept(&root.join(slug));
+    let accept_example = if defaults.as_ref().is_ok_and(|d| !d.is_empty()) { "" } else { " --accept TOOLCHAIN:COMMAND" };
+    let acceptance_note = match &defaults {
+        Ok(defaults) if !defaults.is_empty() => format!("Code launches automatically carry owner acceptance defaults: {}. --no-default-accept opts out for one launch.", defaults.join(", ")),
+        Ok(_) => "Acceptance toolchains are owner-declared in external config.toml.".to_owned(),
+        Err(error) => format!("Owner acceptance defaults unreadable ({error:#}); code launches will refuse until the owner config is fixed."),
+    };
     Ok(format!(
         "\nCanonical commands (replace uppercase values with retained IDs/paths):\n\
 {p} context {slug}\n\
@@ -851,7 +859,8 @@ Record explicit owner decisions after adoption: {p} memory {slug} record --title
 {p} task {slug} show TASK\n\
 {p} task {slug} add TASK --title TITLE --expected-head HEAD\n\
 {p} launch {slug} run --task TASK --profile PROFILE --repository REPO --work-item WORK --role plan --plan-output docs/PLAN.md\n\
-{p} launch {slug} run --task TASK --profile PROFILE --repository REPO --work-item WORK --role build --write src/ --write tests/ --output src/lib.rs --prompt-file BRIEF\n\
+{p} launch {slug} run --task TASK --profile PROFILE --repository REPO --work-item WORK --role build --write src/ --write tests/ --output src/lib.rs --prompt-file BRIEF{accept_example}\n\
+{acceptance_note}\n\
 {p} launch {slug} run --task REVIEW --profile PROFILE --repository REPO --work-item WORK --role review --review-of TASK --output docs/reviews/R.md --deliverable REPORT --prompt-file BRIEF\n\
 {p} launch {slug} run --task SKEPTIC --profile PROFILE --repository REPO --work-item WORK --role skeptic --review-of TASK --review-kind skeptical --review-scope tree --prompt-file BRIEF\n\
 {p} launch {slug} run --task FIX --profile PROFILE --repository REPO --work-item WORK --role fix --fixes-review REVIEW --write src/ --output src/lib.rs --prompt-file FIX_BRIEF\n\

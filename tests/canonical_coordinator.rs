@@ -53,7 +53,8 @@ struct Lab {
     herdr: PathBuf,
 }
 impl Lab {
-    fn new() -> Self {
+    fn new() -> Self { Self::configured(false) }
+    fn configured(defaults: bool) -> Self {
         let home = tempfile::tempdir().unwrap();
         let root = home.path().join("root");
         let project = root.join("demo");
@@ -68,7 +69,14 @@ impl Lab {
         };
         lab.ok(&["new", "demo"]);
         lab.ok(&["pause", "demo"]);
-        let plan = migration::inspect(&lab.project).unwrap();
+        let plan = if defaults {
+            let config = lab.home.path().join(".config/herdr-farm/config.toml");
+            fs::create_dir_all(config.parent().unwrap()).unwrap();
+            fs::write(&config, format!("[verification.defaults.{:?}]\naccept=['godot:./tools/run-tests.sh', 'shell:./tools/check.sh --fast']\n", lab.project.canonicalize().unwrap().to_string_lossy())).unwrap();
+            migration::inspect_with_config(&lab.project, &config).unwrap()
+        } else {
+            migration::inspect(&lab.project).unwrap()
+        };
         migration::apply(&lab.project, &plan, true).unwrap();
         lab
     }
@@ -153,6 +161,8 @@ fn canonical_context_and_thread_refusals_use_public_commands() {
         "Recent results",
         "task demo add TASK --title TITLE --expected-head HEAD",
         "launch demo run --task TASK",
+        "--accept TOOLCHAIN:COMMAND",
+        "Acceptance toolchains are owner-declared",
         "result demo verify SUBMISSION",
     ] {
         assert!(text.contains(expected), "missing {expected}: {text}");
@@ -757,4 +767,13 @@ fn idle_observations_deliver_durable_inbox_advisories_without_stopping_worker() 
     let snapshot = runtime::snapshot(&lab.project).unwrap();
     assert_eq!(snapshot.inbox.len(), 2);
     assert_eq!(snapshot.attempts[0], attempt);
+}
+
+#[test]
+fn canonical_command_list_names_owner_default_acceptance() {
+    let lab = Lab::configured(true);
+    let text = lab.ok(&["context", "demo", "--peek"]);
+    assert!(text.contains("Code launches automatically carry owner acceptance defaults: godot:./tools/run-tests.sh, shell:./tools/check.sh --fast"), "{text}");
+    assert!(text.contains("--no-default-accept opts out for one launch"), "{text}");
+    assert!(!text.contains("--accept TOOLCHAIN:COMMAND"), "{text}");
 }
