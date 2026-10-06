@@ -2,8 +2,13 @@
 //! Order: root barrier, project effect ownership, resource fences sorted by
 //! `(class, identity)`, then any short record lock. Never upgrade a shared
 //! lock in place, and never take an exclusive root guard while holding one.
-//! A `CheckGuard` keeps only the root and one fence; it releases the fence
-//! before taking project ownership again.
+//! A `CheckGuard` keeps only the shared check lock and one fence; it releases
+//! the fence before taking project ownership again. The check lock sits
+//! after the root in the order: a check takes it shared while it still holds
+//! the root shared, and `RootGuard::exclusive` takes it exclusively right
+//! after the root. Maintenance and cleanup therefore stay refused while a
+//! check runs, while the staged effects of `RootGuard::exclusive_by` (launch,
+//! brief, termination) proceed beside it. Every acquisition is a try-lock.
 use std::{fs::{File,OpenOptions},mem::ManuallyDrop,os::{fd::{AsRawFd,RawFd},unix::fs::{DirBuilderExt,OpenOptionsExt,MetadataExt}},path::{Path,PathBuf},
     process::{Child,Command,ExitStatus,Output,Stdio},sync::{PoisonError,RwLock,atomic::{AtomicBool,Ordering}}};
 use anyhow::{Result,Context,ensure};
@@ -174,8 +179,15 @@ fn shared_file(path:&Path,busy:&'static str)->Result<LockFile> {
     Ok(held(file))
 }
 
+/// Held shared by every running isolated check (verification, integration) and
+/// exclusively by root maintenance, after the root. A staged effect never takes it.
+const CHECK_LOCK:&str=".check.lock";
+fn check_file(root:&Path)->Result<File> {lock_file(&root.join(CHECK_LOCK))}
+
 /// Exclusive compatibility barrier for migration, cleanup and terminal effects.
-pub struct RootGuard {_file:LockFile}
+/// `exclusive` (maintenance, cleanup, CLI captures) also refuses to run beside
+/// an isolated check; `exclusive_by` (staged worker effects) does not.
+pub struct RootGuard {_file:LockFile,_check:Option<LockFile>}
 impl RootGuard {
     #[cfg(feature="state-store")]
     pub(crate) fn inherit(&self)->Result<Vec<crate::runner::InheritedLock>> {
@@ -186,7 +198,11 @@ impl RootGuard {
     }
     fn exclusive_now(root:&Path)->Result<Self> {
         let file=exclusive_file(&root.join(".execution.lock"))?;
-        Ok(Self{_file:file})
+        // After the root: a check holds this shared without the root, and
+        // narrowing takes it under the root, so this try-lock never deadlocks.
+        let check=check_file(root)?;
+        check.try_lock().context("a verification or integration check is running; retry")?;
+        Ok(Self{_file:file,_check:Some(held(check))})
     }
     /// Exclusive root ownership for a staged effect (launch, brief,
     /// termination). The effect takes the root afresh at each durable stage;
@@ -198,11 +214,11 @@ impl RootGuard {
     pub fn exclusive_by(root:&Path,deadline:std::time::Instant,cancellation:&crate::runner::Cancellation)->Result<Self> {
         let until=deadline.min(std::time::Instant::now()+EXCLUSIVE_WAIT);
         let file=exclusive_file_until(&root.join(".execution.lock"),until,&|| cancellation.is_cancelled())?;
-        Ok(Self{_file:file})
+        Ok(Self{_file:file,_check:None})
     }
     fn shared(root:&Path)->Result<Self> {
         let file=shared_file(&root.join(".execution.lock"),"root maintenance or exclusive external operation is active; retry")?;
-        Ok(Self{_file:file})
+        Ok(Self{_file:file,_check:None})
     }
 }
 
@@ -246,11 +262,19 @@ impl ProjectGuard {
         Resource::new(&resource.class,&resource.identity)?;
         Ok(Fence{_file:fence_file(&self.root,resource)?})
     }
-    /// Keep the shared root and `fence`; release project ownership. Other
-    /// project effects may then run, while root-exclusive maintenance waits.
-    pub fn narrow(self,fence:Fence)->CheckGuard {
-        let ProjectGuard{_project,_root,project,identity,..}=self;drop(_project);
-        CheckGuard{_fence:fence,_root,project,identity}
+    /// Keep `fence` and take the check lock shared; release project ownership
+    /// and the root. Other project effects and the staged worker effects
+    /// (launch, brief, termination) may then run, while root maintenance and
+    /// cleanup wait. The check lock is taken while the root is still held
+    /// shared: its exclusive holder owns the root exclusively, so it cannot
+    /// be held now and this never fails on contention.
+    pub fn narrow(self,fence:Fence)->Result<CheckGuard> {
+        let ProjectGuard{_project,_root,root,project,identity}=self;
+        let check=check_file(&root)?;
+        check.try_lock_shared().context("a check cannot start beside root maintenance; retry")?;
+        let check=held(check);
+        drop(_project);drop(_root);
+        Ok(CheckGuard{_fence:fence,_check:check,project,identity})
     }
     pub fn acquire(project:&Path)->Result<Self> {
         foreground_acquire(|| Self::acquire_now(project))
@@ -294,14 +318,18 @@ fn fence_file(root:&Path,resource:&Resource)->Result<LockFile> {
     exclusive_file(&dir.join(format!("{:x}",hasher.finalize())))
 }
 
-/// A long isolated check that needs no project ownership: the root stays
-/// shared and the check's fence excludes anyone else from its resource.
-pub struct CheckGuard {_fence:Fence,_root:RootGuard,project:PathBuf,identity:(u64,u64)}
+/// A long isolated check that needs no project ownership: it holds the check
+/// lock shared, which refuses root maintenance, and its fence excludes anyone
+/// else from its resource. It holds no root lock, so a staged worker effect
+/// (root-exclusive for its short durable stages) is not starved by a check
+/// that runs for minutes.
+pub struct CheckGuard {_fence:Fence,_check:LockFile,project:PathBuf,identity:(u64,u64)}
 impl CheckGuard {
     /// Release the fence, then take project ownership again, retrying while
-    /// another effect holds it until `wait` passes. The root stays shared throughout.
+    /// another effect holds it until `wait` passes. The check lock is held
+    /// until ownership is regained, so maintenance cannot slip in between.
     pub fn widen(self,wait:std::time::Duration)->Result<ProjectGuard> {
-        let CheckGuard{_fence,_root,project,identity}=self;drop(_fence);
+        let CheckGuard{_fence,_check,project,identity}=self;drop(_fence);
         let until=std::time::Instant::now()+wait;
         let guard=loop {
             match ProjectGuard::acquire(&project) {
@@ -310,6 +338,7 @@ impl CheckGuard {
                 Err(_)=>std::thread::sleep(std::time::Duration::from_millis(25)),
             }
         };
+        drop(_check);
         guard.check_project(&project)?;ensure!(guard.identity==identity,"execution guard belongs to a different project");
         Ok(guard)
     }
@@ -469,5 +498,33 @@ mod tests {
         drop(first);let released=ProjectSharedGuard::acquire(&c,&footprint(&c,&git_a)).unwrap();drop(released);
         assert!(RootGuard::exclusive(root.path()).is_err(),"the other repository still holds the shared root");
         drop(second);assert!(ProjectGuard::acquire(&b).is_ok());assert!(RootGuard::exclusive(root.path()).is_ok());
+    }
+
+    /// A narrowed check keeps maintenance out but no longer holds the root:
+    /// a staged effect (launch, brief, termination) takes the exclusive root
+    /// beside the running check, and widening regains ownership afterwards.
+    #[test]
+    fn a_narrowed_check_refuses_maintenance_but_not_staged_root_effects() {
+        let root=tempfile::tempdir().unwrap();
+        let a=root.path().join("a");std::fs::create_dir_all(a.join(".state")).unwrap();
+        let guard=ProjectGuard::acquire(&a).unwrap();
+        let fence=guard.fence(&Resource::new("scratch",a.join(".verify-scratch/check-1").display().to_string()).unwrap()).unwrap();
+        let check=guard.narrow(fence).unwrap();
+        let soon=||std::time::Instant::now()+std::time::Duration::from_millis(50);
+        let cancellation=crate::runner::Cancellation::default();
+        assert!(ProjectGuard::acquire(&a).is_ok(),"other project effects proceed beside the check");
+        let maintenance=RootGuard::exclusive(root.path()).err().expect("maintenance is refused while a check runs");
+        assert!(maintenance.chain().any(|cause| matches!(cause.downcast_ref::<std::fs::TryLockError>(),Some(std::fs::TryLockError::WouldBlock))),"{maintenance:#}");
+        assert!(maintenance.to_string().contains("check is running"),"{maintenance:#}");
+        let staged=RootGuard::exclusive_by(root.path(),soon(),&cancellation).expect("a staged effect takes the root beside the check");
+        assert!(ProjectGuard::acquire(&a).is_err(),"the staged effect owns the root exclusively");
+        assert!(RootGuard::exclusive(root.path()).is_err());
+        drop(staged);
+        let regained=check.widen(std::time::Duration::from_secs(1)).unwrap();
+        assert!(RootGuard::exclusive(root.path()).is_err(),"regained ownership shares the root");
+        drop(regained);
+        let after=RootGuard::exclusive(root.path()).unwrap();
+        assert!(RootGuard::exclusive_by(root.path(),soon(),&cancellation).is_err(),"maintenance still excludes staged effects");
+        drop(after);
     }
 }

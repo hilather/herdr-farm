@@ -17,6 +17,12 @@ pub(crate) struct TerminationWorker {
     /// An operator or automatic completion request: stop the worker without failing its task.
     pub completion:bool,
     pub wall_expired:bool,
+    /// A verification or integration job on one of this attempt's submissions
+    /// is claimed (its check may be running). Recording the termination now
+    /// would move the task revision its claim is fenced on, and the check
+    /// would end without a verdict (`task_revision_changed`); a natural exit
+    /// therefore waits for the verdict, which the lease bounds.
+    pub verdict_pending:bool,
 }
 impl SqliteStore {
     pub(super) fn termination_selection(&mut self,id:&AttemptId,expected:u64,budget:&read_budget::ReadBudget)->Result<TerminationSelection> {
@@ -37,6 +43,10 @@ impl SqliteStore {
         let cancelled=tx.query_row("SELECT EXISTS(SELECT 1 FROM attempt_cancellations WHERE attempt_id=?1)",[id.as_str()],|row|row.get(0))?;
         let completion=completion_requested(&tx,id)?;
         let wall_expired=wall_expired(&tx,&record,jiff::Timestamp::now().as_millisecond())?;
+        let schema:u32=tx.query_row("PRAGMA user_version",[],|row|row.get(0))?;
+        let verdict_pending=schema>=47 && tx.query_row("SELECT EXISTS(SELECT 1 FROM operation_delivery d JOIN operations o ON o.id=d.operation_id
+            WHERE d.state IN ('claimed','ambiguous') AND o.kind IN ('verification.run','integration.run')
+            AND json_extract(o.payload,'$.submission_id') IN (SELECT submission_id FROM result_submissions WHERE attempt_id=?1))",[id.as_str()],|row|row.get(0))?;
         let mut query=tx.prepare("SELECT sequence,kind,entity,revision,payload_version,payload FROM events WHERE entity=?1 AND (kind GLOB 'runtime.launch_*' OR kind IN ('runtime.worktrees_creation','runtime.worktrees_ready')) ORDER BY sequence")?;
         let mut rows=query.query([record.operation.as_str()])?;
         let mut events=Vec::new();
@@ -46,7 +56,7 @@ impl SqliteStore {
             events.push(Event{sequence:row.get(0)?,kind:row.get(1)?,entity:row.get(2)?,revision:row.get(3)?,payload_version:row.get(4)?,payload:serde_json::from_str(&payload).map_err(|e|StoreError::Corrupt(e.to_string()))?});
         }
         budget.check()?;
-        Ok(TerminationSelection{head,attempt,worker:Some(TerminationWorker{record,task,binding,owner,delivery,events,cancelled,completion,wall_expired})})
+        Ok(TerminationSelection{head,attempt,worker:Some(TerminationWorker{record,task,binding,owner,delivery,events,cancelled,completion,wall_expired,verdict_pending})})
     }
 }
 

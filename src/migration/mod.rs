@@ -251,11 +251,12 @@ impl Maintenance {
     pub(crate) fn fence(&self,resource:&crate::execution_guard::Resource)->Result<crate::execution_guard::Fence> {
         self._project.as_ref().context("runtime project ownership required")?.fence(resource)
     }
-    /// Release the record lock and project ownership, keeping the shared root
-    /// and `fence`, for a long check that touches only the fenced resource.
+    /// Release the record lock, project ownership and the root, keeping
+    /// `fence` and the shared check lock, for a long check that touches only
+    /// the fenced resource.
     pub(crate) fn narrow(self,fence:crate::execution_guard::Fence)->Result<crate::execution_guard::CheckGuard> {
         let Maintenance{_locks,_project,_root}=self;drop(_locks);drop(_root);
-        Ok(_project.context("runtime project ownership required")?.narrow(fence))
+        _project.context("runtime project ownership required")?.narrow(fence)
     }
     /// Take runtime ownership of `project` again after [`Maintenance::narrow`],
     /// waiting up to `wait` for another effect to finish.

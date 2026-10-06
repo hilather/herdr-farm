@@ -39,7 +39,7 @@ impl verification::CheckOwnership for Ownership<'_> {
     fn release(&mut self)->Result<()> {
         let Slot::Project(guard)=std::mem::replace(&mut self.slot,Slot::Lost) else {anyhow::bail!("the check does not hold project ownership")};
         match guard.fence(&self.scratch) {
-            Ok(fence)=>{self.slot=Slot::Check(guard.narrow(fence));Ok(())}
+            Ok(fence)=>{self.slot=Slot::Check(guard.narrow(fence)?);Ok(())}
             Err(error)=>{self.slot=Slot::Project(guard);Err(error)}
         }
     }
