@@ -92,6 +92,8 @@ migrated sidecar.
   ingest 0015 Claude turn metadata (session-retained, full backup);
   ingest 0016 worker-session metadata (`codex_session_items`,
   `codex_session_turns`, `codex_session_clock`, native-session retention/full backup);
+  ingest 0017 adds `codex_exec_classes` (MET-VERIFY-1, metadata-only project-test
+  classes; native-session retention/full backup; contracts-collection.md A11);
   accounting 0013 adds Claude ledger source/cache normalization, 0014 adds OpenCode,
   0015 adds maintained read aggregates,
   contracts-collection.md A6–A9 and DG4b/DG4d), mode 0600, created on first collect. No

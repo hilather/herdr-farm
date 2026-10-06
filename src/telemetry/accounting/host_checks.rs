@@ -201,6 +201,31 @@ pub fn read(project: &Path, task: Option<&str>) -> Result<Value> {
     }
     Ok(json!({"runs":runs,"tasks":totals}))
 }
+/// Analytics reads typed metadata only, excluding argv, names, paths and log bodies.
+pub(crate) fn verification_metadata(project: &Path) -> Result<Vec<Value>> {
+    let Some(db) = super::super::sidecar::read(project)? else {
+        return Ok(Vec::new());
+    };
+    let exists: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='host_checks')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !exists {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    let mut stmt = db.prepare("SELECT json_object('run_id',run_id,'task',task,'submission_id',json_extract(payload,'$.submission_id'),'attempt_id',json_extract(payload,'$.attempt_id'),'started_unix_ms',started_unix_ms,'duration_ms',json_extract(payload,'$.duration_ms'),'outcome',json_extract(payload,'$.outcome'),'pid',json_extract(payload,'$.pid'),'process_start',json_extract(payload,'$.process_start')) FROM host_checks ORDER BY started_unix_ms,run_id")?;
+    for row in stmt.query_map([], |r| r.get::<_, String>(0))? {
+        let mut row: Value = serde_json::from_str(&row?)?;
+        if row["outcome"] == "running" && !alive(&row) {
+            row["outcome"] = json!("abandoned");
+        }
+        out.push(row);
+    }
+    Ok(out)
+}
+
 static SIGNAL: AtomicI32 = AtomicI32::new(0);
 extern "C" fn received(signal: libc::c_int) {
     SIGNAL.store(signal, Ordering::SeqCst);

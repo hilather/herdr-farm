@@ -1,7 +1,7 @@
 //! Codex rollout adapter (contracts §5): bounded tail reads of
 //! `<execution_home>/.codex/sessions/**/rollout-*.jsonl`, allowlisted typed
 //! fields only, idempotent by `(session_id, ordinal)`, bound by cwd and time.
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::Deserialize;
 use serde_json::{Number, Value, json};
@@ -664,7 +664,8 @@ struct ToolOutput {
     #[serde(default)]
     call_id: Lax,
 }
-/// `event_msg/item_completed`: never the item's command, cwd, parsed command,
+/// `event_msg/item_completed`: command argv is reduced transiently to a class; never retained.
+/// Never the item's cwd, parsed command,
 /// output, process id, content, client id or phase; never an MCP call's
 /// `arguments` or `result.content`, a subagent's `agent_path`, or a collab
 /// call's `receiver_agents` or `agents_states` (A8).
@@ -681,6 +682,9 @@ struct ItemCompleted {
 struct Item {
     #[serde(default)]
     changes: EntryCount,
+    /// Transient argv, reduced to a class before creating the sanitized record.
+    #[serde(default)]
+    command: Value,
     #[serde(rename = "type", default)]
     kind: Lax,
     #[serde(default)]
@@ -1311,6 +1315,7 @@ fn record(tx: &Transaction, ledger: &ingest::Ledger, at: u64, tag: &Tag, line: &
         (Some("event_msg"), Some("item_completed")) => {
             let Ok(Envelope { payload: completed }) = serde_json::from_slice::<Envelope<ItemCompleted>>(line) else { return Ok(false) };
             let item = completed.item.0;
+            let classification = item.as_ref().filter(|i| i.kind.0 == "CommandExecution").map(|i| project_test_class(tx, key, worktrees, &i.command));
             let kind = item.as_ref().map_or(Value::Null, |i| i.kind.0.clone());
             // Each typed item keeps its own allowlisted fields; any other item only its type.
             let fields = match (item, kind.as_str()) {
@@ -1343,6 +1348,8 @@ fn record(tx: &Transaction, ledger: &ingest::Ledger, at: u64, tag: &Tag, line: &
                 let (thread, turn, at) = (text("thread_id", sanitize::Class::Id), text("turn_id", sanitize::Class::Id), ms(tag.timestamp.as_deref()));
                 match kind.as_str() {
                     Some("CommandExecution") => {
+                        let (available, class) = classification.unwrap_or((false, None));
+                        tx.execute("INSERT OR IGNORE INTO codex_exec_classes(session_id,item_id,class,classification_available) VALUES(?1,?2,?3,?4)",params![session,item_id,class,available])?;
                         tx.execute("INSERT OR IGNORE INTO codex_exec_items(session_id,item_id,thread_id,turn_id,status,source,exit_code,startup_duration_secs,
                             startup_duration_nanos,completed_unix_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)", params![session, item_id, thread, turn,
                             text("item.status", sanitize::Class::Tag), text("item.source", sanitize::Class::Tag), number("item.exit_code"),
@@ -1646,4 +1653,69 @@ fn bind(db: &mut Connection, attempts: &[CanonicalAttempt]) -> Result<()> {
         after = next;
     }
     Ok(())
+}
+
+/// Exact declared argv matching only: no shell expansion, basename or substring guesses.
+fn project_test_class(
+    tx: &Transaction,
+    key: &str,
+    worktrees: &str,
+    command: &Value,
+) -> (bool, Option<&'static str>) {
+    let classify = || -> Result<Option<bool>> {
+        let Some(argv) = command
+            .as_array()
+            .and_then(|a| a.iter().map(Value::as_str).collect::<Option<Vec<_>>>())
+        else {
+            return Ok(None);
+        };
+        if argv.is_empty() || argv.len() > 32 {
+            return Ok(None);
+        }
+        let attempt: Option<String> = tx.query_row(
+            "SELECT cwd_attempt FROM rollout_sources WHERE path_digest=?1",
+            [key],
+            |r| r.get(0),
+        )?;
+        let Some(attempt) = attempt else {
+            return Ok(None);
+        };
+        let project = Path::new(worktrees.trim_end_matches('/'))
+            .parent()
+            .and_then(Path::parent)
+            .context("project path")?;
+        // Owner defaults may be declared before launch materializes their signed policies.
+        if let Ok(defaults) = crate::verification::toolchains::default_accept(project) {
+            for entry in defaults {
+                let (_, command) = entry
+                    .split_once(':')
+                    .context("invalid default acceptance")?;
+                let declared = crate::verification::toolchains::split_accept_command(command)?;
+                if declared.iter().map(String::as_str).eq(argv.iter().copied()) {
+                    return Ok(Some(true));
+                }
+            }
+        }
+        let db = super::read_only(&project.join(".state/state.db"))?;
+        let policies=db.prepare("SELECT p.body FROM acceptance_policies p JOIN attempts a ON a.task_id=p.task_id WHERE a.id=?1 AND p.contract_revision=(SELECT max(contract_revision) FROM task_contracts WHERE task_id=a.task_id)")?.query_map([attempt],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        if policies.is_empty() {
+            return Ok(None);
+        }
+        for body in policies {
+            let policy =
+                crate::domain::verification_policy::ExecutionPolicy::parse(body.as_bytes())?;
+            if !policy.file_presence_only()
+                && policy
+                    .commands()
+                    .any(|args| args.iter().map(String::as_str).eq(argv.iter().copied()))
+            {
+                return Ok(Some(true));
+            }
+        }
+        Ok(Some(false))
+    };
+    match classify() {
+        Ok(Some(yes)) => (true, yes.then_some("project_test")),
+        _ => (false, None),
+    }
 }

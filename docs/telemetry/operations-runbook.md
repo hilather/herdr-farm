@@ -447,6 +447,7 @@ $ herdr-farm telemetry demo backup restore --from <tmp>/backup-2026-09-30 --forc
     "claude_tool_results": 0,
     "claude_turn_lines": 0,
     "cli_invocations": 3,
+    "codex_exec_classes": 0,
     "codex_session_clock": 0,
     "codex_session_items": 0,
     "codex_session_turns": 0,

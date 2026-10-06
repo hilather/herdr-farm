@@ -158,7 +158,7 @@ fn retry_and_cancel_are_counted_from_real_commands_and_closed_lifecycle() {
         "legacy_remember_not_observed"
     );
     let registry = f.cli_args(&["metrics", "registry", "--json"]).0;
-    assert_eq!(registry["registry"], "analytics-registry.v11");
+    assert_eq!(registry["registry"], "analytics-registry.v12");
     for id in ["M90", "M91", "M92", "M93", "M94", "M95"] {
         assert_eq!(
             registry["metrics"]
