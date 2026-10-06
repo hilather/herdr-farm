@@ -151,6 +151,8 @@ pub struct Memory {
     #[cfg(feature="state-store")]
     pub canonical_effects_unknown:bool,
     #[cfg(feature="state-store")]
+    pub service_contention_logs:BTreeMap<(String,String),(Instant,u64)>,
+    #[cfg(feature="state-store")]
     pub worker_idle: BTreeMap<String, BTreeMap<(String, u64), crate::reconcile_live::IdleStretch>>,
     #[cfg(feature="state-store")]
     pub canonical_maintenance_turn:bool,
@@ -182,6 +184,8 @@ impl Memory {
             canonical_observations:None,
             #[cfg(feature="state-store")]
             canonical_effects_unknown:false,
+            #[cfg(feature="state-store")]
+            service_contention_logs:BTreeMap::new(),
             #[cfg(feature="state-store")]
             worker_idle: BTreeMap::new(),
             #[cfg(feature="state-store")]

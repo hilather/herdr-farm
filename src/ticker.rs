@@ -327,13 +327,16 @@ pub struct Log {
 static ERROR_COUNTS: std::sync::Mutex<[u64;5]> = std::sync::Mutex::new([0;5]);
 impl Log {
     /// Count explicit error lines without retaining their text in telemetry.
-    pub fn error(&self, text: &str) {
+    fn count_error(&self, text: &str) {
         let lower = text.to_ascii_lowercase();
         let class = if lower.contains("lock contention") || lower.contains("locked") || lower.contains("database is busy") || lower.contains("owns lock") || lower.contains("would block") || lower.contains("acquire") && lower.contains("lock") { 0 }
             else if lower.contains("inventory") && (lower.contains("expired") || lower.contains("stale")) { 1 }
             else if lower.contains("ambiguous") || lower.contains("outcome unknown") { 2 }
             else if lower.contains("permanent") { 3 } else { 4 };
         if let Ok(mut counts) = ERROR_COUNTS.lock() { counts[class] = counts[class].saturating_add(1); }
+    }
+    pub fn error(&self, text: &str) {
+        self.count_error(text);
         self.line(text);
     }
     pub fn line(&self, text: &str) {
@@ -590,12 +593,20 @@ pub fn tick(ctx: &Ctx, log: &Log, memory: &mut Memory) -> bool {
     {
         let mut any_reachable=any_reachable;
         if !canonical.is_empty() {let first=(memory.tick.saturating_sub(1)%canonical.len() as u64) as usize;canonical.rotate_left(first);}
+        memory.service_contention_logs.retain(|(slug,_),_|canonical.contains(slug));
         for slug in &canonical {
             let result=if let Some(reads)=memory.canonical_observations.as_mut(){crate::canonical_controller::poll_queued_effects(ctx,&ctx.root.join(slug),memory.tick.saturating_sub(1),reads,memory.copy_jobs.as_mut())}else{crate::canonical_controller::poll(ctx,&ctx.root.join(slug),memory.tick.saturating_sub(1))};
             match result {
                 Ok(result)=>{
                     memory.canonical_effects_unknown|=result.unknown_effects;any_reachable|=result.reachable||result.scheduled_work;
                     if let Some(line)=result.admission_log {log.line(&line);}
+                    for error in &result.service_lock_errors {log.count_error(error);}
+                    for error in result.service_lock_errors {
+                        let key=(slug.clone(),error.clone());
+                        let entry=memory.service_contention_logs.entry(key).or_insert_with(||(Instant::now()-Duration::from_secs(60),0));
+                        entry.1=entry.1.saturating_add(1);
+                        if entry.0.elapsed()>=Duration::from_secs(60) {log.line(&format!("{slug}: canonical service contention: {error} (count={})",entry.1));entry.0=Instant::now();entry.1=0;}
+                    }
                     if let Some(error)=result.operation_error {log.error(&format!("{slug}: canonical operation: {error}"));}
                 }
                 Err(error)=>{

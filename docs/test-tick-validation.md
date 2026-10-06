@@ -518,3 +518,103 @@ historical socket-only failure lists earlier in this document remain the prior
 sandbox evidence; this follow-up does not claim those workflows passed.
 
 The `state-store` feature is enabled by default; build recipes above use that default.
+
+## EFFECT-LOCK-FAIR-1 sandbox validation (2026-10-06)
+
+All cargo commands used `TMPDIR=$PWD/target/tmp` and
+`nice -n 19 ionice -c 3 cargo`, with `--locked --offline -j 3`.
+
+- Requested nextest suites (`--features state-store --test canonical_worker
+  --test canonical_coordinator --test ticker_jobs`): 76 run, 18 passed,
+  58 socket-only failures, 0 skipped (369.855 seconds).
+- Controller tests (`--features state-store --bin herdr-farm
+  -E 'test(canonical_controller)'`): 24 run, 13 passed,
+  11 socket-only failures, 342 filtered (125.095 seconds).
+- Initial `--lib` controller filter matched no tests (625 filtered); the
+  controller lives in the CLI binary, and the corrected run above completed.
+- `clippy --features state-store --all-targets` completed successfully.
+  Existing warnings remain on unchanged lines; no changed-line warnings.
+- `git diff --check` passed. No canonical or sidecar migrations, new crates,
+  production guard waits, or production locks were added.
+
+Each failure below includes `Operation not permitted` at socket setup/bind.
+The new fairness lab failed at its first fake server bind, before testing the
+fairness, stop, observation, or counted-log assertions. Successful socket
+execution and the load loop remain for the steward outside this sandbox.
+The known checkout-TMPDIR copy-job environmental failures were not exercised
+by these focused suites; their coverage and fixtures were left unchanged.
+
+### Requested E2E suites — socket-only failures
+
+- `canonical_coordinator migrated_doctor_reports_canonical_binding_despite_stale_legacy_record`
+- `canonical_coordinator open_waits_for_brief_project_and_root_contention`
+- `canonical_coordinator socket_coordinator_remote_manifest_and_explicit_local_override_policy`
+- `canonical_coordinator socket_open_primes_owned_coordinator_retries_swallowed_prompt_and_recreates_closed_pane`
+- `canonical_coordinator unchanged_ticker_observations_preserve_head_and_refresh_coordinator_admission`
+- `canonical_worker a_brief_swallowed_by_the_agent_is_redelivered_and_confirmed_only_once_accepted`
+- `canonical_worker a_brief_the_agent_never_accepts_is_left_ambiguous_not_confirmed`
+- `canonical_worker a_hidden_path_covering_the_execution_home_refuses_the_launch_before_creation`
+- `canonical_worker a_launch_reaches_running_while_another_holder_takes_the_shared_root_intermittently`
+- `canonical_worker a_legacy_thread_holding_the_planned_worktree_blocks_its_creation`
+- `canonical_worker a_proven_worker_end_keeps_the_project_admitted_but_an_unexplained_pane_loss_pauses_it`
+- `canonical_worker a_subdirectory_binding_runs_in_the_same_subdirectory_of_the_new_worktree`
+- `canonical_worker a_sandboxed_reviewer_uses_its_worker_channel_through_the_spool`
+- `canonical_worker a_worker_branch_reaching_a_corrupt_quarantined_object_is_refused`
+- `canonical_worker accepted_editing_worker_completes_automatically_after_integration`
+- `canonical_worker accepted_verify_only_editing_worker_completes_without_integration_automation`
+- `canonical_worker an_isolated_codex_worker_commits_through_codex_workspace_write_sandbox`
+- `canonical_worker an_isolated_worker_cannot_read_owner_secrets_or_lift_the_hiding_but_still_commits_and_submits`
+- `canonical_worker an_isolated_worker_submits_only_through_its_own_spool`
+- `canonical_worker an_operator_finishes_a_worker_that_never_submitted_and_the_result_lands_automatically`
+- `canonical_worker an_untracked_working_directory_is_refused_before_the_approval_is_used`
+- `canonical_worker attention_mid_run_failure_remains_incomplete_at_termination`
+- `canonical_worker barrier_stop_gets_a_fair_turn_and_maintenance_keeps_advancing`
+- `canonical_worker canonical_attempt_sidebar_clears_after_termination_in_an_active_project`
+- `canonical_worker canonical_attempt_sidebar_does_not_publish_to_a_replaced_terminal`
+- `canonical_worker canonical_attempt_sidebar_refreshes_and_clears_on_pause_and_termination`
+- `canonical_worker canonical_attempt_sidebar_restart_offers_no_historical_cleanup_or_native_request`
+- `canonical_worker canonical_attempt_sidebar_uses_collected_usage_and_observed_waiting`
+- `canonical_worker concurrent_attempt_tokens_publish_and_missing_retired_server_stays_quiet`
+- `canonical_worker dedicated_worker_refuses_remote_manifest_before_its_brief`
+- `canonical_worker editing_worker_requires_operator_completion_when_automation_is_off`
+- `canonical_worker idle_worker_notice_restarts_stretch_and_deduplicates_within_a_ticker`
+- `canonical_worker launch_run_reviews_use_the_claude_spool_and_record_skeptical_yield`
+- `canonical_worker launch_run_reviews_use_the_codex_spool_and_record_skeptical_yield`
+- `canonical_worker launch_sets_the_intended_permission_mode_over_a_stale_one_in_the_home`
+- `canonical_worker rejected_editing_worker_stays_running_and_can_resubmit`
+- `canonical_worker review_assignment_launches_with_blind_brief_and_records_session`
+- `canonical_worker submit_captured_retains_remember_from_the_attempt_report_and_replays_once`
+- `canonical_worker ticker_launches_and_briefs_once_then_stops_a_cancelled_worker_while_paused_and_revoked`
+- `canonical_worker ticker_does_not_dispatch_a_launch_cancelled_before_creation`
+- `canonical_worker ticker_launches_nothing_on_a_server_without_the_launch_contract_or_while_paused`
+- `canonical_worker ticker_recovers_a_lost_creation_reply_without_creating_again`
+- `canonical_worker ticker_retires_a_cancelled_gated_worker_without_starting_it`
+- `canonical_worker ticker_stops_the_dedicated_herdr_server_of_a_finished_task`
+- `canonical_worker wall_budget_termination_retries_contention_and_notifies_once`
+- `ticker_jobs a_due_legacy_routine_is_claimed_once_and_delivered_after_its_command_ends`
+- `ticker_jobs a_failed_coordinator_start_backs_off_while_another_project_works`
+- `ticker_jobs a_primed_coordinator_is_primed_again_only_after_an_explicit_reprime`
+- `ticker_jobs a_thread_start_is_confirmed_on_acknowledgement_without_waiting_for_the_agent`
+- `ticker_jobs linked_worktree_start_acknowledges_the_recorded_default_arguments`
+- `canonical_worker wall_budget_termination_with_changed_frozen_definition_keeps_process_exit`
+- `ticker_jobs open_after_a_coordinator_start_keeps_its_claim_and_never_starts_again`
+- `ticker_jobs permission_grant_does_not_restart_a_deliberately_stopped_thread`
+- `ticker_jobs remote_machines_poll_on_their_own_deadlines_and_only_long_outages_are_reported`
+- `ticker_jobs token_refreshes_cool_down_while_another_coordinator_starts_and_primes`
+- `ticker_jobs token_refreshes_follow_each_panes_current_group_and_write_no_execution_state`
+- `ticker_jobs worker_permission_grants_restart_preserving_work_and_revoke_next_start`
+- `canonical_worker wall_budget_termination_without_contention`
+
+### Controller binary tests — socket-only failures
+
+- `bin/herdr-farm canonical_controller::observations::tests::canonical_initial_schema_sql_obeys_original_job_deadline`
+- `bin/herdr-farm canonical_controller::observations::tests::canonical_post_probe_sql_cannot_restart_its_budget`
+- `bin/herdr-farm canonical_controller::observations::tests::canonical_rotation_registry_refuses_overflow_without_forgetting_present_projects`
+- `bin/herdr-farm canonical_controller::observations::tests::canonical_worker_batches_leave_root_exclusive_notifications_a_turn`
+- `bin/herdr-farm canonical_controller::observations::tests::canonical_worker_cancellation_excludes_mutations_and_preserves_snapshot`
+- `bin/herdr-farm canonical_controller::observations::tests::canonical_worker_commits_fresh_evidence_without_trusting_queue_consumption`
+- `bin/herdr-farm canonical_controller::observations::tests::canonical_worker_negative_liveness_is_invalidated_by_rebinding`
+- `bin/herdr-farm canonical_controller::observations::tests::canonical_worker_refuses_expiry_and_changed_configuration_without_committing`
+- `bin/herdr-farm canonical_controller::observations::tests::canonical_worker_repeated_negative_completions_clear_exit_veto`
+- `bin/herdr-farm canonical_controller::observations::tests::canonical_worker_slow_probe_does_not_block_legacy_status`
+- `bin/herdr-farm canonical_controller::tests::blocked_operation_preserves_live_reachability_and_capacity`

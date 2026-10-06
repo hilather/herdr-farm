@@ -129,3 +129,26 @@ Legacy ticker labs must create projects with `new --legacy` (or the public
 legacy tickers cannot exercise their intended workflows on that project.
 Canonical labs originally written to migrate legacy state retain explicit
 legacy creation before pausing and applying their migration.
+
+## Canonical service fairness (EFFECT-LOCK-FAIR-1)
+
+Main-pass services retain their nonblocking project guard acquisition and order.
+An actual `effect.lock` contention failure reserves a service opportunity before
+that project's next canonical observation batch. Existing batches drain first;
+maintenance admission then skips at most three otherwise eligible opportunities.
+A pass without service contention clears the reservation. Root-exclusive effect
+passes defer services as before and neither clear nor consume the reservation.
+Thus recurring maintenance cannot win every service opportunity, while persistent
+external contention cannot indefinitely suppress maintenance. There are no new
+locks, guard waits, schema changes, or sidecar migrations.
+
+Service contention is logged separately by project and identical service error,
+at most once per real minute, with `count=N` failures since the previous line.
+The first failure emits immediately. Every failure increments M92 before log
+suppression; the minute interval is not accelerated in labs.
+The new `canonical_worker` lab uses two running attempts, recurring observations,
+and public project guard ownership to force contention, waits for the unscaled
+minute summary to check accumulated counts and suppressed log lines,
+cancels one attempt within the existing 60-second lab budget, and checks that
+observations continue while the other worker remains running. Socket-bound
+validation still requires the steward's unrestricted environment.

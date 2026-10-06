@@ -137,10 +137,20 @@ struct Pending {fingerprint:String,identity:Identity,ticket:Ticket,deadline:Inst
 pub struct Reads {
     executor:Arc<Executor>,pending:BTreeMap<Key,Pending>,offers:BTreeMap<Key,Candidate>,
     ready:BTreeMap<Key,(String,Instant,Result<Sample,String>)>,
-    classified:BTreeMap<Key,Classification>,rotation:BTreeMap<Key,Rotation>,cursor:Cursor,unknown:bool,
+    classified:BTreeMap<Key,Classification>,rotation:BTreeMap<Key,Rotation>,cursor:Cursor,unknown:bool,service_priority:BTreeMap<String,u8>,
 }
 impl Reads {
-    pub fn new(executor:Arc<Executor>)->Self {Self{executor,pending:BTreeMap::new(),offers:BTreeMap::new(),ready:BTreeMap::new(),classified:BTreeMap::new(),rotation:BTreeMap::new(),cursor:Cursor::default(),unknown:false}}
+    pub fn new(executor:Arc<Executor>)->Self {Self{executor,pending:BTreeMap::new(),offers:BTreeMap::new(),ready:BTreeMap::new(),classified:BTreeMap::new(),rotation:BTreeMap::new(),cursor:Cursor::default(),unknown:false,service_priority:BTreeMap::new()}}
+    // Root-exclusive deferrals are not service opportunities. Preserve both
+    // their existing order and the number of maintenance deferrals remaining.
+    pub fn service_pass(&mut self,path:&Path,contended:Option<bool>) {
+        let project=path.canonicalize().unwrap_or_else(|_|path.to_path_buf()).display().to_string();
+        match contended {
+            Some(true)=>{self.service_priority.entry(project).or_insert(0);},
+            Some(false)=>{self.service_priority.remove(&project);},
+            None=>{},
+        }
+    }
     pub fn unknown(&self)->bool {self.unknown}
     pub fn pending(&self)->bool {!self.pending.is_empty()}
     pub fn pending_project(&self,project:&str)->bool {self.pending.keys().any(|key|key.0==project)}
@@ -200,8 +210,16 @@ impl Reads {
         // holds the shared root barrier; overlapping generations could otherwise
         // starve the existing root-exclusive effect adapters indefinitely.
         if !self.pending.is_empty(){return errors;}
+        // Count only opportunities to admit a fresh batch, after old holders
+        // have drained. Three skipped opportunities bound maintenance delay.
+        let mut deferred=std::collections::BTreeSet::new();
+        for (project,count) in &mut self.service_priority {
+            if self.offers.keys().any(|key|&key.0==project)&&allowed(project) {
+                if *count<3 {*count+=1;deferred.insert(project.clone());}else{*count=0;}
+            }
+        }
         while self.pending.len()<PENDING_LIMIT {
-            let Some(key)=self.offers.keys().filter(|key|allowed(&key.0)).min_by(|a,b|cursor.compare(a,b)).cloned()else{break;};let candidate=self.offers.remove(&key).unwrap();let identity=candidate.request.identity.clone();let deadline=candidate.request.deadline+(sample_age()-BUDGET);
+            let Some(key)=self.offers.keys().filter(|key|allowed(&key.0)&&!deferred.contains(&key.0)).min_by(|a,b|cursor.compare(a,b)).cloned()else{break;};let candidate=self.offers.remove(&key).unwrap();let identity=candidate.request.identity.clone();let deadline=candidate.request.deadline+(sample_age()-BUDGET);
             match self.executor.submit(candidate.request) {
                 Ok(ticket)=>{cursor.accepted(&key);self.pending.insert(key,Pending{fingerprint:candidate.fingerprint,identity,ticket,deadline});},
                 Err(error)=>{self.unknown=true;errors.push(format!("{}: canonical observation admission: {error:#}",key.0));},
