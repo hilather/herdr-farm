@@ -278,6 +278,7 @@ sys.stdout.buffer.write(json.dumps({'result':json.loads(reply)['result']}).encod
     /// `spawn` with extra ticker environment (a product knob under test).
     fn spawn_with_env(&self, interval: &str, extra: &[(&str, &str)]) -> Ticker {
         let mut command = Command::new(BIN);
+        command.env_clear();
         for (name, value) in extra { command.env(name, value); }
         Ticker(command.env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", &self.herdr).env("HERDR_FARM_TELEMETRY_COLLECT_SECS", interval)
             .args(["--root", self.path("root").to_str().unwrap(), "ticker", "run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap())
