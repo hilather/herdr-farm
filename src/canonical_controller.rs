@@ -16,7 +16,7 @@ const PREPARED_LAUNCH_DISPATCH_ENABLED: bool = true;
 pub(crate) fn launch_dispatch_enabled()->bool { PREPARED_LAUNCH_DISPATCH_ENABLED }
 
 
-pub struct PollResult {pub reachable:bool,pub scheduled_work:bool,pub unknown_effects:bool,pub operation_error:Option<String>,pub admission_log:Option<String>}
+pub struct PollResult {pub reachable:bool,pub scheduled_work:bool,pub unknown_effects:bool,pub operation_error:Option<String>,pub admission_log:Option<String>,pub service_lock_errors:Vec<String>,pub services_contended:Option<bool>}
 struct ProbeBudget<'a> {runner:&'a dyn crate::runner::Runner,deadline:std::time::Instant}
 impl crate::runner::Runner for ProbeBudget<'_> {
     fn run(&self,cmd:&crate::runner::Cmd)->Result<crate::runner::Output> {
@@ -85,7 +85,9 @@ pub fn poll_queued_effects(ctx:&Ctx,path:&Path,turn:u64,reads:&mut observations:
         Ok(observations::Poll::Failed(error))=>(false,false,Some(error)),
         Err(error)=>(false,false,Some(format!("canonical maintenance: {error:#}"))),
     };
-    finish_poll(ctx,path,turn,reachable,error,effects,Some(scheduled))
+    let result=finish_poll(ctx,path,turn,reachable,error,effects,Some(scheduled))?;
+    reads.service_pass(path,result.services_contended);
+    Ok(result)
 }
 fn finish_poll(ctx:&Ctx,path:&Path,turn:u64,reachable:bool,observation_error:Option<String>,effects:Option<&mut crate::copy_jobs::Queue>,background_plan:Option<bool>)->Result<PollResult> {
     // Background maintenance owns planning. Foreground callers retain their
@@ -102,9 +104,10 @@ fn finish_poll(ctx:&Ctx,path:&Path,turn:u64,reachable:bool,observation_error:Opt
     // lost that race. Defer the services to the pass after the drain; they
     // report pending work so the ticker stays awake.
     let root_owned=effects.as_ref().is_some_and(|queue|queue.pending_exclusive_root());
+    let mut service_lock_errors=Vec::new();
     let mut service=|name:&str,run:&dyn Fn(&Path)->anyhow::Result<bool>|->bool {
         if root_owned {return true;}
-        match run(path) {Ok(pending)=>pending,Err(error)=>{errors.push(format!("{name}: {error:#}"));true}}
+        match run(path) {Ok(pending)=>pending,Err(error)=>{let text=format!("{name}: {error:#}");if service_lock_contention(&error){service_lock_errors.push(text);}else{errors.push(text);}true}}
     };
     let stop_work=service("barrier stop service",&|path|Ok(herdr_farm::store::service_project_barrier_stops(path)?.pending));
     let (admission_log,result)=process_next_with_launches(ctx,&path,turn,effects,launch_dispatch_enabled());
@@ -115,7 +118,7 @@ fn finish_poll(ctx:&Ctx,path:&Path,turn:u64,reachable:bool,observation_error:Opt
     let completion_work=if root_owned {true} else {
         match herdr_farm::store::service_project_result_completions(path) {
             Ok((pending,diagnostic))=>{if let Some(reason)=diagnostic {errors.push(format!("result completion service: {reason}"));}pending},
-            Err(error)=>{errors.push(format!("result completion service: {error:#}"));true},
+            Err(error)=>{let text=format!("result completion service: {error:#}");if service_lock_contention(&error){service_lock_errors.push(text);}else{errors.push(text);}true},
         }
     };
     let routine_work=match scheduled {Ok(report)=>{if let Some(error)=report.diagnostic {errors.push(format!("routine scheduling: {error}"));}report.active},Err(error)=>{errors.push(format!("routine scheduling: {error:#}"));false}};
@@ -124,7 +127,12 @@ fn finish_poll(ctx:&Ctx,path:&Path,turn:u64,reachable:bool,observation_error:Opt
         Ok((progress,admission))=>{if let Some(error)=admission {errors.push(format!("admission: {error}"));}(progress,false)}
         Err(error)=>{errors.push(format!("{error:#}"));(false,queued)}
     };
-    Ok(PollResult{reachable:reachable||progress,scheduled_work:routine_work||wait_work||stop_work||replan_work||verification_work||integration_work||completion_work,unknown_effects,operation_error:(!errors.is_empty()).then(||errors.join("; ")),admission_log})
+    Ok(PollResult{reachable:reachable||progress,scheduled_work:routine_work||wait_work||stop_work||replan_work||verification_work||integration_work||completion_work,unknown_effects,operation_error:(!errors.is_empty()).then(||errors.join("; ")),admission_log,services_contended:(!root_owned).then_some(!service_lock_errors.is_empty()),service_lock_errors})
+}
+// Only actual effect.lock contention grants a service priority turn.
+fn service_lock_contention(error:&anyhow::Error)->bool {
+    error.chain().any(|cause|cause.to_string().contains("owns lock")&&cause.to_string().contains("effect.lock"))
+        && error.chain().any(|cause|matches!(cause.downcast_ref::<std::fs::TryLockError>(),Some(std::fs::TryLockError::WouldBlock)))
 }
 fn process_next(ctx:&Ctx,path:&Path,turn:u64,effects:Option<&mut crate::copy_jobs::Queue>)->Result<bool> {
     Ok(process_next_with_launches(ctx,path,turn,effects,launch_dispatch_enabled()).1?.0)
