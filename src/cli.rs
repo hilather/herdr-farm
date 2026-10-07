@@ -1269,7 +1269,7 @@ pub fn run(#[cfg(feature="state-store")] capture: &mut crate::cli_invocation::Ca
                     serde_json::to_value(herdr_farm::memory::supersede_worker_update(&dir,&attempt,&request)?)?
                 },
                 MemoryCommand::Supersession{binding,change}=>serde_json::to_value(herdr_farm::migration::open_active(&dir)?.worker_update_supersession(&binding,&change)?)?,
-                MemoryCommand::Receipts{attempt}=>serde_json::to_value(herdr_farm::migration::open_active(&dir)?.memory_update_receipts(&attempt)?)?,
+                MemoryCommand::Receipts{attempt}=>serde_json::to_value(herdr_farm::migration::open_active_read_only(&dir)?.memory_update_receipts(&attempt)?)?,
                 MemoryCommand::Invalidations{task}=>serde_json::to_value(herdr_farm::migration::open_active(&dir)?.memory_invalidations(&task)?)?,
                 MemoryCommand::Reconcile{document,signature,expected_head}=>serde_json::to_value(herdr_farm::authority::reconcile_memory(&dir,&document,&signature,expected_head)?)?,
                 MemoryCommand::BarrierFreeze{input,expected_head}=>serde_json::to_value(herdr_farm::memory::freeze_memory_barrier_file(&dir,&input,expected_head)?)?,

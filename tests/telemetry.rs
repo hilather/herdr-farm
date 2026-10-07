@@ -1011,7 +1011,7 @@ fn worker_friction_metrics_cli_fixture_and_unavailable_reasons() {
     db.execute("DELETE FROM cli_invocations",[]).unwrap();
     let now=jiff::Timestamp::now().as_millisecond();
     for (id,caller,path,outcome,delta) in [("w1","worker","task list","help",0),("w2","worker","task list","error",1),("c1","coordinator","inbox list","ok",2),("o1","operator","task list","usage_error",3)] {
-        db.execute("INSERT INTO cli_invocations VALUES(?1,?2,?3,0,10,'demo',?4,'local',?5)",rusqlite::params![id,path,outcome,caller,now+delta]).unwrap();
+        db.execute("INSERT INTO cli_invocations(invocation_id,command_path,outcome,exit_code,duration_ms,project_slug,caller,trust,recorded_unix_ms) VALUES(?1,?2,?3,0,10,'demo',?4,'local',?5)",rusqlite::params![id,path,outcome,caller,now+delta]).unwrap();
     }
     // A fixture delivery receives its timestamp through the real schema-72 trigger.
     let state=rusqlite::Connection::open(f.project.join(".state/state.db")).unwrap();

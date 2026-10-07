@@ -511,10 +511,10 @@ fn launch_run_reserves_a_planning_task_for_each_kind_and_reruns_safely() {
         // it records one submission bound to this attempt's contract.
         let brief_text = lab.ok(&["memory", "demo", "attempt-brief", "--attempt", &attempt])["text"].as_str().unwrap().to_owned();
         assert!(brief_text.contains("herdr-farm --root") && brief_text.contains("submission_id") && brief_text.contains("result demo submit"), "{brief_text}");
-        let command = format!("herdr-farm --root '{}' memory demo", lab.root.display());
+        let root = lab.root.to_str().unwrap().replace('\'', "'\\''");
         let output_directory = lab.project.join(".state/worker-output").join(&attempt);
         let output_path = output_directory.display();
-        let expected_card = format!("\n## Worker commands\n\nSubmit with the script above and wait for `submission_id`. Report: {output_path}/report.md (artifacts: {output_path}/library/)\n```sh\nM=\"{command}\"; A={attempt}\n$M attempt-brief --attempt $A; $M attempt-input --attempt $A; $M receipts --attempt $A\n$M update --attempt $A --delivery ID  # acknowledge after applying it\n$M propose --input FILE; $M ack --input FILE\n```\nThese are all the commands you need; do not run `herdr-farm --help`.\n");
+        let expected_card = format!("\n## Worker commands\n\nSubmit with the script above and wait for `submission_id`. Report: {output_path}/report.md (artifacts: {output_path}/library/)\n```sh\nmemory() {{ herdr-farm --root '{root}' memory demo \"$@\"; }}; M=memory; A={attempt}\n$M attempt-brief --attempt $A; $M attempt-input --attempt $A; $M receipts --attempt $A\n$M update --attempt $A --delivery ID  # acknowledge after applying it\n$M propose --input FILE; $M ack --input FILE\n```\nThese are all the commands you need; do not run `herdr-farm --help`.\n");
         assert_eq!(&brief_text[brief_text.rfind("\n## Worker commands").unwrap()..], expected_card);
         assert!(expected_card.lines().count() < 40);
         let branch = format!("worker-{task}");

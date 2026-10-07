@@ -1217,7 +1217,20 @@ impl SqliteStore {
                     })
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
+            let mut runs_stmt = tx.prepare("SELECT r.run_id,r.policy_id,r.state,r.reason,r.exit_status,r.metadata,p.body FROM verification_runs r LEFT JOIN acceptance_policies p ON p.task_id=r.task_id AND p.contract_revision=r.contract_revision AND p.policy_id=r.policy_id WHERE r.submission_id=?1 ORDER BY r.created_unix_ms,r.run_id")?;
+            let verification_runs = runs_stmt.query_map([&submission_id], |r| {
+                let metadata: Option<String> = r.get(5)?;
+                let metadata: serde_json::Value = metadata.and_then(|m| serde_json::from_str(&m).ok()).unwrap_or_default();
+                let policy: Option<String> = r.get(6)?;
+                let policy: serde_json::Value = policy.and_then(|p| serde_json::from_str(&p).ok()).unwrap_or_default();
+                let toolchain = metadata["toolchain"]["name"].as_str().or_else(|| policy["toolchain"].as_str());
+                Ok(serde_json::json!({"run_id":r.get::<_,String>(0)?, "policy_id":r.get::<_,String>(1)?,
+                    "state":r.get::<_,String>(2)?, "reason":r.get::<_,Option<String>>(3)?,
+                    "exit_status":r.get::<_,Option<i32>>(4)?, "toolchain":toolchain,
+                    "duration_ms":metadata["duration_ms"], "tree_changes":metadata["tree_changes"]}))
+            })?.collect::<std::result::Result<Vec<_>, _>>()?;
             views.push(ResultView {
+                verification_runs,
                 submission_id,
                 task_id,
                 contract_revision,

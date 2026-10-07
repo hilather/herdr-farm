@@ -25,9 +25,10 @@ fn command_card(attempt: &str, output: &str) -> Result<String> {
         .filter(|p| p.file_name().is_some_and(|n| n == ".state")).and_then(Path::parent) else { return Ok(String::new()); };
     let root = project.parent().context("worker project has no root")?;
     let slug = project.file_name().and_then(|n| n.to_str()).context("worker project slug missing")?;
-    let memory = format!("herdr-farm --root '{}' memory {slug}", root.display());
+    let root = root.to_str().context("worker root is not UTF-8")?.replace('\'', "'\\''");
+    let memory = format!("memory() {{ herdr-farm --root '{root}' memory {slug} \"$@\"; }}; M=memory");
     // Compact on purpose: it counts against the worker's input budget.
-    Ok(format!("\n## Worker commands\n\nSubmit with the script above and wait for `submission_id`. Report: {output}/report.md (artifacts: {output}/library/)\n```sh\nM=\"{memory}\"; A={attempt}\n$M attempt-brief --attempt $A; $M attempt-input --attempt $A; $M receipts --attempt $A\n$M update --attempt $A --delivery ID  # acknowledge after applying it\n$M propose --input FILE; $M ack --input FILE\n```\nThese are all the commands you need; do not run `herdr-farm --help`.\n"))
+    Ok(format!("\n## Worker commands\n\nSubmit with the script above and wait for `submission_id`. Report: {output}/report.md (artifacts: {output}/library/)\n```sh\n{memory}; A={attempt}\n$M attempt-brief --attempt $A; $M attempt-input --attempt $A; $M receipts --attempt $A\n$M update --attempt $A --delivery ID  # acknowledge after applying it\n$M propose --input FILE; $M ack --input FILE\n```\nThese are all the commands you need; do not run `herdr-farm --help`.\n"))
 }
 
 #[derive(Debug, Serialize)]

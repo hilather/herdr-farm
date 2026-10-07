@@ -701,6 +701,12 @@ fn verify_owned(store: &mut SqliteStore, request: &VerifyRequest, ownership: Opt
         None
     };
     let mut metadata = execution.metadata(&report.stdout, output.stdout_truncated);
+    if report.reason == Some("tampered_tree") {
+        let changes = protocol(&output.stderr);
+        metadata["tree_changes"] = serde_json::json!({"count": changes.change_count,
+            "truncated": changes.change_count > changes.paths.len() || changes.path_truncated,
+            "paths": changes.paths});
+    }
     metadata["diff_size"] = match diff_counts { Some((a,d,b)) => serde_json::json!({"added":a,"removed":d,"binary_files":b}), None => serde_json::json!({"status":"unavailable","reason":"diff_unavailable"}) };
     if let Some(resolved) = &toolchain { metadata["toolchain"] = serde_json::json!({"name":resolved.name,"digest":resolved.digest,"paths":resolved.identities,"network":resolved.toolchain.network,"timeout_seconds":resolved.toolchain.timeout_seconds}); }
     if crate::domain::verification_policy::ExecutionPolicy::parse(&policy_bytes)?.version == 2 {
@@ -906,6 +912,9 @@ fn classify(output: &Output, commit: &str, tree: &str) -> ChildReport {
 }
 
 struct Protocol {
+    change_count: usize,
+    paths: Vec<serde_json::Value>,
+    path_truncated: bool,
     commit: Option<String>,
     tree: Option<String>,
     checks: Option<i32>,
@@ -913,12 +922,24 @@ struct Protocol {
 
 fn protocol(stderr: &str) -> Protocol {
     let mut parsed = Protocol {
+        change_count: 0, paths: Vec::new(), path_truncated: false,
         commit: None,
         tree: None,
         checks: None,
     };
     for line in stderr.lines() {
-        if let Some(value) = line.strip_prefix("hp-verify commit=") {
+        if line == "hp-verify changed-truncated=true" {
+            parsed.path_truncated = true;
+        } else if let Some(value) = line.strip_prefix("hp-verify changed-count=") {
+            parsed.change_count = value.parse().unwrap_or(0);
+        } else if let Some(value) = line.strip_prefix("hp-verify changed=") {
+            if let Some((kind, path)) = value.split_once('\t')
+                && matches!(kind, "modified" | "deleted" | "added-untracked")
+                && parsed.paths.len() < 50 && path.len() <= 300 {
+                let path = path.replace("%0A", "\n").replace("%0D", "\r").replace("%09", "\t").replace("%25", "%");
+                parsed.paths.push(serde_json::json!({"kind":kind,"path":path}));
+            }
+        } else if let Some(value) = line.strip_prefix("hp-verify commit=") {
             parsed.commit = Some(value.trim().to_string());
         } else if let Some(value) = line.strip_prefix("hp-verify tree=") {
             parsed.tree = Some(value.trim().to_string());

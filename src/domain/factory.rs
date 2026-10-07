@@ -186,6 +186,7 @@ pub struct ResultObjectView {
 /// not verifier evidence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ResultView {
+    pub verification_runs: Vec<serde_json::Value>,
     pub submission_id: String,
     pub task_id: String,
     pub contract_revision: u64,

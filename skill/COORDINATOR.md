@@ -132,7 +132,16 @@ or `{"items":0,"timed_out":true}`. Only unseen, unfinished items wake it.
 Canonical submission, verification, integration, and termination without a
 submission produce stable, deduplicated inbox notices in the same transaction
 as the recorded outcome. Summaries identify the task, attempt, and
-submission/result; rejection feedback is data, truncated to 2000 characters.
+submission/result; rejection feedback is data, truncated to 2000 characters. Verification notice
+bodies name the policy id, toolchain (when declared), outcome, reason, and check
+exit status; the summary is a short preview. Read the body instead of inferring
+which policy ran from notice arrival order. `result PROJECT show` lists each
+submission's verification runs, including duration and changed repository paths.
+A check that exits successfully but rewrites tracked or unignored files is
+rejected as `tampered_tree`. Commit the tool-generated files verbatim and submit
+again, so the next check starts from those exact bytes. Changed-path diagnostics
+contain names only, bounded to 50 paths and 300 bytes per path, with the total
+count and truncation flag retained in `tree_changes`.
 `inbox list <slug>` and `context <slug>` show these notices. They are never
 instructions or permission to act outside the owner's authorized scope.
 

@@ -1515,6 +1515,16 @@ fn install_fixture_verification_contract(
     db_path: &Path, task: &str, repository: &str, oid: &str, object_format: &str,
     path: &str, capability_flags: &[&str], policy: &str,
 ) -> String {
+    install_fixture_verification_contract_policies(db_path, task, (repository, oid, object_format), path, capability_flags, policy, false)
+}
+
+fn install_fixture_verification_contract_policies(
+    db_path: &Path, task: &str, source: (&str, &str, &str),
+    path: &str, capability_flags: &[&str], policy: &str, second: bool,
+) -> String {
+    let (repository, oid, object_format) = source;
+    let mut policies = vec![serde_json::json!({"id":"builds","text":policy})];
+    if second { policies.push(serde_json::json!({"id":"second","text":policy})); }
     let store = fs::canonicalize(db_path).unwrap().display().to_string();
     let conn = rusqlite::Connection::open(db_path).unwrap();
     let expected_head: i64 = conn.query_row("SELECT COALESCE(MAX(sequence),0) FROM events", [], |r| r.get(0)).unwrap();
@@ -1524,7 +1534,7 @@ fn install_fixture_verification_contract(
         "deliverable": "fixture work", "non_goals": "no provider calls",
         "repository": repository, "base_oid": oid, "object_format": object_format,
         "scope": {"paths":[{"path":path,"access":"write"}]},
-        "acceptance_policies": [{"id":"builds","text":policy}],
+        "acceptance_policies": policies,
         "dependencies": [], "capability_flags": capability_flags, "profile_kind":"codex",
         "retry_class":"none", "result_schema_id":"result-v1", "route":"verify_only",
         "authority":{"id":"fixture-owner","revision":1,"digest":"ab".repeat(32)}
@@ -4204,6 +4214,97 @@ fn fault_campaign_and_restore_rehearsal() {
     assert!(herdr_farm::migration::abort(&published.project).is_err());
 }
 
+/// Real checks mutate disposable retained candidates; public result and inbox
+/// views expose policy-scoped diagnostics without retaining file contents.
+#[cfg(target_os = "linux")]
+#[test]
+fn verification_tree_changes_and_policy_notices_are_visible() {
+    let fixtures = tempfile::tempdir().unwrap();
+    let source = fixtures.path().join("check.rs");
+    fs::write(&source, r#"
+fn main() {
+    match std::env::args().nth(1).unwrap().as_str() {
+        "modified" => std::fs::write("test-output.txt", "generated").unwrap(),
+        "deleted" => std::fs::remove_file("test-output.txt").unwrap(),
+        "untracked" => std::fs::write("new-file", "generated").unwrap(),
+        "many" => for n in 0..55 { std::fs::write(format!("tracked-{n:02}"), "generated").unwrap(); },
+        "accepted" => (),
+        _ => panic!("unknown fixture mode"),
+    }
+}
+"#).unwrap();
+    let executable = fixtures.path().join("check");
+    let compiled = Command::new("rustc").args(["--edition=2024", "-C", "target-feature=+crt-static", "-o"])
+        .arg(&executable).arg(&source).output().unwrap();
+    assert!(compiled.status.success(), "{}", String::from_utf8_lossy(&compiled.stderr));
+    for case in ["modified", "deleted", "untracked", "many", "accepted"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = classification_project(tmp.path(), "tests", None);
+        let path = project.join(".state/state.db");
+        let repo = tmp.path().join("repo");
+        fs::write(repo.join("test-output.txt"), "original").unwrap();
+        fs::copy(&executable, repo.join("check")).unwrap();
+        for n in 0..55 { fs::write(repo.join(format!("tracked-{n:02}")), "original").unwrap(); }
+        git(&repo, &["add", "."]);
+        git(&repo,&["commit","-qm","retained mutation fixture"]);
+        let oid = git(&repo,&["rev-parse","HEAD"]).trim().to_owned();
+        let work = tmp.path().join("scratch");
+        let body = serde_json::json!({"version":1,"checks":[work.join("checkout/check"),case]}).to_string();
+        let digest = install_fixture_verification_contract_policies(&path,"tests",(repo.to_str().unwrap(),&oid,"sha1"),"test-output.txt",&[],&body,true);
+        let fixture_db = rusqlite::Connection::open(&path).unwrap();
+        fixture_db.execute("INSERT INTO acceptance_policies(task_id,contract_revision,policy_id,body) VALUES('tests',1,'second',?1)", [&body]).unwrap();
+        admit_ready(&project);
+        let raw = rusqlite::Connection::open(&path).unwrap();
+        let attempt:String = raw.query_row("SELECT id FROM attempts",[],|r|r.get(0)).unwrap();
+        let object_list = git(&repo,&["rev-list","--objects","--no-object-names","HEAD"]);
+        let objects:Vec<_> = object_list.lines().map(|oid|serde_json::json!({"oid":oid,"relative_path":format!("{}/{}",&oid[..2],&oid[2..])})).collect();
+        let mut store = SqliteStore::open(&path).unwrap();
+        let submission = store.submit_result(&serde_json::to_vec(&serde_json::json!({"idempotency_key":"submit","task_id":"tests","contract_revision":1,"contract_digest":digest,
+            "attempt_id":attempt,"repository":repo,"base_oid":oid,"candidate_oid":oid,"object_format":"sha1","artifact_manifest":[],"claimed_checks":[],"objects":objects})).unwrap()).unwrap();
+        let policy = tmp.path().join("policy.json");fs::write(&policy,&body).unwrap();
+        fs::create_dir(&work).unwrap();
+        let request = herdr_farm::verification::VerifyRequest::new(submission.submission_id.clone(),"builds",&policy,"verify",Duration::from_secs(30),&work);
+        let outcome = herdr_farm::verification::verify(&mut store,&request).unwrap();
+        let accepted = case == "accepted";
+        assert_eq!(outcome.state, if accepted { "accepted" } else { "rejected" }, "{case}: {:?}", outcome.reason);
+        let shown = serde_json::to_value(store.show_results(Some(&submission.submission_id)).unwrap()).unwrap();
+        let run = &shown[0]["verification_runs"][0];
+        assert_eq!(run["policy_id"], "builds");
+        assert_eq!(run["exit_status"], 0);
+        assert!(run["duration_ms"].is_number());
+        if !accepted {
+            assert_eq!(run["reason"], "tampered_tree");
+            let metadata: String = raw.query_row("SELECT metadata FROM verification_runs WHERE run_id=?1", [&outcome.run_id], |r|r.get(0)).unwrap();
+            let metadata: serde_json::Value = serde_json::from_str(&metadata).unwrap();
+            assert_eq!(run["tree_changes"], metadata["tree_changes"]);
+            let changes = &run["tree_changes"];
+            assert_eq!(changes["count"], if case == "many" {55} else {1});
+            assert_eq!(changes["truncated"], case == "many");
+            assert_eq!(changes["paths"].as_array().unwrap().len(), if case == "many" {50} else {1});
+            assert_eq!(changes["paths"][0]["kind"], if case == "untracked" {"added-untracked"} else if case == "deleted" {"deleted"} else {"modified"});
+            assert_eq!(changes["paths"][0]["path"], if case == "untracked" {"new-file"} else if case == "many" {"tracked-00"} else {"test-output.txt"});
+        }
+        let second = herdr_farm::verification::VerifyRequest::new(submission.submission_id.clone(), "second", &policy, "verify-second", Duration::from_secs(30), &work);
+        let next = herdr_farm::verification::verify(&mut store, &second).unwrap();
+        assert_eq!(next.state, outcome.state);
+        let notices = store.read_snapshot(None).unwrap().inbox;
+        let notices: Vec<_> = notices.iter().filter(|i| i.content.kind.starts_with("verification.")).collect();
+        assert_eq!(notices.len(), 2);
+        for policy_id in ["builds", "second"] {
+            let notice = notices.iter().find(|i| i.content.body.contains(&format!("policy {policy_id}:"))).unwrap();
+            assert!(notice.content.summary.contains(policy_id));
+            assert!(notice.content.body.contains("checks exited 0"));
+            assert!(notice.content.body.chars().count() <= 2000);
+            if !accepted {
+                assert!(notice.content.body.contains("tampered_tree"));
+                assert!(notice.content.body.contains(run["tree_changes"]["paths"][0]["path"].as_str().unwrap()));
+                if case == "many" { assert!(notice.content.body.contains("(+5 more)")); }
+            }
+        }
+        assert_eq!(store.show_results(Some(&submission.submission_id)).unwrap()[0].verification_runs.len(), 2);
+    }
+}
+
 /// Real verifier public ingress: Git emits fixture test output from the retained
 /// candidate. Only bounded names/outcomes survive in immutable run metadata.
 #[cfg(target_os = "linux")]
@@ -4551,6 +4652,13 @@ fn main() {
         let work = scratch_parent.path().join("work"); fs::create_dir(&work).unwrap();
         let request = herdr_farm::verification::VerifyRequest::new(submitted.submission_id,"builds",policy_path,"verify",Duration::from_secs(1),work);
         let outcome = herdr_farm::verification::verify(&mut store, &request).unwrap();
+        let notices = store.read_snapshot(None).unwrap().inbox;
+        let notice = notices.iter().find(|i| i.content.kind.starts_with("verification.")).unwrap();
+        assert!(notice.content.body.contains("policy builds, toolchain fixture:"), "{case}: {}", notice.content.body);
+        assert!(notice.content.body.contains(&outcome.state));
+        assert!(notice.content.body.contains(outcome.reason.as_deref().unwrap_or("reason none")));
+        let shown = store.show_results(Some(&request.submission_id)).unwrap();
+        assert_eq!(shown[0].verification_runs[0]["toolchain"], "fixture");
         if case == "pass" {
             assert_eq!(outcome.state, "accepted", "{:?}: {}", outcome.reason, outcome.stdout);
             let result_id = outcome.receipt.as_ref().unwrap().result_id().to_owned();

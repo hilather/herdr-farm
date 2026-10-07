@@ -135,6 +135,8 @@ fn main() {
     let mut capture = cli_invocation::Capture::start();
     let result = cli::run(#[cfg(feature="state-store")] &mut capture);
     #[cfg(feature="state-store")]
+    if let Err(error) = &result { capture.failure(error); }
+    #[cfg(feature="state-store")]
     capture.finish(if result.is_ok() { "ok" } else { "error" }, if result.is_ok() { 0 } else { 1 });
     if let Err(error) = result {
         eprintln!("herdr-farm: {error:#}");

@@ -204,7 +204,7 @@ pub(super) fn result_notice(db: &Connection, kind: &str, event: &str, task: &str
     let feedback: String = feedback.chars().take(2000).map(|c| if c.is_control() { ' ' } else { c }).collect();
     let content = InboxContent { id, kind: kind.into(), subject: task.into(),
         created: jiff::Timestamp::now().to_string(),
-        summary: format!("{kind}: task {task}, attempt {attempt}, submission/result {result}; {feedback}"), body: String::new() };
+        summary: format!("{kind}: task {task}, attempt {attempt}, submission/result {result}; {}", feedback.chars().take(240).collect::<String>()), body: feedback };
     insert(db, &InboxItem { revision: 1, content, seen: false, done: false })
 }
 pub(super) fn ended_notice(db: &Connection, attempt: &Attempt) -> Result<()> {
