@@ -13,7 +13,7 @@ use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::unavailable;
 use crate::herdr::{self, Herdr};
@@ -28,6 +28,7 @@ const DEFAULT_INTERVAL_SECS: i64 = crate::timing::TELEMETRY_COLLECT_SECS as i64;
 const MAX_SOCKETS: usize = 4;
 const CALL_TIMEOUT: Duration = Duration::from_secs(5);
 const LIFECYCLE_CALL_TIMEOUT: Duration = Duration::from_millis(500);
+const LIFECYCLE_WRITE_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_REPLY: u64 = 1 << 20;
 const MAX_AGENTS: usize = 1024;
 const OPEN: [&str; 3] = ["launching", "running", "awaiting_input"];
@@ -145,8 +146,9 @@ pub fn observe(project: &Path, db: &mut Connection, budget: crate::telemetry::co
 }
 
 /// Best-effort observation of selected attempts after they reach `running`.
-/// Never creates or migrates a sidecar and never waits for its writer.
+/// Never creates or migrates a sidecar; writer waiting shares the 500 ms probe budget.
 pub fn observe_selected(project: &Path, ids: &BTreeSet<String>) {
+    let deadline = Instant::now() + LIFECYCLE_CALL_TIMEOUT;
     let now = jiff::Timestamp::now().as_millisecond();
     let _ = (|| -> Result<()> {
         let path = crate::telemetry::sidecar::path(project);
@@ -156,17 +158,31 @@ pub fn observe_selected(project: &Path, ids: &BTreeSet<String>) {
         let table: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='attention_samples')", [], |r| r.get(0))?;
         if !table { return Ok(()); }
         crate::telemetry::sidecar::stream_versions(&db)?;
-        // Acquire before the external call: contention skips the entire hook.
-        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let bound = bindings_filtered(project, Some(ids), false, true)?.into_iter().filter(|b| b.open).collect();
-        observe_bound(&tx, crate::telemetry::codex::Budget { bytes: MAX_REPLY }, bound, now, LIFECYCLE_CALL_TIMEOUT)?;
+        let interval = interval_ms();
+        // Query Herdr without holding either database's write transaction.
+        let samples = collect_samples(crate::telemetry::codex::Budget { bytes: MAX_REPLY }, bound, LIFECYCLE_CALL_TIMEOUT, Some(deadline));
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        db.busy_timeout(remaining.min(LIFECYCLE_WRITE_TIMEOUT))?;
+        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        // Only lock acquisition may wait; later SQL cannot spend the budget again.
+        tx.busy_timeout(Duration::ZERO)?;
+        insert_samples(&tx, &samples, now, interval)?;
         tx.commit()?;
         Ok(())
     })();
 }
 
 fn observe_bound(db: &Connection, budget: crate::telemetry::codex::Budget, bound: Vec<Bound>, now: i64, timeout: Duration) -> Result<Value> {
-    let (interval, bin) = (interval_ms(), herdr_bin());
+    let interval = interval_ms();
+    let samples = collect_samples(budget, bound, timeout, None);
+    insert_samples(db, &samples, now, interval)
+}
+
+type Observation = (String, std::result::Result<&'static str, &'static str>);
+
+fn collect_samples(budget: crate::telemetry::codex::Budget, bound: Vec<Bound>, timeout: Duration, deadline: Option<Instant>) -> Vec<Observation> {
+    let bin = herdr_bin();
     let mut remaining = budget.bytes;
     let mut replies: BTreeMap<String, std::result::Result<Vec<Value>, &'static str>> = BTreeMap::new();
     let mut samples = Vec::new();
@@ -175,17 +191,22 @@ fn observe_bound(db: &Connection, budget: crate::telemetry::codex::Budget, bound
             else if b.pane.is_empty() || !Path::new(&b.socket).is_absolute() { Err("route_unrecorded") }
             else {
                 if !replies.contains_key(&b.socket) {
-                    let reply = if replies.len() >= MAX_SOCKETS || remaining == 0 { Err("budget_exhausted") } else { agent_list(&bin, &b.socket, &mut remaining, timeout) };
+                    let timeout = deadline.map_or(timeout, |end| timeout.min(end.saturating_duration_since(Instant::now())));
+                    let reply = if replies.len() >= MAX_SOCKETS || remaining == 0 || timeout.is_zero() { Err("budget_exhausted") } else { agent_list(&bin, &b.socket, &mut remaining, timeout) };
                     replies.insert(b.socket.clone(), reply);
                 }
                 match &replies[&b.socket] { Err(reason) => Err(*reason), Ok(agents) => classify(b, agents) }
             };
-        samples.push((b.attempt.as_str(), sample));
+        samples.push((b.attempt.clone(), sample));
     }
+    samples
+}
+
+fn insert_samples(db: &Connection, samples: &[Observation], now: i64, interval: i64) -> Result<Value> {
     let owned = db.is_autocommit().then(|| db.unchecked_transaction()).transpose()?;
     let tx = owned.as_deref().unwrap_or(db);
     let (mut states, mut gaps) = (0, BTreeMap::<&str, i64>::new());
-    for (attempt, sample) in &samples {
+    for (attempt, sample) in samples {
         let (state, gap) = match sample { Ok(state) => { states += 1; (Some(*state), None) } Err(gap) => { *gaps.entry(gap).or_default() += 1; (None, Some(*gap)) } };
         tx.execute("INSERT INTO attention_samples(attempt_id,observed_unix_ms,state,gap,interval_ms,source) VALUES(?1,?2,?3,?4,?5,?6)",
             params![attempt, now, state, gap, interval, SOURCE])?;

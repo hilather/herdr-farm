@@ -663,9 +663,11 @@ and no leading or trailing gap under the unchanged two-interval rule; longer
 attempts are covered by periodic observation. The hook finishes after the
 canonical commit and before the store call returns,
 so normal CLI exit cannot discard a detached sample. No canonical transaction
-is held; caller operation locks can be extended by the bounded 500 ms Herdr
-probe (1 MiB reply budget). It never creates or migrates a sidecar and skips a
-busy writer without waiting. Missing/old sidecars, writer contention, database
+is held; caller operation locks can be extended by the shared 500 ms probe
+budget (1 MiB reply budget). Herdr is queried before taking the sidecar write
+lock. The hook waits at most 250 ms for a busy writer, limited further by the
+remaining probe budget, and skips the sample if that bounded wait expires.
+It never creates or migrates a sidecar. Missing/old sidecars, writer contention, database
 errors, concurrent termination before binding selection, or process death during
 the hook can still prevent a persisted sample;
 Herdr/identity failures persist a gap rather than an invented state.
