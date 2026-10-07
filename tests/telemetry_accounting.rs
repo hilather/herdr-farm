@@ -1190,7 +1190,8 @@ fn attention_intervals_union_and_censor() {
     db.execute("INSERT INTO result_submissions(submission_id,project_store,idempotency_key,payload_digest,payload,task_id,contract_revision,contract_digest,attempt_id,repository,base_oid,candidate_oid,object_format,artifact_manifest,claimed_checks,created_unix_ms)
         VALUES(?1,'store',?1,?2,'{}','t1',1,?2,'a1','/repo',?3,?3,'sha1','[]','[]',1000)", rusqlite::params![hex('1'), hex('d'), oid]).unwrap();
     db.execute("INSERT INTO verified_results(result_id,run_id,submission_id,commit_oid,tree_oid,object_format,policy_digest,receipt_digest,isolation,memory_fence,created_unix_ms)
-        VALUES(?1,?1,?2,?3,?3,'sha1',?4,?4,'linux-unshare-user-pid-mount-v1',0,2000)", rusqlite::params![hex('4'), hex('1'), oid, hex('e')]).unwrap();
+        VALUES(?1,?1,?2,?3,?3,'sha1','be6f2ce9cb648d4bacb21d433c0baa8e01cae9591afc0669152ab2b64f8bdd3b',?4,'linux-unshare-user-pid-mount-v1',0,2000)", rusqlite::params![hex('4'), hex('1'), oid, hex('e')]).unwrap();
+    support::telemetry::complete_legacy_verification_fixture(&db);
 
     let cli = |args: &[&str]| -> (serde_json::Value, String) {
         let out = Command::new(BIN).env_clear().env("HOME", &home).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", &herdr)
@@ -1788,7 +1789,8 @@ fn plant_fleet_with_runs(project: &Path, class_of: &dyn Fn(&str, &str, &str) -> 
         db.execute("INSERT INTO result_submissions(submission_id,project_store,idempotency_key,payload_digest,payload,task_id,contract_revision,contract_digest,attempt_id,repository,base_oid,candidate_oid,object_format,artifact_manifest,claimed_checks,created_unix_ms)
             VALUES(?1,'store',?1,?2,'{}',?3,1,?2,?4,'/repo',?5,?5,'sha1','[]','[]',?6)", rusqlite::params![submission, id(8), task, attempt, oid, verified - 60_000]).unwrap();
         db.execute("INSERT INTO verified_results(result_id,run_id,submission_id,commit_oid,tree_oid,object_format,policy_digest,receipt_digest,isolation,memory_fence,created_unix_ms)
-            VALUES(?1,?1,?2,?3,?3,'sha1',?4,?4,'linux-unshare-user-pid-mount-v1',0,?5)", rusqlite::params![result, submission, oid, id(7), verified]).unwrap();
+            VALUES(?1,?1,?2,?3,?3,'sha1','be6f2ce9cb648d4bacb21d433c0baa8e01cae9591afc0669152ab2b64f8bdd3b',?4,'linux-unshare-user-pid-mount-v1',0,?5)", rusqlite::params![result, submission, oid, id(7), verified]).unwrap();
+        support::telemetry::complete_legacy_verification_fixture(&db);
         for (k, (target, state, reason, created, integrated)) in ops.into_iter().enumerate() {
             let op = format!("op-{task}-{k}");
             db.execute("INSERT INTO integration_operations(operation_id,project_store,idempotency_key,payload_digest,repository,ref_name,expected_old_oid,verified_result_id,candidate_id,state,generation,object_format,checks_passed,reason,created_unix_ms)
@@ -2322,7 +2324,8 @@ fn shadow_budget_bridge_matches_doc05_goldens() {
     db.execute("INSERT INTO result_submissions(submission_id,project_store,idempotency_key,payload_digest,payload,task_id,contract_revision,contract_digest,attempt_id,repository,base_oid,candidate_oid,object_format,artifact_manifest,claimed_checks,created_unix_ms)
         VALUES(?1,'store',?1,?2,'{}','work',1,?2,?3,'/repo',?4,?4,'sha1','[]','[]',1000)", rusqlite::params![hex('1'), hex('d'), a2, "b".repeat(40)]).unwrap();
     db.execute("INSERT INTO verified_results(result_id,run_id,submission_id,commit_oid,tree_oid,object_format,policy_digest,receipt_digest,isolation,memory_fence,created_unix_ms)
-        VALUES(?1,?1,?2,?3,?3,'sha1',?4,?4,'linux-unshare-user-pid-mount-v1',0,2000)", rusqlite::params![hex('2'), hex('1'), "b".repeat(40), hex('7')]).unwrap();
+        VALUES(?1,?1,?2,?3,?3,'sha1','be6f2ce9cb648d4bacb21d433c0baa8e01cae9591afc0669152ab2b64f8bdd3b',?4,'linux-unshare-user-pid-mount-v1',0,2000)", rusqlite::params![hex('2'), hex('1'), "b".repeat(40), hex('7')]).unwrap();
+    support::telemetry::complete_legacy_verification_fixture(&db);
     drop(db);
     let m04 = f.report()["metrics"]["M04"].clone();
     assert_eq!((&m04["definition"], &m04["name"], &m04["value"], &m04["currency"], &m04["denominator"], &m04["numerator"], &m04["basis"]),
@@ -3192,7 +3195,8 @@ fn attempt_totals_include_only_native_separate_children() {
     db.execute("INSERT INTO result_submissions(submission_id,project_store,idempotency_key,payload_digest,payload,task_id,contract_revision,contract_digest,attempt_id,repository,base_oid,candidate_oid,object_format,artifact_manifest,claimed_checks,created_unix_ms)
         VALUES(?1,'store',?1,?2,'{}','work',1,?2,?3,'/repo',?4,?4,'sha1','[]','[]',1000)", rusqlite::params![hex('1'), hex('d'), f.attempt, "b".repeat(40)]).unwrap();
     db.execute("INSERT INTO verified_results(result_id,run_id,submission_id,commit_oid,tree_oid,object_format,policy_digest,receipt_digest,isolation,memory_fence,created_unix_ms)
-        VALUES(?1,?1,?2,?3,?3,'sha1',?4,?4,'linux-unshare-user-pid-mount-v1',0,2000)", rusqlite::params![hex('2'), hex('1'), "b".repeat(40), hex('7')]).unwrap();
+        VALUES(?1,?1,?2,?3,?3,'sha1','be6f2ce9cb648d4bacb21d433c0baa8e01cae9591afc0669152ab2b64f8bdd3b',?4,'linux-unshare-user-pid-mount-v1',0,2000)", rusqlite::params![hex('2'), hex('1'), "b".repeat(40), hex('7')]).unwrap();
+    support::telemetry::complete_legacy_verification_fixture(&db);
     drop(db);
     let report = f.report();
     assert_eq!(report["metrics"]["M04"]["value"], "250/1", "legacy M04 counted every bound child: 300/1; attempt totals are 250/1");

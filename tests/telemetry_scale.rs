@@ -291,9 +291,9 @@ fn generate(f: Fixture, scale: Scale) -> Dataset {
                 db.execute("INSERT INTO verification_runs(run_id,project_store,idempotency_key,payload_digest,submission_id,task_id,contract_revision,contract_digest,attempt_id,
                     policy_id,policy_digest,commit_oid,tree_oid,object_format,memory_fence,isolation,argv,library_manifest,state,reason,exit_status,receipt_digest,store_device,store_inode,created_unix_ms)
                     VALUES(?1,'store',?2,?3,?4,?5,1,?3,?6,'sim-policy',?7,?8,?8,'sha1',0,'linux-unshare-user-pid-mount-v1','[\"true\"]','[]','accepted',NULL,0,?7,1,1,?9)",
-                    rusqlite::params![result, &result[..32], hex("d"), submission, task, attempt, hex("e"), "a".repeat(40), end - 1_000]).unwrap();
+                    rusqlite::params![result, &result[..32], hex("d"), submission, task, attempt, hex("{}"), "a".repeat(40), end - 1_000]).unwrap();
                 db.execute("INSERT INTO verified_results(result_id,run_id,submission_id,commit_oid,tree_oid,object_format,policy_digest,receipt_digest,isolation,memory_fence,created_unix_ms)
-                    VALUES(?1,?1,?2,?3,?3,'sha1',?4,?4,'linux-unshare-user-pid-mount-v1',0,?5)", rusqlite::params![result, submission, "a".repeat(40), hex("e"), end]).unwrap();
+                    VALUES(?1,?1,?2,?3,?3,'sha1',?4,?4,'linux-unshare-user-pid-mount-v1',0,?5)", rusqlite::params![result, submission, "a".repeat(40), hex("{}"), end]).unwrap();
                 let flagged = i.is_multiple_of(5);
                 producers.proxies.push(Proxy { task: task.clone(), attempt: attempt.clone(), submission: submission.clone(), run: result.clone(), at: end - 1_000, flagged });
                 if i.is_multiple_of(10) && let Some(outcome) = plant_integration(&db, &task, &op, &result, end, i, now) { producers.outcomes.push(outcome); }
@@ -362,7 +362,7 @@ fn plant_integration(db: &rusqlite::Connection, task: &str, op: &str, result: &s
 fn record_producer_mix(mix: &mut Mix, producers: &Producers) {
     for row in &producers.proxies {
         let payload = json!({"kind": "first_candidate_ci", "task_id": row.task, "submission_id": row.submission, "attempt_id": row.attempt,
-            "run_id": row.run, "policy_digest": hex("e"), "base_oid": "a".repeat(40), "candidate_oid": "a".repeat(40), "ci_state": "accepted",
+            "run_id": row.run, "policy_digest": hex("{}"), "base_oid": "a".repeat(40), "candidate_oid": "a".repeat(40), "ci_state": "accepted",
             "verified_unix_ms": row.at, "tests_added_lines": if row.flagged { 0 } else { 12 }, "tests_deleted_lines": if row.flagged { 8 } else { 2 },
             "tests_binary_files": 0, "weakening": if row.flagged { "flagged" } else { "clear" }, "weakening_reason": null,
             "weakening_rule": "tests-net-removal.v1", "source_trust": "proxy_observed", "observed_unix_ms": row.at + 1_000});
@@ -390,7 +390,7 @@ fn plant_producers(d: &Dataset) {
             ON CONFLICT(kind,task_id) DO UPDATE SET tests_added_lines=excluded.tests_added_lines,tests_deleted_lines=excluded.tests_deleted_lines,
             tests_binary_files=excluded.tests_binary_files,weakening=excluded.weakening,weakening_reason=excluded.weakening_reason,
             observed_unix_ms=excluded.observed_unix_ms WHERE proxy_signals.weakening='unavailable' ",
-            rusqlite::params![p.task, p.submission, p.attempt, p.run, hex("e"), "a".repeat(40), p.at, if p.flagged { 0 } else { 12 }, if p.flagged { 8 } else { 2 }, if p.flagged { "flagged" } else { "clear" }, p.at + 1_000]).unwrap();
+            rusqlite::params![p.task, p.submission, p.attempt, p.run, hex("{}"), "a".repeat(40), p.at, if p.flagged { 0 } else { 12 }, if p.flagged { 8 } else { 2 }, if p.flagged { "flagged" } else { "clear" }, p.at + 1_000]).unwrap();
     }
     for o in &d.producers.outcomes {
         tx.execute("INSERT OR IGNORE INTO integration_outcomes VALUES(?1,1209600000,?2,?3,?2,?4,?5,?6,24,8,NULL,'outcomes.v1','proxy_observed',?7)",

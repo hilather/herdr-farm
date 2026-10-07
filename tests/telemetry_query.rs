@@ -67,6 +67,10 @@ type AttemptSpec<'a> = (&'a str, &'a str, &'a [(&'a str, i64)]);
 /// contract. `verified` = (attempt, created ms) plants a submission and a
 /// verified result; `integration` = (state, integrated ms) an integration of it.
 fn plant(db: &rusqlite::Connection, task: &str, state: &str, route: Option<&str>, attempts: &[AttemptSpec], verified: Option<(&str, i64)>, integration: Option<(&str, Option<i64>)>) {
+    plant_with_metadata(db, task, state, route, attempts, verified, integration, None);
+}
+#[allow(clippy::too_many_arguments)]
+fn plant_with_metadata(db: &rusqlite::Connection, task: &str, state: &str, route: Option<&str>, attempts: &[AttemptSpec], verified: Option<(&str, i64)>, integration: Option<(&str, Option<i64>)>, metadata: Option<&str>) {
     db.execute("INSERT INTO tasks(id,revision,state,title) VALUES(?1,1,?2,?1)", [task, state]).unwrap();
     for (id, attempt_state, marks) in attempts {
         db.execute("INSERT INTO attempts(id,task_id,revision,state,reservation,termination_observed) VALUES(?1,?2,2,?3,?1,?4)",
@@ -84,7 +88,8 @@ fn plant(db: &rusqlite::Connection, task: &str, state: &str, route: Option<&str>
         db.execute("INSERT INTO result_submissions(submission_id,project_store,idempotency_key,payload_digest,payload,task_id,contract_revision,contract_digest,attempt_id,repository,base_oid,candidate_oid,object_format,artifact_manifest,claimed_checks,created_unix_ms)
             VALUES(?1,'store',?1,?2,'{}',?3,1,?2,?4,'/repo',?5,?5,'sha1','[]','[]',?6)", rusqlite::params![submission, hex("d"), task, attempt, OID, at - 10]).unwrap();
         db.execute("INSERT INTO verified_results(result_id,run_id,submission_id,commit_oid,tree_oid,object_format,policy_digest,receipt_digest,isolation,memory_fence,created_unix_ms)
-            VALUES(?1,?1,?2,?3,?3,'sha1',?4,?4,'linux-unshare-user-pid-mount-v1',0,?5)", rusqlite::params![result, submission, OID, hex("e"), at]).unwrap();
+            VALUES(?1,?1,?2,?3,?3,'sha1','be6f2ce9cb648d4bacb21d433c0baa8e01cae9591afc0669152ab2b64f8bdd3b',?4,'linux-unshare-user-pid-mount-v1',0,?5)", rusqlite::params![result, submission, OID, hex("e"), at]).unwrap();
+        support::telemetry::complete_legacy_verification_fixture_with_metadata(db, metadata);
         if let Some((op_state, integrated)) = integration {
             let operation = format!("op-{task}");
             db.execute("INSERT INTO integration_operations(operation_id,project_store,idempotency_key,payload_digest,repository,ref_name,expected_old_oid,verified_result_id,state,generation,object_format,checks_passed,created_unix_ms)
@@ -815,6 +820,7 @@ fn operating_throughput_clips_intervals_and_preserves_revisions() {
     db.execute("INSERT INTO verified_results(result_id,run_id,submission_id,commit_oid,tree_oid,object_format,policy_digest,receipt_digest,isolation,memory_fence,created_unix_ms)
         SELECT ?1,?1,?2,commit_oid,tree_oid,object_format,policy_digest,receipt_digest,isolation,memory_fence,2800 FROM verified_results WHERE submission_id IN (SELECT submission_id FROM result_submissions WHERE task_id='t1')",
         rusqlite::params![later_result,later_submission]).unwrap();
+    support::telemetry::complete_legacy_verification_fixture(&db);
     drop(db);
     let canonical = p.state_bytes();
     assert_eq!(p.query(&["--metric","M03","--from","2000","--to","2100"])["numerator"],1,"correction preserves original acceptance occurrence");
@@ -1014,7 +1020,8 @@ fn flow_operations_metrics_exact_values_and_missing_evidence() {
         assert_eq!(p.query(&["--metric",id])["reason"],reason);
     }
     let db = p.db();
-    plant(&db,"a","succeeded",Some("verify_only"),&[("a1","completed",&[("reserved",100),("launching",200),("running",1000),("completed",2000)])],Some(("a1",2050)),None);
+    let metadata = json!({"version":"verification-metadata.v1","load":{"host_load_1m":"3.25"}}).to_string();
+    plant_with_metadata(&db,"a","succeeded",Some("verify_only"),&[("a1","completed",&[("reserved",100),("launching",200),("running",1000),("completed",2000)])],Some(("a1",2050)),None,Some(&metadata));
     plant(&db,"b","failed",None,&[("b1","failed",&[("reserved",6000),("launching",6500),("running",6500),("failed",7000)]),
         ("b2","completed",&[("reserved",7100),("launching",7200),("running",7300),("completed",7500)])],None,None);
     plant(&db,"c","cancelled",None,&[("c1","cancelled",&[("reserved",2500),("cancelled",2800)])],None,None);
@@ -1028,9 +1035,7 @@ fn flow_operations_metrics_exact_values_and_missing_evidence() {
             VALUES(?1,?2,1,?3,'[{}]','operator','operator:cli','[\"fixture\"]',?4)",rusqlite::params![attempt,task,format!("sha256:{}",hex("config")),at]).unwrap();
     }
     db.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES('runtime.worker_terminated','c1',1,1,'{\"cause\":\"cancellation\"}')",[]).unwrap();
-    db.execute("INSERT INTO verification_runs(run_id,project_store,idempotency_key,payload_digest,submission_id,task_id,contract_revision,contract_digest,attempt_id,policy_id,policy_digest,commit_oid,tree_oid,object_format,memory_fence,isolation,argv,library_manifest,state,reason,exit_status,receipt_digest,store_device,store_inode,created_unix_ms,metadata)
-        VALUES(?1,'store',?1,?2,?3,'a',1,?2,'a1','ci',?2,?4,?4,'sha1',0,'linux-unshare-user-pid-mount-v1','[]','[]','accepted',NULL,0,?2,1,1,2050,?5)",
-        rusqlite::params![hex("run"),hex("digest"),hex("submission-a"),OID,json!({"version":"verification-metadata.v1","load":{"host_load_1m":"3.25"}}).to_string()]).unwrap();
+
     drop(db);
     use herdr_farm::telemetry::{operating,operations};
     for (at,active,epoch) in [(0,true,1),(1000,true,1),(3000,true,1),(4000,false,2),(5000,true,3),(7000,true,3)] {

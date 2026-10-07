@@ -13,13 +13,13 @@ const KIND: &str = "first_candidate_ci";
 const RULE: &str = "tests-net-removal.v1";
 
 /// A task's first submission (by `created_unix_ms`, then insertion) and the
-/// first `verification_runs` row for it, if any.
+/// first run provenance and overall policy verdict, if any.
 struct First { task: String, submission: String, attempt: String, repository: String, base: String, candidate: String, run: Option<Run> }
 struct Run { id: String, state: String, policy: String, at: i64 }
 
 fn first_candidates(project: &Path) -> Result<Vec<First>> {
     let db = super::super::read_only(&project.join(".state/state.db"))?;
-    let rows = db.prepare("SELECT s.task_id,s.submission_id,s.attempt_id,s.repository,s.base_oid,s.candidate_oid,r.run_id,r.state,r.policy_digest,r.created_unix_ms
+    let mut rows: Vec<First> = db.prepare("SELECT s.task_id,s.submission_id,s.attempt_id,s.repository,s.base_oid,s.candidate_oid,r.run_id,r.state,r.policy_digest,r.created_unix_ms
         FROM result_submissions s LEFT JOIN verification_runs r ON r.rowid=(SELECT v.rowid FROM verification_runs v WHERE v.submission_id=s.submission_id ORDER BY v.created_unix_ms,v.rowid LIMIT 1)
         WHERE s.rowid=(SELECT f.rowid FROM result_submissions f WHERE f.task_id=s.task_id ORDER BY f.created_unix_ms,f.rowid LIMIT 1) ORDER BY s.task_id")?
         .query_map([], |r| {
@@ -29,6 +29,12 @@ fn first_candidates(project: &Path) -> Result<Vec<First>> {
             };
             Ok(First { task: r.get(0)?, submission: r.get(1)?, attempt: r.get(2)?, repository: r.get(3)?, base: r.get(4)?, candidate: r.get(5)?, run })
         })?.collect::<rusqlite::Result<_>>()?;
+    for first in &mut rows {
+        if let Some(run) = &mut first.run {
+            let revision = db.query_row("SELECT contract_revision FROM result_submissions WHERE submission_id=?1", [&first.submission], |r| r.get(0))?;
+            run.state = super::super::analytics::lifecycle::candidate_verdict(&db, &first.task, revision, &first.submission)?.1.to_owned();
+        }
+    }
     Ok(rows)
 }
 
@@ -74,7 +80,18 @@ pub fn collect(project: &Path, create: bool, limit: usize) -> Result<Collected> 
     let Some(mut db) = super::super::sidecar::open(project, create)? else { return Ok(out) };
     let settled: std::collections::BTreeSet<String> = db.prepare("SELECT task_id FROM proxy_signals WHERE kind=?1 AND weakening<>'unavailable'")?
         .query_map([KIND], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
-    let pending: Vec<First> = first_candidates(project)?.into_iter().filter(|f| f.run.is_some() && !settled.contains(&f.task)).collect();
+    let firsts = first_candidates(project)?;
+    for first in &firsts {
+        if let Some(run) = &first.run
+            && matches!(run.state.as_str(), "accepted" | "rejected") {
+            db.execute("UPDATE proxy_signals SET ci_state=?1 WHERE kind=?2 AND task_id=?3 AND ci_state<>?1", params![run.state, KIND, first.task])?;
+        } else {
+            // The sidecar stores resolved states only. Remove historical
+            // single-policy signals until the candidate has an overall verdict.
+            db.execute("DELETE FROM proxy_signals WHERE kind=?1 AND task_id=?2", params![KIND, first.task])?;
+        }
+    }
+    let pending: Vec<First> = firsts.into_iter().filter(|f| f.run.as_ref().is_some_and(|r| matches!(r.state.as_str(), "accepted" | "rejected")) && !settled.contains(&f.task)).collect();
     let mut rows = Vec::new();
     for first in pending {
         if rows.len() >= limit { out.deferred += 1; continue; }
@@ -92,7 +109,7 @@ pub fn collect(project: &Path, create: bool, limit: usize) -> Result<Collected> 
         tx.execute("INSERT INTO proxy_signals(kind,task_id,submission_id,attempt_id,run_id,policy_digest,base_oid,candidate_oid,ci_state,verified_unix_ms,
             tests_added_lines,tests_deleted_lines,tests_binary_files,weakening,weakening_reason,weakening_rule,source_trust,observed_unix_ms)
             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,'proxy_observed',?17)
-            ON CONFLICT(kind,task_id) DO UPDATE SET tests_added_lines=excluded.tests_added_lines,tests_deleted_lines=excluded.tests_deleted_lines,
+            ON CONFLICT(kind,task_id) DO UPDATE SET ci_state=excluded.ci_state,tests_added_lines=excluded.tests_added_lines,tests_deleted_lines=excluded.tests_deleted_lines,
             tests_binary_files=excluded.tests_binary_files,weakening=excluded.weakening,weakening_reason=excluded.weakening_reason,observed_unix_ms=excluded.observed_unix_ms
             WHERE proxy_signals.weakening='unavailable'",
             params![KIND, first.task, first.submission, first.attempt, run.id, run.policy, first.base, first.candidate, run.state, run.at,
@@ -104,8 +121,8 @@ pub fn collect(project: &Path, create: bool, limit: usize) -> Result<Collected> 
     Ok(out)
 }
 
-/// M45 first-candidate CI pass (proxy): tasks whose first candidate's first
-/// pinned-CI run accepted / tasks with such a run and a clear weakening check.
+/// M45 first-candidate CI pass (proxy): tasks whose first candidate's
+/// overall verdict accepted / resolved candidates with a clear weakening check.
 /// Flagged and unchecked candidates are excluded and reported; tasks whose
 /// first candidate is not yet verified are `pending`.
 pub fn m45(project: &Path, since: Option<i64>) -> Result<Value> {
@@ -121,6 +138,7 @@ pub fn m45(project: &Path, since: Option<i64>) -> Result<Value> {
     for first in &firsts {
         let Some(run) = &first.run else { if since.is_none() { pending += 1; } continue };
         if !in_window(run) { continue; }
+        if run.state == "pending" || run.state == "policy_unknown" { pending += 1; continue; }
         match signals.as_ref().and_then(|s| s.get(&first.task)) {
             Some(signal) if signal["run_id"] == run.id.as_str() => match signal["weakening"].as_str() {
                 Some("clear") => { denominator += 1; if run.state == "accepted" { passed += 1; } }

@@ -38,9 +38,9 @@ fn canonical_bytes(project: &Path) -> Vec<Vec<u8>> {
 }
 
 /// Task `work` (the fixture's attempt): first candidate rejected by pinned CI,
-/// a second candidate accepted. `t2`: first candidate accepted, adds tests.
+/// then accepted on retry; a second candidate accepted. `t2`: first candidate accepted, adds tests.
 /// `t3`: first candidate accepted but deletes a 4-line test file, so flagged
-/// and excluded. `t4`: submitted, not yet verified. M45 = 1/2.
+/// and excluded. `t4`: submitted, not yet verified. M45 = 2/2.
 #[test]
 fn first_candidate_ci_proxy_and_test_weakening_flag() {
     let f = Fixture::new();
@@ -71,17 +71,23 @@ fn first_candidate_ci_proxy_and_test_weakening_flag() {
         db.execute("INSERT INTO result_submissions(submission_id,project_store,idempotency_key,payload_digest,payload,task_id,contract_revision,contract_digest,attempt_id,repository,base_oid,candidate_oid,object_format,artifact_manifest,claimed_checks,created_unix_ms)
             VALUES(?1,'store',?1,?2,'{}',?3,1,?2,?4,?5,?6,?7,'sha1','[]','[]',?8)", rusqlite::params![hex(sub), hex('d'), task, attempt, repo.to_str().unwrap(), base, oid, at]).unwrap();
     }
+    let body = "{\"checks\":[\"fixture\"]}";
+    let digest = format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(body.as_bytes()));
+    for task in ["work", "t2", "t3", "t4"] {
+        db.execute("INSERT INTO acceptance_policies VALUES(?1,1,'ci',?2)", rusqlite::params![task, body]).unwrap();
+    }
     // (run, submission, task, attempt, commit, state, at): `work`'s first
-    // candidate is rejected, then accepted on a re-run; only the first counts.
+    // candidate is rejected, then accepted on a re-run; the candidate is green.
     for (run, sub, task, attempt, oid, state, at) in [('a', '1', "work", &f.attempt, &w1, "rejected", 2_000), ('b', '1', "work", &f.attempt, &w1, "accepted", 2_500),
         ('c', '2', "work", &f.attempt, &w2, "accepted", 4_000), ('e', '3', "t2", &t2, &c2, "accepted", 2_000), ('f', '4', "t3", &t3, &c3, "accepted", 2_000)] {
         let accepted = state == "accepted";
         db.execute("INSERT INTO verification_runs(run_id,project_store,idempotency_key,payload_digest,submission_id,task_id,contract_revision,contract_digest,attempt_id,policy_id,policy_digest,
             commit_oid,tree_oid,object_format,memory_fence,isolation,argv,library_manifest,state,reason,exit_status,receipt_digest,store_device,store_inode,created_unix_ms)
             VALUES(?1,'store',?1,?2,?3,?4,1,?2,?5,'ci',?6,?7,?7,'sha1',0,'linux-unshare-user-pid-mount-v1','[\"x\"]','[]',?8,?9,?10,?11,1,1,?12)",
-            rusqlite::params![hex(run), hex('d'), hex(sub), task, attempt, hex('9'), oid, state, (!accepted).then_some("cargo test failed"),
+            rusqlite::params![hex(run), hex('d'), hex(sub), task, attempt, digest, oid, state, (!accepted).then_some("cargo test failed"),
                 if accepted { 0 } else { 101 }, accepted.then(|| hex('8')), at]).unwrap();
     }
+    db.execute("INSERT INTO verified_results SELECT run_id,run_id,submission_id,commit_oid,tree_oid,object_format,policy_digest,receipt_digest,isolation,memory_fence,created_unix_ms FROM verification_runs WHERE state='accepted'", []).unwrap();
     drop(db);
 
     let m45 = &f.cli_args(&["quality", "report"]).0["metrics"]["M45"];
@@ -104,7 +110,7 @@ fn first_candidate_ci_proxy_and_test_weakening_flag() {
     assert_eq!(after["metrics"]["M54"]["excluded"]["not_collected"], json!(2));
     let m45 = &f.cli_args(&["quality", "report"]).0["metrics"]["M45"];
     assert_eq!((&m45["definition"], &m45["proxy"], &m45["source_trust"]), (&json!("M45.proxy-v1"), &json!(true), &json!("proxy_observed")));
-    assert_eq!((&m45["numerator"], &m45["denominator"], &m45["value"], &m45["pending"]), (&json!(1), &json!(2), &json!("1/2"), &json!(1)));
+    assert_eq!((&m45["numerator"], &m45["denominator"], &m45["value"], &m45["pending"]), (&json!(2), &json!(2), &json!("2/2"), &json!(1)));
     assert_eq!(m45["excluded"], json!({"test_weakening": 1, "weakening_unavailable": 0, "not_collected": 0}));
     assert_eq!(m45["flagged"], json!([{"task_id": "t3", "submission_id": hex('4'), "attempt_id": "t3-a1", "run_id": hex('f'), "ci_state": "accepted",
         "tests_added_lines": 0, "tests_deleted_lines": 4, "tests_binary_files": 0, "weakening": "flagged"}]));
@@ -122,8 +128,8 @@ fn first_candidate_ci_proxy_and_test_weakening_flag() {
         .prepare("SELECT task_id,run_id,policy_digest,ci_state,tests_added_lines,tests_deleted_lines,weakening,source_trust FROM proxy_signals ORDER BY task_id").unwrap()
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?))).unwrap().map(Result::unwrap).collect();
     let row = |task: &str, run: char, state: &str, added: i64, deleted: i64, weakening: &str|
-        (task.to_owned(), hex(run), hex('9'), state.to_owned(), Some(added), Some(deleted), weakening.to_owned(), "proxy_observed".to_owned());
-    assert_eq!(rows, vec![row("t2", 'e', "accepted", 2, 0, "clear"), row("t3", 'f', "accepted", 0, 4, "flagged"), row("work", 'a', "rejected", 0, 0, "clear")]);
+        (task.to_owned(), hex(run), digest.clone(), state.to_owned(), Some(added), Some(deleted), weakening.to_owned(), "proxy_observed".to_owned());
+    assert_eq!(rows, vec![row("t2", 'e', "accepted", 2, 0, "clear"), row("t3", 'f', "accepted", 0, 4, "flagged"), row("work", 'a', "accepted", 0, 0, "clear")]);
     for name in ["telemetry.db", "telemetry.db-wal"] {
         let bytes = fs::read(f.project.join(".state").join(name)).unwrap_or_default();
         assert!(!bytes.windows(6).any(|w| w == b"tests/"), "{name}: counts only, no test path is stored");

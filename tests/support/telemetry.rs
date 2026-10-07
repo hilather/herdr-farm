@@ -307,3 +307,20 @@ pub fn accepted_delta_entries(entries: &serde_json::Value) -> Vec<&serde_json::V
             .any(|p| p["disposition"] == "accepted")
     }).collect()
 }
+
+/// Complete older imported-history fixtures that retained only acceptance
+/// receipts. Real canonical acceptance also retains its policy and run.
+pub fn complete_legacy_verification_fixture(db: &rusqlite::Connection) {
+    complete_legacy_verification_fixture_with_metadata(db, None);
+}
+pub fn complete_legacy_verification_fixture_with_metadata(db: &rusqlite::Connection, metadata: Option<&str>) {
+    let body = "legacy-fixture-policy";
+    let missing: Vec<String> = db.prepare("SELECT r.result_id FROM verified_results r WHERE NOT EXISTS(SELECT 1 FROM verification_runs v WHERE v.run_id=r.run_id)").unwrap()
+        .query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
+    for result in missing {
+        db.execute("INSERT OR IGNORE INTO acceptance_policies(task_id,contract_revision,policy_id,body) SELECT s.task_id,s.contract_revision,'legacy-fixture',?2 FROM result_submissions s JOIN verified_results r ON r.submission_id=s.submission_id WHERE r.result_id=?1", rusqlite::params![result,body]).unwrap();
+        db.execute("INSERT INTO verification_runs(run_id,project_store,idempotency_key,payload_digest,submission_id,task_id,contract_revision,contract_digest,attempt_id,policy_id,policy_digest,commit_oid,tree_oid,object_format,memory_fence,isolation,argv,library_manifest,state,exit_status,receipt_digest,store_device,store_inode,created_unix_ms,metadata)
+            SELECT r.run_id,s.project_store,r.run_id,s.payload_digest,s.submission_id,s.task_id,s.contract_revision,s.contract_digest,s.attempt_id,'legacy-fixture',r.policy_digest,r.commit_oid,r.tree_oid,r.object_format,r.memory_fence,r.isolation,'[]','[]','accepted',0,r.receipt_digest,1,1,r.created_unix_ms,?2
+            FROM verified_results r JOIN result_submissions s ON s.submission_id=r.submission_id WHERE r.result_id=?1", rusqlite::params![result,metadata]).unwrap();
+    }
+}

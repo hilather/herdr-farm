@@ -563,9 +563,19 @@ terminal cohort as stated; every result carries `numerator`, `denominator`,
 
 Let `T` = tasks with a terminal disposition in the window: acceptance
 evidence (below), or `tasks.state ∈ {succeeded, failed, cancelled}`. `A ⊆ T`:
-route `verify_only` → a `verified_results` row for the current contract
-revision; route `verify_then_integrate` → an `integrated_commits` row reached
-from such a verified result. Tasks with neither are **open** and reported
+route `verify_only` → one submission for the current contract revision has,
+for every acceptance policy of that contract, an accepted verification run
+with a matching policy-body SHA-256 digest and a `verified_results` receipt.
+Imported legacy submissions with receipts and no verification runs retain
+receipt-based acceptance; this fallback never completes partial run history.
+Opaque legacy policy text requires a policy-specific accepted run and
+run/receipt digest equality, but has no executable body-digest contract.
+Versioned executable policies always require the exact body digest.
+Policies cannot be combined across submissions. Accepted retries supersede
+earlier rejections. Without legacy receipt-only evidence, no policies means
+acceptance is unknown, not accepted.
+Route `verify_then_integrate` additionally requires an `integrated_commits`
+row reached from a verified result of that same submission. Tasks with neither are **open** and reported
 separately. `succeeded` without evidence stays in `T \ A` and is counted as
 `succeeded_without_evidence`.
 
@@ -580,11 +590,14 @@ separately. `succeeded` without evidence stays in `T \ A` and is counted as
 | M31–M33 | lane B attention (contracts-accounting.md §6) | before any sample `unavailable: attention_not_collected` |
 | M40 Quota headroom at dispatch (extended, `M40.quota-windows-v2`) | per decision and limit window: remaining percent of the latest trusted quota observation of the attempt's account or a matching merged home with `observed ≤ decided_unix_ms` (contracts-accounting.md §5), with age and freshness | decision- or window-level `unavailable` with a reason; native units; never summed or averaged across accounts, limits or services |
 
-Worked M02/M07 example (golden E2E): tasks t1 (verify_only, verified), t2
+Worked M02/M07 example (golden E2E): tasks t1 (verify_only, all policies verified), t2
 (verify_then_integrate, verified and integrated), t3 (verify_then_integrate,
 verified, integration `blocked`), t4 (`failed`), t5 (queued, no evidence).
 Attempts: t1 ×1, t2 ×2, t3 ×1, t4 ×2, t5 ×1. `T = {t1, t2, t4}` (t3 and t5
-open) → M02 = 2/3; M07 = (1+2+2)/2 = 5/2.
+open) → M02 = 2/3; M07 = (1+2+2)/2 = 5/2. If t1 has file-presence and toolchain policies, with only the
+file-presence policy passing and the toolchain policy failing, t1 is not accepted:
+with a failed terminal disposition, M02 = 1/3 and M07 = 5/1. A legacy
+single-policy contract still needs just that policy’s matching accepted receipt.
 
 S6 refinements:
 - Shape: `{metrics: {Mnn: {...}}, since_unix_ms, tasks: {terminal, accepted,

@@ -171,32 +171,53 @@ const FIRST_VERDICTS: &str = "SELECT v.policy_id,v.policy_digest,v.state,
         AND r.run_id=v.run_id AND r.policy_digest=v.policy_digest)
     FROM verification_runs v WHERE v.submission_id=?1";
 
-/// Only M30 reads candidate/policy/verdict history. Prepare each lookup once;
+/// Run-backed candidates need accepted receipts for every policy; executable
+/// documents additionally require their exact body digest. Receipt-only legacy
+/// history remains readable without completing partial run history.
+/// Accepted retries supersede earlier failures, including isolation setup failures.
+pub(crate) fn candidate_verdict(db: &Connection, task: &str, revision: i64, submission: &str) -> Result<(Vec<(String, String)>, &'static str)> {
+    let mut policies_stmt = db.prepare(FIRST_POLICIES)?;
+    let mut verdicts_stmt = db.prepare(FIRST_VERDICTS)?;
+    let policies: Vec<(String, String)> = policies_stmt.query_map(rusqlite::params![task, revision], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+    let mut verdicts = BTreeMap::<(String, String), (bool, bool)>::new();
+    for row in verdicts_stmt.query_map([submission], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, bool>(3)?)))? {
+        let (policy, digest, state, receipt) = row?;
+        let verdict = verdicts.entry((policy, digest)).or_default();
+        verdict.0 |= state == "accepted" && receipt;
+        verdict.1 |= state == "rejected";
+    }
+    // Imported pre-run history retains receipts without verifier run records.
+    // Never use this compatibility evidence to complete partial run history.
+    if verdicts.is_empty() && db.query_row("SELECT EXISTS(SELECT 1 FROM verified_results WHERE submission_id=?1)", [submission], |r| r.get::<_, bool>(0))? {
+        return Ok((policies, "accepted"));
+    }
+    let (mut passed, mut rejected) = (0usize, false);
+    for (policy, body) in &policies {
+        let digest = format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(body.as_bytes()));
+        let (accepted, failed) = if serde_json::from_str::<serde_json::Value>(body).ok().is_some_and(|document| document.get("version").is_some()) {
+            verdicts.get(&(policy.clone(), digest)).copied().unwrap_or_default()
+        } else {
+            // Opaque legacy policies have no executable document digest contract.
+            // They still require their own accepted run and matching receipt.
+            verdicts.iter().filter(|((id, _), _)| id == policy)
+                .fold((false, false), |(accepted, failed), (_, verdict)| (accepted || verdict.0, failed || verdict.1))
+        };
+        if accepted { passed += 1; } else if failed { rejected = true; }
+    }
+    let outcome = if policies.is_empty() { "policy_unknown" } else if passed == policies.len() { "accepted" } else if rejected { "rejected" } else { "pending" };
+    Ok((policies, outcome))
+}
+
+/// M30 reads first-candidate policy/verdict history;
 /// retries belonging to later submissions cannot contribute to the first.
 fn first_candidates(db: &Connection) -> Result<BTreeMap<String, FirstCandidate>> {
     let mut firsts = BTreeMap::new();
     let mut submissions = db.prepare(FIRST_SUBMISSIONS)?;
-    let mut policies_stmt = db.prepare(FIRST_POLICIES)?;
-    let mut verdicts_stmt = db.prepare(FIRST_VERDICTS)?;
     let rows = submissions.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?, r.get::<_, i64>(4)?)))?;
     for row in rows {
         let (task, submission, attempt, revision, at) = row?;
         if firsts.contains_key(&task) { continue; }
-        let policies: Vec<(String, String)> = policies_stmt.query_map(rusqlite::params![task, revision], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
-        let mut verdicts = BTreeMap::<(String, String), (bool, bool)>::new();
-        for row in verdicts_stmt.query_map([&submission], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, bool>(3)?)))? {
-            let (policy, digest, state, receipt) = row?;
-            let verdict = verdicts.entry((policy, digest)).or_default();
-            verdict.0 |= state == "accepted" && receipt;
-            verdict.1 |= state == "rejected";
-        }
-        let (mut passed, mut rejected) = (0usize, false);
-        for (policy, body) in &policies {
-            let digest = format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(body.as_bytes()));
-            let (accepted, failed) = verdicts.get(&(policy.clone(), digest)).copied().unwrap_or_default();
-            if accepted { passed += 1; } else if failed { rejected = true; }
-        }
-        let outcome = if policies.is_empty() { "policy_unknown" } else if passed == policies.len() { "accepted" } else if rejected { "rejected" } else { "pending" };
+        let (policies, outcome) = candidate_verdict(db, &task, revision, &submission)?;
         firsts.insert(task, FirstCandidate { at, attempt, policy: policies.iter().map(|p| p.0.as_str()).collect::<Vec<_>>().join(","), policy_digest: super::sha256(serde_json::to_string(&policies)?.as_bytes()), outcome });
     }
     Ok(firsts)

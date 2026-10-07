@@ -604,7 +604,8 @@ fn accept(f: &Fixture, task: &str, attempt: &str, n: char) {
     db.execute("INSERT INTO result_submissions(submission_id,project_store,idempotency_key,payload_digest,payload,task_id,contract_revision,contract_digest,attempt_id,repository,base_oid,candidate_oid,object_format,artifact_manifest,claimed_checks,created_unix_ms)
         VALUES(?1,'store',?1,?2,'{}',?3,1,?2,?4,'/repo',?5,?5,'sha1','[]','[]',1000)", rusqlite::params![hex(n), hex('d'), task, attempt, "b".repeat(40)]).unwrap();
     db.execute("INSERT INTO verified_results(result_id,run_id,submission_id,commit_oid,tree_oid,object_format,policy_digest,receipt_digest,isolation,memory_fence,created_unix_ms)
-        VALUES(?1,?1,?2,?3,?3,'sha1',?4,?4,'linux-unshare-user-pid-mount-v1',0,2000)", rusqlite::params![hex('e'), hex(n), "b".repeat(40), hex('7')]).unwrap();
+        VALUES(?1,?1,?2,?3,?3,'sha1','be6f2ce9cb648d4bacb21d433c0baa8e01cae9591afc0669152ab2b64f8bdd3b',?4,'linux-unshare-user-pid-mount-v1',0,2000)", rusqlite::params![hex('e'), hex(n), "b".repeat(40), hex('7')]).unwrap();
+    support::telemetry::complete_legacy_verification_fixture(&db);
 }
 
 /// Keys that name when (or in which revision) a rebuilt sidecar computed a view, not what it holds.

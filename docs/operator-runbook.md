@@ -402,6 +402,11 @@ focuses its existing tab. The dedicated worker server keeps its own shell and
 bundled manifests; the viewer uses a private product config allowing nesting,
 without changing the owner's Herdr config. If the coordinator session is
 unavailable, launch still succeeds and reports the viewer as unavailable.
+Native `herdr pane run` acknowledges submission with a silent successful exit;
+the viewer tab and its recovery record are retained after that acknowledgement.
+A failed submission closes the newly created tab and reports the Herdr diagnostic
+(or exit status when there is no diagnostic) in `viewer.reason`. Submission does
+not prove that the nested terminal client has finished starting.
 
 The profile's `max_wall_seconds` ends a worker that runs out of time. After an
 `attempt.ended_without_submission` inbox notice, run
