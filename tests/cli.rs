@@ -5833,17 +5833,19 @@ fn cli_self_observation_records_only_metadata_and_skips_busy_or_absent_sidecars(
     assert_eq!(error.status.code(),Some(2));
     let columns:Vec<String>=db.prepare("PRAGMA table_info(cli_invocations)").unwrap()
         .query_map([],|r|r.get(1)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
-    assert_eq!(columns,["invocation_id","command_path","outcome","exit_code","duration_ms","project_slug","caller","trust","recorded_unix_ms"]);
-    let rows: Vec<Value> = db.prepare("SELECT invocation_id,command_path,outcome,exit_code,duration_ms,project_slug,caller,trust,recorded_unix_ms FROM cli_invocations ORDER BY recorded_unix_ms,rowid").unwrap()
+    assert_eq!(columns,["invocation_id","command_path","outcome","exit_code","duration_ms","project_slug","caller","trust","recorded_unix_ms","error_class"]);
+    let rows: Vec<Value> = db.prepare("SELECT invocation_id,command_path,outcome,exit_code,duration_ms,project_slug,caller,trust,recorded_unix_ms,error_class FROM cli_invocations ORDER BY recorded_unix_ms,rowid").unwrap()
         .query_map([], |r| Ok(json!({"invocation_id":r.get::<_,String>(0)?,"command_path":r.get::<_,String>(1)?,"outcome":r.get::<_,String>(2)?,
             "exit_code":r.get::<_,i32>(3)?,"duration_ms":r.get::<_,i64>(4)?,"project_slug":r.get::<_,String>(5)?,
-            "caller":r.get::<_,String>(6)?,"trust":r.get::<_,String>(7)?,"recorded_unix_ms":r.get::<_,i64>(8)?}))).unwrap()
+            "caller":r.get::<_,String>(6)?,"trust":r.get::<_,String>(7)?,"recorded_unix_ms":r.get::<_,i64>(8)?,"error_class":r.get::<_,Option<String>>(9)?}))).unwrap()
         .collect::<rusqlite::Result<_>>().unwrap();
     assert_eq!(rows.len(),3);
     for row in &rows {
         assert_eq!((row["command_path"].as_str(),row["caller"].as_str(),row["trust"].as_str(),row["project_slug"].as_str()),
             (Some("task list"),Some("operator"),Some("local"),Some("demo")));
         assert!(row["duration_ms"].as_i64().unwrap()>=0);
+        assert!(row["error_class"].is_null() || matches!(row["error_class"].as_str(),
+            Some("usage" | "precondition" | "not_found" | "store_busy" | "internal")));
         let text=row.to_string();
         for forbidden in [r,"/secret/worktree","private-argument-value","unexpected argument","Usage:"] { assert!(!text.contains(forbidden),"{text}"); }
     }

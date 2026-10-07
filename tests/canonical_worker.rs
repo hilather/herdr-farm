@@ -2239,7 +2239,8 @@ fn an_isolated_worker_submits_only_through_its_own_spool() {
     let script = format!("{setup}\nset -e\n$M attempt-brief --attempt $A > brief.json\n$M attempt-input --attempt $A > input.json\n$M receipts --attempt $A > receipts.json\nif $M attempt-input --attempt; then exit 42; fi\n");
     lab.serve();
     let mut ticker = lab.spawn();
-    lab.wait(&mut ticker, 120, &|| worktree.is_dir());
+    // Launch must finish preparing the checkout before the test modifies it.
+    lab.wait(&mut ticker, 120, &|| lab.attempt(&attempt).state == AttemptState::Running);
     fs::write(worktree.join("memory-card.sh"), script).unwrap();
     lab.wait(&mut ticker, 120, &|| worktree.join("probe-1.txt").exists());
     let command_result = fs::read_to_string(worktree.join("memory-card-result.txt")).unwrap();
