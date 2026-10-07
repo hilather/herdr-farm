@@ -63,6 +63,8 @@ attempt and retained outside the signed execution contract. Inspect it with
 
 The commands use the project BEFORE the action, except `context` and `inbox`:
 
+Every fix launch passes `--work-item WORK --role fix`. Use `--fixes-review REVIEW_TASK` only for a receipt with submitted findings, or `--fixes <ref>` for specific findings. For an issue described only in a report (0 submitted findings), omit both finding selectors so fix lineage is still recorded.
+
 ```sh
 herdr-farm task <slug> list
 herdr-farm task <slug> show TASK
@@ -70,7 +72,7 @@ herdr-farm task <slug> add TASK --title 'Work title' --expected-head HEAD
 herdr-farm launch <slug> run --task TASK --profile PROFILE --repository /absolute/repo --work-item WORK --role plan --plan-output docs/plan.md
 herdr-farm launch <slug> run --task TASK --profile PROFILE --repository /absolute/repo --work-item WORK --role build --write src/ --write tests/ --output src/lib.rs --prompt-file /absolute/brief.md
 herdr-farm launch <slug> run --task REVIEW --profile PROFILE --repository /absolute/repo --work-item WORK --role review --review-of TASK --output docs/reviews/R.md --prompt-file /absolute/review.md
-herdr-farm launch <slug> run --task FIX --profile PROFILE --repository /absolute/repo --work-item WORK --role fix --fixes-review REVIEW --write src/ --output src/lib.rs --prompt-file /absolute/fix.md
+herdr-farm launch <slug> run --task FIX --profile PROFILE --repository /absolute/repo --work-item WORK --role fix --fixes-review REVIEW_TASK --write src/ --output src/lib.rs --prompt-file /absolute/fix.md
 herdr-farm launch <slug> run --task NEW_TASK --profile PROFILE --repository /absolute/repo --work-item WORK --role recheck --supersedes OLD_TASK --plan-output docs/recheck.md
 herdr-farm launch <slug> view --task TASK
 herdr-farm result <slug> submit-captured ATTEMPT

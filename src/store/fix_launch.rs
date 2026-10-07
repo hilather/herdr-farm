@@ -23,10 +23,20 @@ struct Selected { claim: Option<i64>, finding: Option<String>, evidence: String 
 fn select(db: &Connection, review: Option<&str>, refs: &[String]) -> Result<Vec<Selected>> {
     let state = finding_state(db, None)?.ok_or(StoreError::UnsupportedSchema(55))?;
     let mut submissions = BTreeSet::new();
+    let mut empty_review = None;
     if let Some(review) = review {
-        let session: String = db.query_row("SELECT c.session_id FROM review_completions c JOIN review_sessions s USING(session_id) JOIN attempts a ON a.id=s.attempt_id JOIN review_session_launches l USING(session_id)
-            WHERE a.task_id=?1 AND c.outcome='completed' ORDER BY c.completed_unix_ms DESC,c.session_id DESC LIMIT 1", [review], |r| r.get(0)).optional()?
-            .ok_or_else(|| invalid(format!("review task {review} has no completed receipt")))?;
+        if review.starts_with("finding:") {
+            return Err(invalid("--fixes-review takes the REVIEW TASK id; to fix one finding use --fixes <ref>"));
+        }
+        let completed: Option<(String, i64)> = db.query_row("SELECT c.session_id,c.findings_submitted FROM review_completions c JOIN review_sessions s USING(session_id) JOIN attempts a ON a.id=s.attempt_id JOIN review_session_launches l USING(session_id)
+            WHERE a.task_id=?1 AND c.outcome='completed' ORDER BY c.completed_unix_ms DESC,c.session_id DESC LIMIT 1", [review], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+        let Some((session, count)) = completed else {
+            let exists: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?1)", [review], |r| r.get(0))?;
+            let is_review: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM review_briefs WHERE task_id=?1)", [review], |r| r.get(0))?;
+            let reason = if !exists { "does not exist" } else if !is_review { "exists but is not a review task" } else { "has no completed review yet" };
+            return Err(invalid(format!("review task {review} {reason}; --fixes-review requires a completed review receipt")));
+        };
+        if count == 0 { empty_review = Some(review); }
         submissions.extend(state.submissions.iter().filter(|s| s.session_id == session).map(|s| s.submission_id));
     }
     let mut findings = BTreeSet::new();
@@ -60,7 +70,12 @@ fn select(db: &Connection, review: Option<&str>, refs: &[String]) -> Result<Vec<
         selected.push(Selected { claim: None, finding: Some(finding), evidence: String::new() });
     }
     if selected.len() > 64 { return Err(invalid("a fix launch names at most 64 findings")); }
-    if selected.is_empty() { return Err(invalid("a fix launch must name at least one finding")); }
+    if selected.is_empty() {
+        if let Some(review) = empty_review {
+            return Err(invalid(format!("review task {review} completed with 0 submitted findings; nothing to bind. Launch the fix with --work-item WORK --role fix (no --fixes-review), or --fixes <ref> for a submitted finding")));
+        }
+        return Err(invalid("a fix launch must name at least one finding"));
+    }
     Ok(selected)
 }
 impl SqliteStore {

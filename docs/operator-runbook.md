@@ -519,8 +519,8 @@ report result. Receipts remain proposals: triage with
 pending pass claims appear as `pending_triage` until decided. A
 `attempt.review_receipt_without_result` notice means the receipt is recorded
 but the report still needs submission. Fix rounds use
-`launch PROJECT run --task FIX --profile PROFILE --repository REPO --fixes-review REVIEW --write ... --output ... --prompt-file FIX_BRIEF`,
-or repeatable `--fixes finding:<token>` for a subset. Selected pending claims
+`launch PROJECT run --task FIX --profile PROFILE --repository REPO --work-item WORK --role fix --fixes-review REVIEW_TASK --write ... --output ... --prompt-file FIX_BRIEF`,
+or repeatable `--fixes finding:<token>` for a subset. Every fix launch passes `--work-item WORK --role fix`. Use `--fixes-review REVIEW_TASK` only for a receipt with submitted findings, or `--fixes <ref>` for specific findings. For an issue described only in a report (0 submitted findings), omit both finding selectors so fix lineage is still recorded. Selected pending claims
 become canonical findings and assigned repairs; submissions record proposals,
 accepted exact-candidate verification closes them `fixed`, and integration links
 them. Re-review with `--review-of FIX` retains the repair findings as priors.
