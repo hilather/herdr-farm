@@ -22,7 +22,9 @@ with `kind = 'first_candidate_ci'`:
   policies and their body digests, as in M30. `accepted` requires an accepted
   run and receipt for every policy; otherwise any rejected policy gives
   `rejected`, else `pending` (no policies: `policy_unknown`). An accepted retry
-  supersedes a prior rejection, including `isolation_setup_failed`.
+  supersedes a prior rejection, including `isolation_setup_failed`. Legacy
+  receipt-only history and opaque policy text follow the compatibility rules
+  in contracts.md §6; partial executable run history never uses that fallback.
   `run_id`, `policy_digest` and the window timestamp retain the first run's
   provenance. Later submissions never contribute. Collection refreshes
   `ci_state` on existing derived rows without recomputing settled diff counts;

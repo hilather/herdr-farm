@@ -13,11 +13,14 @@ fn submissions(f: &Fixture) -> Vec<String> {
     submissions_in(f, "/repo", &"b".repeat(40))
 }
 fn submissions_in(f: &Fixture, repository: &str, oid: &str) -> Vec<String> {
+    submissions_with_policy(f, repository, oid, &json!({"version":2,"toolchain":"fixture","checks":["/bin/true"]}).to_string())
+}
+fn submissions_with_policy(f: &Fixture, repository: &str, oid: &str, policy: &str) -> Vec<String> {
     let db = rusqlite::Connection::open(f.project.join(".state/state.db")).unwrap();
     db.execute("INSERT INTO task_contracts(task_id,contract_revision,project_store,expected_head,repository,base_oid,object_format,route,raw_bytes,raw_digest,installed_seq) VALUES('work',1,?3,0,'/repo',?1,'sha1','verify_only',x'61',?2,(SELECT max(sequence) FROM events))",rusqlite::params!["b".repeat(40),"c".repeat(64),f.project.join(".state/state.db").canonicalize().unwrap().display().to_string()]).unwrap();
     db.execute(
         "INSERT INTO acceptance_policies VALUES('work',1,'accept-1',?1)",
-        [json!({"version":2,"toolchain":"fixture","checks":["/bin/true"]}).to_string()],
+        [policy],
     )
     .unwrap();
     (0..4).map(|i| {
@@ -366,7 +369,15 @@ fn attempt_only_host_history_includes_pre_submission_checks_without_duplicating_
 /// before the final policy verdict and refresh of already settled proxy rows.
 #[test]
 fn acceptance_and_ci_proxy_require_every_policy_of_one_candidate() {
-    for (two_policies, pass, expected) in [(true, false, 0), (true, true, 1), (false, true, 1)] {
+    for (two_policies, pass, wrong_digest, legacy_policy, expected) in [
+        (true, false, false, false, 0),
+        (true, true, false, false, 1),
+        (false, true, false, false, 1),
+        // Executable documents require the body digest even with a receipt.
+        (false, true, true, false, 0),
+        // Opaque legacy text has no executable body-digest contract.
+        (false, true, true, true, 1),
+    ] {
         let f = Fixture::new();
         let repo = f.tmp.path().join("candidate-repo");
         fs::create_dir_all(&repo).unwrap();
@@ -376,7 +387,11 @@ fn acceptance_and_ci_proxy_require_every_policy_of_one_candidate() {
         }
         let oid = Command::new("git").env_clear().env("PATH", "/usr/bin:/bin").env("HERDR_FARM_TEST_TIME_SCALE", f.scale).current_dir(&repo).args(["rev-parse", "HEAD"]).output().unwrap();
         let oid = String::from_utf8(oid.stdout).unwrap().trim().to_owned();
-        let ids = submissions_in(&f, repo.to_str().unwrap(), &oid);
+        let ids = if legacy_policy {
+            submissions_with_policy(&f, repo.to_str().unwrap(), &oid, "cargo test")
+        } else {
+            submissions_in(&f, repo.to_str().unwrap(), &oid)
+        };
         let db = rusqlite::Connection::open(f.project.join(".state/state.db")).unwrap();
         db.execute("UPDATE tasks SET state='failed' WHERE id='work'", []).unwrap();
         let body: String = db.query_row("SELECT body FROM acceptance_policies WHERE task_id='work'", [], |r| r.get(0)).unwrap();
@@ -398,11 +413,12 @@ fn acceptance_and_ci_proxy_require_every_policy_of_one_candidate() {
             assert_eq!(pending["pending"], 1);
             assert_eq!(pending["denominator"], 0);
         }
-        if !two_policies {
+        if !two_policies && !wrong_digest {
             sandbox_policy(&f, &ids[0], 899, f.decided+1, "isolation_setup_failed", None, false, "accept-1", &digest);
             f.cli_args(&["quality", "collect"]);
         }
-        sandbox_policy(&f, &ids[0], 901, f.decided+2, if pass {"pass"} else {"red"}, None, false, "accept-1", &digest);
+        let run_digest = if wrong_digest { "f".repeat(64) } else { digest.clone() };
+        sandbox_policy(&f, &ids[0], 901, f.decided+2, if pass {"pass"} else {"red"}, None, false, "accept-1", &run_digest);
         if two_policies && !pass {
             // A different submission's green toolchain run cannot complete
             // the first submission's accepted file-presence policy.
@@ -429,10 +445,15 @@ fn acceptance_and_ci_proxy_require_every_policy_of_one_candidate() {
         assert_eq!(report["metrics"]["M02"]["denominator"], 1);
         assert_eq!(report["metrics"]["M02"]["value"], format!("{expected}/1"));
         assert_eq!(report["metrics"]["M04"]["denominator"], expected);
-        assert_eq!(report["metrics"]["M04"]["value"], if pass { json!("0.004/1") } else { Value::Null });
+        assert_eq!(report["metrics"]["M04"]["value"], if expected == 1 { json!("0.004/1") } else { Value::Null });
         let proxy = f.cli_args(&["quality", "report"]).0["metrics"]["M45"].clone();
         assert_eq!(proxy["numerator"], expected);
-        assert_eq!(proxy["denominator"], 1);
+        assert_eq!(proxy["denominator"], if wrong_digest && !legacy_policy { 0 } else { 1 });
+        if wrong_digest && !legacy_policy {
+            assert_eq!(proxy["pending"], 1);
+            assert_eq!(f.count("proxy_signals"), 0);
+            continue;
+        }
         assert_eq!(proxy["value"], format!("{expected}/1"));
         assert_eq!(f.sidecar().query_row("SELECT ci_state FROM proxy_signals", [], |r| r.get::<_,String>(0)).unwrap(), if pass {"accepted"} else {"rejected"});
     }

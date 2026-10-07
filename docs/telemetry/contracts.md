@@ -566,8 +566,14 @@ evidence (below), or `tasks.state ∈ {succeeded, failed, cancelled}`. `A ⊆ T`
 route `verify_only` → one submission for the current contract revision has,
 for every acceptance policy of that contract, an accepted verification run
 with a matching policy-body SHA-256 digest and a `verified_results` receipt.
+Imported legacy submissions with receipts and no verification runs retain
+receipt-based acceptance; this fallback never completes partial run history.
+Opaque legacy policy text requires a policy-specific accepted run and
+run/receipt digest equality, but has no executable body-digest contract.
+Versioned executable policies always require the exact body digest.
 Policies cannot be combined across submissions. Accepted retries supersede
-earlier rejections. No policies means acceptance is unknown, not accepted.
+earlier rejections. Without legacy receipt-only evidence, no policies means
+acceptance is unknown, not accepted.
 Route `verify_then_integrate` additionally requires an `integrated_commits`
 row reached from a verified result of that same submission. Tasks with neither are **open** and reported
 separately. `succeeded` without evidence stays in `T \ A` and is counted as

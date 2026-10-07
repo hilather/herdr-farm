@@ -171,7 +171,9 @@ const FIRST_VERDICTS: &str = "SELECT v.policy_id,v.policy_digest,v.state,
         AND r.run_id=v.run_id AND r.policy_digest=v.policy_digest)
     FROM verification_runs v WHERE v.submission_id=?1";
 
-/// A candidate passes only with digest-matched accepted receipts for every policy.
+/// Run-backed candidates need accepted receipts for every policy; executable
+/// documents additionally require their exact body digest. Receipt-only legacy
+/// history remains readable without completing partial run history.
 /// Accepted retries supersede earlier failures, including isolation setup failures.
 pub(crate) fn candidate_verdict(db: &Connection, task: &str, revision: i64, submission: &str) -> Result<(Vec<(String, String)>, &'static str)> {
     let mut policies_stmt = db.prepare(FIRST_POLICIES)?;
@@ -184,10 +186,22 @@ pub(crate) fn candidate_verdict(db: &Connection, task: &str, revision: i64, subm
         verdict.0 |= state == "accepted" && receipt;
         verdict.1 |= state == "rejected";
     }
+    // Imported pre-run history retains receipts without verifier run records.
+    // Never use this compatibility evidence to complete partial run history.
+    if verdicts.is_empty() && db.query_row("SELECT EXISTS(SELECT 1 FROM verified_results WHERE submission_id=?1)", [submission], |r| r.get::<_, bool>(0))? {
+        return Ok((policies, "accepted"));
+    }
     let (mut passed, mut rejected) = (0usize, false);
     for (policy, body) in &policies {
         let digest = format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(body.as_bytes()));
-        let (accepted, failed) = verdicts.get(&(policy.clone(), digest)).copied().unwrap_or_default();
+        let (accepted, failed) = if serde_json::from_str::<serde_json::Value>(body).ok().is_some_and(|document| document.get("version").is_some()) {
+            verdicts.get(&(policy.clone(), digest)).copied().unwrap_or_default()
+        } else {
+            // Opaque legacy policies have no executable document digest contract.
+            // They still require their own accepted run and matching receipt.
+            verdicts.iter().filter(|((id, _), _)| id == policy)
+                .fold((false, false), |(accepted, failed), (_, verdict)| (accepted || verdict.0, failed || verdict.1))
+        };
         if accepted { passed += 1; } else if failed { rejected = true; }
     }
     let outcome = if policies.is_empty() { "policy_unknown" } else if passed == policies.len() { "accepted" } else if rejected { "rejected" } else { "pending" };
