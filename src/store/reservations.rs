@@ -226,6 +226,24 @@ impl SqliteStore {
         if let Some(budget)=budget {budget.check()?;}
         super::delivery::now_check(now)?;if reason.trim().is_empty()||reason.len()>4000||reason.chars().any(char::is_control){return Err(invalid("cancellation reason must contain 1–4000 bytes without control characters"));}
         let tx=self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;schema(&tx)?;if head(&tx)?!=expected_head{return Err(StoreError::Conflict);}
+        let attempt=read_attempt(&tx,id)?;
+        if attempt.revision!=expected_revision{return Err(StoreError::Conflict);}
+        let version:u32=tx.query_row("PRAGMA user_version",[],|row|row.get(0))?;
+        // Operator cancellation moves both attempt and task revisions. Leave
+        // the verifier's generation and delivery fences intact until its real
+        // verdict is recorded. Ambiguous delivery still requires observation.
+        // Internal scope-violation cancellation remains atomic with rejection.
+        if version>=44 {
+            let blocking:Option<(String,String,String)>=tx.query_row(
+                "SELECT o.id,o.kind,d.state FROM operation_delivery d JOIN operations o ON o.id=d.operation_id
+                 WHERE d.state IN ('claimed','ambiguous') AND o.kind IN ('verification.run','integration.run')
+                   AND json_extract(o.payload,'$.submission_id') IN (SELECT submission_id FROM result_submissions WHERE attempt_id=?1)
+                   AND NOT EXISTS(SELECT 1 FROM attempt_cancellations WHERE attempt_id=?1)
+                 ORDER BY o.id LIMIT 1",[id.as_str()],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional()?;
+            if let Some((operation,kind,state))=blocking {
+                return Err(invalid(&format!("cancellation deferred: attempt {} has {state} {kind} job {operation}; wait for its verdict or reconcile its ambiguous delivery, then retry cancel-attempt with fresh revisions",id.as_str())));
+            }
+        }
         let result=cancel_attempt_in_transaction(&tx,id,expected_revision,reason,now,budget)?;
         tx.commit()?;Ok(result)
     }
