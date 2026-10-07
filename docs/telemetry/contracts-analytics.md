@@ -571,7 +571,7 @@ CLI caller labels cannot be joined to worker profiles without guessing.
 | M74 command_friction | Error plus usage_error / retained invocations, by caller; ten command paths ranked by error count, ties by path. | Same as M73. |
 | M75 unanswered_worker_questions | Unanswered request_user_input* calls / observed attempts, plus exact per-attempt counts. Async output alone is not an answer. | session_metadata_not_collected |
 | M76 context_window_fill | Per-attempt maximum input/context-window ratio, nearest-rank median/p95 and fraction strictly over 0.8. | context_window_or_input_tokens_missing |
-| M77 coordinator_reaction_time | Each inbox.delivered event with worker-result- id to first coordinator CLI timestamp at or after delivery; median/p90 ms. A CLI may follow multiple notices. | event_times_not_recorded; coordinator_cli_invocations_missing; worker_result_delivery_times_missing; notice_time_or_next_cli_missing |
+| M77 coordinator_reaction_time | Each retained inbox_items row with worker-result- id to first coordinator CLI timestamp at or after delivery; median/p90 ms. A CLI may follow multiple notices. | coordinator_cli_invocations_missing; worker_result_delivery_times_missing; notice_time_or_next_cli_missing |
 
 Worker metrics carry observed/unavailable attempt coverage, and partial status
 when coverage is incomplete. Unobserved worker quantities use
@@ -665,3 +665,28 @@ forget-session deletion and full telemetry backup. Migration replays retained
 Codex rollouts when the physical class table is newly installed, preserving
 existing offsets after logical stream rollback; deduplication remains by session/item ID.
 New verifier executions retain `duration_ms` in the existing metadata payload.
+
+## MET-NOTICE-TIMES-1 retained notice and historical timing
+
+M77 reads worker-result notice delivery from `inbox_items.payload.created`
+(RFC 3339, converted to milliseconds), including consumed notices, and pairs
+it with the first retained coordinator CLI invocation at or after delivery.
+Result/ended notices are committed atomically with their originating event;
+reading their retained timestamp avoids adding redundant canonical events.
+M77 does not require `event_times`. Invalid delivery times and missing subsequent
+CLI invocations remain unmatched, explicitly counted.
+
+M83/M86 reconstruct unread worker-result intervals from the same inbox delivery
+rows and timed `inbox.seen`/`inbox.done` events, ordered by timestamp. Historical
+untimed consumption events before the first retained `event_times` sequence
+and their associated notice spans are excluded. Attempts without a reserved
+lifecycle mark whose reservation precedes that sequence are excluded as untimed
+historical activity. M83/M84/M86 expose
+`historical_censored` with separate `events` and `attempts` counts, including
+for `--since` windows; these counts describe retained excluded history, not
+samples inside the window. Known attempt intervals ending before `--since`
+do not participate in the timing-completeness gate. Timed intervals beginning
+before the window remain eligible when they overlap it. Missing timing in the
+observable period still yields `historical_activity_times_missing`; historical
+times are never invented. No canonical schema, event volume, retention or
+backup classification changes are needed.

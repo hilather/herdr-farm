@@ -735,6 +735,11 @@ fn claude_v2_thinking_effort_and_cache_tiers_survive_rebuild() {
 #[test]
 fn claude_turn_metadata_workers_and_coordinator_detail() {
     let f = claude();
+    // Readmit ended the previous worker; consume that result before this session.
+    let mut store=herdr_farm::store::SqliteStore::open(&f.project.join(".state/state.db")).unwrap();
+    let notices=store.unseen_inbox().unwrap().into_iter().map(|i|i.content.id).collect::<Vec<_>>();
+    store.update_inbox(store.current_head().unwrap(),&notices,false).unwrap();
+
     let path = transcript(&f, SID, &f.worktree(), "2.1.286", f.decided+1000);
     let fixture = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/telemetry/claude-code/turns.jsonl")).unwrap();
     let render = |sid: &str, cwd: &str| fixture.replace("@SID@",sid).replace("@CWD@",cwd)
@@ -891,6 +896,8 @@ fn coordinator_request_percentiles_and_idle_owner_waits() {
     let snapshot = store.read_snapshot(None).unwrap();
     let attempt = snapshot.attempts.iter().find(|a|a.id.as_str()==f.attempt).unwrap();
     store.cancel_attempt(&AttemptId::new(&f.attempt).unwrap(),attempt.revision,snapshot.head,"fixture complete",f.decided+500).unwrap();
+    let initial=store.unseen_inbox().unwrap().into_iter().map(|i|i.content.id).collect::<Vec<_>>();
+    store.update_inbox(store.current_head().unwrap(),&initial,false).unwrap();
     drop(store);
     let cwd=f.project.display().to_string();
     let path=transcript(&f,"percentiles",&cwd,"2.1.286",f.decided+1000);
@@ -917,9 +924,19 @@ fn coordinator_request_percentiles_and_idle_owner_waits() {
     assert_eq!(metrics["M84"]["open_censored"],1);
     assert_eq!(metrics["M85"]["prompts"],0);
     let canonical=rusqlite::Connection::open(f.project.join(".state/state.db")).unwrap();
-    canonical.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES('inbox.delivered','worker-result-fixture',1,1,'{}')",[]).unwrap();
-    let delivered:i64=canonical.query_row("SELECT recorded_unix_ms FROM event_times ORDER BY sequence DESC LIMIT 1",[],|r|r.get(0)).unwrap();
-    let next=unix_ms().max(f.decided+3100)+1000;
+    // Deliver a second result notice through the public inbox adapter.
+    let mut store=SqliteStore::open(&f.project.join(".state/state.db")).unwrap();
+    let snapshot=store.read_snapshot(None).unwrap();
+    let task=&snapshot.tasks[0];
+    let delivered=f.decided+2500;
+    let notice_id="worker-result-fixture".to_owned();
+    store.commit(herdr_farm::domain::Commit {expected_head:snapshot.head,mutations:vec![herdr_farm::domain::Mutation::Enqueue(herdr_farm::domain::Operation {
+        id:herdr_farm::domain::OperationId::new("fixture-result-delivery").unwrap(),task:Some(task.id.clone()),kind:"legacy.inbox".into(),target:notice_id.clone(),
+        payload_version:1,payload:json!({"id":notice_id,"kind":"attempt.ended_without_submission","subject":"work","created":"","summary":"fixture result","body":""}),
+        expected_revision:task.revision,due_unix_ms:delivered,idempotency_key:"fixture-result-delivery".into()
+    })]}).unwrap();
+    assert_eq!(store.drain_inbox(store.current_head().unwrap(),delivered).unwrap(),1);
+    let next=f.decided+4100;
     rows.push(json!({"sessionId":"percentiles","cwd":cwd,"version":"2.1.286","type":"user","turnOrigin":"owner_typed",
         "timestamp":jiff::Timestamp::from_millisecond(next).unwrap().to_string(),"message":{"content":"CLAUDE_SECRET_NOTICE_PULL"}}).to_string());
     let path=transcript(&f,"percentiles",&cwd,"2.1.286",f.decided+1000);
@@ -929,7 +946,12 @@ fn coordinator_request_percentiles_and_idle_owner_waits() {
     let pulled=(1..=3).filter(|i|f.decided+i*1000>=delivered).count()+1;
     assert_eq!(metrics["M83"]["value"]["ratio"],format!("{pulled}/4"));
     assert_eq!(metrics["M86"]["value"]["max"],next-delivered.max(f.decided+3000));
-    canonical.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES('inbox.seen','worker-result-fixture',2,1,'{}')",[]).unwrap();
+    let mut store=SqliteStore::open(&f.project.join(".state/state.db")).unwrap();
+    store.update_inbox(store.current_head().unwrap(),&[notice_id],false).unwrap();
+    // Deterministic fixture clock for the public consumption event.
+    let seen=f.decided+3500;
+    canonical.execute_batch("DROP TRIGGER event_times_no_update").unwrap();
+    canonical.execute("UPDATE event_times SET recorded_unix_ms=?1 WHERE sequence=(SELECT max(sequence) FROM events)",[seen]).unwrap();
     let seen:i64=canonical.query_row("SELECT recorded_unix_ms FROM event_times ORDER BY sequence DESC LIMIT 1",[],|r|r.get(0)).unwrap();
     // Recollect the final owner turn after the actual seen mark; metadata
     // replay must consume the notice and keep the preceding owner count.
@@ -940,9 +962,23 @@ fn coordinator_request_percentiles_and_idle_owner_waits() {
     fs::write(path,format!("{}\n",rows.join("\n"))).unwrap();
     f.cli("collect");
     let metrics=f.report()["metrics"].clone();
-    // The transcript uses future fixture times, so a real seen event can
-    // precede both appended owner turns. Replaying both is deterministic.
+    // The fixture seen mark precedes both appended owner turns.
     let expected=(1..=3).filter(|i|f.decided+i*1000>=delivered && f.decided+i*1000<seen).count()+usize::from(next<seen);
     assert_eq!(metrics["M83"]["value"]["ratio"],format!("{expected}/5"));
+    // Model retained pre-timing reservations: no invented historical clock.
+    canonical.execute_batch("DROP TRIGGER attempt_lifecycle_no_delete; DELETE FROM attempt_lifecycle;
+        DROP TRIGGER event_times_no_delete;
+        DELETE FROM event_times WHERE sequence <= (SELECT sequence FROM events WHERE kind='inbox.seen' ORDER BY sequence LIMIT 1)").unwrap();
+    canonical.execute("UPDATE event_times SET recorded_unix_ms=?1 WHERE sequence=(SELECT min(sequence) FROM event_times)",[f.decided+500]).unwrap();
+    let epoch:i64=canonical.query_row("SELECT min(recorded_unix_ms) FROM event_times",[],|r|r.get(0)).unwrap();
+    assert!(f.decided+1000>epoch);
+    let since=(f.decided+1000).to_string();
+    let window=f.cli_args(&["report","--json","--since",&since]).0["metrics"].clone();
+    assert_eq!(window["M83"]["value"]["ratio"],"1/5");
+    assert_eq!(window["M84"]["value"],json!({"samples":3,"median":900,"p90":1000,"max":1000,"total":2800}));
+    assert_eq!(window["M86"]["value"],json!({"samples":2,"median":500,"p90":500,"max":500,"total":1000}));
+    for id in ["M83","M84","M86"] {
+        assert_eq!(window[id]["historical_censored"],json!({"events":1,"attempts":2}));
+    }
     no_secrets(&f);
 }

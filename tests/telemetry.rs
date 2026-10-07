@@ -1014,11 +1014,15 @@ fn worker_friction_metrics_cli_fixture_and_unavailable_reasons() {
     for (id,caller,path,outcome,delta) in [("w1","worker","task list","help",0),("w2","worker","task list","error",1),("c1","coordinator","inbox list","ok",2),("o1","operator","task list","usage_error",3)] {
         db.execute("INSERT INTO cli_invocations(invocation_id,command_path,outcome,exit_code,duration_ms,project_slug,caller,trust,recorded_unix_ms) VALUES(?1,?2,?3,0,10,'demo',?4,'local',?5)",rusqlite::params![id,path,outcome,caller,now+delta]).unwrap();
     }
-    // A fixture delivery receives its timestamp through the real schema-72 trigger.
+    // Ending a real attempt delivers its result notice without inbox.delivered.
+    let mut store=SqliteStore::open(&f.project.join(".state/state.db")).unwrap();
+    let snapshot=store.read_snapshot(None).unwrap();
+    let attempt=&snapshot.attempts[0];
+    store.cancel_attempt(&attempt.id,attempt.revision,snapshot.head,"fixture stop",now).unwrap();
+    let notice=store.unseen_inbox().unwrap().into_iter().find(|i|i.content.id.starts_with("worker-result-")).unwrap();
+    let delivered=notice.content.created.parse::<jiff::Timestamp>().unwrap().as_millisecond();
+    store.update_inbox(store.current_head().unwrap(),&[notice.content.id],false).unwrap();
     let state=rusqlite::Connection::open(f.project.join(".state/state.db")).unwrap();
-    state.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES('inbox.delivered','fixture-result',1,1,?1)",[json!({"id":"worker-result-fixture"}).to_string()]).unwrap();
-    // CLI timestamps follow the actual schema-72 event time with deterministic deltas.
-    let delivered:i64=state.query_row("SELECT recorded_unix_ms FROM event_times ORDER BY sequence DESC LIMIT 1",[],|r|r.get(0)).unwrap();
     db.execute("UPDATE cli_invocations SET recorded_unix_ms=?1 WHERE invocation_id='c1'",[delivered+1200]).unwrap();
     let m=f.report()["metrics"].clone();
     assert_eq!(m["M73"]["value"],"1/4");
@@ -1031,10 +1035,11 @@ fn worker_friction_metrics_cli_fixture_and_unavailable_reasons() {
     assert!(text.contains("by_caller={") && text.contains("top_command_paths=["));
     let registry=f.cli_args(&["metrics","registry","--json"]).0;
     assert_eq!(registry["registry"],"analytics-registry.v12");
+    state.execute_batch("DROP TRIGGER events_record_time; DROP TABLE event_times").unwrap();
+    assert_eq!(f.report()["metrics"]["M77"]["value"],json!({"samples":1,"p50":"1200","p90":"1200","unmatched_notices":0}));
     db.execute("DELETE FROM cli_invocations",[]).unwrap();
     assert_eq!(f.report()["metrics"]["M73"]["value"]["reason"],"no_cli_invocations");
-    state.execute_batch("DROP TRIGGER events_record_time; DROP TABLE event_times").unwrap();
-    assert_eq!(f.report()["metrics"]["M77"]["value"]["reason"],"event_times_not_recorded");
+    assert_eq!(f.report()["metrics"]["M77"]["value"]["reason"],"coordinator_cli_invocations_missing");
 
     let refresh=f.cli_args(&["analytics","refresh"]).0;
     assert!(refresh["appended"].as_array().unwrap().iter().all(|row|row["cell"]["metric"]!="M73" && row["cell"]["metric"]!="M74"));

@@ -1921,7 +1921,8 @@ counts as an owner turn; message content never identifies an owner.
   plus count and cost of turns without tools (candidate no-op wake-ups).
 - M83 `owner_pull_rate`: owner turns with an open reserved/running attempt or
   an unread worker-result notice, divided by owner turns. Lifecycle intervals
-  and timestamped delivery/seen/done events reconstruct activity at turn start.
+  and retained inbox delivery timestamps plus timed seen/done events reconstruct
+  activity at turn start.
 - M84 `waiting_on_owner`: nearest-rank distribution and total milliseconds
   from qualifying turn ends to the next owner turn. Qualifying means a question
   was issued or no background work remained. Unmatched waits are open censored;
@@ -2011,3 +2012,28 @@ brief/input rendering without the hidden owner-config filesystem re-read. Store
 config-digest and sealed-input validation remain active; coordinator rendering
 and operators without that context retain the filesystem check. Refusals keep
 the existing `precondition` classification. No accounting migration is needed.
+
+## MET-NOTICE-TIMES-1 retained notice and historical timing
+
+M77 reads worker-result notice delivery from `inbox_items.payload.created`
+(RFC 3339, converted to milliseconds), including consumed notices, and pairs
+it with the first retained coordinator CLI invocation at or after delivery.
+Result/ended notices are committed atomically with their originating event;
+reading their retained timestamp avoids adding redundant canonical events.
+M77 does not require `event_times`. Invalid delivery times and missing subsequent
+CLI invocations remain unmatched, explicitly counted.
+
+M83/M86 reconstruct unread worker-result intervals from the same inbox delivery
+rows and timed `inbox.seen`/`inbox.done` events, ordered by timestamp. Historical
+untimed consumption events before the first retained `event_times` sequence
+and their associated notice spans are excluded. Attempts without a reserved
+lifecycle mark whose reservation precedes that sequence are excluded as untimed
+historical activity. M83/M84/M86 expose
+`historical_censored` with separate `events` and `attempts` counts, including
+for `--since` windows; these counts describe retained excluded history, not
+samples inside the window. Known attempt intervals ending before `--since`
+do not participate in the timing-completeness gate. Timed intervals beginning
+before the window remain eligible when they overlap it. Missing timing in the
+observable period still yields `historical_activity_times_missing`; historical
+times are never invented. No canonical schema, event volume, retention or
+backup classification changes are needed.
