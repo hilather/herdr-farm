@@ -134,6 +134,7 @@ impl Spend {
 pub(crate) fn metrics(project: &Path, since: Option<i64>) -> Result<BTreeMap<String, Value>> {
     let db = crate::telemetry::read_only(&project.join(".state/state.db"))?;
     let _snapshot = db.unchecked_transaction()?;
+    let accepted_attempts = crate::telemetry::analytics::lifecycle::accepted_attempts(&db)?;
     let history = super::work_items::read_snapshot(project, &db)?;
     let mut out: BTreeMap<String, Value> = (65..=69)
         .map(|n| (format!("M{n}"), missing("lineage_not_recorded")))
@@ -227,7 +228,7 @@ pub(crate) fn metrics(project: &Path, since: Option<i64>) -> Result<BTreeMap<Str
             .filter_map(Value::as_str)
             .collect();
         for a in &attempts {
-            if a["launch_unix_ms"].is_null() {
+            if a["launch_unix_ms"].is_null() && a["cost_coverage"]["entries"].as_u64().unwrap_or(0) == 0 {
                 continue;
             }
             let task = a["task_id"].as_str().unwrap_or_default();
@@ -253,8 +254,9 @@ pub(crate) fn metrics(project: &Path, since: Option<i64>) -> Result<BTreeMap<Str
             waste.add(
                 &a["cost_estimate"],
                 &a["cost_coverage"],
-                matches!(a["state"].as_str(), Some("failed" | "cancelled"))
-                    || superseded.contains(task),
+                !accepted_attempts.contains(a["attempt_id"].as_str().unwrap_or_default())
+                    && (matches!(a["state"].as_str(), Some("failed" | "cancelled"))
+                        || superseded.contains(task)),
             )?;
         }
     }

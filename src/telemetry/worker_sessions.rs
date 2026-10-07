@@ -10,13 +10,19 @@ pub(crate) fn attempt(
 ) -> anyhow::Result<Value> {
     let id = record["attempt_id"].as_str().unwrap_or_default();
     let available: bool = db.query_row("SELECT count(*)=8 FROM sqlite_master WHERE type='table' AND name IN ('codex_session_clock','codex_session_turns','codex_session_items','codex_tool_calls','codex_exec_items','codex_turns','codex_turn_aborts','codex_usage')", [], |r| r.get(0))?;
-    if !available {
-        return Ok(
-            json!({"status":"unavailable","reason":"session_metadata_not_collected","end_state":record["session"]["end_state"]}),
-        );
-    }
     let sessions: Vec<String> = db.prepare("SELECT DISTINCT session_id FROM rollout_sources WHERE attempt_id=?1 AND binding='bound' AND (originator IS NULL OR originator NOT LIKE 'otlp:%')")?
         .query_map([id], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+    let never_running = sessions.is_empty() && record["running_unix_ms"].is_null();
+    if never_running {
+        return Ok(json!({"status":"excluded","reason":"never_running","end_state":"never_running"}));
+    }
+    if !available {
+        let end = if record["session"]["end_state"] == "never_running" { json!("unknown") } else { record["session"]["end_state"].clone() };
+        return Ok(json!({"status":"unavailable","reason":"session_metadata_not_collected","end_state":end}));
+    }
+    let canonical_ended: bool = record["agent_kind"] == "claude" && canonical.query_row(
+        "SELECT EXISTS(SELECT 1 FROM inbox_items WHERE json_extract(payload,'$.kind')='attempt.ended_without_submission' AND instr(json_extract(payload,'$.summary'),?1)>0)",
+        [format!("attempt {id},")], |r| r.get(0))?;
     let mut commands = 0i64;
     let mut unknown_commands = 0i64;
     let mut failed = BTreeMap::from([
@@ -90,7 +96,7 @@ pub(crate) fn attempt(
         "stopped"
     } else if timed_out {
         "timed_out"
-    } else if all_completed {
+    } else if all_completed || canonical_ended {
         "ended_without_submission"
     } else {
         "unknown"
@@ -111,13 +117,14 @@ pub(crate) fn attempt(
         "failed_commands":failed.values().sum::<i64>(),"failed_commands_by_class":failed,"file_change_items":files,"failed_file_change_items":failed_files,
         "image_views":images,"user_input_requests":requests,"answered_user_input_requests":answered,"unanswered_user_input_requests":requests-answered,
         "answer_basis":"subsequent_user_message_or_sync_output","sub_agents_spawned":spawned,"max_context_window_fill":fill.map(|n| n.to_string()),
-        "lingering_ms":lingering,"end_state":end,"end_state_basis":"recorded_metadata"}),
+        "lingering_ms":lingering,"end_state":end,"end_state_basis":if canonical_ended && !all_completed && end == "ended_without_submission" {"canonical_notice"} else {"recorded_metadata"}}),
     )
 }
 
 pub(crate) fn summary(records: &[Value]) -> Value {
     let mut states: BTreeMap<String, i64> = [
         "submitted",
+        "never_running",
         "ended_without_submission",
         "stopped",
         "timed_out",
@@ -131,6 +138,8 @@ pub(crate) fn summary(records: &[Value]) -> Value {
     let (mut commands, mut failed, mut unanswered) = (0i64, 0i64, 0i64);
     let mut lingering = Vec::new();
     let mut observed_attempts = 0;
+    let never_running = records.iter().filter(|a| a["session"]["end_state"] == "never_running").count();
+    let eligible = records.len() - never_running;
     for a in records {
         let s = &a["session"];
         *states
@@ -197,6 +206,6 @@ pub(crate) fn summary(records: &[Value]) -> Value {
             json!(lingering[(lingering.len() * p).div_ceil(100) - 1])
         }
     };
-    json!({"status":if observed_attempts==0 {"unavailable"} else if observed_attempts<records.len() {"partial"} else {"observed"},"coverage":{"observed_attempts":observed_attempts,"unavailable_attempts":records.len()-observed_attempts},"end_states":states,"commands":commands,"failed_commands":failed,"failed_command_share":share(failed,commands),"by_class":by_class,"by_profile":profiles,
+    json!({"status":if observed_attempts==0 {"unavailable"} else if observed_attempts<eligible {"partial"} else {"observed"},"coverage":{"observed_attempts":observed_attempts,"unavailable_attempts":eligible-observed_attempts,"never_running_attempts":never_running},"end_states":states,"commands":commands,"failed_commands":failed,"failed_command_share":share(failed,commands),"by_class":by_class,"by_profile":profiles,
         "lingering_ms":{"samples":lingering.len(),"p50":percentile(50),"p95":percentile(95)},"unanswered_user_input_requests":unanswered})
 }

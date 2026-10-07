@@ -207,6 +207,22 @@ fn two_work_items_rework_cost_escape_and_lead_time() {
         json!({"median":4000,"p90":7500,"max":7500})
     );
     assert_eq!(m["M69"]["by_currency"]["USD"]["value"], "0.008/0.028");
+    let db = rusqlite::Connection::open(f.project.join(".state/state.db")).unwrap();
+    db.execute("INSERT INTO attempts(id,task_id,revision,state,reservation,termination_observed) VALUES('never-launched','clean',1,'cancelled','never-launched',1)", []).unwrap();
+    db.execute("INSERT INTO attempt_lifecycle(attempt_id,state,attempt_revision,unix_ms,source) VALUES('never-launched','cancelled',1,?1,'fixture')", [now+4500]).unwrap();
+    let no_launch = f.report()["metrics"].clone();
+    for id in ["M66","M69"] {
+        assert_eq!(no_launch[id]["attempts_without_complete_cost"],0);
+        assert_ne!(no_launch[id]["by_currency"]["USD"]["status"],"partial");
+    }
+    // Accepted work cancelled during cleanup stays in total spend, outside waste.
+    let db = rusqlite::Connection::open(f.project.join(".state/state.db")).unwrap();
+    db.execute("UPDATE attempts SET state='cancelled' WHERE id='clean'", []).unwrap();
+    assert_eq!(f.report()["metrics"]["M69"]["by_currency"]["USD"]["value"], "0.008/0.028");
+    let fleet = f.cli_args(&["accounting", "fleet", "--json"]).0;
+    assert_eq!(fleet["metrics"]["M37"]["buckets"]["accepted_then_cancelled"]["attempts"], 1);
+    assert_eq!(fleet["metrics"]["M37"]["buckets"]["accepted_then_cancelled"]["estimate"]["amount"], "0.004");
+    assert_eq!(fleet["metrics"]["M37"]["buckets"]["unexplained_abandonment"]["attempts"], 0);
     let query = f
         .cli_args(&["query", "--metric", "M65,M66,M67,M68,M69", "--json"])
         .0;
@@ -237,6 +253,12 @@ fn two_work_items_rework_cost_escape_and_lead_time() {
     // Owner triage correction removes the escaped defect from the current count.
     f.cli_args(&["review", "findings", "reset", "1"]);
     assert_eq!(f.report()["metrics"]["M67"]["value"], "0/2");
+    // One passing policy cannot hide pending evidence on another required policy.
+    db.execute("INSERT INTO acceptance_policies(task_id,contract_revision,policy_id,body) VALUES('clean',1,'second','opaque')", []).unwrap();
+    assert_eq!(f.report()["metrics"]["M69"]["by_currency"]["USD"]["value"], "0.012/0.028");
+    let fleet = f.cli_args(&["accounting", "fleet", "--json"]).0;
+    assert_eq!(fleet["metrics"]["M37"]["buckets"]["accepted_then_cancelled"]["attempts"], 0);
+    assert_eq!(fleet["metrics"]["M37"]["buckets"]["unexplained_abandonment"], json!({"attempts":1,"estimate":{"status":"complete","currency":"USD","amount":"0.004"}}));
 }
 
 #[test]

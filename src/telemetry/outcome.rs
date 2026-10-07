@@ -195,7 +195,7 @@ fn record(db: &Connection, version: u32, attempt: &str, task: &str, state: &str,
     // Without a sidecar; `attempts` replaces it with the sidecar's answer.
     let usage = status("unavailable", if matches!(kind, Some("codex" | "claude" | "opencode")) { "collection_not_run" } else { "adapter_absent" });
     Ok(json!({
-        "session": {"status":"unavailable","reason":"collection_not_run","end_state":if submissions > 0 {"submitted"} else if state == "cancelled" {"stopped"} else {"unknown"}},
+        "session": {"status":"unavailable","reason":"collection_not_run","end_state":if submissions > 0 {"submitted"} else if running.is_none() && !predates {"never_running"} else if state == "cancelled" {"stopped"} else {"unknown"}},
         "accepted": accepted, "active_ms": active, "attempt_id": attempt,
         "profile": identity.0, "agent_kind": identity.1, "model": identity.2, "reasoning_effort": identity.3,
         "effort_observed": status("unavailable", "effort_not_reported"),

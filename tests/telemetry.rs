@@ -1003,10 +1003,12 @@ fn worker_friction_metrics_cli_fixture_and_unavailable_reasons() {
     let f=Fixture::new();
     let empty=f.report()["metrics"].clone();
     for id in ["M71","M72","M75","M76"] {
-        assert_eq!(empty[id]["value"]["reason"],"session_metadata_not_collected");
+        assert!(empty[id]["reason"] != "session_metadata_not_collected");
+        assert_eq!(empty[id]["coverage"], json!({"observed_attempts":0,"unavailable_attempts":0,"never_running_attempts":1}));
     }
     assert_eq!(empty["M73"]["value"]["reason"],"cli_invocations_not_collected");
-    assert_eq!(f.cli_args(&["query","--metric","M70","--json"]).0["results"][0]["status"],"partial");
+    assert_eq!(empty["M70"]["value"],json!({"submitted":0,"ended_without_submission":0,"stopped":0,"timed_out":0,"unknown":0,"never_running":1}));
+    assert_eq!(f.cli_args(&["query","--metric","M70","--json"]).0["results"][0]["status"],"available");
     f.cli("collect");
     let db=f.sidecar();
     db.execute("DELETE FROM cli_invocations",[]).unwrap();

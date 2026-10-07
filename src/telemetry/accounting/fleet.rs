@@ -771,7 +771,7 @@ fn allocation(f: Option<&Fleet>, coordinator: &[&Session], coord: &Sum) -> Value
 }
 
 /// Supersession buckets (§10): overlap waste (M37's numerator) and the rest.
-const BUCKETS: [&str; 5] = ["sibling_changed_same_area", "duplicate_effort", "other", "unexplained_abandonment", "not_superseded"];
+const BUCKETS: [&str; 6] = ["sibling_changed_same_area", "duplicate_effort", "other", "accepted_then_cancelled", "unexplained_abandonment", "not_superseded"];
 
 /// M37: lifecycle cost of attempts superseded or abandoned because a sibling
 /// changed the same area (an accepted supersession reason) / total worker
@@ -794,6 +794,7 @@ fn m37(db: &Connection, f: Option<&Fleet>, usage: &std::result::Result<Vec<Sessi
         for attempt in ended { reasons.entry(attempt).or_insert_with(|| "sibling_changed_same_area".into()); }
     }
     let states: BTreeMap<String, String> = db.prepare("SELECT id,state FROM attempts")?.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+    let accepted = crate::telemetry::analytics::lifecycle::accepted_attempts(db)?;
     let mut recorded = BTreeMap::<&str, usize>::new();
     for reason in reasons.values() { *recorded.entry(reason.as_str()).or_default() += 1; }
     body["records"] = json!(recorded);
@@ -811,6 +812,7 @@ fn m37(db: &Connection, f: Option<&Fleet>, usage: &std::result::Result<Vec<Sessi
     let mut total = Sum::default();
     for (attempt, sum) in &per_attempt {
         let bucket = match (reasons.get(*attempt), states.get(*attempt).map(String::as_str)) {
+            (_, Some("cancelled")) if accepted.contains(*attempt) => "accepted_then_cancelled",
             (Some(reason), _) => reason.as_str(),
             (None, Some("cancelled" | "lost")) => "unexplained_abandonment",
             _ => "not_superseded",

@@ -529,7 +529,7 @@ work items are `outside_window`.
 | M66 | rework_cost_share | Fix, recheck and repeat review spend / all spend in cohort work items, exact decimal ratios per currency and per effective attempt profile. A repeat review/skeptic task launches after another task of the same lineage role has a terminal mark; initial concurrent reviews are excluded from the numerator. |
 | M67 | escaped_defects | Current validated, unique, non-seeded review findings discovered strictly after the work item's first build/fix acceptance, counted once by their canonical discovery claim. Count and exact findings / accepted work items ratio; owner resets and duplicate merges restate the count. The finding targets the work item through its review opportunity, never title matching. |
 | M68 | work_item_lead_time | First launch to first recorded build/fix integration, otherwise last terminal lifecycle mark when all attempts have terminal marks; median and nearest-rank p90 in milliseconds (max also provided). Open or missing terminal tails remain censored. |
-| M69 | waste_share | Spend on failed/cancelled attempts or attempts of explicitly superseded tasks / all spend, separately per currency. Union membership prevents double counting; lost attempts are not assumed failed. |
+| M69 | waste_share | Spend on failed/cancelled attempts or attempts of explicitly superseded tasks without every-policy acceptance evidence / all spend, separately per currency. Accepted attempts remain in the denominator. Union membership prevents double counting; lost attempts are not assumed failed. |
 
 Text reports include `M66 rework_cost_share profile=PROFILE currency=CODE n/d`
 and `M67 escaped_defects count=N n/d`, alongside the aggregate currency rows
@@ -544,13 +544,19 @@ zero denominators are null with `empty_denominator`, absent estimates yield
 `cost_not_observed`, and incomplete cost yields `work_item_cost_incomplete`
 partial currency cells retaining observed numerator and denominator subtotals.
 Missing complete costs are counted as `attempts_without_complete_cost`.
-M66 and M69 exclude attempts without a launching/running lifecycle mark from
-spend and incomplete-cost coverage; launched attempts without usage remain incomplete.
+Attempts with neither a launch mark nor cost entries are excluded from spend
+and incomplete-cost coverage, so they do not make M53/M66/M69 partial; launched
+attempts without usage remain incomplete.
 Missing profiles use `unknown`. Pricing revisions are exposed for M66/M69;
 rate cards remain fixture-only estimates, not provider charges. Analytics
 refresh/rebuild and as-of revisions retain the same bodies and invalidate on
 canonical or sidecar input changes, including owner triage corrections.
 
+
+MET-STATES-1: M37 checks attempt-local every-policy acceptance before supersession
+or abandonment and separates accepted_then_cancelled cleanup spend. M69 excludes
+accepted work from waste using the same candidate verdict; a partial policy pass
+does not establish acceptance. No canonical schema or retention changes.
 
 ## MET-WORKER-1: worker and command friction (registry v10)
 
@@ -564,7 +570,7 @@ CLI caller labels cannot be joined to worker profiles without guessing.
 
 | ID / report name | Definition | Missing evidence |
 | --- | --- | --- |
-| M70 worker_end_states | Five end-state counts, including unknown; uses the A10 precedence. | Coverage counts accompany metadata-free canonical end states. |
+| M70 worker_end_states | Six end-state counts, including unknown and never_running; uses the A10 precedence for launched/bound attempts. Claude falls back to canonical ended-without-submission notices. | Coverage counts accompany metadata-free canonical end states. |
 | M71 lingering_time | Last session record to terminal mark, nearest-rank median/p95 in ms; count strictly over 600000 ms. Negative/open/missing times excluded and counted. | session_end_or_terminal_time_missing |
 | M72 failed_command_share | Failed exec items / all exec items; same denominator for exit classes 1, 2, 127_not_found, other_nonzero, signal. Unknown exits counted separately and mark partial coverage. | empty_denominator; exit_code_unknown |
 | M73 help_lookup_share | Help / retained invocations, overall and by worker/coordinator/operator/plugin/ticker. | cli_invocations_not_collected; no_cli_invocations; empty_denominator |
@@ -573,9 +579,12 @@ CLI caller labels cannot be joined to worker profiles without guessing.
 | M76 context_window_fill | Per-attempt maximum input/context-window ratio, nearest-rank median/p95 and fraction strictly over 0.8. | context_window_or_input_tokens_missing |
 | M77 coordinator_reaction_time | Each retained inbox_items row with worker-result- id to first coordinator CLI timestamp at or after delivery; median/p90 ms. A CLI may follow multiple notices. | coordinator_cli_invocations_missing; worker_result_delivery_times_missing; notice_time_or_next_cli_missing |
 
-Worker metrics carry observed/unavailable attempt coverage, and partial status
-when coverage is incomplete. Unobserved worker quantities use
-session_metadata_not_collected rather than zero. Sample distributions include
+Worker metrics carry observed/unavailable attempt coverage plus never_running_attempts.
+Never-running attempts (no running mark or bound session) are exclusions from
+metadata coverage and M71/M76 missing_samples, and their own M70 bucket.
+Launched/bound attempts without metadata mark partial session_metadata_not_collected.
+M71/M76 missing_samples counts eligible attempts without a valid sample, retaining
+the sample-specific reason when metadata is otherwise complete. Sample distributions include
 sample counts; empty ratios have null value and empty_denominator. Decimal
 quantiles are strings. Canonical events without schema-72 times are never
 assigned inferred times. M77 unmatched notices are counted, not zero-duration
