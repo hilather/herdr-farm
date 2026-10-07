@@ -73,6 +73,13 @@ fn two_work_items_rework_cost_escape_and_lead_time() {
             SELECT ?1,?1,1,NULL,chosen_configuration_id,eligible,chooser_kind,chooser_principal,reason_codes,decided_unix_ms FROM dispatch_decisions WHERE attempt_id=?2",rusqlite::params![task,f.attempt]).unwrap();
         ids.push((task.into(), task.into(), offset));
     }
+    db.execute("INSERT INTO tasks(id,revision,state,title) VALUES('never-launched',1,'cancelled','never-launched')", []).unwrap();
+    herdr_farm::store::SqliteStore::open(&f.project.join(".state/state.db"))
+        .unwrap()
+        .prepare_task_lineage("never-launched", "item-one", "fix", None)
+        .unwrap();
+    db.execute("INSERT INTO attempts(id,task_id,revision,state,reservation,termination_observed) VALUES('never-launched','never-launched',1,'cancelled','never-launched',1)", []).unwrap();
+    db.execute("INSERT INTO attempt_lifecycle(attempt_id,state,attempt_revision,unix_ms,source) VALUES('never-launched','cancelled',1,?1,'fixture')", [now + 500]).unwrap();
     for (_, attempt, offset) in &ids {
         for (state, at) in [
             ("launching", now + offset),
@@ -191,6 +198,8 @@ fn two_work_items_rework_cost_escape_and_lead_time() {
         m["M66"]["by_profile"]["codex"]["by_currency"]["USD"]["value"],
         "0.016/0.028"
     );
+    assert_eq!(m["M66"]["attempts_without_complete_cost"], 0);
+    assert_eq!(m["M69"]["attempts_without_complete_cost"], 0);
     assert_eq!(m["M67"]["value"], "1/2");
     assert_eq!(m["M67"]["count"], 1);
     assert_eq!(
