@@ -94,6 +94,11 @@ line=json.dumps({'id':'probe','method':probe}).encode()+b'\n' if probe else brid
 c=socket.socket(socket.AF_UNIX);c.connect(os.environ['HERDR_SOCKET_PATH']);c.sendall(line)
 reply=c.makefile('rb').readline()
 if not reply:sys.exit(1)
+# Native pane run submits the command but prints nothing on success.
+if args[:2]==['pane','run']:
+ if os.path.exists(os.path.join(os.path.dirname(os.environ['HERDR_SOCKET_PATH']),'reject-pane-run')):
+  print('viewer command rejected by coordinator',file=sys.stderr);sys.exit(7)
+ sys.exit(0)
 sys.stdout.buffer.write(json.dumps({'result':json.loads(reply)['result']}).encode() if probe else reply)
 "#;
 
@@ -1077,6 +1082,10 @@ fn canonical_worker_viewers_create_reopen_focus_and_close_only_the_recorded_tab(
     let command = calls.iter().find(|c| c["method"] == "pane.run").unwrap()["params"]["command"].to_string();
     assert!(command.contains(config.to_str().unwrap()));
     assert!(command.contains(launched["herdr_socket"].as_str().unwrap()));
+    let record_path = lab.root.join(".herdr-run/demo-visible/herdr/server.json");
+    let record: Value = serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
+    assert_eq!(&record["viewer"], viewer, "silent pane submission retains the viewer");
+    assert!(!calls.iter().any(|c| c["method"] == "tab.close"));
     let focused = lab.ok(&["launch", "demo", "view", "--task", "visible"]);
     assert_eq!(focused["viewer"]["tab"], viewer["tab"]);
     assert_eq!(owner.calls().iter().filter(|c| c["method"] == "tab.create").count(), 1);
@@ -1120,6 +1129,17 @@ fn canonical_worker_viewers_create_reopen_focus_and_close_only_the_recorded_tab(
     lab.ok(&["launch", "demo", "stop", "--task", "visible"]);
     assert_eq!(owner.calls().iter().filter(|c| c["method"] == "tab.close").count(), before,
         "a tab whose label changed is never closed");
+    // A genuine CLI failure remains nonfatal, preserves its diagnostic and
+    // removes only the newly created viewer from the recovery record.
+    let rejected = owner.socket.parent().unwrap().join("reject-pane-run");
+    fs::write(&rejected, "").unwrap();
+    let failed = lab.ok(&args);
+    assert_eq!(failed["viewer"]["status"], "unavailable");
+    assert!(failed["viewer"]["reason"].as_str().unwrap().contains("viewer command rejected by coordinator"));
+    let record: Value = serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
+    assert!(record.get("viewer").is_none());
+    lab.ok(&["launch", "demo", "stop", "--task", "visible"]);
+    fs::remove_file(rejected).unwrap();
     owner.child.kill().unwrap();
     owner.child.wait().unwrap();
     let unavailable = lab.ok(&args);

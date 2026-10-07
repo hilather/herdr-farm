@@ -194,6 +194,10 @@ pub struct Created {
 impl<'a> Herdr<'a> {
     /// Runs one herdr command and returns the `result` object of its JSON reply.
     pub fn call(&self, args: &[&str], timeout: Duration) -> Result<serde_json::Value, HerdrError> {
+        self.call_with_silent_success(args, timeout, false)
+    }
+
+    fn call_with_silent_success(&self, args: &[&str], timeout: Duration, silent_success: bool) -> Result<serde_json::Value, HerdrError> {
         let cmd = self.cmd(timeout).args(args.iter().copied());
         let out = self.runner.run(&cmd).map_err(|e| HerdrError {
             code: "unreachable".into(),
@@ -215,16 +219,24 @@ impl<'a> Herdr<'a> {
             if let Some(error) = reply.get("error") {
                 return Err(HerdrError {
                     code: error["code"].as_str().unwrap_or("failed").to_string(),
-                    message: error["message"].as_str().unwrap_or("").to_string(),
+                    message: error["message"].as_str().filter(|message| !message.is_empty())
+                        .or_else(|| error.as_str()).map(str::to_owned)
+                        .unwrap_or_else(|| format!("{error}")),
                 });
             }
             if out.success() {
                 return Ok(reply.get("result").cloned().unwrap_or(serde_json::Value::Null));
             }
         }
+        if silent_success && out.success() && out.stdout.trim().is_empty() && out.stderr.trim().is_empty() {
+            return Ok(serde_json::Value::Null);
+        }
+        let reason = out.error_text();
         Err(HerdrError {
             code: "failed".into(),
-            message: format!("`herdr {}`: {}", args.join(" "), out.error_text()),
+            message: format!("`herdr {}`: {}", args.join(" "), if reason.is_empty() {
+                format!("exit status {:?}; no diagnostic output", out.code)
+            } else { reason }),
         })
     }
 
@@ -332,7 +344,8 @@ impl<'a> Herdr<'a> {
     }
 
     pub fn pane_run(&self, pane: &str, command: &str) -> Result<(), HerdrError> {
-        self.call(&["pane", "run", pane, "--", command], CALL_TIMEOUT).map(|_| ())
+        // Native pane run submits shell source and exits successfully without JSON.
+        self.call_with_silent_success(&["pane", "run", pane, "--", command], CALL_TIMEOUT, true).map(|_| ())
     }
 
     /// Creates a worktree-backed workspace. Returns the ids and the checkout
