@@ -271,7 +271,8 @@ fn golden_acceptance_and_amplification() {
         db.execute("INSERT INTO result_submissions(submission_id,project_store,idempotency_key,payload_digest,payload,task_id,contract_revision,contract_digest,attempt_id,repository,base_oid,candidate_oid,object_format,artifact_manifest,claimed_checks,created_unix_ms)
             VALUES(?1,'store',?1,?2,'{}',?3,1,?2,?4,'/repo',?5,?5,'sha1','[]','[]',1000)", rusqlite::params![hex(sub), hex('d'), task, attempt, oid]).unwrap();
         db.execute("INSERT INTO verified_results(result_id,run_id,submission_id,commit_oid,tree_oid,object_format,policy_digest,receipt_digest,isolation,memory_fence,created_unix_ms)
-            VALUES(?1,?1,?2,?3,?3,'sha1',?4,?4,'linux-unshare-user-pid-mount-v1',0,2000)", rusqlite::params![hex(result), hex(sub), oid, hex('e')]).unwrap();
+            VALUES(?1,?1,?2,?3,?3,'sha1','be6f2ce9cb648d4bacb21d433c0baa8e01cae9591afc0669152ab2b64f8bdd3b',?4,'linux-unshare-user-pid-mount-v1',0,2000)", rusqlite::params![hex(result), hex(sub), oid, hex('e')]).unwrap();
+        support::telemetry::complete_legacy_verification_fixture(&db);
     }
     for (operation, result, state) in [("op-t2", '5', "integrated"), ("op-t3", '6', "blocked")] {
         db.execute("INSERT INTO integration_operations(operation_id,project_store,idempotency_key,payload_digest,repository,ref_name,expected_old_oid,verified_result_id,state,generation,object_format,checks_passed,created_unix_ms)

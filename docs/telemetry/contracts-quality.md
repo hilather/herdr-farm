@@ -18,10 +18,18 @@ with `kind = 'first_candidate_ci'`:
 
 - *First candidate*: the task's first `result_submissions` row by
   `(created_unix_ms, rowid)`.
-- *Pinned CI result*: that submission's first `verification_runs` row by
-  `(created_unix_ms, rowid)`; its `state`, `run_id` and `policy_digest` (the
-  pinned CI definition) are copied by value. Later runs and later submissions
-  never change the signal.
+- *Pinned CI result*: the first submission's overall verdict, using its contract's
+  policies and their body digests, as in M30. `accepted` requires an accepted
+  run and receipt for every policy; otherwise any rejected policy gives
+  `rejected`, else `pending` (no policies: `policy_unknown`). An accepted retry
+  supersedes a prior rejection, including `isolation_setup_failed`.
+  `run_id`, `policy_digest` and the window timestamp retain the first run's
+  provenance. Later submissions never contribute. Collection refreshes
+  `ci_state` on existing derived rows without recomputing settled diff counts;
+  the normal quality collection/rebuild path requires no schema migration.
+  The existing sidecar stores resolved states only; incomplete/unknown
+  verdicts are reported as pending from canonical history; stale historical
+  signals for these candidates are removed and collected again once resolved.
 - *Test weakening* (rule `tests-net-removal.v1`): `git diff --numstat
   --no-renames base_oid candidate_oid -- :(top)tests/` in the submission's
   `repository`, spawned through `execution_guard::GatedSpawn`. Stored:
@@ -30,18 +38,19 @@ with `kind = 'first_candidate_ci'`:
   `clear`. When the diff cannot run the counts are `NULL`, `weakening =
   'unavailable'` with `weakening_reason` (`repository_missing`,
   `git_unavailable`, `diff_failed`, `diff_unparseable`) and the next collect
-  retries it; settled rows are never rewritten.
+  retries it; settled diff counts are never rewritten.
 
 **M45 first-candidate CI pass (proxy)**, definition `M45.proxy-v1`, reported
 by `telemetry <slug> quality report [--since MS]` (read-only):
 
-- numerator: tasks whose first candidate's pinned-CI run is `accepted` and
+- numerator: tasks whose first candidate's overall verdict is `accepted` and
   whose weakening check is `clear`; denominator: tasks with a first-candidate
-  run and a `clear` check. Value `"n/d"`; empty denominator is `null` with
+  resolved verdict (`accepted` or `rejected`) and a `clear` check. Value `"n/d"`; empty denominator is `null` with
   `empty_denominator`; no sidecar is `unavailable: collection_not_run`.
 - `excluded`: `test_weakening` (flagged, listed in `flagged` with counts),
   `weakening_unavailable`, `not_collected` (a canonical first run with no
-  signal yet). `pending`: first candidates not yet verified (unwindowed only).
+  signal yet). `pending`: first candidates with incomplete policy verdicts; candidates without any run
+  are pending only in unwindowed reports.
 - `--since` windows by the first run's `created_unix_ms`.
 - Labeled `proxy: true`, `source_trust: proxy_observed`; never replaces M30.
 

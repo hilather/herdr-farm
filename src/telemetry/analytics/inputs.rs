@@ -121,7 +121,7 @@ pub(crate) fn stamp(group: &str, canonical: &Value, generations: &BTreeMap<Strin
         _ => true,
     };
     let selected: BTreeMap<&str, i64> = generations.iter().filter(|(t, _)| relevant(t)).map(|(t, s)| (t.as_str(), *s)).collect();
-    serde_json::to_string(&json!({"canonical": canonical, "sources": selected, "registry": super::registry::VERSION})).unwrap_or_default()
+    serde_json::to_string(&json!({"canonical": canonical, "sources": selected, "registry": super::registry::VERSION, "acceptance_evaluator": "all-policies-v1"})).unwrap_or_default()
 }
 
 pub(crate) fn cached(db: &Connection, group: &str, since: Option<i64>, stamp: &str) -> Result<Option<Value>> {

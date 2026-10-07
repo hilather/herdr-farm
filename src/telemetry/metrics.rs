@@ -37,13 +37,25 @@ fn ratio(id: &str, numerator: usize, denominator: usize, extra: Value) -> Value 
 }
 
 /// Contracts §6 `T`/`A` evidence: every task `(id, state, accepted)`, where
-/// accepted means a verified result for its current contract revision that is
-/// verify-only or integrated. Shared by this report and the attention M31 cohort.
+/// accepted means every policy of one current-contract submission passed,
+/// with integration evidence when required. Shared by this report and the attention M31 cohort.
 pub(crate) fn task_evidence(db: &Connection) -> Result<Vec<(String, String, bool)>> {
-    Ok(db.prepare("SELECT t.id,t.state,EXISTS(SELECT 1 FROM task_contracts c JOIN result_submissions s ON s.task_id=c.task_id AND s.contract_revision=c.contract_revision
+    let mut tasks = db.prepare("SELECT t.id,t.state,EXISTS(SELECT 1 FROM task_contracts c JOIN result_submissions s ON s.task_id=c.task_id AND s.contract_revision=c.contract_revision
         JOIN verified_results r ON r.submission_id=s.submission_id WHERE c.task_id=t.id AND c.contract_revision=(SELECT max(contract_revision) FROM task_contracts WHERE task_id=t.id)
         AND (c.route='verify_only' OR EXISTS(SELECT 1 FROM integration_operations i JOIN integrated_commits k ON k.operation_id=i.operation_id WHERE i.verified_result_id=r.result_id)))
-        FROM tasks t ORDER BY t.id")?.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<rusqlite::Result<_>>()?)
+        FROM tasks t ORDER BY t.id")?.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<rusqlite::Result<Vec<(String, String, bool)>>>()?;
+    for (task, _, accepted) in &mut tasks {
+        if !*accepted { continue; }
+        let revision: i64 = db.query_row("SELECT max(contract_revision) FROM task_contracts WHERE task_id=?1", [task.as_str()], |r| r.get(0))?;
+        let submissions = db.prepare("SELECT s.submission_id FROM result_submissions s JOIN task_contracts c ON c.task_id=s.task_id AND c.contract_revision=s.contract_revision
+            WHERE s.task_id=?1 AND s.contract_revision=?2 AND (c.route='verify_only' OR EXISTS(SELECT 1 FROM verified_results r JOIN integration_operations i ON i.verified_result_id=r.result_id JOIN integrated_commits k ON k.operation_id=i.operation_id WHERE r.submission_id=s.submission_id))")?
+            .query_map(rusqlite::params![task.as_str(), revision], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        *accepted = false;
+        for submission in submissions {
+            if super::analytics::lifecycle::candidate_verdict(db, task, revision, &submission)?.1 == "accepted" { *accepted = true; break; }
+        }
+    }
+    Ok(tasks)
 }
 
 /// `herdr-farm telemetry <slug> report`. `since` bounds the activity window (Unix ms).

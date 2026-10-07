@@ -3,13 +3,16 @@
 #![allow(clippy::disallowed_methods)]
 mod support;
 use serde_json::{Value, json};
-use std::{fs, process::Command};
+use std::{fs, path::Path, process::Command};
 use support::telemetry::*;
 fn metric(f: &Fixture, id: &str) -> Value {
     f.cli_args(&["query", "--metric", id, "--json"]).0["results"][0].clone()
 }
 // Canonical imported-history fixture; tests exercise CLI projections, not SQL helpers.
 fn submissions(f: &Fixture) -> Vec<String> {
+    submissions_in(f, "/repo", &"b".repeat(40))
+}
+fn submissions_in(f: &Fixture, repository: &str, oid: &str) -> Vec<String> {
     let db = rusqlite::Connection::open(f.project.join(".state/state.db")).unwrap();
     db.execute("INSERT INTO task_contracts(task_id,contract_revision,project_store,expected_head,repository,base_oid,object_format,route,raw_bytes,raw_digest,installed_seq) VALUES('work',1,?3,0,'/repo',?1,'sha1','verify_only',x'61',?2,(SELECT max(sequence) FROM events))",rusqlite::params!["b".repeat(40),"c".repeat(64),f.project.join(".state/state.db").canonicalize().unwrap().display().to_string()]).unwrap();
     db.execute(
@@ -19,7 +22,7 @@ fn submissions(f: &Fixture) -> Vec<String> {
     .unwrap();
     (0..4).map(|i| {
         let id=format!("{:064x}",i+1);
-        db.execute("INSERT INTO result_submissions(submission_id,project_store,idempotency_key,payload_digest,payload,task_id,contract_revision,contract_digest,attempt_id,repository,base_oid,candidate_oid,object_format,artifact_manifest,claimed_checks,created_unix_ms) VALUES(?1,?6,?1,?1,'{}','work',1,?1,?2,'/repo',?3,?3,'sha1','[]',?4,?5)",rusqlite::params![id,f.attempt,"b".repeat(40),if i==2 {"[]"}else{"[\"PRIVATE CLAIM TEXT\"]"},f.decided+i,f.project.join(".state/state.db").canonicalize().unwrap().display().to_string()]).unwrap();id
+        db.execute("INSERT INTO result_submissions(submission_id,project_store,idempotency_key,payload_digest,payload,task_id,contract_revision,contract_digest,attempt_id,repository,base_oid,candidate_oid,object_format,artifact_manifest,claimed_checks,created_unix_ms) VALUES(?1,?6,?1,?1,'{}','work',1,?1,?2,?7,?3,?3,'sha1','[]',?4,?5)",rusqlite::params![id,f.attempt,oid,if i==2 {"[]"}else{"[\"PRIVATE CLAIM TEXT\"]"},f.decided+i,f.project.join(".state/state.db").canonicalize().unwrap().display().to_string(),repository]).unwrap();id
     }).collect()
 }
 fn sandbox(
@@ -31,21 +34,36 @@ fn sandbox(
     ms: Option<i64>,
     metadata: bool,
 ) {
+    let digest = format!("{:064x}", key + 100);
+    sandbox_policy(f, sub, key, at, outcome, ms, metadata, "accept-1", &digest);
+}
+#[allow(clippy::too_many_arguments)]
+fn sandbox_policy(
+    f: &Fixture,
+    sub: &str,
+    key: usize,
+    at: i64,
+    outcome: &str,
+    ms: Option<i64>,
+    metadata: bool,
+    policy: &str,
+    digest: &str,
+) {
     let db = rusqlite::Connection::open(f.project.join(".state/state.db")).unwrap();
-    let (task, attempt): (String, String) = db
+    let (task, attempt, oid): (String, String, String) = db
         .query_row(
-            "SELECT task_id,attempt_id FROM result_submissions WHERE submission_id=?1",
+            "SELECT task_id,attempt_id,candidate_oid FROM result_submissions WHERE submission_id=?1",
             [sub],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .unwrap();
     let id = format!("{:064x}", key + 100);
     let pass = outcome == "pass";
     let meta =
         metadata.then(|| json!({"toolchain":{"name":"fixture"},"duration_ms":ms}).to_string());
-    db.execute("INSERT INTO verification_runs(run_id,project_store,idempotency_key,payload_digest,submission_id,task_id,contract_revision,contract_digest,attempt_id,policy_id,policy_digest,commit_oid,tree_oid,object_format,memory_fence,isolation,argv,library_manifest,state,reason,exit_status,receipt_digest,store_device,store_inode,created_unix_ms,metadata) VALUES(?1,'store',?1,?1,?2,?11,1,?1,?3,'accept-1',?1,?4,?4,'sha1',0,'linux-unshare-user-pid-mount-v1','[\"x\"]','[]',?5,?6,?7,?8,1,1,?9,?10)",rusqlite::params![id,sub,attempt,"b".repeat(40),if pass {"accepted"}else{"rejected"},if pass {None}else{Some(if outcome=="red"{"checks_failed"}else{outcome})},if pass {Some(0)}else if outcome=="red"{Some(1)}else{None},pass.then_some(&id),at,meta,task]).unwrap();
+    db.execute("INSERT INTO verification_runs(run_id,project_store,idempotency_key,payload_digest,submission_id,task_id,contract_revision,contract_digest,attempt_id,policy_id,policy_digest,commit_oid,tree_oid,object_format,memory_fence,isolation,argv,library_manifest,state,reason,exit_status,receipt_digest,store_device,store_inode,created_unix_ms,metadata) VALUES(?1,'store',?1,?1,?2,?11,1,?1,?3,?12,?13,?4,?4,'sha1',0,'linux-unshare-user-pid-mount-v1','[\"x\"]','[]',?5,?6,?7,?8,1,1,?9,?10)",rusqlite::params![id,sub,attempt,oid,if pass {"accepted"}else{"rejected"},if pass {None}else{Some(if outcome=="red"{"checks_failed"}else{outcome})},if pass {Some(0)}else if outcome=="red"{Some(1)}else{None},pass.then_some(&id),at,meta,task,policy,digest]).unwrap();
     if pass {
-        db.execute("INSERT INTO verified_results VALUES(?1,?1,?2,?3,?3,'sha1',?1,?1,'linux-unshare-user-pid-mount-v1',0,?4)",rusqlite::params![id,sub,"b".repeat(40),at]).unwrap();
+        db.execute("INSERT INTO verified_results VALUES(?1,?1,?2,?3,?3,'sha1',?5,?1,'linux-unshare-user-pid-mount-v1',0,?4)",rusqlite::params![id,sub,oid,at,digest]).unwrap();
     }
 }
 fn host(f: &Fixture, sub: &str, command: &[&str], extra: &[&str]) -> std::process::Output {
@@ -342,4 +360,80 @@ fn attempt_only_host_history_includes_pre_submission_checks_without_duplicating_
         metric(&f, "M103")["detail"]["claimed_without_agreement"]["value"],
         "0/3"
     );
+}
+
+/// Imported canonical history is projected through the CLI, including collection
+/// before the final policy verdict and refresh of already settled proxy rows.
+#[test]
+fn acceptance_and_ci_proxy_require_every_policy_of_one_candidate() {
+    for (two_policies, pass, expected) in [(true, false, 0), (true, true, 1), (false, true, 1)] {
+        let f = Fixture::new();
+        let repo = f.tmp.path().join("candidate-repo");
+        fs::create_dir_all(&repo).unwrap();
+        fs::write(repo.join("deliverable.txt"), "candidate output\n").unwrap();
+        for args in [vec!["init", "-q"], vec!["add", "deliverable.txt"], vec!["-c", "user.name=fixture", "-c", "user.email=f@f", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "candidate"]] {
+            assert!(Command::new("git").env_clear().env("PATH", "/usr/bin:/bin").env("HERDR_FARM_TEST_TIME_SCALE", f.scale).current_dir(&repo).args(args).status().unwrap().success());
+        }
+        let oid = Command::new("git").env_clear().env("PATH", "/usr/bin:/bin").env("HERDR_FARM_TEST_TIME_SCALE", f.scale).current_dir(&repo).args(["rev-parse", "HEAD"]).output().unwrap();
+        let oid = String::from_utf8(oid.stdout).unwrap().trim().to_owned();
+        let ids = submissions_in(&f, repo.to_str().unwrap(), &oid);
+        let db = rusqlite::Connection::open(f.project.join(".state/state.db")).unwrap();
+        db.execute("UPDATE tasks SET state='failed' WHERE id='work'", []).unwrap();
+        let body: String = db.query_row("SELECT body FROM acceptance_policies WHERE task_id='work'", [], |r| r.get(0)).unwrap();
+        let digest = format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(body.as_bytes()));
+        if two_policies {
+            let output = json!({"version":1,"checks":["/bin/test","-s","deliverable.txt"]}).to_string();
+            let output_digest = format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(output.as_bytes()));
+            db.execute("INSERT INTO acceptance_policies VALUES('work',1,'output-1',?1)", [&output]).unwrap();
+            sandbox_policy(&f, &ids[0], 900, f.decided+1, "pass", None, false, "output-1", &output_digest);
+            f.cli_args(&["quality", "collect"]);
+            // Historical collectors persisted the green file-presence run
+            // even while the candidate's toolchain policy was still pending.
+            f.sidecar().execute("INSERT INTO proxy_signals(kind,task_id,submission_id,attempt_id,run_id,policy_digest,base_oid,candidate_oid,ci_state,verified_unix_ms,tests_added_lines,tests_deleted_lines,tests_binary_files,weakening,weakening_rule,source_trust,observed_unix_ms)
+                VALUES('first_candidate_ci','work',?1,?2,?3,?4,?5,?5,'accepted',?6,0,0,0,'clear','tests-net-removal.v1','proxy_observed',?6)",
+                rusqlite::params![ids[0], f.attempt, format!("{:064x}",1000), output_digest, oid, f.decided+1]).unwrap();
+            f.cli_args(&["quality", "collect"]);
+            assert_eq!(f.count("proxy_signals"), 0);
+            let pending = f.cli_args(&["quality", "report"]).0["metrics"]["M45"].clone();
+            assert_eq!(pending["pending"], 1);
+            assert_eq!(pending["denominator"], 0);
+        }
+        if !two_policies {
+            sandbox_policy(&f, &ids[0], 899, f.decided+1, "isolation_setup_failed", None, false, "accept-1", &digest);
+            f.cli_args(&["quality", "collect"]);
+        }
+        sandbox_policy(&f, &ids[0], 901, f.decided+2, if pass {"pass"} else {"red"}, None, false, "accept-1", &digest);
+        if two_policies && !pass {
+            // A different submission's green toolchain run cannot complete
+            // the first submission's accepted file-presence policy.
+            sandbox_policy(&f, &ids[1], 902, f.decided+3, "pass", None, false, "accept-1", &digest);
+        }
+        f.cli_args(&["quality", "collect"]);
+        if two_policies && !pass {
+            // Upgrade fixture: older collectors settled the file-presence
+            // run as accepted. Normal collection must repair that derived row.
+            f.sidecar().execute("UPDATE proxy_signals SET ci_state='accepted'", []).unwrap();
+            f.cli_args(&["quality", "collect"]);
+        }
+        f.rollout(&f.home, "priced", &[concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/telemetry/accounting/priced-before.jsonl")], &f.worktree(), f.decided, "0.154.0");
+        f.cli("collect");
+        f.cli_args(&["accounting", "sync"]);
+        let card = f.tmp.path().join("rates.json");
+        fs::write(&card, fs::read_to_string(Path::new(FIXTURES).parent().unwrap().join("accounting/rates-v1.json")).unwrap().replace("@BOUNDARY@", &(unix_ms()+60_000).to_string())).unwrap();
+        f.cli_args(&["accounting", "import-rate-card", card.to_str().unwrap()]);
+        f.cli_args(&["accounting", "reprice"]);
+        let report = f.report();
+        assert_eq!(report["tasks"]["accepted"], expected);
+        assert_eq!(report["metrics"]["M01"]["value"], expected);
+        assert_eq!(report["metrics"]["M02"]["numerator"], expected);
+        assert_eq!(report["metrics"]["M02"]["denominator"], 1);
+        assert_eq!(report["metrics"]["M02"]["value"], format!("{expected}/1"));
+        assert_eq!(report["metrics"]["M04"]["denominator"], expected);
+        assert_eq!(report["metrics"]["M04"]["value"], if pass { json!("0.004/1") } else { Value::Null });
+        let proxy = f.cli_args(&["quality", "report"]).0["metrics"]["M45"].clone();
+        assert_eq!(proxy["numerator"], expected);
+        assert_eq!(proxy["denominator"], 1);
+        assert_eq!(proxy["value"], format!("{expected}/1"));
+        assert_eq!(f.sidecar().query_row("SELECT ci_state FROM proxy_signals", [], |r| r.get::<_,String>(0)).unwrap(), if pass {"accepted"} else {"rejected"});
+    }
 }
