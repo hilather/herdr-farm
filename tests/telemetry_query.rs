@@ -1148,12 +1148,18 @@ fn storage_measures_large_worktree_fleet_and_state_wal_through_cli() {
     let wal = fs::metadata(p.project.join(".state/state.db-wal")).unwrap().len();
     assert!(wal > 0);
     for tree in 0..4 {
-        let seed = p.tmp.path().join(format!("seed-{tree}"));
-        fs::write(&seed, [0; 1]).unwrap();
         let dir = p.project.join(format!(".state/worktrees/w{tree}"));
         fs::create_dir_all(&dir).unwrap();
         for file in 0..26_000 {
-            fs::hard_link(&seed, dir.join(file.to_string())).unwrap();
+            // Count the seed among each 100 entries so no inode has more than
+            // 100 links: large link counts make btrfs teardown very expensive.
+            let seed = dir.join((file / 100 * 100).to_string());
+            let path = dir.join(file.to_string());
+            if file % 100 == 0 {
+                fs::write(&path, [0; 1]).unwrap();
+            } else {
+                fs::hard_link(&seed, &path).unwrap();
+            }
         }
     }
     herdr_farm::telemetry::operations::sample_storage(&p.project,10_000).unwrap();
