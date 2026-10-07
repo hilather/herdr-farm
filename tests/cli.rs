@@ -5524,7 +5524,7 @@ fn fleet_text_matches_report_json() {
             (value,_) if ["M60","M61","M62","M64","M70"].contains(&id.as_str()) && value.get("reason").is_none() => value.to_string(),
             (value,_)=>format!("n/a ({})",value["reason"].as_str().unwrap_or_else(||panic!("{id}: a structured value needs its own expectation: {value}"))),
         };
-        if ["M70","M71","M72","M73","M74","M75","M76","M77"].contains(&id.as_str()) {
+        if ["M70","M71","M72","M73","M74","M75","M76","M77","M90"].contains(&id.as_str()) {
             assert!(shown.contains(&expected),"{shown} != {expected}");
         } else { assert!(shown.ends_with(&expected),"{shown} != {expected}"); }
         if expected.starts_with("n/a") {assert!(!shown.split_whitespace().any(|w|w=="0"),"unavailable must not read 0: {shown}");}

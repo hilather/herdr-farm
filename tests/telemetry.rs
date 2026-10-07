@@ -548,7 +548,7 @@ fn sidecar_streams_upgrade_v2_store() {
     f.rollout(&f.home, SID, &["head.jsonl"], &f.worktree(), f.decided + 1_000, "0.154.0");
     f.cli("collect");
     // Back to a v2 sidecar: no streams table, no codex 0003 indexes.
-    f.sidecar().execute_batch("DROP TABLE telemetry_streams; DROP VIEW otlp_ledger_sources; DROP TABLE otlp_records; DROP TABLE gemini_file_cursors; DROP TABLE otlp_attempt_tokens; DROP INDEX codex_usage_by_path; DROP INDEX rollout_sources_by_attempt;
+    f.sidecar().execute_batch("ALTER TABLE operation_storage_samples DROP COLUMN worktrees_covered; ALTER TABLE operation_storage_samples DROP COLUMN worktrees_expected; DROP TABLE telemetry_streams; DROP VIEW otlp_ledger_sources; DROP TABLE otlp_records; DROP TABLE gemini_file_cursors; DROP TABLE otlp_attempt_tokens; DROP INDEX codex_usage_by_path; DROP INDEX rollout_sources_by_attempt;
         DROP INDEX codex_usage_by_turn; DROP INDEX codex_usage_by_response; PRAGMA user_version = 2").unwrap();
     let streams = |f: &Fixture| f.sidecar().prepare("SELECT stream,version FROM telemetry_streams ORDER BY stream").unwrap()
         .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))).unwrap().map(Result::unwrap).collect::<Vec<_>>();
@@ -1003,10 +1003,12 @@ fn worker_friction_metrics_cli_fixture_and_unavailable_reasons() {
     let f=Fixture::new();
     let empty=f.report()["metrics"].clone();
     for id in ["M71","M72","M75","M76"] {
-        assert_eq!(empty[id]["value"]["reason"],"session_metadata_not_collected");
+        assert!(empty[id]["reason"] != "session_metadata_not_collected");
+        assert_eq!(empty[id]["coverage"], json!({"observed_attempts":0,"unavailable_attempts":0,"never_running_attempts":1}));
     }
     assert_eq!(empty["M73"]["value"]["reason"],"cli_invocations_not_collected");
-    assert_eq!(f.cli_args(&["query","--metric","M70","--json"]).0["results"][0]["status"],"partial");
+    assert_eq!(empty["M70"]["value"],json!({"submitted":0,"ended_without_submission":0,"stopped":0,"timed_out":0,"unknown":0,"never_running":1}));
+    assert_eq!(f.cli_args(&["query","--metric","M70","--json"]).0["results"][0]["status"],"available");
     f.cli("collect");
     let db=f.sidecar();
     db.execute("DELETE FROM cli_invocations",[]).unwrap();

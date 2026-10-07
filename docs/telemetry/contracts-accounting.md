@@ -1814,14 +1814,25 @@ cost by currency with unpriced request counts, wall duration (reported system
 duration when present, otherwise observed timestamp span), and AskUserQuestion
 call-to-result wait. Stop reasons count reported assistant line tags.
 
-Trigger precedence: scheduled_wakeup (tags scheduled_wakeup, scheduled, timer,
-wakeup); subagent (subagent, subagent_notification); background_task (a preceding
-tool-result backgroundTaskId, or background_task/background_task_notification);
-bootstrap (bootstrap, startup, init); queued_owner (preceding enqueue operation,
-or queued_owner, queue, queued); owner_typed (owner_typed, user, owner, typed,
-cli); other. Tags are matched against turnOrigin and promptSource. Queue and
-background evidence is consumed by the next prompt; dequeue clears queue
-evidence. This is a metadata heuristic, not an assertion about prompt content.
+Trigger classification first uses a recognized turnOrigin, then a recognized
+promptSource. Explicit per-turn tags take precedence over preceding background
+or queue evidence: scheduled_wakeup (scheduled_wakeup, scheduled, timer, wakeup);
+subagent (subagent, subagent_notification); background_task (task_notification,
+background_task, background_task_notification); bootstrap (bootstrap, startup,
+init); queued_owner (queued_owner, queue, queued); owner_typed (human,
+owner_typed, user, owner, typed, cli). Without a recognized tag, a preceding
+tool-result backgroundTaskId selects background_task, then a preceding enqueue
+selects queued_owner, otherwise other (including null origins with no preceding
+evidence). Queue and background evidence is consumed by the next prompt;
+dequeue clears queue evidence. This is a metadata heuristic, not an assertion
+about prompt content.
+
+M82 and M87 use this same classification. Computed cost buckets with no requests
+report available, an empty by_currency map and amount "0" (no currency is
+invented); text renders them as 0. Unpriced requests remain explicitly unavailable
+or partial, never zero. Retained turn metadata is reclassified on read; refresh
+stored analytics with the existing `analytics rebuild` path after upgrading.
+No canonical or sidecar schema migration is needed.
 
 Summaries report costs by trigger class, turns issuing no tool calls, and idle
 gaps from the previous turn's last observed line before cache rewrites. A

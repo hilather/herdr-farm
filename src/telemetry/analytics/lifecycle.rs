@@ -208,6 +208,19 @@ pub(crate) fn candidate_verdict(db: &Connection, task: &str, revision: i64, subm
     Ok((policies, outcome))
 }
 
+/// Attempt-local accepted work, using the same every-policy verdict as M30.
+pub(crate) fn accepted_attempts(db: &Connection) -> Result<BTreeSet<String>> {
+    let mut accepted = BTreeSet::new();
+    let mut stmt = db.prepare("SELECT task_id,contract_revision,submission_id,attempt_id FROM result_submissions")?;
+    for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?)))? {
+        let (task, revision, submission, attempt) = row?;
+        if candidate_verdict(db, &task, revision, &submission)?.1 == "accepted" {
+            accepted.insert(attempt);
+        }
+    }
+    Ok(accepted)
+}
+
 /// M30 reads first-candidate policy/verdict history;
 /// retries belonging to later submissions cannot contribute to the first.
 fn first_candidates(db: &Connection) -> Result<BTreeMap<String, FirstCandidate>> {

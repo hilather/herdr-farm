@@ -41,9 +41,11 @@ fn costs<'a>(rows: impl Iterator<Item = &'a Value>) -> Result<Value> {
     } else {
         "available"
     };
-    Ok(
-        json!({"by_currency":sums.into_iter().map(|(k,v)|(k,v.to_string())).collect::<BTreeMap<_,_>>(),"unpriced_requests":unpriced,"status":status,"reason":if unpriced>0 {json!("requests_unpriced")} else {Value::Null}}),
-    )
+    let zero = sums.is_empty() && unpriced == 0;
+    let mut cost = json!({"by_currency":sums.into_iter().map(|(k,v)|(k,v.to_string())).collect::<BTreeMap<_,_>>(),
+        "unpriced_requests":unpriced,"status":status,"reason":if unpriced>0 {json!("requests_unpriced")} else {Value::Null}});
+    if zero { cost["amount"] = json!("0"); }
+    Ok(cost)
 }
 
 pub(crate) fn metrics(project: &Path, since: Option<i64>) -> Result<BTreeMap<String, Value>> {

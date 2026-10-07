@@ -30,6 +30,7 @@ struct Invocation {
     attempt: Option<String>,
     force: bool,
     errored: bool,
+    ok: bool,
 }
 fn invocations(side: Option<&Connection>, since: Option<i64>) -> Result<Option<Vec<Invocation>>> {
     let Some(db) = side else {
@@ -38,8 +39,8 @@ fn invocations(side: Option<&Connection>, since: Option<i64>) -> Result<Option<V
     if !table(db, "operation_cli_targets")? {
         return Ok(None);
     }
-    let rows = db.prepare("SELECT c.invocation_id,c.command_path,c.recorded_unix_ms,t.task_id,t.attempt_id,coalesce(t.force,0),c.outcome='error' FROM cli_invocations c LEFT JOIN operation_cli_targets t USING(invocation_id) WHERE c.caller IN ('operator','coordinator') AND c.outcome NOT IN ('help','version','usage_error') AND c.command_path IN ('launch run','launch stop','task cancel-attempt') AND c.recorded_unix_ms>=?1 ORDER BY c.recorded_unix_ms,c.invocation_id")?
-        .query_map([since.unwrap_or(0).max(crate::telemetry::maintenance::store::now()-crate::telemetry::accounting::cli_invocations::MAX_AGE_MS)], |r| Ok(Invocation {path:r.get(1)?,at:r.get(2)?,task:r.get(3)?,attempt:r.get(4)?,force:r.get(5)?,errored:r.get(6)?}))?.collect::<rusqlite::Result<_>>()?;
+    let rows = db.prepare("SELECT c.invocation_id,c.command_path,c.recorded_unix_ms,t.task_id,t.attempt_id,coalesce(t.force,0),c.outcome FROM cli_invocations c LEFT JOIN operation_cli_targets t USING(invocation_id) WHERE c.caller IN ('operator','coordinator') AND c.outcome NOT IN ('help','version','usage_error') AND c.command_path IN ('launch run','launch stop','task cancel-attempt') AND c.recorded_unix_ms>=?1 ORDER BY c.recorded_unix_ms,c.invocation_id")?
+        .query_map([since.unwrap_or(0).max(crate::telemetry::maintenance::store::now()-crate::telemetry::accounting::cli_invocations::MAX_AGE_MS)], |r| Ok(Invocation {path:r.get(1)?,at:r.get(2)?,task:r.get(3)?,attempt:r.get(4)?,force:r.get(5)?,errored:r.get::<_,String>(6)?=="error",ok:r.get::<_,String>(6)?=="ok"}))?.collect::<rusqlite::Result<_>>()?;
     Ok(Some(rows))
 }
 fn launches(db: &Connection, rows: Option<&[Invocation]>) -> Result<Value> {
@@ -51,6 +52,9 @@ fn launches(db: &Connection, rows: Option<&[Invocation]>) -> Result<Value> {
     let mut reached = 0;
     let mut by_task = BTreeMap::<String, Value>::new();
     let mut missing = 0;
+    let mut attributed = 0;
+    let mut targeted = 0;
+    let mut claimed = BTreeSet::new();
     let mut first_running = BTreeMap::<&str, i64>::new();
     for (task, at, _) in &running {
         first_running
@@ -60,7 +64,18 @@ fn launches(db: &Connection, rows: Option<&[Invocation]>) -> Result<Value> {
     }
     for (index, row) in launches.iter().enumerate() {
         let Some(task) = row.task.as_deref() else {
-            missing += 1;
+            // Legacy invocations have no target. Restrict inference to the next
+            // invocation and five minutes; never reuse a running mark.
+            let end = launches.get(index + 1).map_or(row.at.saturating_add(300_000), |r| r.at.min(row.at.saturating_add(300_000)));
+            let candidate = running.iter().enumerate()
+                .filter(|(i, (_, at, _))| row.ok && *at >= row.at && *at < end && !claimed.contains(i))
+                .min_by_key(|(_, (_, at, _))| *at);
+            if let Some((i, _)) = candidate {
+                claimed.insert(i);
+                attributed += 1;
+            } else {
+                missing += 1;
+            }
             continue;
         };
         let next = launches[index + 1..]
@@ -73,6 +88,7 @@ fn launches(db: &Connection, rows: Option<&[Invocation]>) -> Result<Value> {
                     || (*at < row.at && end.is_none_or(|end| end >= row.at)))
         });
         reached += i64::from(success);
+        targeted += 1;
         let item = by_task
             .entry(task.into())
             .or_insert(json!({"launches":0,"tries_before_running":0,"reached_running":false}));
@@ -84,7 +100,7 @@ fn launches(db: &Connection, rows: Option<&[Invocation]>) -> Result<Value> {
         item["reached_running"] = json!(first_running.contains_key(task));
     }
     let d = launches.len() as i64;
-    let mut out = json!({"value":ratio(reached,d),"numerator":reached,"denominator":d,"by_task":by_task,"unattributed_invocations":missing});
+    let mut out = json!({"value":ratio(reached+attributed,d),"numerator":reached+attributed,"denominator":d,"by_task":by_task,"unattributed_invocations":missing,"time_attributed_invocations":attributed,"untargeted_invocations":d-targeted,"targeted_value":ratio(reached,targeted),"targeted_denominator":targeted,"attribution_window_ms":300_000});
     if missing > 0 {
         out["status"] = json!("partial");
         out["reason"] = json!("launch_target_not_recorded");

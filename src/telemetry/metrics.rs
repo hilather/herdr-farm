@@ -286,6 +286,19 @@ fn headroom(project: &Path, sidecar: Option<&Connection>, attempts: &[Attempt], 
 /// tools` prints it, never `n/a` while the counts are known.
 pub fn structured_text(value: &Value) -> Option<String> {
     let o = value.as_object()?;
+    if o.contains_key("by_currency") && o.contains_key("unpriced_requests") {
+        if value["status"] == "available" && value["amount"] == "0" { return Some("0".to_owned()); }
+        let amounts = value["by_currency"].as_object()?.iter()
+            .map(|(currency, amount)| format!("{} {currency}", amount.as_str().unwrap_or("unknown")))
+            .collect::<Vec<_>>().join(", ");
+        return Some(if value["status"] == "available" { amounts } else {
+            format!("{} ({} requests unpriced)", if amounts.is_empty() { "n/a" } else { &amounts }, value["unpriced_requests"])
+        });
+    }
+    if !o.is_empty() && o.values().all(|v| v.get("by_currency").is_some() && v.get("unpriced_requests").is_some()) {
+        return Some(o.iter().map(|(trigger, cost)| format!("{trigger} {}", structured_text(cost).unwrap_or_else(|| cost.to_string())))
+            .collect::<Vec<_>>().join("; "));
+    }
     if value["status"] == "partial" && o.contains_key("denominator") {
         let subtotal = value["priced_amount"].as_str().map(str::to_owned).unwrap_or_else(|| value["tokens"].to_string());
         let reason = value["reason"].as_str().unwrap_or("unknown");
@@ -299,7 +312,7 @@ pub fn structured_text(value: &Value) -> Option<String> {
             let last = category["samples"].as_array().and_then(|rows| rows.last());
             let bytes = last.and_then(|row| row["bytes"].as_i64()).map_or_else(|| "n/a (scan_incomplete)".to_owned(), |bytes| bytes.to_string());
             let growth = &category["growth_bytes_per_day"];
-            let growth = growth.as_str().map(str::to_owned).unwrap_or_else(|| format!("n/a ({})", growth["reason"].as_str().unwrap_or("unknown")));
+            let growth = growth.as_str().and_then(|s| s.split_once('/')).and_then(|(n,d)| Some((n.parse::<f64>().ok()?,d.parse::<f64>().ok()?))).map(|(n,d)| format!("{:.2} bytes/day", n/d)).unwrap_or_else(|| format!("n/a ({})", growth["reason"].as_str().unwrap_or("unknown")));
             format!("{name} bytes={bytes} growth_bytes_per_day={growth}")
         });
         return Some(sizes.join("; "));
@@ -334,6 +347,10 @@ pub fn text(report: &Value) -> String {
         let name = m["name"].as_str().unwrap_or(registered.name);
         let show_metric = |cell: &Value| {
             let mut text = show(cell);
+            if id == "M90" && cell.get("targeted_value").is_some() {
+                let targeted = cell["targeted_value"].as_str().map(str::to_owned).unwrap_or_else(|| format!("n/a ({})", cell["targeted_value"]["reason"].as_str().unwrap_or("unknown")));
+                text += &format!(" targeted={targeted} time_attributed={} unattributed={}", cell["time_attributed_invocations"], cell["unattributed_invocations"]);
+            }
             if matches!(id, "M70" | "M71" | "M72" | "M73" | "M74" | "M75" | "M76" | "M77") {
                 if cell["value"].get("samples").is_some() { text = cell["value"].to_string(); }
                 for key in ["over_10_min", "commands", "failed_commands", "exit_unknown", "unanswered", "missing_samples", "over_80_percent", "by_class", "by_caller", "top_command_paths"] {

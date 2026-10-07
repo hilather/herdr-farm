@@ -877,6 +877,68 @@ fn claude_turn_metadata_workers_and_coordinator_detail() {
     assert_eq!(query["results"][1]["detail"]["value"],metrics["M87"]["value"]);
     assert_eq!(f.cli_args(&["accounting","coordinator"]).0["metrics"]["M87"]["value"],metrics["M87"]["value"]);
 
+    // Real coordinator collection: notifications, explicit typed origins after
+    // background results, null origins without evidence, and a no-request wakeup.
+    let trigger_path = transcript(&f,"trigger-coordinator",&f.project.display().to_string(),"2.1.286",f.decided+50000);
+    let mut trigger_rows = Vec::new();
+    for (index, origin) in [Some("task_notification"), Some("human"), Some("typed"), None, Some("scheduled")].into_iter().enumerate() {
+        let mut prompt = rows[0].clone();
+        prompt["sessionId"] = json!("trigger-coordinator");
+        prompt["promptId"] = json!(format!("trigger-prompt-{index}"));
+        prompt["turnOrigin"] = json!(origin);
+        // A recognized origin also wins over a conflicting promptSource.
+        prompt["promptSource"] = if index == 0 { json!("owner_typed") } else { Value::Null };
+        prompt["timestamp"] = json!(jiff::Timestamp::from_millisecond(f.decided+50000+index as i64*1000).unwrap().to_string());
+        trigger_rows.push(prompt);
+        if index == 4 { continue; }
+        let mut assistant = rows[1].clone();
+        assistant["sessionId"] = json!("trigger-coordinator");
+        assistant["timestamp"] = trigger_rows.last().unwrap()["timestamp"].clone();
+        assistant["requestId"] = json!(format!("trigger-request-{index}"));
+        assistant["message"]["id"] = json!(format!("trigger-message-{index}"));
+        assistant["message"]["content"] = json!([]);
+        trigger_rows.push(assistant);
+        if index < 2 {
+            let mut result = rows[2].clone();
+            result["sessionId"] = json!("trigger-coordinator");
+            result["timestamp"] = trigger_rows.last().unwrap()["timestamp"].clone();
+            result["toolUseResult"]["backgroundTaskId"] = json!(format!("trigger-background-{index}"));
+            trigger_rows.push(result);
+        }
+    }
+    fs::write(trigger_path,format!("{}\n",trigger_rows.iter().map(Value::to_string).collect::<Vec<_>>().join("\n"))).unwrap();
+    f.cli("collect");
+    f.cli_args(&["accounting","sync"]);
+    f.cli_args(&["accounting","reprice"]);
+    let detail = f.cli_args(&["accounting","coordinator"]).0;
+    let session = detail["sessions"].as_array().unwrap().iter().find(|s|s["turns"][0]["session_id"]=="claude-code:trigger-coordinator").unwrap();
+    let classified = session["turns"].as_array().unwrap();
+    for (turn, expected) in classified.iter().zip(["background_task","owner_typed","owner_typed","other","scheduled_wakeup"]) {
+        assert_eq!(turn["trigger_class"], expected);
+    }
+    assert_eq!(session["cost_by_trigger_class"]["background_task"]["USD"],"0.000062");
+    assert_eq!(session["cost_by_trigger_class"]["owner_typed"]["USD"],"0.000124");
+    assert_eq!(session["cost_by_trigger_class"]["other"]["USD"],"0.000062");
+    // Select the fixture's time window so scheduled_wakeup is exactly zero.
+    let since = (f.decided+50000).to_string();
+    let window = f.cli_args(&["report","--json","--since",&since]).0;
+    assert_eq!(window["metrics"]["M82"]["value"]["scheduled_wakeup"],
+        json!({"by_currency":{},"amount":"0","unpriced_requests":0,"status":"available","reason":null}));
+    assert_eq!(window["metrics"]["M82"]["value"]["background_task"]["by_currency"]["USD"],"0.000062");
+    assert_eq!(window["metrics"]["M82"]["value"]["owner_typed"]["by_currency"]["USD"],"0.000124");
+    assert!(f.text(&["report","--since",&since]).contains("scheduled_wakeup 0"));
+    let corrected = f.report()["metrics"].clone();
+    assert_eq!(corrected["M87"]["value"]["ratio"],"4/1");
+    f.cli_args(&["analytics","rebuild"]);
+    let rebuilt = f.report()["metrics"].clone();
+    for id in ["M82","M87"] { assert_eq!(rebuilt[id]["value"], corrected[id]["value"]); }
+    let verified = f.cli_args(&["analytics","rebuild","--verify"]).0;
+    for id in ["M82","M87"] {
+        let cells: Vec<_> = verified["cells"].as_array().unwrap().iter().filter(|c|c["cell"]["metric"]==id).collect();
+        assert!(!cells.is_empty(), "{verified}");
+        for cell in cells { assert_eq!(cell["identical"],true,"{cell}"); }
+    }
+
     canonical.execute_batch("DROP TRIGGER attempt_lifecycle_no_delete; DELETE FROM attempt_lifecycle WHERE state='reserved'").unwrap();
     let incomplete=f.report()["metrics"].clone();
     assert_eq!(incomplete["M83"]["value"]["reason"],"historical_activity_times_missing");
@@ -981,4 +1043,34 @@ fn coordinator_request_percentiles_and_idle_owner_waits() {
         assert_eq!(window[id]["historical_censored"],json!({"events":1,"attempts":2}));
     }
     no_secrets(&f);
+}
+
+#[test]
+fn claude_canonical_end_notice_and_never_running_coverage() {
+    let f = claude();
+    transcript(&f, "end-state", &f.worktree(), "2.1.286", f.decided + 1000);
+    f.cli("collect");
+    let db = rusqlite::Connection::open(f.project.join(".state/state.db")).unwrap();
+    // Historical natural-exit fixture: canonical notice exists, reader has no turn-complete marker.
+    db.execute("UPDATE attempts SET state='failed',termination_observed=1 WHERE id=?1", [&f.attempt]).unwrap();
+    db.execute("INSERT INTO attempt_lifecycle(attempt_id,state,attempt_revision,unix_ms,source) VALUES(?1,'failed',1,?2,'fixture')", rusqlite::params![f.attempt,f.decided+4000]).unwrap();
+    let notice = json!({"id":"end-notice","kind":"attempt.ended_without_submission","subject":"work","created":"2026-01-01T00:00:00Z","summary":format!("attempt.ended_without_submission: task work, attempt {}, submission/result none; failed",f.attempt),"body":"failed"}).to_string();
+    let digest = <sha2::Sha256 as sha2::Digest>::digest(notice.as_bytes());
+    db.execute("INSERT INTO inbox_items(id,revision,payload,payload_hash,seen,done) VALUES('end-notice',1,?1,?2,0,0)", rusqlite::params![notice,format!("{digest:x}")]).unwrap();
+    let metrics = f.report()["metrics"].clone();
+    assert_eq!(metrics["M70"]["value"], json!({"submitted":0,"ended_without_submission":1,"stopped":0,"timed_out":0,"unknown":0,"never_running":1}));
+    for id in ["M70","M71","M72","M75","M76"] {
+        assert_eq!(metrics[id]["coverage"], json!({"observed_attempts":1,"unavailable_attempts":0,"never_running_attempts":1}));
+        assert_ne!(metrics[id]["reason"], "session_metadata_not_collected");
+    }
+    assert_eq!(metrics["M71"]["missing_samples"],0);
+    assert_eq!(metrics["M76"]["missing_samples"],1);
+    assert_eq!(metrics["M76"]["reason"],"context_window_or_input_tokens_missing");
+    let side = f.sidecar();
+    side.execute("DELETE FROM codex_session_clock", []).unwrap();
+    let missing = f.report()["metrics"].clone();
+    for id in ["M70","M71","M72","M75","M76"] {
+        assert_eq!(missing[id]["coverage"], json!({"observed_attempts":0,"unavailable_attempts":1,"never_running_attempts":1}));
+        assert_eq!(if id == "M70" { &missing[id]["reason"] } else { &missing[id]["value"]["reason"] }, "session_metadata_not_collected");
+    }
 }

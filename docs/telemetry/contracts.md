@@ -1018,3 +1018,9 @@ owner config to detect changes since approval; failures remain `precondition`.
 No mounts, writable paths, execution authority, schema, or retention classes
 change. The canonical worker E2E workflow covers both hidden-config worker
 rendering and operator refusal; the isolated spool lab exercises the real mounts.
+
+MET-M90-M63-1: sidecar operations **v3**,
+`migrations/telemetry/operations/0003_storage_coverage.sql`, adds nullable
+worktree coverage columns to storage samples. These share the existing
+`sidecar.storage_samples` 90-day retention, tombstones and source-of-truth backup
+classification. Canonical schema is unchanged. See contracts-analytics.md M63/M90.

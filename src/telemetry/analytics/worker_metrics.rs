@@ -27,10 +27,13 @@ fn workers(records: &[&Value], id: &str) -> Value {
         .filter(|a| a["session"]["status"] == "observed")
         .copied()
         .collect();
+    let never_running = records.iter().filter(|a| a["session"]["end_state"] == "never_running").count();
+    let eligible = records.len() - never_running;
     let mut body = match id {
         "M70" => {
             let mut states = BTreeMap::from([
                 ("submitted", 0),
+                ("never_running", 0),
                 ("ended_without_submission", 0),
                 ("stopped", 0),
                 ("timed_out", 0),
@@ -48,7 +51,7 @@ fn workers(records: &[&Value], id: &str) -> Value {
                 .iter()
                 .filter_map(|a| a["session"]["lingering_ms"].as_i64())
                 .collect();
-            json!({"value":distribution(samples.iter().map(|n| *n as f64).collect(),"session_end_or_terminal_time_missing",95),"over_10_min":samples.iter().filter(|n| **n>600_000).count(),"missing_samples":records.len()-samples.len()})
+            json!({"value":distribution(samples.iter().map(|n| *n as f64).collect(),"session_end_or_terminal_time_missing",95),"over_10_min":samples.iter().filter(|n| **n>600_000).count(),"missing_samples":eligible-samples.len()})
         }
         "M72" => {
             let commands: usize = observed
@@ -115,7 +118,7 @@ fn workers(records: &[&Value], id: &str) -> Value {
                         .ok()
                 })
                 .collect();
-            json!({"value":distribution(samples.clone(),"context_window_or_input_tokens_missing",95),"over_80_percent":share(samples.iter().filter(|n|**n>0.8).count(),samples.len()),"missing_samples":records.len()-samples.len()})
+            json!({"value":distribution(samples.clone(),"context_window_or_input_tokens_missing",95),"over_80_percent":share(samples.iter().filter(|n|**n>0.8).count(),samples.len()),"missing_samples":eligible-samples.len()})
         }
         _ => unreachable!(),
     };
@@ -131,10 +134,10 @@ fn workers(records: &[&Value], id: &str) -> Value {
             "context_window_or_input_tokens_missing"
         });
     }
-    body["coverage"] = json!({"observed_attempts":observed.len(),"unavailable_attempts":records.len()-observed.len()});
-    if id != "M70" && observed.is_empty() {
+    body["coverage"] = json!({"observed_attempts":observed.len(),"unavailable_attempts":eligible-observed.len(),"never_running_attempts":never_running});
+    if id != "M70" && observed.is_empty() && eligible > 0 {
         body["value"] = unavailable("session_metadata_not_collected");
-    } else if observed.len() < records.len() {
+    } else if observed.len() < eligible {
         body["status"] = json!("partial");
         body["reason"] = json!("session_metadata_not_collected");
     }
