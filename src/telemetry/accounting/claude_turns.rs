@@ -6,15 +6,19 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::cost::Dec;
 
 fn trigger(p: &Value, queued: bool, background: bool) -> &'static str {
-    let tags = [p["turn_origin"].as_str(), p["prompt_source"].as_str()];
-    let has = |values: &[&str]| tags.iter().flatten().any(|t| values.contains(t));
-    if has(&["scheduled_wakeup", "scheduled", "timer", "wakeup"]) { "scheduled_wakeup" }
-    else if has(&["subagent", "subagent_notification"]) { "subagent" }
-    else if background || has(&["background_task", "background_task_notification"]) { "background_task" }
-    else if has(&["bootstrap", "startup", "init"]) { "bootstrap" }
-    else if queued || has(&["queued_owner", "queue", "queued"]) { "queued_owner" }
-    else if has(&["owner_typed", "user", "owner", "typed", "cli"]) { "owner_typed" }
-    else { "other" }
+    let classify = |tag: &str| match tag {
+        "scheduled_wakeup" | "scheduled" | "timer" | "wakeup" => Some("scheduled_wakeup"),
+        "subagent" | "subagent_notification" => Some("subagent"),
+        "task_notification" | "background_task" | "background_task_notification" => Some("background_task"),
+        "bootstrap" | "startup" | "init" => Some("bootstrap"),
+        "queued_owner" | "queue" | "queued" => Some("queued_owner"),
+        "human" | "owner_typed" | "user" | "owner" | "typed" | "cli" => Some("owner_typed"),
+        _ => None,
+    };
+    // Per-turn metadata is stronger evidence than preceding session activity.
+    p["turn_origin"].as_str().and_then(classify)
+        .or_else(|| p["prompt_source"].as_str().and_then(classify))
+        .unwrap_or(if background { "background_task" } else if queued { "queued_owner" } else { "other" })
 }
 
 pub(super) fn read(db: &Connection, session: &str, cost: &Value) -> Result<Value> {

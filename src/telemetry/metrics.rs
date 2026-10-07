@@ -286,6 +286,19 @@ fn headroom(project: &Path, sidecar: Option<&Connection>, attempts: &[Attempt], 
 /// tools` prints it, never `n/a` while the counts are known.
 pub fn structured_text(value: &Value) -> Option<String> {
     let o = value.as_object()?;
+    if o.contains_key("by_currency") && o.contains_key("unpriced_requests") {
+        if value["status"] == "available" && value["amount"] == "0" { return Some("0".to_owned()); }
+        let amounts = value["by_currency"].as_object()?.iter()
+            .map(|(currency, amount)| format!("{} {currency}", amount.as_str().unwrap_or("unknown")))
+            .collect::<Vec<_>>().join(", ");
+        return Some(if value["status"] == "available" { amounts } else {
+            format!("{} ({} requests unpriced)", if amounts.is_empty() { "n/a" } else { &amounts }, value["unpriced_requests"])
+        });
+    }
+    if !o.is_empty() && o.values().all(|v| v.get("by_currency").is_some() && v.get("unpriced_requests").is_some()) {
+        return Some(o.iter().map(|(trigger, cost)| format!("{trigger} {}", structured_text(cost).unwrap_or_else(|| cost.to_string())))
+            .collect::<Vec<_>>().join("; "));
+    }
     if value["status"] == "partial" && o.contains_key("denominator") {
         let subtotal = value["priced_amount"].as_str().map(str::to_owned).unwrap_or_else(|| value["tokens"].to_string());
         let reason = value["reason"].as_str().unwrap_or("unknown");
