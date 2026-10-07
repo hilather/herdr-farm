@@ -4684,3 +4684,152 @@ fn main() {
         if case == "changed" { fs::write(tools.join("seal"), "owner tool data").unwrap(); }
     }
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn cancellation_waits_for_running_or_ambiguous_verification_and_contract_changes_still_fence() {
+    use herdr_farm::operations::{DeliveryState, Outcome};
+    use std::os::fd::AsRawFd;
+    let fixtures = tempfile::tempdir().unwrap();
+    let source = fixtures.path().join("check.rs");
+    fs::write(&source, r#"
+fn main() {
+    use std::os::fd::AsRawFd;
+    #[repr(C)]
+    struct Lock { kind: i16, whence: i16, start: i64, len: i64, pid: i32 }
+    unsafe extern "C" {
+        fn flock(fd: i32, operation: i32) -> i32;
+        fn fcntl(fd: i32, command: i32, ...) -> i32;
+    }
+    // The signed policy is mounted read-only with its original inode. File
+    // locks coordinate with the host without a socket or changing any bytes.
+    let policy = std::fs::File::open(std::env::args().nth(2).unwrap()).unwrap();
+    let fd = policy.as_raw_fd();
+    assert_eq!(unsafe { flock(fd, 2) }, 0); // LOCK_EX: signal that checks started
+    let lock = Lock { kind: 0, whence: 0, start: 0, len: 1, pid: 0 }; // F_RDLCK
+    assert_eq!(unsafe { fcntl(fd, 38, &lock) }, 0); // F_OFD_SETLKW: wait for release
+    if std::env::args().nth(1).as_deref() == Some("rejected") { std::process::exit(1); }
+}
+"#).unwrap();
+    let executable = fixtures.path().join("check");
+    let compiled = Command::new("nice").args(["-n", "19", "ionice", "-c", "3", "rustc", "--edition=2024", "-C", "target-feature=+crt-static", "-o"])
+        .arg(&executable).arg(&source).output().unwrap();
+    assert!(compiled.status.success(), "{}", String::from_utf8_lossy(&compiled.stderr));
+    for case in ["accepted", "rejected", "ambiguous", "contract-changed"] {
+        let lab = memory_project();
+        let project = &lab.project;
+        let tmp = &lab.tmp;
+        let path = state_db(project);
+        let repo = tmp.path().join("repo");
+        fs::create_dir(&repo).unwrap();
+        git(&repo, &["init", "-q"]);
+        fs::copy(&executable, repo.join("check")).unwrap();
+        git(&repo, &["add", "check"]);
+        git(&repo, &["commit", "-qm", "blocking verification fixture"]);
+        let oid = git(&repo, &["rev-parse", "HEAD"]).trim().to_owned();
+        let work = tmp.path().join("scratch");
+        let policy = tmp.path().join("policy.json");
+        let body = serde_json::json!({"version":1,"checks":[work.join("checkout/check"),case,policy]}).to_string();
+        let mut store = SqliteStore::open(&path).unwrap();
+        let task = TaskId::new("tests").unwrap();
+        let attempt = AttemptId::new("test-attempt").unwrap();
+        store.commit(Commit { expected_head: store.current_head().unwrap(), mutations: vec![
+            Mutation::Task { expected: None, next: Task { id: task.clone(), revision: 1, state: TaskState::Running, title: "tests".into(), active_attempt: Some(attempt.clone()) } },
+            Mutation::Attempt { expected: None, next: Attempt { id: attempt.clone(), task, revision: 1, state: AttemptState::Running, snapshot: None, reservation: "fixture".into(), termination_observed: false } },
+        ] }).unwrap();
+        let mut contract = serde_json::json!({
+            "version":1,"project_store":path.canonicalize().unwrap(),"expected_head":store.current_head().unwrap(),
+            "task_id":"tests","contract_revision":1,"deliverable":"run the real check","non_goals":"no provider calls",
+            "repository":repo,"base_oid":oid,"object_format":"sha1","acceptance_policies":[{"id":"builds","text":body}],
+            "dependencies":[],"capability_flags":[],"profile_kind":"codex","retry_class":"none","result_schema_id":"result-v1","route":"verify_only",
+            "authority":herdr_farm::authority::policy_reference(project).unwrap()
+        });
+        let install = |contract: &serde_json::Value, revision: u32| {
+            let document = tmp.path().join(format!("contract-{revision}.json"));
+            fs::write(&document, serde_json::to_vec(contract).unwrap()).unwrap();
+            assert!(Command::new("/usr/bin/ssh-keygen").args(["-Y", "sign", "-n", herdr_farm::authority::CONTRACT_SIGNATURE_NAMESPACE, "-f"])
+                .arg(&lab.key).arg(&document).output().unwrap().status.success());
+            herdr_farm::authority::import_contract(project, &document, &PathBuf::from(format!("{}.sig", document.display()))).unwrap()
+        };
+        let digest = install(&contract, 1).digest;
+        let objects: Vec<_> = git(&repo, &["rev-list", "--objects", "--no-object-names", "HEAD"]).lines()
+            .map(|oid| serde_json::json!({"oid":oid,"relative_path":format!("{}/{}",&oid[..2],&oid[2..])})).collect();
+        let submission = store.submit_result(&serde_json::to_vec(&serde_json::json!({"idempotency_key":"submit","task_id":"tests","contract_revision":1,"contract_digest":digest,
+            "attempt_id":attempt,"repository":repo,"base_oid":oid,"candidate_oid":oid,"object_format":"sha1","artifact_manifest":[],"claimed_checks":[],"objects":objects})).unwrap()).unwrap();
+        store.set_result_automation(store.current_head().unwrap(), Some(true), None).unwrap();
+        herdr_farm::store::service_project_verification_jobs(project).unwrap();
+        let job = store.verification_jobs().unwrap().remove(0);
+        let claim = store.claim_operation(&job.operation, job.delivery.revision, "fixture-verifier", unix_ms(), 120_000).unwrap();
+        fs::write(&policy, &body).unwrap();
+        let gate = fs::OpenOptions::new().read(true).write(true).open(&policy).unwrap();
+        let mut gate_lock = libc::flock { l_type: libc::F_WRLCK as _, l_whence: libc::SEEK_SET as _, l_start: 0, l_len: 1, l_pid: 0 };
+        assert_eq!(unsafe { libc::fcntl(gate.as_raw_fd(), libc::F_OFD_SETLK, &gate_lock) }, 0);
+        fs::create_dir(&work).unwrap();
+        let request = herdr_farm::verification::VerifyRequest::new(submission.submission_id.clone(), "builds", &policy, job.operation.as_str(), Duration::from_secs(45), &work);
+        let verifier_path = path.clone();
+        let verifier = std::thread::spawn(move || {
+            herdr_farm::verification::verify(&mut SqliteStore::open(&verifier_path).unwrap(), &request).unwrap()
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            if unsafe { libc::flock(gate.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+                assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::EWOULDBLOCK));
+                break;
+            }
+            assert_eq!(unsafe { libc::flock(gate.as_raw_fd(), libc::LOCK_UN) }, 0);
+            if verifier.is_finished() {
+                let outcome = verifier.join().unwrap();
+                panic!("verifier ended before executing the check ({case}): {} {:?}", outcome.state, outcome.reason);
+            }
+            assert!(std::time::Instant::now() < deadline, "verifier never started ({case})");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let before = store.read_snapshot(None).unwrap();
+        let error = store.cancel_attempt(&attempt, 1, before.head, "worker exited", unix_ms()).unwrap_err().to_string();
+        assert!(error.contains("cancellation deferred") && error.contains("claimed verification.run") && error.contains(job.operation.as_str()), "{error}");
+        let after = store.read_snapshot(None).unwrap();
+        assert_eq!(after.head, before.head);
+        assert_eq!(after.tasks, before.tasks);
+        assert_eq!(after.attempts, before.attempts);
+        assert_eq!(sql_count(&path, "SELECT count(*) FROM attempt_cancellations"), 0);
+        if case == "contract-changed" {
+            // Install a newly signed contract while the old check runs.
+            contract["contract_revision"] = 2.into();
+            contract["expected_head"] = store.current_head().unwrap().into();
+            contract["deliverable"] = "changed contract".into();
+            install(&contract, 2);
+        }
+        gate_lock.l_type = libc::F_UNLCK as _;
+        assert_eq!(unsafe { libc::fcntl(gate.as_raw_fd(), libc::F_OFD_SETLK, &gate_lock) }, 0);
+        let outcome = verifier.join().unwrap();
+        let expected = if matches!(case, "accepted" | "ambiguous") { "accepted" } else { "rejected" };
+        assert_eq!(outcome.state, expected, "{case}: {:?}", outcome.reason);
+        if case == "rejected" { assert_eq!(outcome.reason.as_deref(), Some("checks_failed")); }
+        if case == "contract-changed" {
+            assert_eq!(outcome.reason.as_deref(), Some("stale_verification"));
+            assert!(outcome.receipt.is_none());
+        }
+        let confirmed = Outcome::Confirmed { observed_identity: outcome.run_id.clone() };
+        let delivery = if case == "ambiguous" {
+            // The verdict survived, but executor acknowledgement was lost.
+            // Cancellation must wait for observation even after the run exists.
+            store.finish_operation(&claim, Outcome::Ambiguous { observation_required: "executor lost; observe the retained run".into() }, unix_ms()).unwrap();
+            let head = store.current_head().unwrap();
+            let error = store.cancel_attempt(&attempt, 1, head, "worker exited", unix_ms()).unwrap_err().to_string();
+            assert!(error.contains("ambiguous verification.run"), "{error}");
+            assert_eq!(store.current_head().unwrap(), head);
+            let delivery = store.verification_jobs().unwrap().remove(0).delivery;
+            store.observe_operation(&job.operation, delivery.revision, "observer", confirmed, unix_ms()).unwrap()
+        } else { store.finish_operation(&claim, confirmed, unix_ms()).unwrap() };
+        assert_eq!(delivery.state, DeliveryState::Confirmed);
+        let shown = store.show_results(Some(&submission.submission_id)).unwrap();
+        assert_eq!(shown[0].verification_runs.len(), 1);
+        assert_eq!(shown[0].verification_runs[0]["state"], expected);
+        let notices = store.read_snapshot(None).unwrap().inbox;
+        assert!(notices.iter().any(|item| item.content.kind == format!("verification.{expected}")));
+        assert!(!notices.iter().any(|item| item.content.kind == "verification.errored"));
+        let cancelled = store.cancel_attempt(&attempt, 1, store.current_head().unwrap(), "worker exited", unix_ms()).unwrap();
+        assert_eq!(cancelled.attempt_revision, 2);
+        assert_eq!(sql_count(&path, "SELECT count(*) FROM attempt_cancellations"), 1);
+    }
+}

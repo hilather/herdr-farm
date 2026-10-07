@@ -1081,3 +1081,17 @@ submission is still being verified or integrated keeps its attempt open until th
 verdict is recorded, because the termination moves the task revision the running
 check is fenced on; the next observation after the verdict records it, with no
 contention and no cancel.
+
+### Relaunch contract scope and overlap refusals
+
+`launch PROJECT run` reuses an installed task contract on reruns. If supplied
+`--write`, `--output`, or `--accept` inputs change its scope, outputs, or acceptance
+policies, launch refuses before preparation and names the old and requested
+values. The same check applies to `--plan-output` and `--contract-file`. Use a new
+task id with `--supersedes OLD` for corrected contract decisions; a rerun that
+omits contract inputs continues to use the installed contract.
+
+An active attempt retains its write claims. A conflicting launch reports
+`launch run stopped at step N (launch failed: refused: ... resource_conflict: ... overlaps ... )`
+on one line, including the conflicting paths and holding task/attempt, so filters
+for `refused` or `error` retain the cause. Resolve the conflicting work before retrying.

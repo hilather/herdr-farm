@@ -213,6 +213,21 @@ fn contract_document(args: &Args, repository: &Path, head: u64, kind: &str, proj
     Ok(serde_json::to_vec_pretty(&contract)?)
 }
 
+// Reruns may omit contract inputs, but supplied inputs must never be ignored.
+fn check_requested_contract(args: &Args, repository: &Path, head: u64, kind: &str, project: &Path, stored: &Value) -> Result<()> {
+    if args.write.is_empty() && args.output.is_empty() && args.accept.is_empty()
+        && args.plan_output.is_none() && args.contract_file.is_none() && !args.no_default_accept {
+        return Ok(());
+    }
+    let requested: Value = serde_json::from_slice(&contract_document(args, repository, head, kind, project)?)?;
+    for field in ["scope", "outputs", "acceptance_policies"] {
+        ensure!(stored[field] == requested[field],
+            "task {} already has a frozen contract; requested {field} differs: old={}, new={}. Use a new task id with --supersedes {}",
+            args.task, stored[field], requested[field], args.task);
+    }
+    Ok(())
+}
+
 fn planning_contract(args: &Args, repository: &Path, head: u64, kind: &str, project: &Path) -> Result<Vec<u8>> {
     let output = args.plan_output.as_deref().context("planning output missing")?;
     ensure!(
@@ -683,7 +698,10 @@ pub fn run(ctx: &Ctx, slug: &str, mut args: Args) -> Result<Value> {
     let kind=config.get("profiles").and_then(|p|p.get(&args.profile)).and_then(|p|p.get("kind")).and_then(|v|v.as_str());
     let request_digest=(|| -> Result<String> {
         let document=match store.task_contract_document(&args.task)? {
-            Some(document)=>document,
+            Some(document)=>{
+                check_requested_contract(&args, &repository, snapshot.head, kind.context("profile kind missing")?, &project, &document)?;
+                document
+            },
             None=>serde_json::from_slice(&contract_document(&args,&repository,snapshot.head,kind.context("profile kind missing")?,&project)?)?,
         };
         Ok(herdr_farm::store::owner_requests::contract_digest(document))
@@ -723,7 +741,8 @@ pub fn run(ctx: &Ctx, slug: &str, mut args: Args) -> Result<Value> {
         Err(error) => {
             let failed = run.steps.len() + 1;
             let done: Vec<String> = run.steps.iter().map(|s| format!("{} ({})", s.name, s.outcome)).collect();
-            bail!("launch run stopped at step {failed} (launch failed: {error:#}); completed before it: [{}]. Fix the cause and rerun the same command; finished steps are skipped.", done.join(", "))
+            let reason = format!("{error:#}").split_whitespace().collect::<Vec<_>>().join(" ");
+            bail!("launch run stopped at step {failed} (launch failed: refused: {reason}); completed before it: [{}]. Fix the cause and rerun the same command; finished steps are skipped.", done.join(", "))
         }
     }
 }
@@ -782,6 +801,8 @@ fn steps(run: &mut Run, args: &Args, plan: ProfilePlan) -> Result<Value> {
     }
     eprintln!("launch run: contract");
     if let Some(installed) = runtime::task_contract(&project, &task_id)? {
+        let document = migration::open_active(&project)?.task_contract_document(&args.task)?.context("installed contract document missing")?;
+        check_requested_contract(args, &repository, run.head()?, &kind, &project, &document)?;
         run.skipped("contract", json!({"installed":installed}));
     } else {
         let dir = run.dir(&args.task)?;

@@ -35,6 +35,23 @@ The replay display does not reconstruct a trusted receipt from JSON. A replay al
 inputs with the same key conflict. Reserved attempts remain bound to their frozen
 contract revision, including after a newer ordinary contract is installed.
 
+Operator `task cancel-attempt` refuses cancellation while a verification or
+integration job for any of that attempt's submissions is `claimed` or
+`ambiguous`. The message identifies the job and its state. Wait for its verdict
+and delivery acknowledgement, or reconcile an ambiguous delivery, then retry
+with fresh expected revisions and head. Refusal changes neither the attempt nor
+the task and writes no cancellation request. A pending job does not block
+cancellation; its existing revision fence and retirement behavior still apply.
+
+This preserves the submitted commit's real verdict without weakening any
+verification fence. Cancellation advances task and attempt revisions, and also
+moves the store head used by the verifier's memory fence. Changing only the
+automatic job's task fence would still reject a running check as stale.
+Contract installation during a check still invalidates that run through the
+memory fence. Internal cancellation for a proven scope violation remains atomic
+with rejection. Natural worker exit retains its existing verdict deferral.
+No store schema change is required.
+
 Contracts with explicit path scopes also constrain the candidate's changed paths.
 Before running checks, verification compares the signed base and candidate trees.
 A changed path must match a literal write path or a declared directory prefix.

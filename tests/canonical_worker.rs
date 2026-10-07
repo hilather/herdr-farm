@@ -2965,8 +2965,11 @@ fn attention_mid_run_failure_remains_incomplete_at_termination() {
     lab.wait_for(&mut ticker, "terminal observation", &attempt, 120, &|| lab.attempt(&attempt).termination_observed);
     lab.stop(ticker);
     let m31 = lab.ok(&["telemetry", "demo", "report", "--json"])["metrics"]["M31"].clone();
-    assert_eq!(m31["value"], json!({"status": "unavailable", "reason": "incomplete_observation"}));
+    assert!(m31["value"].is_null());
+    assert_eq!(m31["reason"], "empty_denominator");
     assert_eq!(m31["coverage"]["with_gaps"], 1);
+    assert_eq!(m31["coverage"]["complete"], 0);
+    assert_eq!(m31["coverage"]["not_observed"], 0);
 }
 
 #[test]

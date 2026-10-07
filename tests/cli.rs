@@ -3240,9 +3240,20 @@ fn outcome_success_path() {
     // The ticker launches `a`'s worker and delivers its brief; the worker keeps running.
     let briefed=||{let state=snapshot();state.operations.iter().filter(|o|o.kind=="runtime.worker_brief")
         .any(|o|state.deliveries.iter().any(|d|d.operation==o.id&&d.state==DeliveryState::Confirmed))};
-    let mut child=f.spawn_with(&herdr_path);
+    cli(&["telemetry","demo","collect"]);
+    let mut child=Ticker(Command::new(BIN).env_clear()
+        .env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim())
+        .env("HERDR_FARM_TELEMETRY_COLLECT_SECS", "0")
+        .env("HOME",f.home.path()).env("PATH","/usr/bin:/bin").env("HERDR_BIN_PATH",&herdr_path)
+        .args(["--root",f.r(),"ticker","run"])
+        .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap());
     f.wait(&mut child,120,&briefed);
     f.stop(&mut child);
+    // This worker reaches running before the next periodic attention pass.
+    // Stopping the launching ticker must not discard its at-running sample.
+    let attention_db=rusqlite::Connection::open(f.project.join(".state/telemetry.db")).unwrap();
+    let samples:i64=attention_db.query_row("SELECT count(*) FROM attention_samples WHERE attempt_id=?1",[&attempt],|r|r.get(0)).unwrap();
+    assert_eq!(samples,1);
     let started:herdr_farm::domain::LaunchStartedReceipt=serde_json::from_value(events("runtime.launch_started")[0].payload.clone()).unwrap();
     let supervisor=started.supervisor.clone().unwrap();
     assert!(!herdr_farm::worker_supervision::SupervisorObservation::recover_exited(&supervisor).unwrap(),"the worker is running");
