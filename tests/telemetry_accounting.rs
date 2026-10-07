@@ -1300,6 +1300,16 @@ fn attention_intervals_union_and_censor() {
     assert!(text.lines().any(|l| l == "M32 waiting_on_you_share 360000/660000"), "{text}");
     assert!(text.lines().any(|l| l == "attempt a3 ended n/a (not_observed)"), "{text}");
     assert!(text.lines().any(|l| l == "signal herdr-agent-list-v1 agent_status=blocked (certified: live for codex; fixture for other agent kinds; human_routed_waits)"), "{text}");
+    // A short cancelled attempt in the accepted task's lifecycle was never sampled.
+    db.execute("UPDATE attempts SET task_id='t1' WHERE id='a3'", []).unwrap();
+    let partial = cli(&["accounting", "attention", "--json"]).0;
+    assert_eq!(partial["metrics"]["M31"]["value"], json!({"status": "partial",
+        "reason": "incomplete_observation", "observed_interventions": 2,
+        "denominator": 1, "unobserved_attempts": 1}));
+    assert_eq!(partial["metrics"]["M31"]["coverage"], json!({"attempts": 2,
+        "complete": 1, "not_observed": 1, "with_gaps": 0}));
+    assert!(cli(&["report"]).1.contains("M31 human_interventions_per_accepted_task partial 2/1 (incomplete_observation: 1 unobserved attempts)"));
+
 }
 
 /// Session ids written literally in the tool rollouts.

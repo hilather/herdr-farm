@@ -299,6 +299,10 @@ pub fn structured_text(value: &Value) -> Option<String> {
         return Some(o.iter().map(|(trigger, cost)| format!("{trigger} {}", structured_text(cost).unwrap_or_else(|| cost.to_string())))
             .collect::<Vec<_>>().join("; "));
     }
+    if value["status"] == "partial" && o.contains_key("observed_interventions") {
+        return Some(format!("partial {}/{} (incomplete_observation: {} unobserved attempts)",
+            value["observed_interventions"], value["denominator"], value["unobserved_attempts"]));
+    }
     if value["status"] == "partial" && o.contains_key("denominator") {
         let subtotal = value["priced_amount"].as_str().map(str::to_owned).unwrap_or_else(|| value["tokens"].to_string());
         let reason = value["reason"].as_str().unwrap_or("unknown");

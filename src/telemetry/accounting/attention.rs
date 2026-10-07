@@ -497,7 +497,14 @@ fn computed(project: &Path, all: &[Attention], since: Option<i64>) -> Result<BTr
     let base = json!({"reason_type": "blocked_untyped", "source": "controller_observed", "scope": SCOPE, "coverage": coverage});
     let m31 = if complete < t.len() {
         let mut body = base;
-        body["value"] = unavailable("incomplete_observation");
+        body["value"] = if accepted == 0 { Value::Null } else {
+            json!({"status": "partial", "reason": "incomplete_observation",
+                "observed_interventions": counted, "denominator": accepted,
+                "unobserved_attempts": not_observed})
+        };
+        if accepted == 0 { body["reason"] = json!("empty_denominator"); }
+        body["numerator"] = json!(counted);
+        body["unobserved_attempts"] = json!(not_observed);
         body["observed_interventions"] = json!(counted);
         body["uncertain_starts"] = json!(uncertain);
         body["denominator"] = json!(accepted);

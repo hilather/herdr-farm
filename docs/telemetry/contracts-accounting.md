@@ -660,12 +660,16 @@ censored waits is excluded). An attempt with no successful sample is
 Lifecycle sampling also runs once after the worker brief commits `running`,
 so an attempt shorter than two sampling intervals has a sample near its start
 and no leading or trailing gap under the unchanged two-interval rule; longer
-attempts are covered by periodic observation. The hook runs on its own
-thread after the canonical commit (never inside a store transaction or under
-the caller's operation locks; a process that exits first loses the sample),
-never creates or
-migrates a sidecar, skips a busy writer without waiting, and bounds the Herdr
-call to 500 ms with a 1 MiB reply budget. It reuses the same bindings, labels
+attempts are covered by periodic observation. The hook finishes after the
+canonical commit and before the store call returns,
+so normal CLI exit cannot discard a detached sample. No canonical transaction
+is held; caller operation locks can be extended by the bounded 500 ms Herdr
+probe (1 MiB reply budget). It never creates or migrates a sidecar and skips a
+busy writer without waiting. Missing/old sidecars, writer contention, database
+errors, concurrent termination before binding selection, or process death during
+the hook can still prevent a persisted sample;
+Herdr/identity failures persist a gap rather than an invented state.
+It reuses the same bindings, labels
 and insertion as periodic observation. Failures remain gaps, including genuine
 mid-run failures; no state is inferred at termination.
 
@@ -677,10 +681,16 @@ counted once in the union), and `metrics`:
 
 - M31 `human_interventions_per_accepted_task` (`M31.attention-v2`): counted
   wait starts of launched attempts of `T` / `count(A)` (contracts §6 cohort,
-  same window rule). Needs every such attempt observed without gaps; else
-  `unavailable incomplete_observation` with `observed_interventions` (a lower
-  bound), `uncertain_starts` and `denominator`. `coverage {attempts, complete,
-  not_observed, with_gaps}`, `scope: human_routed_waits`.
+  same window rule). Fully observed coverage returns the unreduced ratio.
+  Incomplete coverage returns `value {status: partial, reason:
+  incomplete_observation, observed_interventions, denominator,
+  unobserved_attempts}`: observed wait starts / accepted tasks is a lower bound,
+  never a complete total. Outer `numerator`, `observed_interventions`,
+  `uncertain_starts`, `denominator`, and `unobserved_attempts` accompany it.
+  `unobserved_attempts` counts attempts without any successful sample; observed
+  attempts with gaps remain separately visible in `coverage {attempts, complete,
+  not_observed, with_gaps}`. Zero accepted tasks returns null with
+  `empty_denominator`. `scope: human_routed_waits`.
 - M32 `waiting_on_you_share` (`M32.attention-v1`): Σ `waiting_ms` / Σ
   `observed_ms` over launched attempts decided in the window (all without
   `--since`), unit ms, unreduced `"n/d"`; `waiting_union_ms` shows the fleet
