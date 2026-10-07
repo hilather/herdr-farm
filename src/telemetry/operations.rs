@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use std::{collections::{BTreeMap, BTreeSet}, io::Read, path::Path};
 
 pub const STREAM: &str = "operations";
-pub const MIGRATIONS: &[&str] = &[include_str!("../../migrations/telemetry/operations/0001_samples.sql"), include_str!("../../migrations/telemetry/operations/0002_launch_metrics.sql")];
+pub const MIGRATIONS: &[&str] = &[include_str!("../../migrations/telemetry/operations/0001_samples.sql"), include_str!("../../migrations/telemetry/operations/0002_launch_metrics.sql"), include_str!("../../migrations/telemetry/operations/0003_storage_coverage.sql")];
 pub mod launch;
 const HOUR_MS: i64 = 3_600_000;
 const DAY_MS: i64 = 86_400_000;
@@ -51,8 +51,8 @@ pub(crate) fn sample_launch(project: &Path, attempt: &str) {
 /// Sum regular-file logical bytes without reading content or following links.
 /// Missing trees are zero; unreadable/incomplete scans are unknown. Bound the
 /// traversal so an hourly sample cannot monopolize the telemetry worker.
-fn bytes(path: &Path, budget: &mut usize) -> Option<i64> {
-    if *budget == 0 { return None; }
+fn bytes(path: &Path, budget: &mut usize, deadline: std::time::Instant) -> Option<i64> {
+    if *budget == 0 || std::time::Instant::now() >= deadline { return None; }
     *budget -= 1;
     let meta = match std::fs::symlink_metadata(path) {
         Ok(m) => m,
@@ -64,9 +64,37 @@ fn bytes(path: &Path, budget: &mut usize) -> Option<i64> {
     if !meta.is_dir() { return Some(0); }
     let mut sum = 0i64;
     for entry in std::fs::read_dir(path).ok()? {
-        sum = sum.checked_add(bytes(&entry.ok()?.path(), budget)?)?;
+        sum = sum.checked_add(bytes(&entry.ok()?.path(), budget, deadline)?)?;
     }
     Some(sum)
+}
+
+// Each worktree gets its own budget; the outer scan is also bounded.
+fn worktree_bytes(path: &Path) -> (Option<i64>, usize, usize) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_symlink() || !meta.is_dir() => return (Some(0), 0, 0),
+        Ok(_) => {},
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Some(0), 0, 0),
+        Err(_) => return (None, 0, 0),
+    }
+    let entries = match std::fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Some(0), 0, 0),
+        Err(_) => return (None, 0, 0),
+    };
+    let (mut sum, mut covered, mut expected) = (Some(0i64), 0, 0);
+    for entry in entries {
+        expected += 1;
+        if expected > 4096 || std::time::Instant::now() >= deadline {
+            return (None, covered, expected);
+        }
+        let size = entry.ok().and_then(|e| bytes(&e.path(), &mut 100_000,
+            deadline.min(std::time::Instant::now() + std::time::Duration::from_secs(2))));
+        if size.is_some() { covered += 1; }
+        sum = sum.zip(size).and_then(|(a, b)| a.checked_add(b));
+    }
+    (sum, covered, expected)
 }
 
 /// Public producer for deterministic ticker labs. Never creates a sidecar.
@@ -81,13 +109,15 @@ pub fn sample_storage(project: &Path, at: i64) -> Result<()> {
     let last: Option<i64> = db.query_row("SELECT max(sampled_unix_ms) FROM operation_storage_samples", [], |r| r.get(0))?;
     if last.is_some_and(|last| at.saturating_sub(last) < HOUR_MS) { return Ok(()); }
     drop(db);
-    let sizes: Vec<_> = ["state.db", "telemetry.db", "worktrees", "worker-output"].into_iter()
-        .map(|name| bytes(&project.join(".state").join(name), &mut 100_000)).collect();
+    let (worktrees, covered, expected) = worktree_bytes(&project.join(".state/worktrees"));
+    let mut sizes: Vec<_> = ["state.db", "telemetry.db", "worktrees", "worker-output"].into_iter()
+        .map(|name| if name == "worktrees" { worktrees } else { bytes(&project.join(".state").join(name), &mut 100_000, std::time::Instant::now() + std::time::Duration::from_secs(2)) }).collect();
+    sizes[0] = sizes[0].zip(bytes(&project.join(".state/state.db-wal"), &mut 1, std::time::Instant::now() + std::time::Duration::from_secs(2))).and_then(|(a,b)| a.checked_add(b));
     let Some(mut db) = super::sidecar::open(project, false)? else { return Ok(()); };
     let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let last: Option<i64> = tx.query_row("SELECT max(sampled_unix_ms) FROM operation_storage_samples", [], |r| r.get(0))?;
     if last.is_some_and(|last| at.saturating_sub(last) < HOUR_MS) { return Ok(()); }
-    tx.execute("INSERT INTO operation_storage_samples VALUES(?1,?2,?3,?4,?5)", params![at,sizes[0],sizes[1],sizes[2],sizes[3]])?;
+    tx.execute("INSERT INTO operation_storage_samples VALUES(?1,?2,?3,?4,?5,?6,?7)", params![at,sizes[0],sizes[1],sizes[2],sizes[3],covered as i64,expected as i64])?;
     tx.execute("DELETE FROM operation_storage_samples WHERE sampled_unix_ms < ?1 OR sampled_unix_ms NOT IN (SELECT sampled_unix_ms FROM operation_storage_samples ORDER BY sampled_unix_ms DESC LIMIT ?2)", params![at.saturating_sub(90 * DAY_MS),STORAGE_ROWS])?;
     tx.commit()?;
     Ok(())
@@ -163,8 +193,16 @@ fn load(db: &Connection, sidecar: Option<&Connection>, attempts: &[Attempt], sin
 }
 fn storage(sidecar: Option<&Connection>, since: Option<i64>) -> Result<Value> {
     let Some(db) = sidecar.filter(|db| table(db,"operation_storage_samples").unwrap_or(false)) else {return Ok(json!({"value":unavailable("storage_not_sampled")}));};
-    let rows: Vec<(i64,[Option<i64>;4])> = db.prepare("SELECT * FROM operation_storage_samples WHERE ?1 IS NULL OR sampled_unix_ms>=?1 ORDER BY sampled_unix_ms")?
+    let rows: Vec<(i64,[Option<i64>;4])> = db.prepare("SELECT sampled_unix_ms,state_bytes,telemetry_bytes,worktrees_bytes,worker_output_bytes FROM operation_storage_samples WHERE ?1 IS NULL OR sampled_unix_ms>=?1 ORDER BY sampled_unix_ms")?
         .query_map([since], |r| Ok((r.get(0)?,[r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?])))?.collect::<rusqlite::Result<_>>()?;
+    let has_coverage: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('operation_storage_samples') WHERE name='worktrees_covered')", [], |r| r.get(0))?;
+    let coverage_sql = if has_coverage {
+        "SELECT sampled_unix_ms,worktrees_covered,worktrees_expected FROM operation_storage_samples WHERE ?1 IS NULL OR sampled_unix_ms>=?1 ORDER BY sampled_unix_ms"
+    } else {
+        "SELECT sampled_unix_ms,NULL,NULL FROM operation_storage_samples WHERE ?1 IS NULL OR sampled_unix_ms>=?1 ORDER BY sampled_unix_ms"
+    };
+    let coverage: Vec<Value> = db.prepare(coverage_sql)?
+        .query_map([since], |r| Ok(json!({"sampled_unix_ms":r.get::<_,i64>(0)?,"covered":r.get::<_,Option<i64>>(1)?,"expected":r.get::<_,Option<i64>>(2)?})))?.collect::<rusqlite::Result<_>>()?;
     let mut sizes = BTreeMap::new();
     for (i, name) in ["state_db","telemetry_db","worktrees","worker_output"].into_iter().enumerate() {
         let samples: Vec<_> = rows.iter().map(|r| json!({"sampled_unix_ms":r.0,"bytes":r.1[i],"reason":r.1[i].is_none().then_some("scan_incomplete")})).collect();
@@ -177,6 +215,7 @@ fn storage(sidecar: Option<&Connection>, since: Option<i64>) -> Result<Value> {
         };
         sizes.insert(name,json!({"samples":samples,"growth_bytes_per_day":growth}));
     }
+    sizes.get_mut("worktrees").unwrap()["coverage"] = json!(coverage);
     Ok(json!({"value":if rows.is_empty() {unavailable("storage_not_sampled")} else {json!(sizes)},"samples":rows.len()}))
 }
 fn briefs(db: &Connection, attempts: &[Attempt]) -> Result<Value> {

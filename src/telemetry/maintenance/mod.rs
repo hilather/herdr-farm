@@ -101,7 +101,7 @@ pub const CLASSES: &[Class] = &[
     Class { id: "sidecar.submission_diff", store: "telemetry.db", scope: "operation_submission_diff", default_days: None, basis: "source_of_truth", destructive: true,
         action: Action::Retain, age_from: "-", requires: "lifetime counts; verifier checkout may disappear; full backups" },
     Class { id: STORAGE, store: "telemetry.db", scope: "operation_storage_samples", default_days: Some(90), basis: "source_of_truth", destructive: false,
-        action: Action::Prune, age_from: "sampled_unix_ms", requires: "capture also caps 90 days and 2160 rows; full backups; no content or paths" },
+        action: Action::Prune, age_from: "sampled_unix_ms", requires: "capture also caps 90 days and 2160 rows; sizes and worktree coverage share retention and full backups; no content or paths" },
     Class { id: "sidecar.operating_intervals", store: "telemetry.db", scope: "operating_intervals, operating_clock, operating_gaps", default_days: None, basis: "source_of_truth", destructive: true,
         action: Action::Retain, age_from: "end_unix_ms", requires: "kept: ticker observations cannot be replayed; included in full sidecar backups" },
     Class { id: "sidecar.otlp", store: "telemetry.db", scope: "otlp_records, gemini_file_cursors", default_days: None, basis: "source_of_truth", destructive: true,

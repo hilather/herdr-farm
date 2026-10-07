@@ -1089,6 +1089,8 @@ fn flow_operations_metrics_exact_values_and_missing_evidence() {
     assert_eq!(m63["value"]["worktrees"]["samples"],json!([{"sampled_unix_ms":10000,"bytes":100,"reason":null},{"sampled_unix_ms":86410000,"bytes":150,"reason":null}]));
     assert_eq!(m63["value"]["worktrees"]["growth_bytes_per_day"],"4320000000/86400000");
     assert_eq!(m63["value"]["worker_output"]["growth_bytes_per_day"],"-864000000/86400000");
+    assert_eq!(m63["value"]["worktrees"]["coverage"],json!([{"sampled_unix_ms":10000,"covered":1,"expected":1},{"sampled_unix_ms":86410000,"covered":1,"expected":1}]));
+    assert!(String::from_utf8(p.raw(&["report"])).unwrap().contains("growth_bytes_per_day=50.00 bytes/day"));
     assert_eq!(m63["value"]["state_db"]["samples"][0]["bytes"],canonical.len() as u64);
     assert!(m63["value"]["telemetry_db"]["samples"][0]["bytes"].as_u64().unwrap()>0);
     assert_eq!(p.query(&["--metric","M63","--from","90000000"])["reason"],"storage_not_sampled");
@@ -1134,4 +1136,55 @@ fn idle_gaps_merge_overlapping_workers_and_clip_the_window() {
     herdr_farm::telemetry::operating::observe(&p.project,"fixture",true,1,5000,2000).unwrap();
     assert_eq!(p.query(&["--metric","M60"])["value"],json!({"count":3,"median_ms":1000,"p90_ms":1000,"total_ms":2500}));
     assert_eq!(p.query(&["--metric","M60","--from","2500"])["value"],json!({"count":2,"median_ms":500,"p90_ms":1000,"total_ms":1500}));
+}
+
+#[test]
+fn storage_measures_large_worktree_fleet_and_state_wal_through_cli() {
+    let p = Planted::new();
+    p.json(&["collect"]);
+    let db = p.db();
+    db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; INSERT INTO tasks(id,revision,state,title) VALUES('wal',1,'draft','WAL data');").unwrap();
+    let main = fs::metadata(p.project.join(".state/state.db")).unwrap().len();
+    let wal = fs::metadata(p.project.join(".state/state.db-wal")).unwrap().len();
+    assert!(wal > 0);
+    for tree in 0..4 {
+        let seed = p.tmp.path().join(format!("seed-{tree}"));
+        fs::write(&seed, [0; 1]).unwrap();
+        let dir = p.project.join(format!(".state/worktrees/w{tree}"));
+        fs::create_dir_all(&dir).unwrap();
+        for file in 0..26_000 {
+            fs::hard_link(&seed, dir.join(file.to_string())).unwrap();
+        }
+    }
+    herdr_farm::telemetry::operations::sample_storage(&p.project,10_000).unwrap();
+    let m = p.query(&["--metric","M63"]);
+    assert_eq!(m["value"]["worktrees"]["samples"][0]["bytes"],104_000);
+    assert_eq!(m["value"]["worktrees"]["coverage"][0],json!({"sampled_unix_ms":10000,"covered":4,"expected":4}));
+    assert_eq!(m["value"]["state_db"]["samples"][0]["bytes"],main+wal);
+    drop(db);
+}
+
+#[test]
+fn legacy_launches_use_bounded_running_evidence_and_report_both_cohorts() {
+    let p = Planted::new();
+    p.json(&["collect"]);
+    let now = jiff::Timestamp::now().as_millisecond();
+    let db = p.db();
+    plant(&db,"legacy","running",None,&[("la","running",&[("running",now-500_000)])],None,None);
+    plant(&db,"late","running",None,&[("lb","running",&[("running",now-100_000)])],None,None);
+    drop(db);
+    let side = rusqlite::Connection::open(p.project.join(".state/telemetry.db")).unwrap();
+    for (id,at) in [("old",now-580_000),("outside",now-450_000),("target",now-50_000)] {
+        side.execute("INSERT INTO cli_invocations(invocation_id,command_path,outcome,exit_code,duration_ms,caller,trust,recorded_unix_ms) VALUES(?1,'launch run','ok',0,1,'operator','local',?2)",rusqlite::params![id,at]).unwrap();
+    }
+    side.execute("INSERT INTO operation_cli_targets VALUES('target','late',NULL,0)",[]).unwrap();
+    drop(side);
+    let m = p.query(&["--metric","M90"]);
+    assert_eq!(m["value"],"2/3");
+    assert_eq!(m["detail"]["time_attributed_invocations"],1);
+    assert_eq!(m["detail"]["untargeted_invocations"],2);
+    assert_eq!(m["detail"]["unattributed_invocations"],1);
+    assert_eq!(m["detail"]["targeted_value"],"1/1");
+    assert_eq!(m["detail"]["targeted_denominator"],1);
+    assert!(String::from_utf8(p.raw(&["report"])).unwrap().contains("targeted=1/1 time_attributed=1 unattributed=1"));
 }
