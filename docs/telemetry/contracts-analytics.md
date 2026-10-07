@@ -582,6 +582,8 @@ CLI caller labels cannot be joined to worker profiles without guessing.
 Worker metrics carry observed/unavailable attempt coverage plus never_running_attempts.
 Never-running attempts (no running mark or bound session) are exclusions from
 metadata coverage and M71/M76 missing_samples, and their own M70 bucket.
+The attempt report also uses `session.end_state: never_running` for cancellation
+before launch, retaining unavailable collection fields and censored launch timing.
 Launched/bound attempts without metadata mark partial session_metadata_not_collected.
 M71/M76 missing_samples counts eligible attempts without a valid sample, retaining
 the sample-specific reason when metadata is otherwise complete. Sample distributions include

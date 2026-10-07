@@ -1390,7 +1390,7 @@ fn cancelled_before_launch_is_censored_not_zero() {
         "reserved_unix_ms": marks[0].2,
         "result": {"state": "not_submitted"},
         "running_unix_ms": null,
-        "session": {"end_state": "stopped", "reason": "collection_not_run", "status": "unavailable"},
+        "session": {"end_state": "never_running", "reason": "collection_not_run", "status": "unavailable"},
         "task_id": "gone",
         "terminal_state": "cancelled",
         "terminal_unix_ms": marks[1].2,

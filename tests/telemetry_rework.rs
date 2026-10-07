@@ -79,6 +79,10 @@ fn two_work_items_rework_cost_escape_and_lead_time() {
         .prepare_task_lineage("never-launched", "item-one", "fix", None)
         .unwrap();
     db.execute("INSERT INTO attempts(id,task_id,revision,state,reservation,termination_observed) VALUES('never-launched','never-launched',1,'cancelled','never-launched',1)", []).unwrap();
+    // Retained launch inputs make the cancelled reservation visible in attempt reports.
+    db.execute("INSERT INTO operations(id,task_id,kind,target,payload_version,payload,payload_hash,expected_revision,due_unix_ms,idempotency_key) SELECT 'never-launched','never-launched',kind,target,payload_version,payload,payload_hash,expected_revision,due_unix_ms,'never-launched' FROM operations WHERE id=(SELECT operation_id FROM attempt_inputs WHERE attempt_id=?1)", [&f.attempt]).unwrap();
+    db.execute("INSERT INTO attempt_inputs(attempt_id,operation_id,payload,payload_hash) SELECT 'never-launched','never-launched',payload,payload_hash FROM attempt_inputs WHERE attempt_id=?1", [&f.attempt]).unwrap();
+    db.execute("INSERT INTO attempt_lifecycle(attempt_id,state,attempt_revision,unix_ms,source) VALUES('never-launched','reserved',1,?1,'fixture')", [now]).unwrap();
     db.execute("INSERT INTO attempt_lifecycle(attempt_id,state,attempt_revision,unix_ms,source) VALUES('never-launched','cancelled',1,?1,'fixture')", [now + 500]).unwrap();
     for (_, attempt, offset) in &ids {
         for (state, at) in [
@@ -191,6 +195,8 @@ fn two_work_items_rework_cost_escape_and_lead_time() {
         &format!("sha256:{}", "a".repeat(64)),
     ]);
     let m = f.report()["metrics"].clone();
+    assert_eq!(m["M70"]["value"]["never_running"], 1);
+    assert_eq!(m["M53"]["attempts_without_usage"], 0);
     assert_eq!(m["M65"]["value"], json!({"median":1,"p90":2,"max":2}));
     assert_eq!(m["M65"]["by_profile"]["codex"]["samples"], 2);
     assert_eq!(m["M66"]["by_currency"]["USD"]["value"], "0.016/0.028", "metric={} cost={}", m["M66"], f.cli_args(&["accounting", "cost", "--json"]).0);
@@ -207,9 +213,6 @@ fn two_work_items_rework_cost_escape_and_lead_time() {
         json!({"median":4000,"p90":7500,"max":7500})
     );
     assert_eq!(m["M69"]["by_currency"]["USD"]["value"], "0.008/0.028");
-    let db = rusqlite::Connection::open(f.project.join(".state/state.db")).unwrap();
-    db.execute("INSERT INTO attempts(id,task_id,revision,state,reservation,termination_observed) VALUES('never-launched','clean',1,'cancelled','never-launched',1)", []).unwrap();
-    db.execute("INSERT INTO attempt_lifecycle(attempt_id,state,attempt_revision,unix_ms,source) VALUES('never-launched','cancelled',1,?1,'fixture')", [now+4500]).unwrap();
     let no_launch = f.report()["metrics"].clone();
     for id in ["M66","M69"] {
         assert_eq!(no_launch[id]["attempts_without_complete_cost"],0);
