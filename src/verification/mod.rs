@@ -1002,7 +1002,7 @@ pub fn checkout_project(project: &Path, submission: Option<&str>, attempt: Optio
         anyhow::ensure!(meta.is_dir() && !meta.file_type().is_symlink() && fs::read_dir(&destination)?.next().is_none(), "checkout destination must be an empty directory");
     } else { fs::create_dir(&destination)?; }
     let scratch = checkout::Scratch::new(&parent)?;
-    let checkout = checkout::materialize(&scratch.0, &project.join(".state/state.db"), &objects,
+    let checkout = checkout::materialize_project(&scratch.0, &project.join(".state/state.db"), &objects,
         &view.candidate_oid, &view.object_format, Some((Path::new(&view.repository), &view.base_oid)))?;
     // Rename into the reserved empty directory; never remove caller contents.
     fs::rename(&checkout.path, &destination)?;

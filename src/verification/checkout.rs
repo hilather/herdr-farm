@@ -49,6 +49,37 @@ pub fn materialize(
     object_format: &str,
     trusted_base: Option<(&Path, &str)>,
 ) -> Result<Checkout> {
+    materialize_inner(work, store_file, objects, oid, object_format, trusted_base, false)
+}
+
+/// Materialize an operator checkout with hardening isolated from verification.
+pub(super) fn materialize_project(
+    work: &Path,
+    store_file: &Path,
+    objects: &[RetainedObject],
+    oid: &str,
+    object_format: &str,
+    trusted_base: Option<(&Path, &str)>,
+) -> Result<Checkout> {
+    let checkout = materialize_inner(work, store_file, objects, oid, object_format, trusted_base, true)?;
+    fs::create_dir_all(checkout.path.join(".git/hooks"))?;
+    checkout_git(&checkout.path, &["config".into(), "core.hooksPath".into(), ".git/hooks".into()], Some(&checkout.path))?;
+    checkout_git(&checkout.path, &["config".into(), "submodule.recurse".into(), "false".into()], Some(&checkout.path))?;
+    Ok(checkout)
+}
+
+fn materialize_inner(
+    work: &Path,
+    store_file: &Path,
+    objects: &[RetainedObject],
+    oid: &str,
+    object_format: &str,
+    trusted_base: Option<(&Path, &str)>,
+    operator_checkout: bool,
+) -> Result<Checkout> {
+    let git = |cwd: &Path, args: &[String], dir: Option<&Path>| {
+        if operator_checkout { checkout_git(cwd, args, dir) } else { git(cwd, args, dir) }
+    };
     if !matches!(object_format, "sha1" | "sha256") {
         bail!("unsupported Git object format");
     }
@@ -87,7 +118,8 @@ pub fn materialize(
         git(&path, &[
             "-c".into(), "protocol.file.allow=always".into(),
             "-c".into(), "fetch.fsckObjects=true".into(),
-            "fetch".into(), "--no-tags".into(), "--no-write-fetch-head".into(), "--no-recurse-submodules".into(),
+            "-c".into(), "core.hooksPath=/dev/null".into(),
+            "fetch".into(), "--no-tags".into(), "--no-write-fetch-head".into(),
             "--".into(), repository.display().to_string(), base.into(),
         ], Some(&path)).context("owner repository base is unavailable or invalid")?;
     }
@@ -113,6 +145,8 @@ pub fn materialize(
     git(
         &path,
         &[
+            "-c".into(),
+            "core.hooksPath=/dev/null".into(),
             "checkout".into(),
             "--detach".into(),
             oid.into(),
@@ -125,9 +159,6 @@ pub fn materialize(
         bail!("checkout did not land on the retained commit");
     }
     let _ = fs::remove_dir_all(path.join(".git/hooks"));
-    fs::create_dir_all(path.join(".git/hooks"))?;
-    git(&path, &["config".into(), "core.hooksPath".into(), ".git/hooks".into()], Some(&path))?;
-    git(&path, &["config".into(), "submodule.recurse".into(), "false".into()], Some(&path))?;
     Ok(Checkout { path, commit, tree })
 }
 
@@ -154,10 +185,7 @@ fn git_text(cwd: &Path, args: &[String]) -> Result<String> {
 
 fn run(cwd: &Path, args: &[String], dir: Option<&Path>) -> Result<crate::runner::Output> {
     let mut command = Cmd::new("/usr/bin/git", Duration::from_secs(30));
-    let hooks = Scratch::new(&std::env::temp_dir())?;
-    command.args = vec!["-c".into(), format!("core.hooksPath={}", hooks.0.display()),
-        "-c".into(), "submodule.recurse=false".into(), "-c".into(), "core.attributesFile=/dev/null".into()];
-    command.args.extend_from_slice(args);
+    command.args = args.to_vec();
     command.cwd = Some(dir.unwrap_or(cwd).to_path_buf());
     command.env_clear = true;
     command.env = git_env();
@@ -218,6 +246,24 @@ pub(super) fn diff_counts(checkout: &Path, base: &str, candidate: &str) -> Optio
         }
     }
     Some(counts)
+}
+
+/// Only operator checkouts use private hooks and disable attributes/submodules.
+fn checkout_git(cwd: &Path, args: &[String], dir: Option<&Path>) -> Result<()> {
+    let hooks = Scratch::new(&std::env::temp_dir())?;
+    let mut hardened = vec!["-c".into(), format!("core.hooksPath={}", hooks.0.display()),
+        "-c".into(), "submodule.recurse=false".into(), "-c".into(), "core.attributesFile=/dev/null".into()];
+    let mut args = args.iter().peekable();
+    while let Some(arg) = args.next() {
+        // Replace verification's per-command hook setting only for this path.
+        if arg == "-c" && args.peek().is_some_and(|next| next.as_str() == "core.hooksPath=/dev/null") {
+            args.next();
+            continue;
+        }
+        hardened.push(arg.clone());
+        if arg == "fetch" { hardened.push("--no-recurse-submodules".into()); }
+    }
+    git(cwd, &hardened, dir)
 }
 
 /// Private scratch directories created exclusively; cleanup only our own tree.
