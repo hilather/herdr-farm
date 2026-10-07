@@ -2005,3 +2005,9 @@ full-backup classification; no new table or canonical schema is introduced.
 Worker command cards use a shell function so quoted root paths survive `$M`
 expansion. Attempt brief/input reads open the published store read-only without
 acquiring mutation locks, while preserving sealed-input and live-binding checks.
+
+For TRAIN-19-FIX-2, the attempt's exact project/spool context allows read-only
+brief/input rendering without the hidden owner-config filesystem re-read. Store
+config-digest and sealed-input validation remain active; coordinator rendering
+and operators without that context retain the filesystem check. Refusals keep
+the existing `precondition` classification. No accounting migration is needed.

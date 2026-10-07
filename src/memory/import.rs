@@ -557,16 +557,31 @@ pub(crate) fn render_knowledge_snapshot_budgeted(project: &Path, id: &str, db: &
 /// This does not launch a worker or turn profile probes into execution authority.
 pub fn render_attempt_knowledge(project:&Path,attempt:&str)->Result<serde_json::Value> {
     let mut db=migration::open_active_read_only(project)?;
-    render_attempt_knowledge_held(project,attempt,&mut db)
+    let own_worker = crate::submission_spool::worker_spool()
+        .is_some_and(|spool| spool == project.join(".state/spool").join(attempt));
+    if own_worker {
+        render_attempt_knowledge_inner(project,attempt,&mut db,None,true)
+    } else {
+        render_attempt_knowledge_held(project,attempt,&mut db)
+    }
 }
 /// Caller retains project or root execution ownership across rendering and use.
 pub(crate) fn render_attempt_knowledge_held(project:&Path,attempt:&str,db:&mut crate::store::SqliteStore)->Result<serde_json::Value> {
     render_attempt_knowledge_budgeted(project,attempt,db,None)
 }
 pub(crate) fn render_attempt_knowledge_budgeted(project:&Path,attempt:&str,db:&mut crate::store::SqliteStore,budget:Option<&crate::store::read_budget::ReadBudget>)->Result<serde_json::Value> {
+    render_attempt_knowledge_inner(project,attempt,db,budget,false)
+}
+fn render_attempt_knowledge_inner(project:&Path,attempt:&str,db:&mut crate::store::SqliteStore,budget:Option<&crate::store::read_budget::ReadBudget>,own_worker:bool)->Result<serde_json::Value> {
     let snapshot=db.attempt_knowledge_snapshot_with_budget(attempt,jiff::Timestamp::now().as_millisecond(),budget)?;
     let sealed=db.sealed_attempt_input(attempt,budget)?;
-    ensure!(migration::config_reference(Path::new(&sealed.inputs.config.path))?==sealed.inputs.config,"worker configuration changed since approval");
+    // The own worker cannot see the owner config. The store already verifies
+    // sealed payload hashes and the recorded config digest/control epoch above.
+    // This read-only rendering grants no execution authority; held coordinator
+    // rendering must still detect filesystem changes since approval.
+    if !own_worker {
+        ensure!(migration::config_reference(Path::new(&sealed.inputs.config.path))?==sealed.inputs.config,"worker configuration changed since approval");
+    }
     let mut evidence_bytes=0usize;
     for object in db.memory_consumed_objects_with_budget(sealed.inputs.task.as_str(),budget)? {
         evidence_bytes=evidence_bytes.checked_add(super::read_object_controlled(&objects_dir(project),&object,(64*1024*1024-evidence_bytes) as u64,budget)?.len()).context("worker evidence byte count overflow")?;

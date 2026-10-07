@@ -989,3 +989,19 @@ adds nullable fixed-enum `cli_invocations.error_class` for worker CLI diagnosis.
 No message text is retained. It uses the existing `sidecar.cli_invocations`
 retention/backup class and tombstones; the canonical schema is unchanged.
 See [accounting contracts](contracts-accounting.md#worker-cli-failure-classes-memory-brief-cli-1).
+
+### TRAIN-19-FIX-2 retained worker memory rendering
+
+`memory attempt-brief` and `memory attempt-input` use the read-only canonical
+store. When `HERDR_FARM_SUBMISSION_SPOOL` exactly names the requested project's
+`.state/spool/<attempt>`, rendering skips the owner-config filesystem re-read:
+the isolated worker cannot see that file. Sealed payload hashes, live attempt
+and task bindings, retained snapshot/profile/config digests, control epoch,
+policy validity, object verification, and the final concurrent-revocation fence
+remain enforced by the existing store/rendering paths. The spool environment is
+caller context, not authentication or execution authority. Operator callers
+without that exact context and all held coordinator rendering still re-read the
+owner config to detect changes since approval; failures remain `precondition`.
+No mounts, writable paths, execution authority, schema, or retention classes
+change. The canonical worker E2E workflow covers both hidden-config worker
+rendering and operator refusal; the isolated spool lab exercises the real mounts.

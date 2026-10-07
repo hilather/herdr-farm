@@ -2066,6 +2066,15 @@ fn rendered_memory_commands_read_the_reserved_attempt() {
     drop(herdr_farm::telemetry::sidecar::open(&lab.project, true).unwrap());
     herdr_farm::submission_spool::prepare(&lab.project, &attempt).unwrap();
     let spool = lab.project.join(".state/spool").join(attempt.as_str());
+    // Model the sandbox's hidden owner config without requiring mount privileges.
+    let config = lab.home.path().join(".config/herdr-farm/config.toml");
+    let saved_config = fs::read(&config).unwrap();
+    fs::remove_file(&config).unwrap();
+    for command in ["attempt-brief", "attempt-input"] {
+        let denied = lab.cli(&["memory", "demo", command, "--attempt", attempt.as_str()]);
+        assert!(!denied.status.success());
+        assert!(String::from_utf8_lossy(&denied.stderr).contains("worker configuration changed since approval"));
+    }
     let script = format!("{setup}\nset -e\n$M attempt-brief --attempt $A\n$M attempt-input --attempt $A\n$M receipts --attempt $A\nif $M attempt-input --attempt; then exit 42; fi\n");
     let out = Command::new("/bin/bash").env_clear()
         .env("HERDR_FARM_TEST_TIME_SCALE", include_str!("support/time-scale.txt").trim())
@@ -2082,6 +2091,7 @@ fn rendered_memory_commands_read_the_reserved_attempt() {
     assert_eq!(values[1]["attempt_id"], attempt.as_str());
     assert!(values[1]["text"].as_str().unwrap().contains("Retained instructions"));
     assert!(values[2].is_array());
+    fs::write(&config, saved_config).unwrap();
     // Reproduce the former card with the same valid attempt: quotes inside a
     // variable survive word splitting and become part of the root argument.
     let old_prefix = format!("M=\"herdr-farm --root '{}' memory demo\"; A={}; $M attempt-brief --attempt $A",
@@ -2097,6 +2107,8 @@ fn rendered_memory_commands_read_the_reserved_attempt() {
     herdr_farm::submission_spool::ingest_with_cli_paths(&lab.project,
         &["memory attempt-brief".into(), "memory attempt-input".into(), "memory receipts".into()]).unwrap();
     let sidecar = rusqlite::Connection::open(herdr_farm::telemetry::sidecar::path(&lab.project)).unwrap();
+    let operator_preconditions:i64 = sidecar.query_row("SELECT count(*) FROM cli_invocations WHERE command_path IN ('memory attempt-brief','memory attempt-input') AND caller='operator' AND error_class='precondition' AND outcome='error'", [], |r| r.get(0)).unwrap();
+    assert_eq!(operator_preconditions, 2);
     let failures:i64 = sidecar.query_row("SELECT count(*) FROM cli_invocations WHERE command_path='memory attempt-input' AND caller='worker' AND trust='worker_reported' AND error_class='usage' AND outcome='usage_error'", [], |r| r.get(0)).unwrap();
     assert_eq!(failures, 1);
     let missing:i64 = sidecar.query_row("SELECT count(*) FROM cli_invocations WHERE command_path='memory attempt-brief' AND caller='worker' AND trust='worker_reported' AND error_class='precondition' AND outcome='error'", [], |r| r.get(0)).unwrap();
