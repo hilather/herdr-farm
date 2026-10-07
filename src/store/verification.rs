@@ -159,6 +159,19 @@ impl VerifyTarget {
 }
 
 impl SqliteStore {
+    /// Read the same digest-checked staging bytes used by verification, without
+    /// requiring a current acceptance policy or granting acceptance evidence.
+    pub(crate) fn checkout_objects(&mut self, id: &str) -> Result<Vec<RetainedObject>> {
+        let view = self.show_results(Some(id))?.remove(0);
+        let key: String = self.connection.query_row("SELECT idempotency_key FROM result_submissions WHERE submission_id=?1", [id], |r| r.get(0))?;
+        let path = Path::new(self.connection.path().ok_or_else(|| invalid("store path missing"))?);
+        view.objects.into_iter().map(|o| {
+            if !loose_relative(&o.relative_path) { return Err(invalid("invalid retained object path")); }
+            let bytes = read_retained(&staging_file(path, &key, &o.byte_sha256), &o.byte_sha256, o.size)?;
+            Ok(RetainedObject { oid: o.oid, relative_path: o.relative_path, bytes })
+        }).collect()
+    }
+
     pub(crate) fn load_verify_target(
         &mut self,
         submission_id: &str,

@@ -87,8 +87,7 @@ pub fn materialize(
         git(&path, &[
             "-c".into(), "protocol.file.allow=always".into(),
             "-c".into(), "fetch.fsckObjects=true".into(),
-            "-c".into(), "core.hooksPath=/dev/null".into(),
-            "fetch".into(), "--no-tags".into(), "--no-write-fetch-head".into(),
+            "fetch".into(), "--no-tags".into(), "--no-write-fetch-head".into(), "--no-recurse-submodules".into(),
             "--".into(), repository.display().to_string(), base.into(),
         ], Some(&path)).context("owner repository base is unavailable or invalid")?;
     }
@@ -114,8 +113,6 @@ pub fn materialize(
     git(
         &path,
         &[
-            "-c".into(),
-            "core.hooksPath=/dev/null".into(),
             "checkout".into(),
             "--detach".into(),
             oid.into(),
@@ -128,6 +125,9 @@ pub fn materialize(
         bail!("checkout did not land on the retained commit");
     }
     let _ = fs::remove_dir_all(path.join(".git/hooks"));
+    fs::create_dir_all(path.join(".git/hooks"))?;
+    git(&path, &["config".into(), "core.hooksPath".into(), ".git/hooks".into()], Some(&path))?;
+    git(&path, &["config".into(), "submodule.recurse".into(), "false".into()], Some(&path))?;
     Ok(Checkout { path, commit, tree })
 }
 
@@ -154,7 +154,10 @@ fn git_text(cwd: &Path, args: &[String]) -> Result<String> {
 
 fn run(cwd: &Path, args: &[String], dir: Option<&Path>) -> Result<crate::runner::Output> {
     let mut command = Cmd::new("/usr/bin/git", Duration::from_secs(30));
-    command.args = args.to_vec();
+    let hooks = Scratch::new(&std::env::temp_dir())?;
+    command.args = vec!["-c".into(), format!("core.hooksPath={}", hooks.0.display()),
+        "-c".into(), "submodule.recurse=false".into(), "-c".into(), "core.attributesFile=/dev/null".into()];
+    command.args.extend_from_slice(args);
     command.cwd = Some(dir.unwrap_or(cwd).to_path_buf());
     command.env_clear = true;
     command.env = git_env();
@@ -216,3 +219,22 @@ pub(super) fn diff_counts(checkout: &Path, base: &str, candidate: &str) -> Optio
     }
     Some(counts)
 }
+
+/// Private scratch directories created exclusively; cleanup only our own tree.
+pub(super) struct Scratch(pub PathBuf);
+impl Scratch {
+    pub(super) fn new(parent: &Path) -> Result<Self> {
+        use std::os::unix::fs::DirBuilderExt;
+        for ordinal in 0..100 {
+            let name = format!(".result-checkout-{}-{}-{ordinal}", std::process::id(), jiff::Timestamp::now().as_nanosecond());
+            let path = parent.join(name);
+            match fs::DirBuilder::new().mode(0o700).create(&path) {
+                Ok(()) => return Ok(Self(path)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        bail!("cannot reserve checkout scratch directory")
+    }
+}
+impl Drop for Scratch { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); } }

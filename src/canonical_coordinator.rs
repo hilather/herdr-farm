@@ -869,6 +869,7 @@ Record explicit owner decisions after adoption: {p} memory {slug} record --title
 {p} result {slug} submit-captured ATTEMPT\n\
 {p} result {slug} show\n\
 {p} result {slug} jobs\n\
+For candidate host checks use {p} result {slug} checkout --submission ID --into DIR (or --attempt ID), then run checks in DIR. Read reports with {p} result {slug} show --attempt ID --report; show --attempt ID lists declared review document paths, available in the candidate checkout. Never read .git-quarantine or .state/worker-output directly.\n\
 Wrap host checks so they are recorded (not acceptance evidence): {p} result {slug} host-check --task TASK --name NAME --log FILE -- ./tools/run-tests.sh\n\
 {p} memory {slug} list\n\
 {p} memory {slug} show CANDIDATE\n\

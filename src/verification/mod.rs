@@ -984,5 +984,48 @@ pub(super) fn check_command(program: &str) -> std::process::Command {
     command
 }
 
+/// Materialize a submission for an operator's host inspection. Not acceptance.
+pub fn checkout_project(project: &Path, submission: Option<&str>, attempt: Option<&str>, into: &Path) -> Result<serde_json::Value> {
+    anyhow::ensure!(crate::submission_spool::worker_spool().is_none(), "result checkout refuses a worker execution context");
+    crate::telemetry::review::refuse_owner_cli_in_worker_context(project, "result checkout")?;
+    anyhow::ensure!(submission.is_some() != attempt.is_some(), "select either submission or attempt");
+    let mut db = crate::migration::open_active(project)?;
+    let mut views = db.show_results(submission)?;
+    if let Some(attempt) = attempt { views.retain(|v| v.attempt_id == attempt); }
+    anyhow::ensure!(views.len() == 1, "checkout requires exactly one submission; select --submission explicitly");
+    let view = views.remove(0);
+    let objects = db.checkout_objects(&view.submission_id)?;
+    let parent = into.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new(".")).canonicalize()?;
+    let destination = parent.join(into.file_name().context("checkout directory name missing")?);
+    anyhow::ensure!(!destination.starts_with(project.canonicalize()?) && !destination.starts_with(Path::new(&view.repository).canonicalize()?), "checkout must be outside the project and source repository");
+    if let Ok(meta) = fs::symlink_metadata(&destination) {
+        anyhow::ensure!(meta.is_dir() && !meta.file_type().is_symlink() && fs::read_dir(&destination)?.next().is_none(), "checkout destination must be an empty directory");
+    } else { fs::create_dir(&destination)?; }
+    let scratch = checkout::Scratch::new(&parent)?;
+    let checkout = checkout::materialize(&scratch.0, &project.join(".state/state.db"), &objects,
+        &view.candidate_oid, &view.object_format, Some((Path::new(&view.repository), &view.base_oid)))?;
+    // Rename into the reserved empty directory; never remove caller contents.
+    fs::rename(&checkout.path, &destination)?;
+    Ok(serde_json::json!({"candidate_oid":view.candidate_oid,"base_oid":view.base_oid,
+        "attempt":view.attempt_id,"task":view.task_id,"path":destination,"outputs":view.artifact_manifest}))
+}
+
+/// Bounded report observation; declared review document paths are available in
+/// result show's artifact_manifest and checkout's outputs.
+pub fn attempt_report(project: &Path, attempt: &str) -> Result<String> {
+    use std::{io::Read, os::unix::fs::OpenOptionsExt};
+    crate::domain::AttemptId::new(attempt.to_owned()).map_err(anyhow::Error::msg)?;
+    let mut db = crate::migration::open_active(project)?;
+    anyhow::ensure!(db.read_snapshot(None)?.attempts.iter().any(|a| a.id.as_str() == attempt), "attempt missing");
+    let relative = format!(".state/worker-output/{attempt}/report.md");
+    let path = crate::migration::safe_join(project, &relative)?;
+    let file = fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path)?;
+    anyhow::ensure!(file.metadata()?.is_file(), "report is not a regular file");
+    let mut bytes = Vec::new();
+    file.take(1024 * 1024 + 1).read_to_end(&mut bytes)?;
+    anyhow::ensure!(bytes.len() <= 1024 * 1024, "report exceeds 1 MiB");
+    Ok(String::from_utf8(bytes)?)
+}
+
 #[cfg(test)]
 mod tests;
