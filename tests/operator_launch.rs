@@ -883,6 +883,44 @@ fn code_launch_validates_scopes_and_outputs_before_writing() {
 }
 
 #[test]
+fn relaunch_refuses_changed_contract_and_overlap_reports_its_reason() {
+    let lab = Lab::with_herdr(STATIC_HERDR);
+    let config_path = lab.home.join(".config/herdr-farm/config.toml");
+    let mut config = fs::read_to_string(&config_path).unwrap();
+    config.push_str("\n[verification.toolchains.shell]\npaths=['/bin/true']\n");
+    fs::write(&config_path, config).unwrap();
+    lab.plant_launchable("codex-sol", "codex", "gpt-6.1-sol");
+    let socket = lab.socket_inode_once("scope.sock");
+    let mut args = vec!["launch", "demo", "run", "--task", "scope-first", "--profile", "codex-sol",
+        "--repository", lab.repo.to_str().unwrap(), "--write", "tests/presentation/", "--output", "tests/presentation/result.rs",
+        "--sign-with", lab.key.to_str().unwrap(), "--herdr-socket", socket.to_str().unwrap()];
+    lab.ok(&args);
+    let before = herdr_farm::runtime::snapshot(&lab.project).unwrap();
+    args[10] = "tests/release/";
+    args[12] = "tests/release/result.rs";
+    let error = lab.fail(&args);
+    for text in ["frozen contract", "tests/presentation/", "tests/release/", "--supersedes scope-first"] {
+        assert!(error.contains(text), "{error}");
+    }
+    assert_eq!(herdr_farm::runtime::snapshot(&lab.project).unwrap(), before);
+    args[10] = "tests/presentation/";
+    args[12] = "tests/presentation/other.rs";
+    assert!(lab.fail(&args).contains("requested outputs differs"));
+    args[12] = "tests/presentation/result.rs";
+    args.extend(["--accept", "shell:/bin/true"]);
+    assert!(lab.fail(&args).contains("requested acceptance_policies differs"));
+    args.truncate(17);
+    lab.ok(&args);
+    args[4] = "scope-second";
+    let error = lab.fail(&args);
+    let line = error.lines().find(|line| line.contains("launch failed:")).expect("launch failure line");
+    for text in ["launch run stopped at step", "refused", "resource_conflict", "overlaps", "scope-first", "tests/presentation/"] {
+        assert!(line.contains(text), "{error}");
+    }
+    assert!(!herdr_farm::runtime::snapshot(&lab.project).unwrap().attempts.iter().any(|a| a.task.as_str() == "scope-second"));
+}
+
+#[test]
 fn code_launch_reserves_under_concurrent_writes_and_submits_all_scoped_changes() {
     let lab = Lab::with_herdr(STATIC_HERDR);
     let config_path = lab.home.join(".config/herdr-farm/config.toml");
