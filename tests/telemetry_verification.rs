@@ -458,3 +458,38 @@ fn acceptance_and_ci_proxy_require_every_policy_of_one_candidate() {
         assert_eq!(f.sidecar().query_row("SELECT ci_state FROM proxy_signals", [], |r| r.get::<_,String>(0)).unwrap(), if pass {"accepted"} else {"rejected"});
     }
 }
+
+#[test]
+fn accepted_attempt_cancel_and_force_stop_are_one_cleanup_intervention() {
+    let f = Fixture::reserved();
+    let ids = submissions(&f);
+    // Retained acceptance history precedes real operator cleanup commands.
+    sandbox(&f, &ids[0], 1, f.decided, "pass", Some(1), true);
+    f.cli("collect");
+    for (index, args) in [
+        vec![
+            "task", "demo", "cancel-attempt", &f.attempt,
+            "--expected-revision", "1", "--expected-head", "0",
+            "--reason", "worker exited after submission",
+        ],
+        vec!["launch", "demo", "stop", "--task", "work", "--force"],
+    ].into_iter().enumerate() {
+        let out = Command::new(BIN)
+            .env_clear()
+            .env("HOME", f.tmp.path().join("home"))
+            .env("PATH", "/usr/bin:/bin")
+            .env("HERDR_FARM_TEST_TIME_SCALE", f.scale)
+            .args(["--root", f.root.to_str().unwrap()])
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.success(), index == 1, "{}", String::from_utf8_lossy(&out.stderr));
+    }
+    let m = metric(&f, "M91");
+    assert_eq!(m["value"], 0);
+    assert_eq!(m["detail"]["breakdown"], json!({
+        "stuck": 0, "cleanup_after_acceptance": 1, "other": 0
+    }));
+    assert_eq!(m["detail"]["per_attempt"][&f.attempt], 1);
+    assert_eq!(m["detail"]["errored_calls"], 1);
+}
