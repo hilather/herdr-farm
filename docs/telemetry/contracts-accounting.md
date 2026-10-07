@@ -690,7 +690,10 @@ counted once in the union), and `metrics`:
   `unobserved_attempts` counts attempts without any successful sample; observed
   attempts with gaps remain separately visible in `coverage {attempts, complete,
   not_observed, with_gaps}`. Zero accepted tasks returns null with
-  `empty_denominator`. `scope: human_routed_waits`.
+  outer `reason: empty_denominator`, including when coverage is incomplete.
+  A cancelled, never-accepted attempt with a successful running sample and a
+  mid-run gap retains `complete: 0, not_observed: 0, with_gaps: 1` at termination.
+  `scope: human_routed_waits`.
 - M32 `waiting_on_you_share` (`M32.attention-v1`): Σ `waiting_ms` / Σ
   `observed_ms` over launched attempts decided in the window (all without
   `--since`), unit ms, unreduced `"n/d"`; `waiting_union_ms` shows the fleet
