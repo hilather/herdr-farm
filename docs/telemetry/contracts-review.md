@@ -1504,9 +1504,11 @@ retain their existing exclusions. No automatic duplicate decision is made.
 Fix tasks name findings through either or both forms:
 
 ```sh
-herdr-farm launch PROJECT run --task FIX --profile PROFILE --repository REPO --fixes-review REVIEW --write src/ --output src/lib.rs --prompt-file FIX_BRIEF
-herdr-farm launch PROJECT run --task FIX --profile PROFILE --repository REPO --fixes finding:token --fixes finding:other --write src/ --output src/lib.rs --prompt-file FIX_BRIEF
+herdr-farm launch PROJECT run --task FIX --profile PROFILE --repository REPO --work-item WORK --role fix --fixes-review REVIEW_TASK --write src/ --output src/lib.rs --prompt-file FIX_BRIEF
+herdr-farm launch PROJECT run --task FIX --profile PROFILE --repository REPO --work-item WORK --role fix --fixes finding:token --fixes finding:other --write src/ --output src/lib.rs --prompt-file FIX_BRIEF
 ```
+
+Every fix launch passes `--work-item WORK --role fix`. Use `--fixes-review REVIEW_TASK` only for a receipt with submitted findings, or `--fixes <ref>` for specific findings. For an issue described only in a report (0 submitted findings), omit both finding selectors so fix lineage is still recorded.
 
 `--fixes-review` selects all current claims in the review task's latest completed
 receipt. `--fixes` selects an unambiguous receipt finding reference or a validated

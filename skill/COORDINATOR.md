@@ -63,6 +63,8 @@ attempt and retained outside the signed execution contract. Inspect it with
 
 The commands use the project BEFORE the action, except `context` and `inbox`:
 
+Every fix launch passes `--work-item WORK --role fix`. Use `--fixes-review REVIEW_TASK` only for a receipt with submitted findings, or `--fixes <ref>` for specific findings. For an issue described only in a report (0 submitted findings), omit both finding selectors so fix lineage is still recorded.
+
 ```sh
 herdr-farm task <slug> list
 herdr-farm task <slug> show TASK
@@ -70,7 +72,7 @@ herdr-farm task <slug> add TASK --title 'Work title' --expected-head HEAD
 herdr-farm launch <slug> run --task TASK --profile PROFILE --repository /absolute/repo --work-item WORK --role plan --plan-output docs/plan.md
 herdr-farm launch <slug> run --task TASK --profile PROFILE --repository /absolute/repo --work-item WORK --role build --write src/ --write tests/ --output src/lib.rs --prompt-file /absolute/brief.md
 herdr-farm launch <slug> run --task REVIEW --profile PROFILE --repository /absolute/repo --work-item WORK --role review --review-of TASK --output docs/reviews/R.md --prompt-file /absolute/review.md
-herdr-farm launch <slug> run --task FIX --profile PROFILE --repository /absolute/repo --work-item WORK --role fix --fixes-review REVIEW --write src/ --output src/lib.rs --prompt-file /absolute/fix.md
+herdr-farm launch <slug> run --task FIX --profile PROFILE --repository /absolute/repo --work-item WORK --role fix --fixes-review REVIEW_TASK --write src/ --output src/lib.rs --prompt-file /absolute/fix.md
 herdr-farm launch <slug> run --task NEW_TASK --profile PROFILE --repository /absolute/repo --work-item WORK --role recheck --supersedes OLD_TASK --plan-output docs/recheck.md
 herdr-farm launch <slug> view --task TASK
 herdr-farm result <slug> submit-captured ATTEMPT
@@ -376,3 +378,24 @@ owner answers: direct them to record assumptions in their report. Handle these
 advisories and mark the inbox items done; neither notice proves termination.
 
 Wrap coordinator host checks with `result PROJECT host-check --task TASK --name NAME --log FILE -- ./tools/run-tests.sh` (or the project script) so they are recorded. This runs with your environment and privileges on the host: it is not a sandbox or acceptance evidence.
+
+Candidate host inspection uses `herdr-farm result PROJECT checkout --submission ID --into DIR`
+(or `--attempt ID` when it has exactly one submission). DIR must be absent or empty,
+with an existing parent, outside the project and source repository. This creates a
+fresh detached checkout of the exact retained candidate and prints JSON with
+candidate/base OIDs, attempt, task, path and declared outputs. It grants no acceptance evidence.
+Run host checks from that directory and record them with `result PROJECT host-check`.
+Read worker reports with `result PROJECT show --attempt ID --report` (UTF-8,
+1 MiB maximum; larger reports are refused). `show --attempt ID` exposes declared
+review document paths in `artifact_manifest`; read those documents in the candidate checkout.
+Never read `.git-quarantine` or `.state/worker-output` directly.
+
+Checkout reuses verification's digest-checked submission objects in
+`.state/factory-objects/staging` and imports only the trusted base from the source
+repository. Quarantine import happens before submission staging. No source refs
+or source checkout are changed. Git uses a scrubbed environment, empty hooks,
+an empty template, no global/system configuration, and no submodule recursion.
+Source repository configuration is not copied; no LFS or other filter drivers
+are configured, so their execution is avoided and LFS pointers stay pointers.
+Candidate files remain untrusted: running their scripts on the host uses operator
+privileges. This command does not change integration policy or responsibility.

@@ -6075,3 +6075,48 @@ fn interactive_task_waits_for_project_locks_with_bounded_notice_and_no_partial_o
     assert_eq!(runtime::snapshot(&project).unwrap().head.to_string(), head);
     assert_eq!(std::fs::read_to_string(target).unwrap(), "preserve");
 }
+
+#[cfg(all(feature="state-store",target_os="linux"))]
+#[test]
+fn result_checkout_and_bounded_report_cli() {
+    use std::{fs, os::unix::fs::PermissionsExt};
+    let f = VerifyFixture::new(&[("src/lib.rs", "candidate contents\n".into()), (".gitattributes", "src/lib.rs filter=evil\n".into())]);
+    let id = f.submit("checkout", &[("present", r#"{"version":1,"checks":["/usr/bin/true"]}"#.into())]);
+    let marker = f.home.path().join("hook-ran");
+    let hooks = f.home.path().join("malicious-hooks"); fs::create_dir(&hooks).unwrap();
+    let hook = hooks.join("post-checkout");
+    fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o700)).unwrap();
+    f.git(&["config", "core.hooksPath", hooks.to_str().unwrap()]);
+    f.git(&["config", "filter.evil.smudge", hook.to_str().unwrap()]);
+    let checkout = |selector: &str, value: &str, dir: &Path| hp(f.home.path(), &["--root", f.r(), "result", "demo", "checkout", selector, value, "--into", dir.to_str().unwrap()]);
+    for (selector, value, name) in [("--submission", id.as_str(), "one"), ("--attempt", "checkout-attempt", "two"), ("--submission", id.as_str(), "empty")] {
+        let dir = f.home.path().join(name);
+        if name == "empty" { fs::create_dir(&dir).unwrap(); }
+        let out = checkout(selector, value, &dir);
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(json["candidate_oid"], f.candidate); assert_eq!(json["base_oid"], f.base);
+        assert_eq!(fs::read_to_string(dir.join("src/lib.rs")).unwrap(), "candidate contents\n");
+        let head = Command::new("/usr/bin/git").arg("-C").arg(&dir).args(["rev-parse", "HEAD"]).output().unwrap();
+        assert_eq!(String::from_utf8(head.stdout).unwrap().trim(), f.candidate);
+        assert!(!Command::new("/usr/bin/git").arg("-C").arg(&dir).args(["symbolic-ref", "HEAD"]).output().unwrap().status.success());
+        assert!(!checkout(selector, value, &dir).status.success());
+        assert_eq!(fs::read_to_string(dir.join("src/lib.rs")).unwrap(), "candidate contents\n");
+    }
+    assert!(!marker.exists()); assert_eq!(f.git(&["rev-parse", "HEAD"]), f.candidate);
+    let unknown = f.home.path().join("unknown");
+    assert!(!checkout("--submission", "missing", &unknown).status.success()); assert!(!unknown.exists());
+    let worker = f.project.join(".state/worktrees/worker"); fs::create_dir_all(&worker).unwrap();
+    let out = Command::new(BIN).env_clear().env("HOME", f.home.path()).env("PATH", "/usr/bin:/bin")
+        .env("HERDR_FARM_TEST_TIME_SCALE", include_str!("support/time-scale.txt").trim()).current_dir(&worker)
+        .args(["--root",f.r(),"result","demo","checkout","--submission",&id,"--into",unknown.to_str().unwrap()]).output().unwrap();
+    assert!(!out.status.success()); assert!(String::from_utf8_lossy(&out.stderr).contains("worker execution context"));
+    let report = f.project.join(".state/worker-output/checkout-attempt/report.md"); fs::create_dir_all(report.parent().unwrap()).unwrap();
+    let show = || hp(f.home.path(), &["--root",f.r(),"result","demo","show","--attempt","checkout-attempt","--report"]);
+    fs::write(&report, "worker report 🔥\n").unwrap(); let out=show(); assert!(out.status.success()); assert_eq!(String::from_utf8(out.stdout).unwrap(), "worker report 🔥\n");
+    fs::write(&report, vec![b'x'; 1024*1024+1]).unwrap(); let out=show(); assert!(!out.status.success()); assert!(out.stdout.is_empty()); assert!(String::from_utf8_lossy(&out.stderr).contains("exceeds 1 MiB"));
+    fs::remove_file(&report).unwrap();
+    std::os::unix::fs::symlink(f.repo.join("src/lib.rs"), &report).unwrap();
+    assert!(!show().status.success());
+}

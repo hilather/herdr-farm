@@ -599,6 +599,11 @@ pub fn run(ctx: &Ctx, slug: &str, mut args: Args) -> Result<Value> {
     if args.work_item.is_some() || args.role.is_some() || args.supersedes.is_some() {
         ensure!(runtime::snapshot(&project)?.schema_version >= 72, "launch lineage requires upgrade-store to schema 72");
     }
+    if args.fixes_review.is_some() || !args.fixes.is_empty() {
+        ensure!(args.role.as_deref().is_none_or(|role| role == "fix"),
+            "a fix launch is always role fix; --fixes/--fixes-review cannot be combined with --role other than fix");
+    }
+    migration::open_active(&project)?.check_fix_run(&args.task, args.fixes_review.as_deref(), &args.fixes, &args.profile)?;
     let role = args.role.clone().unwrap_or_else(|| {
         if args.review_of.is_some() && args.review_kind == "code" { "review" }
         else if args.review_of.is_some() && args.review_kind == "skeptical" { "skeptic" }
@@ -626,7 +631,6 @@ pub fn run(ctx: &Ctx, slug: &str, mut args: Args) -> Result<Value> {
     };
     args.work_item = Some(work_item);
     args.role = Some(role);
-    migration::open_active(&project)?.check_fix_run(&args.task, args.fixes_review.as_deref(), &args.fixes, &args.profile)?;
     eprintln!("launch run: preflight");
     let pinned = migration::status(&project)?.plan.config.context("migration has no pinned config")?;
     let config: toml::Value = toml::from_str(&String::from_utf8(migration::read_plan_file(Path::new(&pinned.path))?)?)?;

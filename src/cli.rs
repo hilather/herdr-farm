@@ -911,7 +911,11 @@ enum ResultCommand {
     #[cfg(target_os="linux")]
     Submit { #[arg(long)] input_file:PathBuf },
     /// Read stored submissions. Claimed checks are not evidence.
-    Show { #[arg(long)] id:Option<String> },
+    Show { #[arg(long, conflicts_with="attempt")] id:Option<String>, #[arg(long)] attempt:Option<String>, #[arg(long, requires="attempt")] report:bool },
+    /// Materialize the exact retained candidate as a detached host checkout. Not acceptance evidence.
+    #[cfg(target_os="linux")]
+    #[command(group=clap::ArgGroup::new("candidate").required(true).args(["submission", "attempt"]))]
+    Checkout { #[arg(long)] submission:Option<String>, #[arg(long)] attempt:Option<String>, #[arg(long)] into:PathBuf },
     /// Enable or disable automatic verification and integration; the ticker runs each job in its result lane
     #[command(group=clap::ArgGroup::new("switch").required(true).multiple(true).args(["verify","integrate"]))]
     Auto { #[arg(long,value_parser=["on","off"])] verify:Option<String>, #[arg(long,value_parser=["on","off"])] integrate:Option<String>, #[arg(long)] expected_head:u64 },
@@ -1705,7 +1709,21 @@ pub fn run(#[cfg(feature="state-store")] capture: &mut crate::cli_invocation::Ca
                     println!("{}",serde_json::to_string_pretty(&outcome)?);
                     if outcome.state != "integrated" { anyhow::bail!("integration {}: {}",outcome.state,outcome.reason.as_deref().unwrap_or("not integrated")); }
                 },
-                ResultCommand::Show{id}=>println!("{}",serde_json::to_string_pretty(&herdr_farm::store::show_results(&dir,id.as_deref())?)?),
+                #[cfg(target_os="linux")]
+                ResultCommand::Checkout{submission,attempt,into}=>println!("{}",serde_json::to_string_pretty(&herdr_farm::verification::checkout_project(&dir,submission.as_deref(),attempt.as_deref(),&into)?)?),
+                ResultCommand::Show{id,attempt,report}=> {
+                    if report {
+                        #[cfg(target_os="linux")]
+                        print!("{}",herdr_farm::verification::attempt_report(&dir,attempt.as_deref().unwrap())?);
+                        #[cfg(not(target_os="linux"))]
+                        anyhow::bail!("attempt reports require Linux");
+                    }
+                    else {
+                        let mut views=herdr_farm::store::show_results(&dir,id.as_deref())?;
+                        if let Some(attempt)=attempt {views.retain(|v|v.attempt_id==attempt);}
+                        println!("{}",serde_json::to_string_pretty(&views)?);
+                    }
+                },
                 ResultCommand::Auto{verify,integrate,expected_head}=>println!("{}",serde_json::to_string_pretty(&herdr_farm::store::set_project_result_automation(&dir,expected_head,verify.map(|v|v=="on"),integrate.map(|v|v=="on"))?)?),
                 ResultCommand::Jobs=>println!("{}",serde_json::to_string_pretty(&herdr_farm::store::project_verification_jobs(&dir)?)?),
                 ResultCommand::RetryVerification{operation,expected_revision}=>println!("{}",serde_json::to_string_pretty(&herdr_farm::store::reset_project_verification_job(&dir,&operation,expected_revision)?)?),

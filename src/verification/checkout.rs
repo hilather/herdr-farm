@@ -49,6 +49,37 @@ pub fn materialize(
     object_format: &str,
     trusted_base: Option<(&Path, &str)>,
 ) -> Result<Checkout> {
+    materialize_inner(work, store_file, objects, oid, object_format, trusted_base, false)
+}
+
+/// Materialize an operator checkout with hardening isolated from verification.
+pub(super) fn materialize_project(
+    work: &Path,
+    store_file: &Path,
+    objects: &[RetainedObject],
+    oid: &str,
+    object_format: &str,
+    trusted_base: Option<(&Path, &str)>,
+) -> Result<Checkout> {
+    let checkout = materialize_inner(work, store_file, objects, oid, object_format, trusted_base, true)?;
+    fs::create_dir_all(checkout.path.join(".git/hooks"))?;
+    checkout_git(&checkout.path, &["config".into(), "core.hooksPath".into(), ".git/hooks".into()], Some(&checkout.path))?;
+    checkout_git(&checkout.path, &["config".into(), "submodule.recurse".into(), "false".into()], Some(&checkout.path))?;
+    Ok(checkout)
+}
+
+fn materialize_inner(
+    work: &Path,
+    store_file: &Path,
+    objects: &[RetainedObject],
+    oid: &str,
+    object_format: &str,
+    trusted_base: Option<(&Path, &str)>,
+    operator_checkout: bool,
+) -> Result<Checkout> {
+    let git = |cwd: &Path, args: &[String], dir: Option<&Path>| {
+        if operator_checkout { checkout_git(cwd, args, dir) } else { git(cwd, args, dir) }
+    };
     if !matches!(object_format, "sha1" | "sha256") {
         bail!("unsupported Git object format");
     }
@@ -216,3 +247,40 @@ pub(super) fn diff_counts(checkout: &Path, base: &str, candidate: &str) -> Optio
     }
     Some(counts)
 }
+
+/// Only operator checkouts use private hooks and disable attributes/submodules.
+fn checkout_git(cwd: &Path, args: &[String], dir: Option<&Path>) -> Result<()> {
+    let hooks = Scratch::new(&std::env::temp_dir())?;
+    let mut hardened = vec!["-c".into(), format!("core.hooksPath={}", hooks.0.display()),
+        "-c".into(), "submodule.recurse=false".into(), "-c".into(), "core.attributesFile=/dev/null".into()];
+    let mut args = args.iter().peekable();
+    while let Some(arg) = args.next() {
+        // Replace verification's per-command hook setting only for this path.
+        if arg == "-c" && args.peek().is_some_and(|next| next.as_str() == "core.hooksPath=/dev/null") {
+            args.next();
+            continue;
+        }
+        hardened.push(arg.clone());
+        if arg == "fetch" { hardened.push("--no-recurse-submodules".into()); }
+    }
+    git(cwd, &hardened, dir)
+}
+
+/// Private scratch directories created exclusively; cleanup only our own tree.
+pub(super) struct Scratch(pub PathBuf);
+impl Scratch {
+    pub(super) fn new(parent: &Path) -> Result<Self> {
+        use std::os::unix::fs::DirBuilderExt;
+        for ordinal in 0..100 {
+            let name = format!(".result-checkout-{}-{}-{ordinal}", std::process::id(), jiff::Timestamp::now().as_nanosecond());
+            let path = parent.join(name);
+            match fs::DirBuilder::new().mode(0o700).create(&path) {
+                Ok(()) => return Ok(Self(path)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        bail!("cannot reserve checkout scratch directory")
+    }
+}
+impl Drop for Scratch { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); } }

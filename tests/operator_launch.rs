@@ -1436,6 +1436,23 @@ fn owner_rejection_and_expiry_preserve_repository_and_capacity() {
     assert_eq!(fs::read(lab.project.join("PROJECT.md")).unwrap(),before);
 }
 
+#[test]
+fn fix_launch_selector_errors_refuse_before_worker_preparation() {
+    let lab = Lab::with_herdr(STATIC_HERDR);
+    let launch = ["launch", "demo", "run", "--task", "fix", "--profile", "codex-sol", "--repository", lab.repo.to_str().unwrap()];
+    let before = herdr_farm::runtime::snapshot(&lab.project).unwrap();
+    let mut finding = launch.to_vec();
+    finding.extend(["--fixes-review", "finding:issue"]);
+    assert!(lab.fail(&finding).contains("--fixes-review takes the REVIEW TASK id; to fix one finding use --fixes <ref>"));
+    let mut missing = launch.to_vec();
+    missing.extend(["--fixes-review", "absent"]);
+    assert!(lab.fail(&missing).contains("review task absent does not exist"));
+    let mut role = launch.to_vec();
+    role.extend(["--fixes", "finding:issue", "--role", "build"]);
+    assert!(lab.fail(&role).contains("a fix launch is always role fix"));
+    assert_eq!(herdr_farm::runtime::snapshot(&lab.project).unwrap(), before);
+}
+
 /// CLI review launches keep normal report contracts and automatically capture
 /// code reviews and skeptical passes on the author's exact submission.
 #[test]
@@ -1474,7 +1491,7 @@ fn launch_run_records_reviews_and_skeptical_yield_and_refuses_without_writes() {
     assert_eq!(herdr_farm::runtime::snapshot(&lab.project).unwrap(), state);
     assert_eq!(lab.ok(&["telemetry", "demo", "review", "show"])["opportunities"], serde_json::json!([]));
     fs::write(&prompt, "Inspect edge cases and explain the evidence.").unwrap();
-    for (args, refs) in [(code, vec!["finding:first", "finding:second"]), (launch("skeptic", "author", "skeptical", "codex-sol"), vec!["finding:new"])] {
+    for (args, refs) in [(code, vec!["finding:first", "finding:second"]), (launch("skeptic", "author", "skeptical", "codex-sol"), vec!["finding:new"]), (launch("empty-review", "author", "code", "codex-sol"), vec![])] {
         let argv = args.iter().map(String::as_str).collect::<Vec<_>>();
         let report = lab.ok(&argv);
         assert!(report["acceptance_policies"].as_array().unwrap().iter().all(|p| !p["id"].as_str().unwrap().starts_with("accept-default")));
@@ -1489,18 +1506,21 @@ fn launch_run_records_reviews_and_skeptical_yield_and_refuses_without_writes() {
         }
         let session = lab.ok(&["telemetry", "demo", "review", "session", "--attempt", attempt])["session"].clone();
         assert_eq!(session["submission_id"], submission["submission_id"]);
+        let error = lab.fail(&["launch", "demo", "run", "--task", "premature-fix", "--profile", "codex-sol",
+            "--repository", lab.repo.to_str().unwrap(), "--fixes-review", report["task"].as_str().unwrap()]);
+        assert!(error.contains("has no completed review yet"), "{error}");
         let receipt = lab.home.join("review-receipt.json");
         fs::write(&receipt, serde_json::json!({"schema":"review_receipt.v1","session_id":session["session_id"],"submission_id":session["submission_id"],
             "candidate_oid":session["candidate_oid"],"outcome":"completed","findings":refs.iter().map(|r|serde_json::json!({"ref":r,"title":"Edge case"})).collect::<Vec<_>>(),"evidence":[format!("sha256:{}", "b".repeat(64))]}).to_string()).unwrap();
         lab.ok(&["telemetry", "demo", "review", "submit", "--input-file", receipt.to_str().unwrap()]);
         let task = report["task"].as_str().unwrap();
-        let output = if task == "review" { "docs/reviews/R.md" } else { "docs/reviews/skeptic.md" };
-        let delivered = lab.follow_brief(attempt, output, &format!("{task}-report"));
+        let output = if task == "review" { "docs/reviews/R.md".to_owned() } else { format!("docs/reviews/{task}.md") };
+        let delivered = lab.follow_brief(attempt, &output, &format!("{task}-report"));
         assert!(delivered.status.success(), "{}", String::from_utf8_lossy(&delivered.stderr));
         assert_eq!(lab.ok(&argv)["attempt"], report["attempt"]);
     }
     let report = lab.ok(&["telemetry", "demo", "review", "report"]);
-    assert_eq!(report["metrics"]["M20"]["value"], "2/2");
+    assert_eq!(report["metrics"]["M20"]["value"], "3/3");
     assert_eq!(report["metrics"]["M28"]["excluded"]["pending_triage"], 1);
     let findings = lab.ok(&["telemetry", "demo", "review", "findings", "show"]);
     let claim = findings["findings"]["submissions"].as_array().unwrap().iter().find(|s| s["finding_ref"] == "finding:new").unwrap()["claims"][0]["claim_id"].as_i64().unwrap().to_string();
@@ -1529,6 +1549,30 @@ fn launch_run_records_reviews_and_skeptical_yield_and_refuses_without_writes() {
     let selector = first_args.iter().position(|a| a=="--fixes").unwrap();
     first_args[selector] = "--fixes-review".into();
     first_args[selector+1] = "review".into();
+    let before = herdr_farm::runtime::snapshot(&lab.project).unwrap();
+    for (reference, expected) in [
+        ("finding:first", "--fixes-review takes the REVIEW TASK id; to fix one finding use --fixes <ref>"),
+        ("empty-review", "completed with 0 submitted findings; nothing to bind. Launch the fix with --work-item WORK --role fix"),
+        ("absent", "does not exist"),
+        ("author", "exists but is not a review task"),
+    ] {
+        let mut invalid = first_args.clone();
+        invalid[selector + 1] = reference.into();
+        assert!(lab.fail(&invalid.iter().map(String::as_str).collect::<Vec<_>>()).contains(expected));
+        assert_eq!(herdr_farm::runtime::snapshot(&lab.project).unwrap(), before);
+    }
+    let mut invalid = fix("wrong-role", "finding:first");
+    invalid.extend(["--role".into(), "build".into()]);
+    assert!(lab.fail(&invalid.iter().map(String::as_str).collect::<Vec<_>>()).contains("a fix launch is always role fix"));
+    assert_eq!(herdr_farm::runtime::snapshot(&lab.project).unwrap(), before);
+    let mut unbound = fix("report-only-fix", "unused");
+    unbound.drain(selector..selector + 2);
+    unbound.extend(["--work-item".into(), "author".into(), "--role".into(), "fix".into()]);
+    let report_only = lab.ok(&unbound.iter().map(String::as_str).collect::<Vec<_>>());
+    let attempts = lab.ok(&["telemetry", "demo", "attempts", "--json"]);
+    let row = attempts["attempts"].as_array().unwrap().iter().find(|a| a["task_id"] == "report-only-fix").unwrap();
+    assert_eq!(row["lineage"], serde_json::json!({"work_item":"author","role":"fix","supersedes":null}));
+    cancel(report_only["attempt"].as_str().unwrap());
     let first = lab.ok(&first_args.iter().map(String::as_str).collect::<Vec<_>>());
     let mut replacement = author_args.to_vec();
     let task_arg = replacement.iter().position(|a| *a == "author").unwrap();
@@ -1538,7 +1582,8 @@ fn launch_run_records_reviews_and_skeptical_yield_and_refuses_without_writes() {
     let delivered = lab.follow_brief(first["attempt"].as_str().unwrap(),"src/lib.rs","fix-one-result");
     assert!(delivered.status.success(),"{}",String::from_utf8_lossy(&delivered.stderr));
     cancel(first["attempt"].as_str().unwrap());
-    let second_args = fix("fix-2","finding:new");
+    let mut second_args = fix("fix-2","finding:new");
+    second_args.extend(["--fixes-review".into(), "empty-review".into()]);
     let second = lab.ok(&second_args.iter().map(String::as_str).collect::<Vec<_>>());
     let delivered = lab.follow_brief(second["attempt"].as_str().unwrap(),"src/lib.rs","fix-two-result");
     assert!(delivered.status.success(),"{}",String::from_utf8_lossy(&delivered.stderr));
@@ -1556,10 +1601,10 @@ fn launch_run_records_reviews_and_skeptical_yield_and_refuses_without_writes() {
     let detail = lab.ok(&["telemetry","demo","accounting","work-items","--json"]);
     assert_eq!(detail["work_items"].as_array().unwrap().len(),1);
     let work = &detail["work_items"][0];
-    assert_eq!(work["fix_rounds"],2);
+    assert_eq!(work["fix_rounds"],3);
     assert_eq!(work["superseded_count"],1);
-    assert_eq!(work["attempt_count"],6);
-    assert_eq!(work["tasks_by_role"]["fix"],serde_json::json!(["fix-1","fix-2"]));
+    assert_eq!(work["attempt_count"],8);
+    assert_eq!(work["tasks_by_role"]["fix"],serde_json::json!(["fix-1","fix-2","report-only-fix"]));
     let query = lab.ok(&["telemetry","demo","query","--metric","M07","--cohort","assignment_cohort","--by","role","--json"]);
     let cells = query["results"][0]["cells"].as_array().unwrap();
     assert!(cells.iter().any(|c| c["dimension"]["role"]=="fix"));
