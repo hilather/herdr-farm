@@ -241,11 +241,6 @@ pub(super) fn metrics(project: &Path, since: Option<i64>) -> Result<BTreeMap<Str
         out.insert(id.into(), b);
     }
     let canonical = crate::telemetry::read_only(&project.join(".state/state.db"))?;
-    let times: bool = canonical.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='event_times')",
-        [],
-        |r| r.get(0),
-    )?;
     // Invocation rows are time ordered. Binary search avoids scanning the
     // retained CLI history once for every notice in a large canonical log.
     let coordinator_times: Vec<i64> = rows
@@ -253,15 +248,14 @@ pub(super) fn metrics(project: &Path, since: Option<i64>) -> Result<BTreeMap<Str
         .filter(|r| r.0 == "coordinator")
         .map(|r| r.3)
         .collect();
-    let reaction = if !times {
-        unavailable("event_times_not_recorded")
-    } else if coordinator_times.is_empty() {
+    let reaction = if coordinator_times.is_empty() {
         unavailable("coordinator_cli_invocations_missing")
     } else {
-        let notices=canonical.prepare("SELECT t.recorded_unix_ms FROM events e LEFT JOIN event_times t USING(sequence) WHERE e.kind='inbox.delivered' AND json_extract(e.payload,'$.id') LIKE 'worker-result-%'")?.query_map([],|r|r.get::<_,Option<i64>>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let notices=canonical.prepare("SELECT json_extract(payload,'$.created') FROM inbox_items WHERE id LIKE 'worker-result-%'")?.query_map([],|r|r.get::<_,Option<String>>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
         let mut samples = Vec::new();
         let mut missing = 0;
-        for at in notices {
+        for created in notices {
+            let at = created.and_then(|s| s.parse::<jiff::Timestamp>().ok()).map(|t| t.as_millisecond());
             if let Some(at) = at {
                 if since.is_some_and(|s| at < s) {
                     continue;

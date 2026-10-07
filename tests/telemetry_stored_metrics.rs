@@ -289,7 +289,7 @@ fn reviewed_submission_density_and_review_task_spend_use_unique_findings() {
         now - 1000,
         r#"{"version":1,"checks":["/usr/bin/cargo","test"]}"#,
     );
-    for id in ["review-one", "review-two"] {
+    for id in ["review-one", "review-two", "brief-only", "never-launched"] {
         db.execute(
             "INSERT INTO tasks(id,revision,state,title) VALUES(?1,1,'running',?1)",
             [id],
@@ -303,13 +303,21 @@ fn reviewed_submission_density_and_review_task_spend_use_unique_findings() {
             SELECT ?1,?1,1,NULL,chosen_configuration_id,'[\"x\"]','operator','operator:cli','[\"x\"]',?2 FROM dispatch_decisions WHERE attempt_id=?3",rusqlite::params![id,now-1,f.attempt]).unwrap();
         let inputs=json!({"inputs":{"version":2,"effective_profile":{"kind":"codex","name":"reviewer","execution_home":f.home.display().to_string()}}}).to_string();
         db.execute("INSERT INTO attempt_inputs(attempt_id,operation_id,payload,payload_hash) VALUES(?1,?1,?2,?3)",rusqlite::params![id,inputs,"a".repeat(64)]).unwrap();
-        db.execute("INSERT INTO collector_bindings(attempt_id,revision,state,collector,execution_home,unix_ms,source) VALUES(?1,1,'active','codex',?2,?3,'apply_launch_started')",rusqlite::params![id,f.home.display().to_string(),now]).unwrap();
+        if id != "never-launched" {
+            db.execute("INSERT INTO attempt_lifecycle(attempt_id,state,attempt_revision,unix_ms,source) VALUES(?1,'launching',1,?2,'fixture')",rusqlite::params![id,now]).unwrap();
+            db.execute("INSERT INTO collector_bindings(attempt_id,revision,state,collector,execution_home,unix_ms,source) VALUES(?1,1,'active','codex',?2,?3,'apply_launch_started')",rusqlite::params![id,f.home.display().to_string(),now]).unwrap();
+        }
     }
     drop(db);
     let sub = "1".repeat(64);
-    for (n, (attempt, kind)) in [("review-one", "code"), ("review-two", "skeptical")]
-        .into_iter()
-        .enumerate()
+    for (n, (attempt, kind)) in [
+        ("review-one", "code"),
+        ("review-two", "skeptical"),
+        ("brief-only", "code"),
+        ("never-launched", "code"),
+    ]
+    .into_iter()
+    .enumerate()
     {
         let op = f
             .cli_args(&[
@@ -327,26 +335,33 @@ fn reviewed_submission_density_and_review_task_spend_use_unique_findings() {
             .to_owned();
         f.cli_args(&["review", "assign", &op, "--reviewer", "codex"]);
         let db = rusqlite::Connection::open(f.project.join(".state/state.db")).unwrap();
-        db.execute("INSERT INTO review_briefs(snapshot_id,opportunity_id,task_id,brief_schema,brief_digest,prior_disclosure,principal,recorded_unix_ms) VALUES(?1,?2,?1,'review_brief.v1',?3,'withheld','operator:cli',?4)",rusqlite::params![attempt,op,format!("sha256:{}","a".repeat(64)),now]).unwrap();
+        if n != 0 {
+            db.execute("INSERT INTO review_briefs(snapshot_id,opportunity_id,task_id,brief_schema,brief_digest,prior_disclosure,principal,recorded_unix_ms) VALUES(?1,?2,?1,'review_brief.v1',?3,'withheld','operator:cli',?4)",rusqlite::params![attempt,op,format!("sha256:{}","a".repeat(64)),now]).unwrap();
+        }
         drop(db);
-        let session = f
-            .cli_args(&["review", "start", &op, "--attempt", attempt])
-            .0["session"]["session_id"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        let receipt = f.tmp.path().join(format!("{attempt}-receipt.json"));
-        fs::write(&receipt,json!({"schema":"review_receipt.v1","session_id":session,"submission_id":sub,"candidate_oid":"1".repeat(40),"outcome":"completed","findings":[format!("finding:report-{n}")],"evidence":[]}).to_string()).unwrap();
-        f.cli_args(&[
-            "review",
-            "complete",
-            "--input-file",
-            receipt.to_str().unwrap(),
-        ]);
+        if n == 3 {
+            continue;
+        }
+        if n < 2 {
+            let session = f
+                .cli_args(&["review", "start", &op, "--attempt", attempt])
+                .0["session"]["session_id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let receipt = f.tmp.path().join(format!("{attempt}-receipt.json"));
+            fs::write(&receipt,json!({"schema":"review_receipt.v1","session_id":session,"submission_id":sub,"candidate_oid":"1".repeat(40),"outcome":"completed","findings":[format!("finding:report-{n}")],"evidence":[]}).to_string()).unwrap();
+            f.cli_args(&[
+                "review",
+                "complete",
+                "--input-file",
+                receipt.to_str().unwrap(),
+            ]);
+        }
         let dir = f.home.join(".codex/sessions");
         fs::create_dir_all(&dir).unwrap();
         let at = jiff::Timestamp::from_millisecond(now).unwrap().to_string();
-        let (input, output, model) = if n == 0 {
+        let (input, output, model) = if n != 1 {
             (1000, 500, "gpt-5.5")
         } else {
             (2000, 1000, "gpt-5.5-mini")
@@ -364,6 +379,8 @@ fn reviewed_submission_density_and_review_task_spend_use_unique_findings() {
         )
         .unwrap();
     }
+    // review-one is session-only, review-two is in both cohorts, brief-only has
+    // no session, and never-launched has no usage or launch mark.
     // Two reports of the same defect: owner validation mints one unique root.
     f.cli_args(&[
         "review",
@@ -418,16 +435,25 @@ fn reviewed_submission_density_and_review_task_spend_use_unique_findings() {
             let partial = f.report()["metrics"]["M53"].clone();
             assert_eq!(
                 partial["by_currency"]["USD"]["value"],
-                json!({"status":"partial","reason":"review_cost_incomplete","priced_amount":"0.004","denominator":1})
+                json!({"status":"partial","reason":"review_cost_incomplete","priced_amount":"0.008","denominator":1})
             );
-            assert!(f.text(&["report"]).contains("M53 cost_per_validated_finding currency=USD partial 0.004/1 (review_cost_incomplete)"));
+            assert!(f.text(&["report"]).contains("M53 cost_per_validated_finding currency=USD partial 0.008/1 (review_cost_incomplete)"));
         }
     }
     f.cli_args(&["accounting", "reprice"]);
     let cost = f.report()["metrics"]["M53"].clone();
-    assert_eq!(cost["by_currency"]["USD"]["value"], "0.004/1");
+    assert_eq!(cost["by_currency"]["USD"]["value"], "0.008/1");
     assert_eq!(cost["by_currency"]["EUR"]["value"], "0.006/1");
     assert_eq!(cost["attempts_without_usage"], 0);
+    assert_eq!(cost["value"], "per_currency");
+    // A launch mark makes the same usage-less attempt incomplete, preserving coverage.
+    let db = rusqlite::Connection::open(f.project.join(".state/state.db")).unwrap();
+    db.execute("INSERT INTO attempt_lifecycle(attempt_id,state,attempt_revision,unix_ms,source) VALUES('never-launched','launching',1,?1,'fixture')", [now]).unwrap();
+    drop(db);
+    let partial = f.report()["metrics"]["M53"].clone();
+    assert_eq!(partial["attempts_without_usage"], 1);
+    assert_eq!(partial["by_currency"]["USD"]["value"],
+        json!({"status":"partial","reason":"review_cost_incomplete","priced_amount":"0.008","denominator":1}));
     // Correcting validation removes the unique denominator without removing observed spend.
     f.cli_args(&["review", "findings", "reset", "1"]);
     let cost = f.report()["metrics"]["M53"].clone();

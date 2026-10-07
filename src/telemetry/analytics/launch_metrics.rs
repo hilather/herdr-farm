@@ -29,6 +29,7 @@ struct Invocation {
     task: Option<String>,
     attempt: Option<String>,
     force: bool,
+    errored: bool,
 }
 fn invocations(side: Option<&Connection>, since: Option<i64>) -> Result<Option<Vec<Invocation>>> {
     let Some(db) = side else {
@@ -37,8 +38,8 @@ fn invocations(side: Option<&Connection>, since: Option<i64>) -> Result<Option<V
     if !table(db, "operation_cli_targets")? {
         return Ok(None);
     }
-    let rows = db.prepare("SELECT c.invocation_id,c.command_path,c.recorded_unix_ms,t.task_id,t.attempt_id,coalesce(t.force,0) FROM cli_invocations c LEFT JOIN operation_cli_targets t USING(invocation_id) WHERE c.caller IN ('operator','coordinator') AND c.outcome NOT IN ('help','version','usage_error') AND c.command_path IN ('launch run','launch stop','task cancel-attempt') AND c.recorded_unix_ms>=?1 ORDER BY c.recorded_unix_ms,c.invocation_id")?
-        .query_map([since.unwrap_or(0).max(crate::telemetry::maintenance::store::now()-crate::telemetry::accounting::cli_invocations::MAX_AGE_MS)], |r| Ok(Invocation {path:r.get(1)?,at:r.get(2)?,task:r.get(3)?,attempt:r.get(4)?,force:r.get(5)?}))?.collect::<rusqlite::Result<_>>()?;
+    let rows = db.prepare("SELECT c.invocation_id,c.command_path,c.recorded_unix_ms,t.task_id,t.attempt_id,coalesce(t.force,0),c.outcome='error' FROM cli_invocations c LEFT JOIN operation_cli_targets t USING(invocation_id) WHERE c.caller IN ('operator','coordinator') AND c.outcome NOT IN ('help','version','usage_error') AND c.command_path IN ('launch run','launch stop','task cancel-attempt') AND c.recorded_unix_ms>=?1 ORDER BY c.recorded_unix_ms,c.invocation_id")?
+        .query_map([since.unwrap_or(0).max(crate::telemetry::maintenance::store::now()-crate::telemetry::accounting::cli_invocations::MAX_AGE_MS)], |r| Ok(Invocation {path:r.get(1)?,at:r.get(2)?,task:r.get(3)?,attempt:r.get(4)?,force:r.get(5)?,errored:r.get(6)?}))?.collect::<rusqlite::Result<_>>()?;
     Ok(Some(rows))
 }
 fn launches(db: &Connection, rows: Option<&[Invocation]>) -> Result<Value> {
@@ -99,6 +100,16 @@ fn interventions(db: &Connection, rows: Option<&[Invocation]>) -> Result<Value> 
     };
     let mut days = BTreeMap::<i64, i64>::new();
     let mut attempts = BTreeMap::<String, i64>::new();
+    // Anchor each episode at its first call; retries cannot extend it indefinitely.
+    const WINDOW_MS: i64 = 5_000;
+    let mut episodes = BTreeMap::<String, i64>::new();
+    let mut classes = BTreeMap::from([
+        ("cleanup_after_acceptance", 0_i64),
+        ("stuck", 0),
+        ("other", 0),
+    ]);
+    let mut per_attempt_classes = BTreeMap::<String, BTreeMap<&str, i64>>::new();
+    let mut errored_calls = 0_i64;
     let mut missing = 0;
     let unknown_force = rows
         .iter()
@@ -108,7 +119,7 @@ fn interventions(db: &Connection, rows: Option<&[Invocation]>) -> Result<Value> 
         .iter()
         .filter(|r| r.path == "task cancel-attempt" || (r.path == "launch stop" && r.force))
     {
-        *days.entry(row.at.div_euclid(86_400_000)).or_default() += 1;
+        errored_calls += i64::from(row.errored);
         let attempt = if let Some(attempt) = &row.attempt {
             Some(attempt.clone())
         } else if let Some(task) = &row.task {
@@ -118,12 +129,36 @@ fn interventions(db: &Connection, rows: Option<&[Invocation]>) -> Result<Value> 
             None
         };
         if let Some(id) = attempt {
+            if episodes.get(&id).is_some_and(|at| row.at - at <= WINDOW_MS) {
+                continue;
+            }
+            episodes.insert(id.clone(), row.at);
+            let accepted: bool = db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM verified_results v JOIN result_submissions s USING(submission_id) WHERE s.attempt_id=?1 AND v.created_unix_ms<?2)",
+                params![id, row.at], |r| r.get(0),
+            )?;
+            let terminated: bool = db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM attempt_lifecycle WHERE attempt_id=?1 AND state IN ('completed','failed','cancelled','lost') AND unix_ms<?2) OR EXISTS(SELECT 1 FROM events WHERE entity=?1 AND kind='runtime.worker_terminated' AND json_extract(payload,'$.observed_unix_ms')<?2)",
+                params![id, row.at], |r| r.get(0),
+            )?;
+            let class = if accepted {
+                "cleanup_after_acceptance"
+            } else if terminated {
+                "other"
+            } else {
+                "stuck"
+            };
+            *classes.get_mut(class).unwrap() += 1;
+            *per_attempt_classes.entry(id.clone()).or_default().entry(class).or_default() += 1;
             *attempts.entry(id).or_default() += 1;
+            if class == "stuck" {
+                *days.entry(row.at.div_euclid(86_400_000)).or_default() += 1;
+            }
         } else {
             missing += 1;
         }
     }
-    let mut out = json!({"value":days.values().sum::<i64>(),"per_day_utc":days,"per_attempt":attempts,"unattributed_invocations":missing,"force_flag_unknown":unknown_force});
+    let mut out = json!({"value":classes["stuck"],"breakdown":classes,"errored_calls":errored_calls,"dedupe_window_ms":WINDOW_MS,"per_day_utc":days,"per_attempt":attempts,"per_attempt_classes":per_attempt_classes,"unattributed_invocations":missing,"force_flag_unknown":unknown_force});
     if missing > 0 || unknown_force > 0 {
         out["status"] = json!("partial");
         out["reason"] = json!("intervention_attempt_unknown");

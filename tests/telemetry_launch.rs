@@ -102,7 +102,7 @@ fn retry_and_cancel_are_counted_from_real_commands_and_closed_lifecycle() {
         )
         .unwrap();
     drop(store);
-    // An unsuccessful second intervention is still an invocation.
+    // An unsuccessful retry is a separate error but shares the first intervention.
     let out = product(
         &f,
         &[
@@ -121,11 +121,16 @@ fn retry_and_cancel_are_counted_from_real_commands_and_closed_lifecycle() {
     assert!(!out.status.success());
     // Forced stops count; ordinary stops do not, even when no server exists.
     let _ = product(&f, &["launch", "demo", "stop", "--task", "work"]);
-    assert_eq!(query(&f, "M91")["value"], 2);
+    let cancellations = query(&f, "M91");
+    assert_eq!(cancellations["value"], 1);
+    assert_eq!(cancellations["detail"]["breakdown"]["stuck"], 1);
+    assert_eq!(cancellations["detail"]["errored_calls"], 2);
     let _ = product(&f, &["launch", "demo", "stop", "--task", "work", "--force"]);
     let m = query(&f, "M91");
-    assert_eq!(m["value"], 3);
-    assert_eq!(m["detail"]["per_attempt"][&f.attempt], 3);
+    assert_eq!(m["value"], 1);
+    assert_eq!(m["detail"]["breakdown"]["stuck"], 1);
+    assert_eq!(m["detail"]["errored_calls"], 2);
+    assert_eq!(m["detail"]["per_attempt"][&f.attempt], 1);
     assert_eq!(
         m["detail"]["per_day_utc"]
             .as_object()
@@ -133,7 +138,7 @@ fn retry_and_cancel_are_counted_from_real_commands_and_closed_lifecycle() {
             .values()
             .map(|v| v.as_i64().unwrap())
             .sum::<i64>(),
-        3
+        1
     );
     let db = rusqlite::Connection::open(f.project.join(".state/state.db")).unwrap();
     let elapsed:i64=db.query_row("SELECT (SELECT unix_ms FROM attempt_lifecycle WHERE attempt_id=?1 AND state='cancelled')-(SELECT unix_ms FROM attempt_lifecycle WHERE attempt_id=?1 AND state='reserved')",[&f.attempt],|r|r.get(0)).unwrap();
@@ -230,4 +235,24 @@ fn ticker_passes_publish_metadata_and_disabled_collection_stays_unobserved() {
     );
     assert_eq!(query(&g, "M92")["reason"], "ticker_errors_not_observed");
     assert_eq!(g.count("operation_ticker_errors"), 0);
+}
+
+#[test]
+fn already_terminal_attempt_is_other_and_errors_remain_visible() {
+    let f = Fixture::reserved();
+    f.cancel_reserved();
+    f.cli("collect");
+    let out = product(&f, &[
+        "task", "demo", "cancel-attempt", &f.attempt,
+        "--expected-revision", "1", "--expected-head", "0",
+        "--reason", "already exited",
+    ]);
+    assert!(!out.status.success());
+    let m = query(&f, "M91");
+    assert_eq!(m["value"], 0);
+    assert_eq!(m["detail"]["breakdown"], json!({
+        "stuck": 0, "cleanup_after_acceptance": 0, "other": 1
+    }));
+    assert_eq!(m["detail"]["errored_calls"], 1);
+    assert_eq!(m["detail"]["per_attempt_classes"][&f.attempt]["other"], 1);
 }

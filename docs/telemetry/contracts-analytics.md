@@ -448,7 +448,7 @@ refresh records derived aggregates under the existing retention/backup classes.
 |---|---|---|
 | M51 `verification_strength` | Distinct submissions with accepted verifier evidence whose executed signed policy includes a command / distinct accepted submissions. Window by first acceptance. `by_profile`, `file_presence_only`, `policy_unavailable` accompany the project share. | `empty_denominator` (null); `acceptance_policy_unavailable` for missing, malformed or digest-mismatched policy evidence unless another executed policy proves a command. |
 | M52 `defect_density_by_setup` | M21's current validated unique non-seeded finding roots, windowed by discovery arrival, / distinct candidate submissions with completed reviews, windowed by completion. Repeated reviews of one candidate do not increase its denominator. Attribute findings and denominator to the candidate author's profile. Severity uses the discovery claim's owner-assigned `finding_severity.v1`; every severity cell shares the profile's reviewed denominator. | `no_reviews`; profile cells with no denominator use null `empty_denominator`. |
-| M53 `cost_per_validated_finding` | Latest published-rate attempt estimates (primary plus eligible children) for all attempts of tasks bound by `review_briefs`, including skeptical review tasks and unsuccessful attempts, / the same M21 finding count as M52. Window by attempt decision and discovery arrival. Sum once per eligible entry, separately per currency in `by_currency`; author and unrelated task spend stays outside. | `no_reviews`, `collection_not_run`, `not_priced` (or `cost`'s unavailable reason), `no_usage`, `no_priced_entries`; zero findings gives null `empty_denominator`. Missing review attempts or unpriced entries mark observed currency subtotals `partial: review_cost_incomplete`, never complete spend. |
+| M53 `cost_per_validated_finding` | Latest published-rate attempt estimates (primary plus eligible children) for the deduplicated union of attempts bound by `review_sessions.attempt_id` and all attempts of tasks bound by `review_briefs`, including skeptical review tasks and unsuccessful attempts, / the same M21 finding count as M52. Window by attempt decision and discovery arrival. Sum once per eligible entry, separately per currency in `by_currency`; author and unrelated task spend stays outside. | `no_reviews`, `collection_not_run`, `not_priced` (or `cost`'s unavailable reason), `no_usage`, `no_priced_entries`; zero findings gives null `empty_denominator`. Attempts without a launching/running lifecycle mark are excluded from spend and missing-cost coverage. Missing launched review attempts or unpriced entries mark observed currency subtotals `partial: review_cost_incomplete`, never complete spend. |
 | M54 `test_weakening_rate` | Submissions flagged by `tests-net-removal.v1` / submissions with an observed clear or flagged quality signal. Window by submission creation. Existing collection observes first candidates only; later and uncollected candidates remain explicit exclusions, never inferred clear. Proxy, `source_trust=proxy_observed`. | `collection_not_run`, `no_observed_submissions`; observed empty population gives null `empty_denominator`. Exclusions: `not_collected` and stored `weakening_reason` (`repository_missing`, `git_unavailable`, `diff_failed`, `diff_unparseable`, or `weakening_unavailable`). |
 | M55 `subagent_token_share` | Native-linked child-session input plus output / primary plus child input plus output, per profile. Children follow the attempt usage `children` convention, including guardians and eligible forks; reasoning is already in output. | Common usage reasons below; `no_children` when eligible requests exist but no child usage. |
 | M56 `reasoning_and_cache_share` | Per profile `reasoning_share` = reasoning/output; `cache_share` = normalized cached input/inclusive input. Primary and eligible children contribute once. | Common usage reasons; `reasoning_tokens_not_reported` affects only the reasoning component; zero component denominators are null `empty_denominator`. |
@@ -544,6 +544,8 @@ zero denominators are null with `empty_denominator`, absent estimates yield
 `cost_not_observed`, and incomplete cost yields `work_item_cost_incomplete`
 partial currency cells retaining observed numerator and denominator subtotals.
 Missing complete costs are counted as `attempts_without_complete_cost`.
+M66 and M69 exclude attempts without a launching/running lifecycle mark from
+spend and incomplete-cost coverage; launched attempts without usage remain incomplete.
 Missing profiles use `unknown`. Pricing revisions are exposed for M66/M69;
 rate cards remain fixture-only estimates, not provider charges. Analytics
 refresh/rebuild and as-of revisions retain the same bodies and invalidate on
@@ -569,7 +571,7 @@ CLI caller labels cannot be joined to worker profiles without guessing.
 | M74 command_friction | Error plus usage_error / retained invocations, by caller; ten command paths ranked by error count, ties by path. | Same as M73. |
 | M75 unanswered_worker_questions | Unanswered request_user_input* calls / observed attempts, plus exact per-attempt counts. Async output alone is not an answer. | session_metadata_not_collected |
 | M76 context_window_fill | Per-attempt maximum input/context-window ratio, nearest-rank median/p95 and fraction strictly over 0.8. | context_window_or_input_tokens_missing |
-| M77 coordinator_reaction_time | Each inbox.delivered event with worker-result- id to first coordinator CLI timestamp at or after delivery; median/p90 ms. A CLI may follow multiple notices. | event_times_not_recorded; coordinator_cli_invocations_missing; worker_result_delivery_times_missing; notice_time_or_next_cli_missing |
+| M77 coordinator_reaction_time | Each retained inbox_items row with worker-result- id to first coordinator CLI timestamp at or after delivery; median/p90 ms. A CLI may follow multiple notices. | coordinator_cli_invocations_missing; worker_result_delivery_times_missing; notice_time_or_next_cli_missing |
 
 Worker metrics carry observed/unavailable attempt coverage, and partial status
 when coverage is incomplete. Unobserved worker quantities use
@@ -598,7 +600,7 @@ No canonical migration or SCHEMA bump is needed.
 | ID | Definition and time basis |
 |---|---|
 | M90 `launch_success_rate` | Operator/coordinator `launch run` invocations (excluding help/version/usage errors), placed by invocation start. Numerator: invocations whose task reaches running after that start and before the next retained invocation for that task, or whose existing attempt is still running at invocation start (idempotent launch). Denominator: launches attempted, including command failures. `by_task` includes launches and tries at/before the task's first running mark. CLI exit success alone is never running evidence. |
-| M91 `stuck_attempt_interventions` | Operator/coordinator `task cancel-attempt` and `launch stop --force` invocations, including failed interventions, by UTC day and attempt. Forced stop is attributed to the task's latest reservation at invocation start. |
+| M91 `stuck_attempt_interventions` | Operator/coordinator `task cancel-attempt` and `launch stop --force` calls (excluding help/version/usage errors) grouped per attempt in inclusive 5,000 ms windows anchored at the first call (retries do not extend the window). All calls, including errors, participate; `errored_calls` separately counts error outcomes without deduplication. Each window is classified at its first call: `cleanup_after_acceptance` if a `verified_results` row for that attempt predates the call; otherwise `other` if a terminal lifecycle mark or recorded worker termination predates it; otherwise `stuck`. Acceptance takes precedence. Headline `value` and `per_day_utc` count only stuck windows; `breakdown`, `per_attempt`, and `per_attempt_classes` include all classified windows. Unknown targets are excluded from the headline and reported as partial. Forced stop is attributed to the task's latest reservation at invocation start. Historical evidence is checked before the call, independent of the report window. |
 | M92 `ticker_error_rate` | Counts of explicitly logged ticker errors per UTC hour bucket, by `lock_contention`, `expired_inventory`, `ambiguous_outcome`, `permanent_failure`, `other`. Fixed saturating ticker counters are drained once each pass and replicated to existing sidecars. Values are root-wide: never sum across projects. Background errors enter the next completed pass. No log text is stored. Partial hours, missing pass prefixes/gaps and observation endpoints are explicit; zero-wait write contention can leave unobserved passes, which make coverage partial (`ticker_passes_not_observed`); no unobserved hour is assumed zero. |
 | M93 `work_item_time_breakdown` | Items placed by first reservation across lineage tasks. Complete closed items partition first reservation→last terminal wall time into running, launch overhead and gaps between attempts. Interval unions handle parallel attempts; running takes priority over launch overhead. Never-running closed attempts retain total and running/gap observations but make launch overhead and its share unavailable (`never_running_attempt`); known launch overhead stays a subtotal. `worker_attempt_ms` separately sums running attempt durations. Shares are exact unreduced milliseconds/elapsed ratios. |
 | M94 `diff_size` | Every submission placed by submission time; whole-range numstat in the disposable verification checkout, with rename folding disabled, no external diff or text conversion. Paths and diff text are discarded. Added/removed counts are retained in verifier metadata and, when present, the sidecar. Binary files make coverage partial. Profile cost/changed-line ratios divide exact single-currency priced cost of distinct submission attempts by their known submitted changed lines (an attempt's cost counted once across its submissions). Missing/binary ranges suppress the ratio. |
@@ -663,3 +665,28 @@ forget-session deletion and full telemetry backup. Migration replays retained
 Codex rollouts when the physical class table is newly installed, preserving
 existing offsets after logical stream rollback; deduplication remains by session/item ID.
 New verifier executions retain `duration_ms` in the existing metadata payload.
+
+## MET-NOTICE-TIMES-1 retained notice and historical timing
+
+M77 reads worker-result notice delivery from `inbox_items.payload.created`
+(RFC 3339, converted to milliseconds), including consumed notices, and pairs
+it with the first retained coordinator CLI invocation at or after delivery.
+Result/ended notices are committed atomically with their originating event;
+reading their retained timestamp avoids adding redundant canonical events.
+M77 does not require `event_times`. Invalid delivery times and missing subsequent
+CLI invocations remain unmatched, explicitly counted.
+
+M83/M86 reconstruct unread worker-result intervals from the same inbox delivery
+rows and timed `inbox.seen`/`inbox.done` events, ordered by timestamp. Historical
+untimed consumption events before the first retained `event_times` sequence
+and their associated notice spans are excluded. Attempts without a reserved
+lifecycle mark whose reservation precedes that sequence are excluded as untimed
+historical activity. M83/M84/M86 expose
+`historical_censored` with separate `events` and `attempts` counts, including
+for `--since` windows; these counts describe retained excluded history, not
+samples inside the window. Known attempt intervals ending before `--since`
+do not participate in the timing-completeness gate. Timed intervals beginning
+before the window remain eligible when they overlap it. Missing timing in the
+observable period still yields `historical_activity_times_missing`; historical
+times are never invented. No canonical schema, event volume, retention or
+backup classification changes are needed.

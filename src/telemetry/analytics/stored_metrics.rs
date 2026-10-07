@@ -237,7 +237,10 @@ fn finding_cost(
     findings: i64,
 ) -> Result<Value> {
     let review_attempts: BTreeSet<String> = db.prepare("SELECT a.id FROM attempts a LEFT JOIN dispatch_decisions d ON d.attempt_id=a.id
-        WHERE EXISTS(SELECT 1 FROM review_briefs b WHERE b.task_id=a.task_id) AND (?1 IS NULL OR d.decided_unix_ms>=?1)")?
+        WHERE (EXISTS(SELECT 1 FROM review_sessions s WHERE s.attempt_id=a.id)
+            OR EXISTS(SELECT 1 FROM review_briefs b WHERE b.task_id=a.task_id))
+        AND EXISTS(SELECT 1 FROM attempt_lifecycle m WHERE m.attempt_id=a.id AND m.state IN ('launching','running'))
+        AND (?1 IS NULL OR d.decided_unix_ms>=?1)")?
         .query_map([since], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
     if review_attempts.is_empty() {
         return Ok(missing("no_reviews"));

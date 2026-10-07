@@ -227,6 +227,9 @@ pub(crate) fn metrics(project: &Path, since: Option<i64>) -> Result<BTreeMap<Str
             .filter_map(Value::as_str)
             .collect();
         for a in &attempts {
+            if a["launch_unix_ms"].is_null() {
+                continue;
+            }
             let task = a["task_id"].as_str().unwrap_or_default();
             let role = roles.get(task).copied().unwrap_or("other");
             let rer = matches!(role, "review" | "skeptic")

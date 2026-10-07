@@ -157,8 +157,18 @@ pub(crate) fn metrics(project: &Path, since: Option<i64>) -> Result<BTreeMap<Str
                 );
             }
         } else {
-            let mut events = db.prepare("SELECT e.kind,e.entity,t.recorded_unix_ms FROM events e LEFT JOIN event_times t USING(sequence) WHERE e.kind IN ('inbox.delivered','inbox.seen','inbox.done') ORDER BY e.sequence")?
-                .query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,Option<i64>>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            // The first retained timed sequence fences history that was never timed.
+            let epoch: i64 = db.query_row("SELECT coalesce(min(sequence),0) FROM event_times", [], |r| r.get(0))?;
+            let historical_events: usize = db.query_row("SELECT count(*) FROM events e LEFT JOIN event_times t USING(sequence) WHERE e.sequence<?1 AND t.sequence IS NULL AND e.kind IN ('inbox.seen','inbox.done') AND e.entity LIKE 'worker-result-%'", [epoch], |r| r.get(0))?;
+            let mut events = db.prepare("SELECT e.kind,e.entity,t.recorded_unix_ms FROM events e LEFT JOIN event_times t USING(sequence) WHERE e.kind IN ('inbox.seen','inbox.done') AND (t.sequence IS NOT NULL OR e.sequence>=?1) ORDER BY e.sequence")?
+                .query_map([epoch],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,Option<i64>>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            let notices = db.prepare("SELECT id,json_extract(payload,'$.created') FROM inbox_items i WHERE id LIKE 'worker-result-%' AND NOT EXISTS(SELECT 1 FROM events e LEFT JOIN event_times t USING(sequence) WHERE e.entity=i.id AND e.kind IN ('inbox.seen','inbox.done') AND e.sequence<?1 AND t.sequence IS NULL)")?
+                .query_map([epoch], |r| Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            events.extend(notices.into_iter().map(|(id, created)| {
+                let at = created.and_then(|s| s.parse::<jiff::Timestamp>().ok()).map(|t| t.as_millisecond());
+                ("inbox.delivered".to_owned(), id, at)
+            }));
+            events.sort_by_key(|(kind, _, at)| (*at, kind != "inbox.delivered"));
             let owner_requests = db.prepare("SELECT o.id,min(t.recorded_unix_ms) FROM owner_requests o LEFT JOIN events e ON e.entity=o.id AND e.kind='owner.requested' LEFT JOIN event_times t USING(sequence) GROUP BY o.id")?
                 .query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<i64>>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
             events.extend(
@@ -166,8 +176,11 @@ pub(crate) fn metrics(project: &Path, since: Option<i64>) -> Result<BTreeMap<Str
                     .into_iter()
                     .map(|(id, time)| ("owner.requested".to_owned(), id, time)),
             );
-            let intervals = db.prepare("SELECT a.id,min(CASE WHEN l.state='reserved' THEN l.unix_ms END),min(CASE WHEN l.state IN ('completed','failed','cancelled','lost') THEN l.unix_ms END),min(CASE WHEN l.state='running' THEN l.unix_ms END) FROM attempts a LEFT JOIN attempt_lifecycle l ON l.attempt_id=a.id GROUP BY a.id")?
+            let mut intervals = db.prepare("SELECT a.id,min(CASE WHEN l.state='reserved' THEN l.unix_ms END),min(CASE WHEN l.state IN ('completed','failed','cancelled','lost') THEN l.unix_ms END),min(CASE WHEN l.state='running' THEN l.unix_ms END) FROM attempts a LEFT JOIN attempt_lifecycle l ON l.attempt_id=a.id GROUP BY a.id")?
                 .query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<i64>>(1)?,r.get::<_,Option<i64>>(2)?,r.get::<_,Option<i64>>(3)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            let historical_attempts = db.prepare("SELECT a.id FROM attempts a WHERE NOT EXISTS(SELECT 1 FROM attempt_lifecycle l WHERE l.attempt_id=a.id AND l.state='reserved') AND EXISTS(SELECT 1 FROM events e WHERE e.entity=a.id AND e.kind IN ('attempt.reserved','attempt.changed') AND e.revision=1 AND e.sequence<?1)")?
+                .query_map([epoch], |r| r.get::<_,String>(0))?.collect::<rusqlite::Result<std::collections::BTreeSet<_>>>()?;
+            intervals.retain(|(id, _, end, _)| !historical_attempts.contains(id) && !since.is_some_and(|s| end.is_some_and(|e| e < s)));
             let pending = |at: i64| {
                 let mut unread = std::collections::BTreeSet::new();
                 for (kind, id, time) in &events {
@@ -298,6 +311,10 @@ pub(crate) fn metrics(project: &Path, since: Option<i64>) -> Result<BTreeMap<Str
                 .filter(|(_, _, _, s)| s.is_some_and(|at| at >= first && at <= last))
                 .count();
             out.insert("M86".into(),json!({"value":if missing {unavailable("historical_activity_times_missing")} else {distribution(stretches)},"launches_per_owner_turn":if missing {unavailable("historical_activity_times_missing")} else {ratio(launches,owner_count)},"observation_end_unix_ms":last}));
+            for id in ["M83", "M84", "M86"] {
+                let body = out.get_mut(id).unwrap();
+                body["historical_censored"] = json!({"events":historical_events,"attempts":historical_attempts.len()});
+            }
         }
     }
     for (id, b) in &mut out {
