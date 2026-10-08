@@ -265,7 +265,7 @@ fn prepare_locked(
         kind: definition.kind.clone(),
         definition_digest: digest(&serde_json::to_vec(&definition)?),
         config,
-        arguments_digest: digest(&serde_json::to_vec(&definition.extra_args)?),
+        arguments_digest: digest(&serde_json::to_vec(&crate::profile_config::agent_arguments(&definition.kind, &definition.extra_args))?),
         environment_names: definition.environment.clone(),
         execution_home: Some(
             execution_home

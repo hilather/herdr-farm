@@ -208,7 +208,9 @@ fn model_and_effort_pins_are_profile_fields_that_inspect_shows_and_identity_bind
         let profile: FrozenProfile = serde_json::from_value(prepared["profile"].clone()).unwrap();
         assert_eq!(profile.kind, kind);
         // No passthrough argument carries the pin; the definition identity does.
-        assert_eq!(profile.arguments_digest, "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945", "empty extra_args");
+        let expected_args: Vec<&str> = if kind == "codex" { vec!["--no-daemon"] } else { vec![] };
+        use sha2::{Digest, Sha256};
+        assert_eq!(profile.arguments_digest, format!("{:x}", Sha256::digest(serde_json::to_vec(&expected_args).unwrap())));
         let plain = Lab::pinned(kind, "", version);
         let other: Value = serde_json::from_slice(&plain.profile("prepare", &[]).stdout).unwrap();
         assert_ne!(other["profile"]["definition_digest"], prepared["profile"]["definition_digest"], "the pins are part of the profile identity");
@@ -232,10 +234,7 @@ fn invalid_pins_are_refused_without_echoing_them() {
     }
 }
 
-/// Real public native probe: delayed detector evidence, live argv title races,
-/// and sanitized persisted failures inspected in a separate CLI process.
-fn readiness_scenario(mode: &str, delay: u64, wall: u64, failure_class: Option<&str>) {
-    let lab = Lab::new("[]");
+fn setup_readiness_lab(lab: &Lab, mode: &str, delay: u64, wall: u64) {
     let config = fs::read_to_string(&lab.config).unwrap().replace("kind='claude'", "kind='codex'")
         .replace("max_wall_seconds=60", &format!("max_wall_seconds={wall}"));
     let config = format!("{config}\n[worker_isolation]\nshare_login=false\n");
@@ -248,6 +247,57 @@ fn readiness_scenario(mode: &str, delay: u64, wall: u64, failure_class: Option<&
     let compiled = Command::new("/usr/bin/cc").args(["-O0", "-o"]).arg(lab.path("claude"))
         .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/probe_readiness_agent.c")).output().unwrap();
     assert!(compiled.status.success(), "{}", String::from_utf8_lossy(&compiled.stderr));
+}
+
+#[test]
+fn codex_shared_home_survives_root_owner_root_with_a_stale_daemon_link() {
+    let lab = Lab::new("[]");
+    setup_readiness_lab(&lab, "h", 0, 120);
+    let control = lab.path("agent-home/.codex/app-server-control");
+    fs::create_dir_all(&control).unwrap();
+    let link = control.join("app-server-control.sock");
+    std::os::unix::fs::symlink("/tmp/codex-daemon-0/old-session", &link).unwrap();
+    let base = fs::read_to_string(&lab.config).unwrap();
+    for identity in ["root", "owner", "root"] {
+        fs::write(&lab.config, format!("{base}\n[safety.{}]\nworker_uid='{identity}'\n",
+            serde_json::to_string(lab.project.to_str().unwrap()).unwrap())).unwrap();
+        let result = lab.profile("verify-native", &[]);
+        if let Ok(diagnostic) = fs::read_to_string(lab.path("socket-error")) {
+            panic!("{diagnostic}");
+        }
+        assert!(result.status.success(), "{identity}: {}", String::from_utf8_lossy(&result.stderr));
+        assert_eq!(fs::read_link(&link).unwrap(), PathBuf::from("/tmp/codex-daemon-0/old-session"));
+    }
+    let owner = unsafe { libc::geteuid() };
+    if owner == 0 {
+        assert_eq!(fs::read_to_string(lab.path("agent-home/started-0")).unwrap().lines().count(), 3);
+    } else {
+        assert_eq!(fs::read_to_string(lab.path("agent-home/started-0")).unwrap().lines().count(), 2);
+        assert_eq!(fs::read_to_string(lab.path(&format!("agent-home/started-{owner}"))).unwrap().lines().count(), 1);
+    }
+}
+
+#[test]
+fn native_probe_reports_early_agent_exit_and_terminal_reason() {
+    let lab = Lab::new("[]");
+    setup_readiness_lab(&lab, "z", 0, 120);
+    let result = lab.profile("verify-native", &[]);
+    if let Ok(diagnostic) = fs::read_to_string(lab.path("socket-error")) {
+        panic!("{diagnostic}");
+    }
+    assert!(!result.status.success());
+    let text = String::from_utf8_lossy(&result.stderr);
+    assert!(text.contains("native probe agent exited before readiness"), "{text}");
+    assert!(text.contains("File exists (os error 17)"), "{text}");
+    let record = lab.ok(&["profile", "inspect", "worker", "--project", "demo"]);
+    assert!(!record.to_string().contains("File exists"), "raw terminal content must not be persisted");
+}
+
+/// Real public native probe: delayed detector evidence, live argv title races,
+/// and sanitized persisted failures inspected in a separate CLI process.
+fn readiness_scenario(mode: &str, delay: u64, wall: u64, failure_class: Option<&str>) {
+    let lab = Lab::new("[]");
+    setup_readiness_lab(&lab, mode, delay, wall);
     let result = lab.profile("verify-interaction", &[]);
     if let Ok(diagnostic) = fs::read_to_string(lab.path("socket-error")) {
         panic!("{diagnostic}");

@@ -511,7 +511,7 @@ fn verify_prepared(
     let isolation = crate::profile_config::share_login(isolation, profile, execution_home)?;
     let argv = crate::worker_supervision::isolated_gated_command(
         Path::new(&profile.agent.path),
-        &definition.extra_args,
+        &crate::profile_config::agent_arguments(&profile.kind, &definition.extra_args),
         wall,
         &token,
         execution_home,
@@ -619,6 +619,7 @@ fn verify_prepared(
     ensure!(sent["type"] == "ok", "uncertain native probe gate release");
     loop {
         check(deadline, &cancellation)?;
+        check_early_exit(&api, &observation, pane)?;
         if let Ok(process) =
             observation.agent_process(Path::new(&profile.agent.path), &profile.arguments_digest)
         {
@@ -631,8 +632,7 @@ fn verify_prepared(
                     && native["cwd"] == json!(cwd),
                 "native probe terminal changed"
             );
-            if native["agent"].as_str() == Some(profile.kind.as_str()) {
-                process.check()?;
+            if native["agent"].as_str() == Some(profile.kind.as_str()) && process.check().is_ok() {
                 break;
             }
         }
@@ -737,6 +737,21 @@ pub(super) fn apply_evidence(preparation: &mut ProfilePreparation, evidence: &Na
     Ok(())
 }
 
+/// Read terminal diagnostics only after the retained pidfds prove termination.
+/// This tail is returned to the invoking operator, never retained in telemetry.
+fn check_early_exit(api: &Api<'_>, observation: &SupervisorObservation, pane: &str) -> Result<()> {
+    if !observation.namespace_exited()? {
+        return Ok(());
+    }
+    let screen = api.call("pane.read", json!({"pane_id":pane,"source":"visible"})).ok();
+    let text = screen.as_ref().and_then(|s| s["text"].as_str()).unwrap_or("terminal diagnostics unavailable");
+    let lines = text.lines().rev().take(12).collect::<Vec<_>>();
+    let tail = lines.into_iter().rev().collect::<Vec<_>>().join("\n");
+    let tail = tail.chars().rev().take(2048).collect::<Vec<_>>().into_iter().rev()
+        .map(|c| if c.is_control() && c != '\n' && c != '\t' { ' ' } else { c }).collect::<String>();
+    anyhow::bail!("native probe agent exited before readiness; last terminal output (including stderr):\n{tail}");
+}
+
 fn ready(api: &Api<'_>, route: &RuntimeRoute, terminal: &str) -> Result<String> {
     fn agent(api: &Api<'_>, route: &RuntimeRoute, terminal: &str) -> Result<()> {
         let result = api.call("agent.list", json!({}))?;
@@ -821,6 +836,7 @@ fn verify_prompt(
             return Err(ReadinessFailure { observation: readiness_failure, categories,
                 class: if api.cancellation.is_cancelled() { "cancelled" } else { "transient_readiness" } }.into());
         }
+        check_early_exit(api, observation, &route.pane_id)?;
         let process_ready = match observation.agent_process(Path::new(&api.profile.agent.path), &api.profile.arguments_digest)
             .and_then(|process| process.check()) {
             Ok(()) => true,
@@ -839,6 +855,7 @@ fn verify_prompt(
                 false
             }
             Err(error) => {
+                check_early_exit(api, observation, &route.pane_id)?;
                 let class = if error.chain().any(|cause| {
                     let message = cause.to_string();
                     message == "agent process changed: executable mismatch"

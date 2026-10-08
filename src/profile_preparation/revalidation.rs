@@ -122,7 +122,7 @@ fn evidence_shape(report: &Report, now: i64) -> Result<()> {
 
 fn derivation(report: &Report) -> Result<()> {
     let retained = &report.preparation;
-    ensure!(retained.profile.arguments_digest == digest(&serde_json::to_vec(&Vec::<String>::new())?)
+    ensure!(retained.profile.arguments_digest == digest(&serde_json::to_vec(&crate::profile_config::agent_arguments(&retained.profile.kind, &[]))?)
         && retained.profile.environment_names.is_empty(), "unverified native argument or environment mapping");
     let mut profile = retained.profile.clone();
     profile.workflow_certificate = None;

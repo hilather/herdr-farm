@@ -3,15 +3,40 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <errno.h>
+#include <sys/stat.h>
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--version")) {
         puts("codex-cli 0.154.0"); return 0;
     }
     /* After the arguments-change exec, remain stable for identity observation. */
-    if (argc > 1) for (;;) pause();
+    int no_daemon = argc == 2 && !strcmp(argv[1], "--no-daemon");
+    if (argc > 1 && !no_daemon) for (;;) pause();
     FILE *mode = fopen("../mode", "r");
     int mutation = mode ? fgetc(mode) : '0';
     if (mode) fclose(mode);
+    if (mutation == 'z') {
+        fputs("app server did not become ready: Error: File exists (os error 17)\n", stderr);
+        return 17;
+    }
+    if (mutation == 'h') {
+        const char *home = getenv("HOME");
+        char directory[4096], link[4096], target[128], started[4096];
+        snprintf(directory, sizeof directory, "%s/.codex/app-server-control", home);
+        mkdir(directory, 0700);
+        snprintf(link, sizeof link, "%s/app-server-control.sock", directory);
+        snprintf(target, sizeof target, "/tmp/codex-daemon-%u/fixture", (unsigned)geteuid());
+        if (!no_daemon && symlink(target, link) != 0) {
+            perror("daemon control link: File exists");
+            return 17;
+        }
+        snprintf(started, sizeof started, "%s/started-%u", home, (unsigned)geteuid());
+        FILE *record = fopen(started, "a");
+        if (!record) return 18;
+        fprintf(record, "started\n");
+        fclose(record);
+        mutation = '0';
+    }
     if (mutation == 'w') {
         /* Nothing inside the worker sandbox is guaranteed writable (on CI the
            probe home and working directory are read-only), so the re-exec
@@ -21,7 +46,7 @@ int main(int argc, char **argv) {
             /* Match the released sandbox wrapper's public process identity,
                then restore the exact agent argv by exec in the same child. */
             execl("/bin/sh", "/bin/sh", "-c",
-                ": probe-fixture-wrapper; sleep 2; PROBE_FIXTURE_WRAPPED=1 exec \"$1\"",
+                ": probe-fixture-wrapper; sleep 2; PROBE_FIXTURE_WRAPPED=1 exec \"$1\" --no-daemon",
                 "herdr-farm-worker-sandbox", argv[0], (char *)NULL);
             return 3;
         }
