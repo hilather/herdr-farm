@@ -30,7 +30,7 @@ while True:
     if method == 'ping':
         result = dict(type='pong', version='0.9.1', capabilities=dict(workspace_create_command=True))
     elif method == 'workspace.create_command':
-        child = subprocess.Popen(params['command'], cwd=params['cwd'], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True, env={'PATH': '/usr/bin:/bin'})
+        child = subprocess.Popen(params['command'], cwd=params['cwd'], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=open(os.path.join(os.path.dirname(__file__), 'child-stderr'), 'wb'), start_new_session=True, env={'PATH': '/usr/bin:/bin'})
         s.update(child=child, argv=params['command'], cwd=params['cwd'])
         result = dict(type='workspace_created', workspace=dict(workspace_id='w', pane_count=1), root_pane=dict(pane_id='w:p'))
     elif method == 'pane.get':
@@ -44,6 +44,16 @@ while True:
             deadline = time.monotonic() + 10
             while not os.path.exists(os.path.join(s['cwd'], 'setup-pending')):
                 if time.monotonic() >= deadline:
+                    here = os.path.dirname(__file__)
+                    def read(name):
+                        try:
+                            return open(name, 'rb').read()[-2000:].decode(errors='replace')
+                        except OSError as error:
+                            return 'unreadable: ' + error.strerror
+                    with open(os.path.join(here, 'socket-error'), 'w') as diagnostic:
+                        diagnostic.write('setup wrapper did not start within 10 s; child exit=%r; mode=%r; cwd=%r; stderr=%r' % (
+                            s['child'].poll(), read(os.path.join(s['cwd'], '..', 'mode')),
+                            sorted(os.listdir(s['cwd'])) if os.path.isdir(s['cwd']) else 'missing', read(os.path.join(here, 'child-stderr'))))
                     raise RuntimeError('setup wrapper did not start')
                 time.sleep(0.01)
         s['released'] = time.monotonic()
