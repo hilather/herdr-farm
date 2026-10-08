@@ -360,6 +360,11 @@ pub fn apply(project:&Path,plan:&Plan,writers_stopped:bool)->Result<Journal> {
 
 /// Only a never-published skeleton may bypass the global ticker maintenance lock.
 pub fn initialize_new(project: &Path, config: &Path) -> Result<Journal> {
+    initialize_new_with_memory(project, config, |_| Ok(()))
+}
+
+/// Finish memory setup while the empty project remains unpublished.
+pub fn initialize_new_with_memory(project: &Path, config: &Path, memory: impl FnOnce(&Path) -> Result<()>) -> Result<Journal> {
     ensure!(fs::symlink_metadata(project.join(".creating"))?.file_type().is_file(), "regular new project creation marker required");
     let project=checked_project(project)?;
     let _maintenance=Maintenance::runtime(&project)?;
@@ -368,6 +373,7 @@ pub fn initialize_new(project: &Path, config: &Path) -> Result<Journal> {
         && plan.sources.iter().all(|s| matches!(s.path.as_str(), ".state/project.json"|"PROJECT.md"|"TASKS.md"|"MEMORY.md")),
         "new project initialization requires an untouched empty skeleton; use legacy migration for existing state");
     let journal=apply_locked(&project,&plan)?;
+    memory(&project)?;
     fs::remove_file(project.join(".creating"))?; sync_dir(&project)?;
     Ok(journal)
 }

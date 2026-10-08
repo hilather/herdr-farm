@@ -115,6 +115,14 @@ cannot record a row. Production launch dispatch remains disabled.
 
 ## Owner-approved Markdown adoption
 
+New canonical projects install the same owner-signed `sqlite-v1` memory policy
+as empty-project adoption before publication, without a ticker quiet window.
+`MEMORY.md` remains the owner’s index and `memory PROJECT record` works immediately.
+If the automatic owner signer is unavailable, `new` retains `legacy-markdown`
+and prints the later `memory PROJECT adopt` command. Existing projects and
+`new --legacy` retain their current behavior; adoption of existing projects still
+requires its normal maintenance barrier.
+
 `herdr-farm memory PROJECT adopt --dry-run` reports every planned constraint,
 retained index, excluded candidate and refusal. `memory PROJECT adopt` signs the
 exact adoption plan and cutover document in `memory@herdr-projects`, using the

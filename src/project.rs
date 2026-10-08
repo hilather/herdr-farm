@@ -590,7 +590,7 @@ pub fn create_canonical(root: &Path, config_dir: &Path, name: &str, goal: &str, 
     {
         herdr_farm::owner_setup::prepare(config_dir)?;
         let project = create_skeleton(root, name, goal, repos, true)?;
-        herdr_farm::migration::initialize_new(&project.dir(), &std::path::absolute(config_dir.join("config.toml"))?)?;
+        herdr_farm::migration::initialize_new_with_memory(&project.dir(), &std::path::absolute(config_dir.join("config.toml"))?, |dir| crate::launch_run::initialize_memory(config_dir, dir))?;
         Ok(project)
     }
 }

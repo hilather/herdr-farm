@@ -31,6 +31,15 @@ Signature namespaces ending in `@herdr-projects`, internal persisted job ids, wo
 New projects use canonical SQLite storage by default and must be created at
 their final path. Canonical stores pin absolute paths and refuse relocation;
 renaming the product or changing config selection does not move a store.
+
+New canonical projects install the same owner-signed `sqlite-v1` memory policy
+as empty-project adoption before publication, without a ticker quiet window.
+`MEMORY.md` remains the owner’s index and `memory PROJECT record` works immediately.
+If the automatic owner signer is unavailable, `new` retains `legacy-markdown`
+and prints the later `memory PROJECT adopt` command. Existing projects and
+`new --legacy` retain their current behavior; adoption of existing projects still
+requires its normal maintenance barrier.
+
 Use `new --legacy NAME` if you need the legacy project format.
 An interrupted `new` retains `.creating`; after confirming no creation command
 is running, remove that directory and recreate it at the intended final path.

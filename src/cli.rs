@@ -222,7 +222,7 @@ enum MemoryCommand {
     Inspect,
     /// Record an explicit owner decision using the automatic owner signer
     Record { #[arg(long)] title:String, #[arg(long)] provenance:String, #[arg(long)] body_file:PathBuf },
-    /// Import owner-approved Markdown decisions and switch memory authority
+    /// Adopt existing Markdown memory (new SQLite projects set this up when a signer is available)
     Adopt { #[arg(long)] dry_run:bool, #[arg(long)] sign_with:Option<PathBuf> },
     /// List canonical Remember candidates (untrusted evidence)
     List,
@@ -377,7 +377,7 @@ enum Command {
         #[command(subcommand)]
         command: RepairCommand,
     },
-    /// Create a project folder with its skeleton files
+    /// Create a SQLite project with owner-signed memory when a signer is available
     New {
         /// Create a legacy Markdown project instead of the default SQLite project
         #[arg(long)]

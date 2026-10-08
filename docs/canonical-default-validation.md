@@ -8,11 +8,20 @@ maintenance. Only the four-file empty skeleton is accepted by this path; existin
 legacy migration retains its original global locking protocol.
 
 The existing migration journal/advance implementation publishes the schema,
-format, active journal, config pin and paused control. Memory authority remains
-`legacy-markdown`, as with a migrated empty project. The creation marker is
+format, active journal, config pin and paused control. Creation then sets up
+owner-signed memory when the automatic signer is available. The creation marker is
 excluded from provenance and removed only after publication. Listing and doctor
 report creating projects; ticker scans and open leave them inert. Interrupted
 creation is explicitly removed and recreated after confirming no creator remains.
+
+New canonical projects install the same owner-signed `sqlite-v1` memory policy
+as empty-project adoption before publication, without a ticker quiet window.
+`MEMORY.md` remains the owner’s index and `memory PROJECT record` works immediately.
+If the automatic owner signer is unavailable, `new` retains `legacy-markdown`
+and prints the later `memory PROJECT adopt` command. Existing projects and
+`new --legacy` retain their current behavior; adoption of existing projects still
+requires its normal maintenance barrier.
+
 `new --legacy` retains legacy creation.
 
 First-run owner setup generates Ed25519 approval keys through gated ssh-keygen,
@@ -135,3 +144,57 @@ stand-in's server branch in a disposable lab confirmed its `AF_UNIX` bind exits
 with `PermissionError: [Errno 1] Operation not permitted`. No sandbox workaround
 was attempted. These workflows require the steward's unrestricted rerun.
 There are no remaining real failures in the final runs.
+
+## NEW-MEMORY-DEFAULT-1 validation (2026-10-07)
+
+Canonical creation now signs the empty memory adoption plan and cutover policy
+with the automatic owner signer before removing `.creating`. It uses the existing
+project barrier, memory policy, backup and recovery receipts; no schema changes
+or root ticker lock are needed. Signer discovery failure preserves Markdown
+memory and prints the later adoption command. Existing adoption retains its
+maintenance barrier.
+
+The CLI workflow in `tests/projects.rs` verifies SQLite authority and its policy,
+doctor output, immediate owner recording, retained index bytes, creation under a
+held ticker lock, missing-signer fallback, later adoption and unchanged legacy
+creation. All seven project tests passed. Memory barriers (6), read sets (4) and
+regressions (15) passed. Memory control passed 12 initially; the remaining test,
+`proposal_review_requires_signed_exact_scope_and_promotion_rechecks_authority`,
+expired its fixture's 60-second authorization under load and passed its isolated
+rerun. The full operator suite passed 25 of 35, including both existing-memory
+adoption tests and canonical owner recording.
+
+All cargo commands used `TMPDIR=$PWD/target/tmp`, `nice -n 19 ionice -c 3`,
+`--locked --offline -j 3`. State-store clippy with `--all-targets` completed
+successfully with existing warnings and no warnings on changed lines. No
+repo-wide formatting, live services, owner agent data or canonical schema were
+changed.
+
+Socket-limited operator tests requiring a run outside this hard sandbox:
+
+- `canonical_worker_viewers_create_reopen_focus_and_close_only_the_recorded_tab`
+- `code_launch_passes_only_selected_toolchain_environment_to_the_worker`
+- `launch_run_retries_after_termination_but_refuses_an_unobserved_live_worker`
+- `launch_run_with_a_dedicated_server_after_verify_interaction_reserves_both_kinds`
+- `stale_profile_evidence_is_refreshed_by_launch_run`
+- `verify_interaction_produces_launchable_evidence_for_codex_and_claude_from_the_cli`
+- `verify_interaction_tolerates_agents_writing_into_their_execution_home`
+
+The viewer and termination tests directly report `Operation not permitted` at
+Unix-listener binding. The five profile-probe tests report `native probe server
+exited`; their local Herdr fixture binds a Unix listener before serving probes.
+These were not worked around.
+
+Three additional operator failures in the full concurrent run passed on isolated
+reruns, with no code or fixture changes:
+
+- `contracted_launch_starts_at_an_unchecked_out_base_and_captures_only_worker_changes`:
+  worktree Git execution failure/output-budget refusal.
+- `code_launch_reserves_under_concurrent_writes_and_submits_all_scoped_changes`:
+  transient root execution-lock contention at profile evidence.
+- `launch_run_reacknowledges_an_owner_configuration_edited_since_control_was_activated`:
+  a matching observation had become stale.
+
+Thus all non-socket checks passed, including isolated reruns of the load-sensitive
+failures. The seven socket-limited workflows remain for the steward outside the
+sandbox; the new memory defaults and existing-memory adoption paths are verified.
