@@ -70,7 +70,7 @@ pub(crate) fn read_pane_bindings(project:&Path,pane:&str,budget:&mut Budget)->Re
     crate::store::identity_inventory::read_pane_bindings(&project.join(".state/state.db"),&publication,budget,pane)
 }
 /// Local worktree references plus malformed machine/path identities. Retained
-/// nonempty paths remain references until ownership has a release receipt.
+/// nonempty paths remain references regardless of task/attempt terminal state.
 pub(crate) fn read_worktree_bindings(project:&Path,budget:&mut Budget)->Result<Vec<RuntimeBinding>> {
     budget.reader("worktree binding inventory",&project.join(".state/state.db"));
     let(project,publication)=publication(project,budget)?;
@@ -88,8 +88,7 @@ pub fn read_launch_target_inventory(project:&Path,budget:&mut Budget)->Result<Ve
     crate::store::identity_inventory::read_launch_targets(&project.join(".state/state.db"),&publication,budget)
 }
 /// Historical worktree paths remain references even when receipt publication
-/// failed or the attempt stopped without a release receipt. Filesystem absence
-/// is not a release receipt. Terminated, durably released launches are excluded.
+/// failed or the attempt stopped. Filesystem absence is not a release receipt.
 pub fn read_worktree_inventory(project:&Path,budget:&mut Budget)->Result<Vec<(String,crate::domain::WorktreePlan)>> {
     budget.reader("worktree inventory",&project.join(".state/state.db"));
     let(project,publication)=publication(project,budget)?;
