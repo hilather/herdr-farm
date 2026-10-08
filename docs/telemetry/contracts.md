@@ -624,6 +624,13 @@ S6 refinements:
   `adapter_absent` (terminated non-Codex) and `incomplete` by first failing
   reason: `not_bound`, `quarantined`, `cli_version_uncertified`,
   `records_not_accepted` (a source's `records` ≠ its accepted rows).
+- Current quota headroom uses only the newest started window per account,
+  limit id, kind and duration (latest observation breaks equal-start ties).
+  Provider early resets supersede older windows before their nominal reset;
+  history remains available in `accounting quota`, alongside a per-account
+  `current_windows` list.
+  Health exposes the selected reading's age and retains `not_certified`
+  semantics. See contracts-accounting.md §5.
 - M40 is the extended form of `accounting quota` (contracts-accounting.md
   §5): `definition` `M40.quota-windows-v2`, `stale_after_ms` 900000,
   `decisions` in attempt order, each `{attempt_id, decided_unix_ms, service,
