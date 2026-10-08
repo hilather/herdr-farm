@@ -13,16 +13,18 @@ int main(int argc, char **argv) {
     int mutation = mode ? fgetc(mode) : '0';
     if (mode) fclose(mode);
     if (mutation == 'w') {
-        mode = fopen("../mode", "w");
-        if (!mode) return 2;
-        fputs("0", mode);
-        fclose(mode);
-        /* Match the released sandbox wrapper's public process identity,
-           then restore the exact agent argv by exec in the same child. */
-        execl("/bin/sh", "/bin/sh", "-c",
-            "touch setup-pending; sleep 2; exec \"$1\"",
-            "herdr-farm-worker-sandbox", argv[0], (char *)NULL);
-        return 3;
+        /* Only the working directory is guaranteed writable inside the worker
+           sandbox (the home may be read-only), so the wrapper's own marker
+           records that it already ran instead of rewriting ../mode. */
+        if (access("setup-pending", F_OK) != 0) {
+            /* Match the released sandbox wrapper's public process identity,
+               then restore the exact agent argv by exec in the same child. */
+            execl("/bin/sh", "/bin/sh", "-c",
+                "touch setup-pending; sleep 2; exec \"$1\"",
+                "herdr-farm-worker-sandbox", argv[0], (char *)NULL);
+            return 3;
+        }
+        mutation = '0';
     }
     /* Wait until the public readiness request proves initial identity passed. */
     while (access("readiness-started", F_OK) != 0) usleep(10000);
