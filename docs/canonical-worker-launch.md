@@ -1100,7 +1100,7 @@ An active attempt retains its write claims. A conflicting launch reports
 on one line, including the conflicting paths and holding task/attempt, so filters
 for `refused` or `error` retain the cause. Resolve the conflicting work before retrying.
 
-### Conflict inventory bounds and released history
+### Conflict inventory bounds
 
 Root-wide ownership checks (including `open --reprime`) and worker pane/worktree
 allocation share a ceiling of 16,384 candidate records, 50 MiB of charged input,
@@ -1112,29 +1112,15 @@ retained plan consume records separately. Root enumeration remains bounded to
 1,024 entries and legacy thread enumeration to 256 entries per project. Errors
 identify the reader, project and consumed record/byte count.
 
-Launch workspace, target and worktree creation conflict references retire only
-when their linked attempt has `termination_observed=1` and their operation has a
-`runtime.launch_release` event. A stopped attempt without that receipt, a released
-attempt without observed termination, and missing attempt/input provenance remain
-conflict evidence. Filesystem absence never establishes release. Exact-operation
-worktree reads still retain the complete history for verification and recovery.
-A binding retires when its current ownership generation belongs to a terminated,
-released launch with no uncertain attempt for the task, or after explicit
-`runtime.relinquished` evidence for that binding revision with no remaining
-ownership or uncertain task attempt. Later binding revisions remain references.
+`runtime.launch_release` records the start-gate release that lets the agent begin,
+not a resource release. Workspace history and bindings remain conflict references;
+started, terminated launch targets retain the existing eligibility rules and
+pane reads use the retained launch-resource projection. Retiring finished launch
+history requires a real close/release signal and is follow-up work (LAUNCH-BUDGET-1).
+No canonical schema, backup or retention classification changes are made.
 
-Schema 43's `retained_launch_resources` table uses an older eligibility rule:
-workspace history is retained and started, terminated targets may be omitted
-without a release receipt. Conflict readers therefore select pane candidates
-from indexed events and apply the same receipt rule as the root-wide reader;
-the historical table is not authoritative for conflict eligibility. Its existing
-maintenance remains backward compatible. The existing event entity/kind and
-pane expression indexes support these reads; no new index or canonical schema
-migration is required. Retained events, backup and retention classifications
-remain unchanged.
-
-E2E coverage uses two isolated published projects with more than 1,024 historical
-launches, checks live and uncertain pane conflicts, verifies revision-scoped
-relinquishment through the public store API, and extends the public coordinator
-reprime and worktree preparation workflows. The latter two need local Unix
-sockets and must run outside sandboxes that forbid binding them.
+E2E coverage uses two isolated published projects with more than 1,024 terminated
+launches that remain counted, checks live pane conflicts and shared-budget errors,
+and extends the public coordinator reprime and worktree preparation workflows.
+The latter two need local Unix sockets and must run outside sandboxes that forbid
+binding them.
