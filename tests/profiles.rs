@@ -258,7 +258,7 @@ fn readiness_scenario(mode: &str, delay: u64, wall: u64, failure_class: Option<&
             let proof: Value = serde_json::from_slice(&result.stdout).unwrap();
             assert_eq!(proof["preparation"]["launchable"], true);
             if mode == "w" {
-                assert!(lab.path("agent-home/.hp-verify-work/setup-pending").exists(),
+                assert!(lab.path("wrapper-observed").exists(),
                     "setup wrapper must have run");
             }
             assert!(lab.ok(&["profile", "inspect", "worker", "--project", "demo"])["probe_failures"].as_array().unwrap().is_empty());

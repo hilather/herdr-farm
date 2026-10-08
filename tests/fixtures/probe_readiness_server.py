@@ -42,7 +42,18 @@ while True:
         s['child'].stdin.flush()
         if open(os.path.join(os.path.dirname(__file__), 'setup-delay')).read() == 'true':
             deadline = time.monotonic() + 8  # inside the probe's 10 s request timeout
-            while not os.path.exists(os.path.join(s['cwd'], 'setup-pending')):
+            def wrapper_running():
+                # The wrapper runs inside the worker sandbox, where nothing is
+                # guaranteed writable; observe it from the host instead.
+                for entry in os.listdir('/proc'):
+                    if entry.isdigit():
+                        try:
+                            if b'probe-fixture-wrapper' in open('/proc/%s/cmdline' % entry, 'rb').read():
+                                return True
+                        except OSError:
+                            pass
+                return False
+            while not wrapper_running():
                 if time.monotonic() >= deadline:
                     here = os.path.dirname(__file__)
                     def read(name):
@@ -56,6 +67,7 @@ while True:
                             sorted(os.listdir(s['cwd'])) if os.path.isdir(s['cwd']) else 'missing', read(os.path.join(here, 'child-stderr'))))
                     raise RuntimeError('setup wrapper did not start')
                 time.sleep(0.01)
+            open(os.path.join(os.path.dirname(__file__), 'wrapper-observed'), 'w').close()
         s['released'] = time.monotonic()
     elif method == 'agent.list':
         result = dict(type='agent_list', agents=[agent])
