@@ -42,6 +42,12 @@ pub(crate) fn read_attempt_input(db:&Connection,attempt:&str,budget:Option<&read
     Ok(record)
 }
 impl SqliteStore {
+    /// Imported historical attempts without sealed launch inputs used root.
+    pub(crate) fn attempt_worker_uid(&self, attempt: &str) -> Result<Option<(u32, u32)>> {
+        let sealed: bool = self.connection.query_row("SELECT EXISTS(SELECT 1 FROM attempt_inputs WHERE attempt_id=?1)", [attempt], |row| row.get(0))?;
+        if !sealed { return Ok(None); }
+        Ok(self.sealed_attempt_input(attempt, None)?.inputs.worker_uid)
+    }
     pub(crate) fn sealed_attempt_input(&self,attempt:&str,budget:Option<&read_budget::ReadBudget>)->Result<AttemptInputRecord> {
         read_attempt_input(&self.connection,attempt,budget)
     }

@@ -791,11 +791,12 @@ fn policies_pass(
     let toolchains = verified.policies.iter().map(|(_, body)| verification::toolchains::for_policy(project, body.as_bytes())).collect::<Result<Vec<_>>>()?;
     let lease_ms = toolchains.iter().map(|r| verification::toolchains::timeout(r.as_ref(), POLICY_TIMEOUT).as_millis() as i64).sum::<i64>() + if toolchains.iter().any(Option::is_some) { 90_000 } else { 30_000 };
     let claim = store.extend_integration_lease(&claim, lease_ms, now_ms())?;
+    let worker_uid = store.integration_worker_uid(&verified.result_id)?;
     let run = || -> Result<(Vec<(String, String, bool)>, bool)> {
         let mut checks = Vec::new();
         let mut all = !verified.policies.is_empty();
         for (index, (policy_id, body)) in verified.policies.iter().enumerate() {
-            let passed = check_passes(work, checkout, index, body, verification::toolchains::timeout(toolchains[index].as_ref(), POLICY_TIMEOUT), commit, tree, toolchains[index].as_ref(), Path::new(&verified.repository))?;
+            let passed = check_passes(work, checkout, index, body, verification::toolchains::timeout(toolchains[index].as_ref(), POLICY_TIMEOUT), commit, tree, toolchains[index].as_ref(), Path::new(&verified.repository), worker_uid)?;
             checks.push((policy_id.clone(), format!("{:x}", Sha256::digest(body.as_bytes())), passed));
             if !passed {
                 all = false;
@@ -849,6 +850,7 @@ fn check_passes(
     tree: &str,
     toolchain: Option<&verification::toolchains::Resolved>,
     repository: &Path,
+    worker_uid: Option<(u32, u32)>,
 ) -> Result<bool> {
     crate::self_executable::real_path()?;
     let checks = match parse_checks(body.as_bytes()) {
@@ -864,6 +866,7 @@ fn check_passes(
     let policy_digest = format!("{:x}", Sha256::digest(body.as_bytes()));
     // The child copies the candidate checkout into its tmpfs. Do not point it at the host branch.
     let launch = supervise::launch(&supervise::Spec {
+        worker_uid,
         unshare_program: unshare,
         timeout,
         checkout: checkout.to_path_buf(),

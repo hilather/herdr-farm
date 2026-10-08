@@ -3455,3 +3455,135 @@ fn the_server_sweep_spares_a_queued_task_without_an_attempt() {
     lab.run_quiet(4);
     assert!(dir.join("server.json").is_file(), "the queued task's server record was retired: {}", fs::read_to_string(lab.path("root/.ticker.log")).unwrap_or_default());
 }
+
+// Real worker and acceptance commands, with the policy changed only after the
+// worker has started. Both directions must retain the original mapping.
+#[test]
+fn worker_uid_default_root_and_verification_stay_frozen() {
+    worker_uid_workflow(false);
+}
+
+#[test]
+fn worker_uid_owner_and_verification_stay_frozen_with_mounts_enforced() {
+    worker_uid_workflow(true);
+}
+
+fn worker_uid_workflow(owner: bool) {
+    let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+    let host = Command::new("/usr/bin/id").arg("-u").output().unwrap();
+    let uid = String::from_utf8(host.stdout).unwrap().trim().parse::<u32>().unwrap();
+    assert_ne!(uid, 0, "this lab requires a regular owner uid");
+    let expected = if owner { uid } else { 0 };
+    let hidden = lab.path("secret-dir/secret");
+    plant(&hidden, "HIDDEN-SENTINEL");
+    let read_only = lab.repo.join("owner-read-only");
+    plant(&read_only, "READ-ONLY-SENTINEL");
+    let checker = lab.path("bin/uid-check");
+    let source = lab.path("uid-check.rs");
+    fs::write(&source, r#"
+use std::{fs,process::Command};
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let out = Command::new("/usr/bin/id").arg("-u").output().unwrap();
+    assert!(out.status.success());
+    let uid = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(uid.trim(), args[1]);
+    if uid.trim() != "0" { assert!(fs::read_dir("/proc/1/fd").is_err(), "private supervisor descriptors exposed"); }
+    assert!(fs::read(&args[2]).is_err(), "host secret exposed");
+    assert_eq!(fs::read_to_string(&args[3]).unwrap(), "READ-ONLY-SENTINEL");
+    assert!(fs::write(&args[3], "overwrite").is_err(), "toolchain input was writable");
+    assert_eq!(fs::read_to_string("work.txt").unwrap(), "uid workflow\n");
+    println!("VERIFICATION-UID={}", uid.trim());
+}
+"#).unwrap();
+    assert!(Command::new("rustc").args(["--edition", "2021", "-o"]).arg(&checker).arg(&source).status().unwrap().success());
+    let config = lab.path(".config/herdr-farm/config.toml");
+    let original = fs::read_to_string(&config).unwrap();
+    let mode = if owner { "owner" } else { "root" };
+    let settings = format!("{original}\n[worker_isolation]\nhide=[{:?}]\n[verification.toolchains.uid]\npaths=[{:?}, '/usr/bin/id', {:?}]\nnetwork=false\ntimeout_seconds=30\n[safety.{:?}]\nworker_uid={mode:?}\n",
+        hidden.parent().unwrap().display().to_string(), checker.display().to_string(), read_only.display().to_string(), lab.project.canonicalize().unwrap().display().to_string());
+    let settings = if owner { settings } else { settings.replace("worker_uid=\"root\"\n", "") };
+    fs::write(&config, &settings).unwrap();
+    lab.resume();
+    let policy = herdr_farm::verification::toolchains::policy(&lab.project, "uid", vec![checker.display().to_string(), expected.to_string(), hidden.display().to_string(), read_only.display().to_string()]).unwrap();
+    lab.install_work_contract_policy("verify_only", &policy);
+    lab.write_agent(r#"
+use std::{fs, process::Command, path::Path, time::Duration};
+fn main() {
+    if std::env::args().nth(1).as_deref()==Some("--version") { println!("2.1.0 (Claude Code)"); return; }
+    let output = std::env::var("HERDR_FARM_WORKER_OUTPUT").unwrap();
+    let output = Path::new(&output);
+    fs::create_dir_all(output).unwrap();
+    let sample = || {
+        let out = Command::new("/usr/bin/id").arg("-u").output().unwrap();
+        assert!(out.status.success());
+        String::from_utf8(out.stdout).unwrap()
+    };
+    assert!(fs::read(HIDDEN).is_err());
+    assert!(fs::write(READ_ONLY, "overwrite").is_err());
+    // Private HOME still maps to this same host owner; Git and token login
+    // remain usable without an in-sandbox chown.
+    fs::write(Path::new(&std::env::var("HOME").unwrap()).join("uid-home"), "ok").unwrap();
+    fs::write("work.txt", "uid workflow\n").unwrap();
+    fs::write(output.join("report.md"), "Uid workflow\n").unwrap();
+    fs::write(output.join("uid-before"), sample()).unwrap();
+    while !output.join("sample-again").exists() { std::thread::sleep(Duration::from_millis(20)); }
+    fs::write(output.join("uid-after"), sample()).unwrap();
+    loop { std::thread::park(); }
+}
+"#, &[("HIDDEN", hidden.display().to_string()), ("READ_ONLY", read_only.display().to_string())]);
+    let (_, attempt) = lab.reserve("Uid mapping workflow");
+    lab.serve();
+    let mut ticker = lab.spawn();
+    let output = lab.project.join(".state/worker-output").join(attempt.as_str());
+    lab.wait(&mut ticker, 120, &|| output.join("uid-before").exists());
+    assert_eq!(fs::read_to_string(output.join("uid-before")).unwrap().trim(), expected.to_string());
+    let replacement = if owner { settings.replace("worker_uid=\"owner\"", "worker_uid=\"root\"") }
+        else { format!("{settings}worker_uid=\"owner\"\n") };
+    fs::write(&config, replacement).unwrap();
+    fs::write(output.join("sample-again"), "go").unwrap();
+    lab.wait(&mut ticker, 120, &|| output.join("uid-after").exists());
+    assert_eq!(fs::read_to_string(output.join("uid-after")).unwrap().trim(), expected.to_string());
+    assert_eq!(fs::read_to_string(&read_only).unwrap(), "READ-ONLY-SENTINEL");
+    assert_eq!(fs::read_to_string(&hidden).unwrap(), "HIDDEN-SENTINEL");
+    drop(ticker);
+    lab.ok(&["runtime", "demo", "state", "active", "--expected-revision", &lab.state().control.unwrap().revision.to_string(), "--expected-head", &lab.head().to_string()]);
+    let captured = lab.ok(&["result", "demo", "submit-captured", attempt.as_str()]);
+    let submission = captured["submission"]["submission_id"].as_str().unwrap();
+    let policy_file = lab.path("uid-policy.json");
+    fs::write(&policy_file, policy).unwrap();
+    let scratch = lab.path("uid-verification");
+    let verified = lab.ok(&["result", "demo", "verify", submission, "--policy-id", "clean", "--policy-file", policy_file.to_str().unwrap(),
+        "--idempotency-key", "uid-verification", "--work-dir", scratch.to_str().unwrap()]);
+    assert_eq!(verified["state"], "accepted", "{verified}");
+    assert!(verified["stdout"].as_str().unwrap().contains(&format!("VERIFICATION-UID={expected}")), "{verified}");
+    let shown = lab.ok(&["result", "demo", "show"]);
+    assert_eq!(shown[0]["verification_runs"][0]["state"], "accepted", "{shown}");
+}
+
+#[test]
+fn owner_uid_policy_is_retained_in_approved_launch_inputs_without_a_server() {
+    let identity = |flag| {
+        let out = Command::new("/usr/bin/id").arg(flag).output().unwrap();
+        assert!(out.status.success());
+        String::from_utf8(out.stdout).unwrap().trim().parse::<u32>().unwrap()
+    };
+    let host = (identity("-u"), identity("-g"));
+    for owner in [false, true] {
+        let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+        let config = lab.path(".config/herdr-farm/config.toml");
+        let original = fs::read_to_string(&config).unwrap();
+        let policy = format!("\n[safety.{:?}]\nworker_uid={:?}\n", lab.project.canonicalize().unwrap().display().to_string(), if owner { "owner" } else { "root" });
+        if owner {
+            fs::write(&config, format!("{original}{policy}")).unwrap();
+            lab.resume();
+        }
+        let (_, attempt) = lab.reserve("Frozen identity workflow");
+        let retained = lab.state().attempt_inputs.into_iter().find(|input| input.attempt == attempt).unwrap();
+        assert_eq!(retained.inputs.worker_uid, owner.then_some(host));
+        if !owner { assert!(serde_json::to_value(&retained.inputs).unwrap().get("worker_uid").is_none()); }
+        fs::write(&config, if owner { original.clone() } else { format!("{original}{policy}").replace("worker_uid=\"root\"", "worker_uid=\"owner\"") }).unwrap();
+        let after = lab.state().attempt_inputs.into_iter().find(|input| input.attempt == attempt).unwrap();
+        assert_eq!(after, retained, "owner config edited a retained attempt");
+    }
+}

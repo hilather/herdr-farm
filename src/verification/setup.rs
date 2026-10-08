@@ -53,6 +53,7 @@ pub(super) fn namespace_is_new(current: Option<&str>, host_mnt: &str) -> bool {
 }
 
 struct Args {
+    worker_uid: Option<(u32, u32)>,
     host_mnt: String,
     checkout: PathBuf,
     policy: PathBuf,
@@ -65,6 +66,7 @@ struct Args {
 
 fn parse_args(args: &[String]) -> Option<Args> {
     let start = args.iter().position(|arg| arg == "verification-setup")? + 1;
+    let mut worker_uid = None;
     let mut host_mnt = None;
     let mut checkout = None;
     let mut policy = None;
@@ -82,6 +84,10 @@ fn parse_args(args: &[String]) -> Option<Args> {
         }
         let value = args.get(index + 1)?;
         match arg.as_str() {
+            "--worker-uid" => {
+                let (uid, gid) = value.split_once(':')?;
+                worker_uid = Some((uid.parse().ok()?, gid.parse().ok()?));
+            }
             "--host-mnt" => host_mnt = Some(value.clone()),
             "--checkout" => checkout = Some(PathBuf::from(value)),
             "--policy" => policy = Some(PathBuf::from(value)),
@@ -94,6 +100,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
         index += 2;
     }
     Some(Args {
+        worker_uid,
         host_mnt: host_mnt?,
         checkout: checkout?,
         policy: policy?,
@@ -120,6 +127,15 @@ fn enter(parsed: &Args) -> i32 {
     {
         return fail("loopback", error);
     }
+    // Keep a private reference to the writable setup proc mount. Checks see
+    // only the read-only proc mounted below; map writes happen before exec.
+    let mapping_proc = if parsed.worker_uid.is_some() {
+        use std::os::unix::fs::OpenOptionsExt;
+        match fs::OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC).open("/proc") {
+            Ok(file) => Some(file),
+            Err(error) => return fail("mapping-proc", error.raw_os_error().unwrap_or(0)),
+        }
+    } else { None };
     let libraries = match Command::new("/usr/bin/ldd").arg(&parsed.git).output_gated() {
         Ok(output) if output.status.success() => {
             super::manifest::parse_ldd(&String::from_utf8_lossy(&output.stdout))
@@ -133,6 +149,13 @@ fn enter(parsed: &Args) -> i32 {
         return fail("root", errno);
     }
     if !drop_privileges() { return fail("drop-privileges", 0); }
+    if mapping_proc.is_some() {
+        // A check must never reopen the parent's private proc descriptor via
+        // /proc/1/fd. A descendant user namespace cannot override this fence.
+        if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 { return fail("mapping-fence", 0); }
+    }
+    use std::os::fd::AsRawFd;
+    let worker_identity = parsed.worker_uid.map(|(uid, gid)| (uid, gid, mapping_proc.as_ref().expect("owner mapping proc").as_raw_fd()));
     let bytes = match fs::read(&parsed.policy) {
         Ok(bytes) => bytes,
         Err(error) => return fail("policy", error.raw_os_error().unwrap_or(0)),
@@ -193,13 +216,13 @@ fn enter(parsed: &Args) -> i32 {
         return EXIT_CHECKS;
     }
     let code = if policy.version == 2 {
-        match super::repetitions::execute(&policy, &parsed.checkout) {
+        match super::repetitions::execute(&policy, &parsed.checkout, worker_identity) {
             Ok(code) => code,
             Err(error) if error.kind() == std::io::ErrorKind::TimedOut => return 78,
             Err(error) => return fail("exec", error.raw_os_error().unwrap_or(0)),
         }
     } else {
-        let status = match super::check_command(&checks[0])
+        let status = match super::check_command(&checks[0], worker_identity)
             .args(&checks[1..])
             .current_dir(&parsed.checkout)
             .stdin(std::process::Stdio::null())

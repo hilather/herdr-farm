@@ -322,6 +322,25 @@ network setting and every path's identity; environment values are not recorded.
 No new storage table is needed: this uses the existing signed policy and bounded
 verification metadata evidence.
 
+Verification and integration rechecks use the attempt's frozen `worker_uid`
+policy from the owner safety configuration, never a fresh project setting.
+Absent/`"root"` preserves the existing verifier command. With `"owner"`, the
+outer namespace retains root for its mounts and root switch; each check,
+stress load and rerun executes through an inner
+user namespace using the sealed host uid/gid, equivalent to
+`unshare --user --map-user=<uid> --map-group=<gid>`. Since its `/proc` is
+read-only, the gated child performs `unshare(CLONE_NEWUSER)` and the map writes
+before exec using a private descriptor to the setup proc mount. That descriptor
+closes before check exec; the supervisor disables dumpability so checks cannot
+reopen it through `/proc/1/fd`. No proc mount becomes writable to checks.
+Recorded argv includes the frozen identity.
+The automatic isolation probe exercises this same mapping and verifies both uid
+and gid before claiming work. Historical imported attempts without sealed launch
+inputs retain root behavior. Nothing gets broader: the inner check namespace
+loses root capabilities at exec, host identity is unchanged, and hidden host
+paths and read-only mounts stay enforced. HOME remains the private `/tmp` for
+toolchain checks; legacy HOME behavior is unchanged.
+
 Commands beginning with `./` resolve within the copied checkout and may not
 traverse outside it. Checks can write only inside that disposable copy and a
 private `/tmp`; the rest of the root and owner tools are read-only. Mount

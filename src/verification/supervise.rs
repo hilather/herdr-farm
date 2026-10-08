@@ -10,6 +10,7 @@ use anyhow::{Context, Result, bail};
 use crate::runner::Cmd;
 
 pub struct Spec {
+    pub worker_uid: Option<(u32, u32)>,
     pub unshare_program: PathBuf,
     pub timeout: Duration,
     pub checkout: PathBuf,
@@ -34,6 +35,10 @@ pub fn launch(spec: &Spec) -> Result<Launch> {
     crate::self_executable::real_path()?;
     if spec.checks.is_empty() || spec.timeout.is_zero() {
         bail!("verification command is empty");
+    }
+    if let Some(identity) = spec.worker_uid {
+        // SAFETY: these calls only read the process identity.
+        anyhow::ensure!(identity == unsafe { (libc::getuid(), libc::getgid()) }, "sealed verifier owner identity differs from the launching process");
     }
     fs::create_dir_all(&spec.scratch).context("verification scratch directory")?;
     let host_mnt = fs::read_link("/proc/self/ns/mnt").context("mount namespace")?;
@@ -70,6 +75,9 @@ pub fn launch(spec: &Spec) -> Result<Launch> {
         "--git".into(),
         "/usr/bin/git".into(),
     ];
+    if let Some((uid, gid)) = spec.worker_uid {
+        args.extend(["--worker-uid".into(), format!("{uid}:{gid}")]);
+    }
     for hidden in &spec.hidden {
         args.extend(["--hidden".into(), hidden.display().to_string()]);
     }

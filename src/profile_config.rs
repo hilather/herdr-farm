@@ -378,3 +378,55 @@ pub fn check_worker_login(profile: &crate::domain::FrozenProfile, project: &std:
     }
     crate::agent_home::check_token_file(&claude_token_file(&config)?, project, std::path::Path::new(""))
 }
+
+/// Owner-only per-project inner user namespace policy. No identity is changed
+/// on the host. None preserves the historical root mapping byte for byte.
+pub fn parse_worker_uid(config: &toml::Value, project: &std::path::Path) -> anyhow::Result<Option<(u32, u32)>> {
+    use anyhow::{Context, bail};
+    let Some(value) = config.get("safety").and_then(|s| s.get(project.to_string_lossy().as_ref())).and_then(|s| s.get("worker_uid")) else { return Ok(None) };
+    match value.as_str().context("worker_uid must be root or owner")? {
+        "root" => Ok(None),
+        // SAFETY: these calls read the process identity and cannot fail.
+        "owner" => Ok(Some(unsafe { (libc::getuid(), libc::getgid()) })),
+        _ => bail!("worker_uid must be root or owner"),
+    }
+}
+
+/// Refuse this owner policy anywhere in PROJECT.md front matter, including
+/// nested safety tables. Workers and coordinators cannot opt themselves in.
+pub fn refuse_project_worker_uid(value: &toml::Value) -> anyhow::Result<()> {
+    if let Some(table) = value.as_table() {
+        anyhow::ensure!(!table.contains_key("worker_uid"), "worker_uid is owner-only; set it in config.toml safety settings");
+        for child in table.values() { refuse_project_worker_uid(child)?; }
+    } else if let Some(array) = value.as_array() {
+        for child in array { refuse_project_worker_uid(child)?; }
+    }
+    Ok(())
+}
+
+/// Capture from the digest-bound owner config before sealing launch inputs.
+#[cfg(feature = "state-store")]
+pub(crate) fn frozen_worker_uid(profile: &crate::domain::FrozenProfile, project: &std::path::Path) -> anyhow::Result<Option<(u32, u32)>> {
+    use sha2::{Digest, Sha256};
+    // No retained owner configuration cannot enable an opt-in. Historical
+    // admissions with an absent config reference preserve root behavior.
+    if profile.config.digest.is_none() { return Ok(None); }
+    let bytes = crate::migration::read_plan_file(std::path::Path::new(&profile.config.path))?;
+    anyhow::ensure!(profile.config.digest.as_deref() == Some(format!("{:x}", Sha256::digest(&bytes)).as_str()), "worker profile configuration changed");
+    let config = toml::from_str(std::str::from_utf8(&bytes)?)?;
+    validate_worker_uid_source(&config, std::path::Path::new(&profile.config.path), project)?;
+    parse_worker_uid(&config, project)
+}
+
+/// A worker/coordinator writable project path is never an owner policy source.
+pub fn validate_worker_uid_source(config: &toml::Value, path: &std::path::Path, project: &std::path::Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    if config.get("safety").and_then(|s| s.get(project.to_string_lossy().as_ref())).and_then(|s| s.get("worker_uid")).is_none() { return Ok(()) }
+    let path = path.canonicalize()?;
+    let meta = std::fs::metadata(&path)?;
+    // SAFETY: geteuid only reads the effective process identity.
+    anyhow::ensure!(!path.starts_with(project.canonicalize()?) && meta.is_file()
+        && meta.uid() == unsafe { libc::geteuid() } && meta.mode() & 0o022 == 0,
+        "worker_uid requires external owner-owned configuration without group/other write access");
+    Ok(())
+}

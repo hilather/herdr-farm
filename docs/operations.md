@@ -975,6 +975,33 @@ Use a regular owner-owned 0600 file outside projects and agent directories.
 The token reaches only the agent environment via an inherited descriptor;
 it is never copied into the home or included in argv.
 
+Owner-only `[safety."<canonical project path>"]` also accepts
+`worker_uid = "root"` (default) or `worker_uid = "owner"`. For example:
+
+```toml
+[safety."/absolute/projects/unreal-t4c"]
+worker_uid = "owner"
+```
+
+Only that project opts in. Unknown values and non-string values refuse.
+`PROJECT.md` cannot supply this setting, including through a nested safety
+table. The config must be an external owner-owned file without group or other
+write access; project-local configuration is refused. `safety show PROJECT`
+reports the effective value. Reprepare the worker profile after changing its
+owner configuration, then create a new launch approval. Existing attempts retain
+the uid/gid captured in their approved launch inputs, including their verification
+and integration checks; a config edit does not change a running attempt.
+No store migration is required: the optional identity uses the existing retained
+launch payload and is omitted for historical/default root attempts.
+
+Nothing gets broader. The outer namespace still maps root for mount setup.
+The inner namespace uses the herdr-farm process's regular host uid/gid and loses
+root capabilities at agent/check exec. Host identity and file ownership are
+unchanged; hidden paths and read-only mounts remain enforced. This supports tools
+such as UnrealEditor-Cmd that refuse uid 0. It does not grant mount, chown, host
+filesystem or network access. Transfers and routine execution keep their existing
+mapping.
+
 Owner-only `[safety."<canonical project path>"]` settings include
 `thread_sandbox = true` (default; false opts out), `thread_wall_hours = 168`
 (between 1 and the seven-day supervisor cap of 168), and `thread_env = ["NAME=VALUE"]`.

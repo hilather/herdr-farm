@@ -117,7 +117,10 @@ fn inputs(
     }
     // The grant covers these exact bindings; a still-blocked dependent is not drafted.
     let dependencies = state.dependencies.clone().context("task dependency is not satisfied; the task is not released")?;
+    let project = proof.store_path().parent().and_then(Path::parent).context("project store has no project")?;
+    let worker_uid = crate::profile_config::frozen_worker_uid(&profile, project)?;
     Ok(LaunchInputs {
+        worker_uid,
         task_contract: None, version: 2, project_store: proof.store_path().to_str().context("project store is not UTF-8")?.into(),
         task: task.id.clone(), task_revision: task.revision,
         scheduler_revision: state.scheduler_revision,
@@ -153,7 +156,10 @@ pub(crate) fn seal_admission_inputs(
     {
         return Err("new launch requires an unused local binding".into());
     }
+    let project = Path::new(project_store).parent().and_then(Path::parent).ok_or("project store has no project")?;
+    let worker_uid = crate::profile_config::frozen_worker_uid(profile, project).map_err(|e| e.to_string())?;
     Ok(LaunchInputs {
+        worker_uid,
         task_contract: None, version: 2,
         project_store: project_store.into(),
         task: task.id.clone(),

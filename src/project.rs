@@ -142,6 +142,8 @@ pub fn parse_project_md(text: &str) -> Result<(Settings, String)> {
             .map(|front| (front, ""))
             .context("PROJECT.md front matter has no closing `+++` line")?,
     };
+    let value: toml::Value = toml::from_str(front).context("PROJECT.md front matter does not parse")?;
+    herdr_farm::profile_config::refuse_project_worker_uid(&value)?;
     let settings: Settings = toml::from_str(front).context("PROJECT.md front matter does not parse")?;
     Ok((settings, body.trim_start_matches('\n').to_string()))
 }
@@ -208,6 +210,7 @@ pub struct Safety {
     pub thread_agent_args_kind: Option<String>,
     pub thread_allowed_commands: Vec<String>,
     pub worker_permissions: String,
+    pub worker_uid: String,
     pub grantable_commands: Vec<String>,
     pub thread_network: bool,
     pub thread_sandbox: bool,
@@ -327,6 +330,7 @@ impl Default for Safety {
             thread_agent_args_kind: None,
             thread_allowed_commands: Vec::new(),
             worker_permissions: "coordinator".into(),
+            worker_uid: "root".into(),
             grantable_commands: Vec::new(),
             thread_network: false,
             thread_sandbox: true,
@@ -489,6 +493,7 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 pub fn load_safety(config_dir: &Path, canonical_project_dir: &Path) -> Result<Safety> {
     let file=config_dir.join("config.toml");
     let Some(text)=crate::paths::read_root_config(&file).with_context(||format!("cannot load safety settings from {}",file.display()))? else {return Ok(Safety::default());};
+    herdr_farm::profile_config::validate_worker_uid_source(&toml::from_str(&text)?, &file, canonical_project_dir)?;
     parse_safety(&text,canonical_project_dir).with_context(||format!("invalid safety settings in {}",file.display()))
 }
 
@@ -516,6 +521,7 @@ pub fn parse_safety(text:&str,canonical_project_dir:&Path)->Result<Safety> {
     anyhow::ensure!(matches!(safety.cleanup_resolved.as_str(), "auto" | "keep"), "cleanup_resolved must be auto or keep");
     anyhow::ensure!(matches!(safety.resolve_threads.as_str(), "propose" | "auto"), "resolve_threads must be propose or auto");
     anyhow::ensure!(matches!(safety.worker_permissions.as_str(), "coordinator" | "owner"), "worker_permissions must be coordinator or owner");
+    herdr_farm::profile_config::parse_worker_uid(&raw, canonical_project_dir)?;
     anyhow::ensure!((1..=168).contains(&safety.thread_wall_hours), "thread_wall_hours must be between 1 and 168");
     herdr_farm::worker_supervision::validate_thread_env(&safety.thread_env)?;
     safety.validate_thread_allowed_commands()?;

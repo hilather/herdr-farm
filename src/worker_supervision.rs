@@ -182,9 +182,11 @@ pub fn gated_command(
 /// Filesystem view of an isolated agent: what the sandbox hides and, when the
 /// projects root is covered, which paths under it stay visible. Built only by
 /// the launch/thread constructors so every launch derives its view consistently; it is
-/// part of the literal supervisor argv, not of any approval digest.
+/// part of the literal supervisor argv. The optional inner identity is sealed
+/// in the approved launch inputs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Isolation {
+    worker_uid: Option<(u32, u32)>,
     root: String,
     expose: Vec<String>,
     /// Private tmpfs directories and, for each, the needed entries in it that
@@ -365,7 +367,8 @@ const OWNER_SECRETS: &[&str] = &[
 ///    stays fixed; a directory the owner does not own is left alone).
 ///
 /// It re-enters the working directory through the new mount tree and execs
-/// the agent in a nested user namespace: the agent keeps root there but holds
+/// the agent in a nested user namespace: the agent uses the frozen root or
+/// owner uid/gid mapping there, but holds
 /// no capability over the mount namespace that owns these mounts, so it cannot
 /// unmount, move or remount them (nor remount a read-only one writable), and
 /// a mount namespace it creates itself receives them locked. Any failure
@@ -580,6 +583,12 @@ fn real_owner_homes() -> Result<Vec<String>> {
 }
 
 impl Isolation {
+    /// Apply the identity retained in the owner-approved launch inputs.
+    pub fn with_worker_uid(mut self, identity: Option<(u32, u32)>) -> Self {
+        self.worker_uid = identity;
+        self
+    }
+
     /// The sandbox for one agent. `project` is its own project directory: the
     /// projects root above it is covered and only `project` (plus the root's
     /// shared execution lock and any needed path under the root) stays visible.
@@ -831,7 +840,7 @@ impl Isolation {
             ensure!(keep.len() <= 7, "too many agent paths directly under {dir}");
             private.push(((*dir).to_owned(), keep));
         }
-        let mut isolation = Self { root, expose, private, git: quarantines, plan, hide, login: Vec::new(), token: None, project, spool: None, product: None, thread_path: None, thread_env: Vec::new(), thread_defaults: Vec::new() };
+        let mut isolation = Self { worker_uid: None, root, expose, private, git: quarantines, plan, hide, login: Vec::new(), token: None, project, spool: None, product: None, thread_path: None, thread_env: Vec::new(), thread_defaults: Vec::new() };
         // Every executable the worker runs: the agent, and the product binary
         // it invokes for `result submit` and the review worker channel (the
         // controller deriving this sandbox is that binary).
@@ -1258,6 +1267,10 @@ pub fn isolated_gated_command(
         Path::new(home).is_absolute() && home.len() <= 4096 && !home.chars().any(char::is_control),
         "invalid execution home"
     );
+    if let Some(identity) = isolation.worker_uid {
+        // SAFETY: these calls only read the process identity.
+        ensure!(identity == unsafe { (libc::getuid(), libc::getgid()) }, "sealed worker owner identity differs from the launching process");
+    }
     command(executable, arguments, wall)?;
     if isolation.thread_path.is_some() {
         ensure!(isolation.token.is_some(), "no Claude worker login is configured: create a long-lived token with `claude setup-token`, save it in a 0600 file outside the project and the agent directories, set `claude_token_file = \"/abs/path\"` under [worker_isolation.login] in the owner configuration, then prepare and verify the profile again");
@@ -1268,7 +1281,11 @@ pub fn isolated_gated_command(
         "-i".into(),
         "/bin/sh".into(),
         "-c".into(),
-        SANDBOX.into(),
+        match isolation.worker_uid {
+            None => SANDBOX.into(),
+            Some((uid, gid)) => SANDBOX.replace("exec /usr/bin/unshare --user --map-root-user --",
+                &format!("exec /usr/bin/unshare --user --map-user={uid} --map-group={gid} --")),
+        },
         "herdr-farm-worker-sandbox".into(),
     ];
     args.extend(isolation.arguments());

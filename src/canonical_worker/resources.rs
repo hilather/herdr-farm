@@ -41,6 +41,7 @@ pub(super) fn command(
             &crate::profile_config::frozen_isolation_hides(profile)?,
             launch_hides,
         )?
+        .with_worker_uid(inputs.worker_uid)
         .with_submission_spool(attempt.as_str())?;
         let isolation = isolation.with_acceptance_toolchains(project, contract)?;
         let isolation = crate::profile_config::share_login(isolation, profile, Path::new(home))?;

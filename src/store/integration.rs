@@ -240,6 +240,14 @@ impl SqliteStore {
         found.ok_or_else(|| invalid("integration operation is missing"))
     }
 
+    /// Inner identity sealed for the attempt that produced this verified result.
+    pub(crate) fn integration_worker_uid(&self, result: &str) -> Result<Option<(u32, u32)>> {
+        let attempt: String = self.connection.query_row(
+            "SELECT s.attempt_id FROM verified_results r JOIN result_submissions s ON s.submission_id=r.submission_id WHERE r.result_id=?1",
+            [result], |row| row.get(0))?;
+        self.attempt_worker_uid(&attempt)
+    }
+
     /// Read output requirements from the immutable signed contract. This is
     /// separate from current authority: reconciliation still has to classify
     /// an observed external effect after authority has been withdrawn.

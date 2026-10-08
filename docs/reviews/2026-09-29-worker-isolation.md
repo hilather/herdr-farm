@@ -1107,3 +1107,32 @@ Host under heavy unrelated load throughout (load average 15–22 on 12 cores).
 - See the card's commit for the full suite run.
 
 The `state-store` feature is enabled by default; build recipes above use that default.
+
+## 2026-10-07: per-project owner uid opt-in
+
+The reviewed root command remains the default. The external owner configuration
+can now set `[safety."<canonical project path>"] worker_uid = "owner"` (see the
+[config reference](../operations.md)). Canonical launch inputs retain the host
+uid/gid at approval/reservation; running attempts and their verification and
+integration checks keep that identity after config edits. PROJECT.md cannot
+supply the setting, and project-local or group/other-writable policy sources
+are refused.
+
+The outer U1 namespace still maps root for bind mounts. Only the final U2 exec
+changes to `unshare --user --map-user=<uid> --map-group=<gid> -- ...`. At exec the
+non-root inner identity loses root capabilities. Nothing gets broader: M1's
+ownership, locked mounts, hiding and read-only paths retain the reviewed
+restrictions, while host identity and file ownership are unchanged. HOME,
+quarantine and login files still map to the same host owner; the token wrapper
+keeps its inherited descriptor and needs no chown. Codex's existing permission
+profile and nested sandbox grants are unchanged; this setting controls Herdr's
+inner exec, not a root mapping explicitly created by a tool itself. Transfers
+and routine execution keep their existing supervision.
+
+Verification keeps its mount/root-switch setup in the outer root namespace and
+runs checks (including repetitions and stress loads) through the corresponding
+inner mapping. The verifier uses an equivalent gated pre-exec unshare/map
+step through a private setup-proc descriptor, which closes before check exec;
+parent dumpability is disabled to prevent reopening it via `/proc/1/fd`.
+The check-visible `/proc` stays read-only. The automatic probe checks both uid
+and gid for that sealed mapping. See [verification](../factory/verified-results.md).
