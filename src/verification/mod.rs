@@ -435,7 +435,7 @@ fn isolation_available_with_uid(identity: Option<(u32, u32)>) -> Result<()> {
         .into_iter().map(String::from).collect();
     if let Some((uid, gid)) = identity {
         probe.args.pop();
-        probe.args.extend([std::env::current_exe()?.display().to_string(),
+        probe.args.extend([crate::self_executable::real_path()?.display().to_string(),
             "verification-setup".into(), "--probe-worker-uid".into(), format!("{uid}:{gid}")]);
     }
     probe.env_clear = true;
