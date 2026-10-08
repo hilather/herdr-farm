@@ -409,6 +409,22 @@ pub fn recorded_run(store: &mut SqliteStore, project_store: &str, key: &str) -> 
 /// Automatic runs never fall back to an unsandboxed check. Probe the same
 /// namespaces the verifier uses before any claim is taken.
 pub fn isolation_available() -> Result<()> {
+    isolation_available_with_uid(None)
+}
+
+/// Probe the identity sealed for this submission, including the inner step.
+pub fn isolation_available_for(store: &mut SqliteStore, submission: &str, policy: &str) -> Result<()> {
+    let target = store.load_verify_target(submission, policy)?;
+    let identity = store.attempt_worker_uid(&target.attempt_id)?;
+    isolation_available_with_uid(identity)
+}
+
+/// Integration probes the attempt that produced the verified result.
+pub fn isolation_available_for_result(store: &SqliteStore, result: &str) -> Result<()> {
+    isolation_available_with_uid(store.integration_worker_uid(result)?)
+}
+
+fn isolation_available_with_uid(identity: Option<(u32, u32)>) -> Result<()> {
     crate::self_executable::real_path()?;
     let unshare = Path::new("/usr/bin/unshare");
     if !unshare_ready(unshare) {
@@ -417,6 +433,11 @@ pub fn isolation_available() -> Result<()> {
     let mut probe = crate::runner::Cmd::new(unshare.display().to_string(), Duration::from_secs(5));
     probe.args = ["--user", "--map-root-user", "--mount", "--propagation", "private", "--pid", "--fork", "--mount-proc", "--kill-child=KILL", "--", "/bin/true"]
         .into_iter().map(String::from).collect();
+    if let Some((uid, gid)) = identity {
+        probe.args.pop();
+        probe.args.extend([crate::self_executable::real_path()?.display().to_string(),
+            "verification-setup".into(), "--probe-worker-uid".into(), format!("{uid}:{gid}")]);
+    }
     probe.env_clear = true;
     let output = RealRunner.run(&probe).context("isolation unavailable")?;
     if !output.success() {
@@ -600,7 +621,9 @@ fn verify_owned(store: &mut SqliteStore, request: &VerifyRequest, ownership: Opt
             );
         }
     };
+    let worker_uid = store.attempt_worker_uid(&target.attempt_id)?;
     let mut launch = supervise::launch(&supervise::Spec {
+        worker_uid,
         unshare_program: request.unshare_program.clone(),
         timeout,
         checkout: checkout.path.clone(),
@@ -972,8 +995,42 @@ pub(crate) fn unshare_ready(path: &Path) -> bool {
 
 /// Toolchain checks receive only the owner-declared environment. Legacy checks
 /// retain the verifier environment, as before toolchain policies.
-pub(super) fn check_command(program: &str) -> std::process::Command {
+pub(super) fn check_command(program: &str, identity: Option<(u32, u32, i32)>) -> std::process::Command {
+    use std::os::unix::process::CommandExt;
     let mut command = std::process::Command::new(program);
+    if let Some((uid, gid, proc_fd)) = identity {
+        // Equivalent to unshare --user --map-user=uid --map-group=gid. The
+        // parent mapped the host owner to 0. Use its private writable proc
+        // mount for these writes, without making the check's /proc writable.
+        let cap_last_cap = setup::cap_last_cap();
+        let uid_map = format!("{uid} 0 1\n");
+        let gid_map = format!("{gid} 0 1\n");
+        // SAFETY: the gated spawn runs this in its child before exec. All
+        // strings are allocated before fork; the hook uses only syscalls.
+        // proc_fd remains live in the parent, closes here before check exec,
+        // and is CLOEXEC as an additional fence. Parent dumpability is off.
+        unsafe { command.pre_exec(move || {
+            let last = cap_last_cap.ok_or_else(|| std::io::Error::from_raw_os_error(libc::EIO))?;
+            if libc::unshare(libc::CLONE_NEWUSER) != 0 { return Err(std::io::Error::last_os_error()); }
+            // Mapping proc inodes must belong to this child, not global root.
+            if libc::prctl(libc::PR_SET_DUMPABLE, 1, 0, 0, 0) != 0 { return Err(std::io::Error::last_os_error()); }
+            for (path, bytes) in [(c"self/setgroups", b"deny".as_slice()),
+                (c"self/uid_map", uid_map.as_bytes()), (c"self/gid_map", gid_map.as_bytes())] {
+                let fd = libc::openat(proc_fd, path.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC);
+                if fd < 0 { return Err(std::io::Error::last_os_error()); }
+                let written = libc::write(fd, bytes.as_ptr().cast(), bytes.len());
+                let error = std::io::Error::last_os_error();
+                libc::close(fd);
+                if written != bytes.len() as isize { return Err(error); }
+            }
+            libc::close(proc_fd);
+            // unshare grants child-namespace capabilities; remove every one
+            // before executing the check, including the setup-only SETFCAP.
+            if !setup::drop_bounding_set(last) { return Err(std::io::Error::last_os_error()); }
+            if !setup::clear_capabilities(false) { return Err(std::io::Error::last_os_error()); }
+            Ok(())
+        }); }
+    }
     let Ok(raw) = std::env::var("HP_VERIFY_CHECK_ENV") else { return command; };
     command.env_clear().env("PATH", "/usr/bin:/bin").env("HOME", "/tmp").env("TMPDIR", "/tmp")
         .env("LANG", "C").env("LC_ALL", "C").env("GIT_CONFIG_NOSYSTEM", "1")

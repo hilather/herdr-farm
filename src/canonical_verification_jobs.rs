@@ -75,7 +75,7 @@ fn execute(input:&Input,control:&Control)->Result<()> {
         };
         db.observe_operation(&operation.id,input.revision,OWNER,outcome,now())?;return Ok(());
     }
-    if let Err(error)=verification::isolation_available() {
+    if let Err(error)=verification::isolation_available_for(&mut db, &payload.submission_id, &payload.policy_id) {
         // Never run unsandboxed: stay pending with a visible reason.
         db.note_verification_paused(&operation.id,&format!("{error:#}"))?;return Err(error.context("verification paused"));
     }

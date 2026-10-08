@@ -2232,6 +2232,7 @@ pub fn run(#[cfg(feature="state-store")] capture: &mut crate::cli_invocation::Ca
                 println!("  resolve_threads = {:?}", safety.resolve_threads);
                 println!("  thread_allowed_commands = {:?}", safety.thread_allowed_commands);
                 println!("  worker_permissions = {:?}", safety.worker_permissions);
+                println!("  worker_uid = {:?}", safety.worker_uid);
                 println!("  grantable_commands = {:?}", safety.grantable_commands);
                 println!("  config thread_allowed_commands: {:?}", safety.thread_allowed_commands);
                 crate::worker_permissions::show(&project)?;

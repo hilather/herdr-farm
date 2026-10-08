@@ -438,7 +438,7 @@ print(json.dumps({{'id':('wrong' if mode=='wrong-id' and r['method']=='agent.pro
             git(&["init","--quiet"]);fs::write(project.join("source.txt"),"approved base\n").unwrap();git(&["add","source.txt"]);git(&["commit","--quiet","-m","baseline"]);
             vec![RepositoryInput{repository:project.display().to_string(),commit:git(&["rev-parse","HEAD"]),tree:git(&["rev-parse","HEAD^{tree}"])}]
         }else{vec![]};
-        let mut inputs = LaunchInputs {
+        let mut inputs = LaunchInputs { worker_uid: None,
             task_contract: if mode == "barrier-stop" { db.task_contract_reference(task.as_str()).unwrap() } else { None }, version: 2,
             project_store: project
                 .join(".state/state.db")

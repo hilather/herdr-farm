@@ -13,6 +13,9 @@ pub struct DependencyInput {pub task:TaskId,pub task_revision:u64,pub requiremen
 #[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LaunchInputs {
+    /// Frozen inner namespace identity, absent for historical root launches.
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub worker_uid:Option<(u32,u32)>,
     pub version:u32,
     pub project_store:String,
     pub task:TaskId,

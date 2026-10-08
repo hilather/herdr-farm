@@ -89,7 +89,7 @@ fn execute(input:&Input,control:&Control)->Result<()> {
         if matches!(outcome,Outcome::Confirmed{..}) { db.service_result_completions()?; }
         db.observe_operation(&operation.id,input.revision,OWNER,outcome,now())?;return Ok(());
     }
-    if let Err(error)=verification::isolation_available() {
+    if let Err(error)=verification::isolation_available_for_result(&db, &payload.result_id) {
         // Candidate checks never run unsandboxed: stay pending with a visible reason.
         db.note_verification_paused(&operation.id,&format!("{error:#}"))?;return Err(error.context("integration paused"));
     }

@@ -593,6 +593,7 @@ fn validate_runtime(path:&str,value:&serde_json::Value)->Result<()> {
 }
 
 fn validate_settings(value:&toml::Value)->Result<()> {
+    crate::profile_config::refuse_project_worker_uid(value)?;
     for field in ["name","goal","coordinator_agent","thread_agent"] { if let Some(v)=value.get(field) { ensure!(v.is_str(),"invalid settings string field"); } }
     for field in ["max_parallel_threads","auto_resolve_days"] { if let Some(v)=value.get(field) { ensure!(v.as_integer().is_some_and(|n|n>=0 && n<=u32::MAX as i64),"invalid settings integer"); } }
     if let Some(v)=value.get("nudge") { ensure!(v.is_bool(),"invalid nudge flag"); }

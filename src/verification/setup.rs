@@ -20,7 +20,11 @@ const EXIT_CHECKS: i32 = 76;
 const EXIT_CHECK_FAILED: i32 = 77;
 
 pub fn setup_main() -> i32 {
-    setup_from_args(&std::env::args().collect::<Vec<_>>())
+    let args = std::env::args().collect::<Vec<_>>();
+    if args.get(2).map(String::as_str) == Some("--probe-worker-uid") {
+        return probe_worker_uid(&args);
+    }
+    setup_from_args(&args)
 }
 
 pub fn setup_from_args(args: &[String]) -> i32 {
@@ -53,6 +57,7 @@ pub(super) fn namespace_is_new(current: Option<&str>, host_mnt: &str) -> bool {
 }
 
 struct Args {
+    worker_uid: Option<(u32, u32)>,
     host_mnt: String,
     checkout: PathBuf,
     policy: PathBuf,
@@ -65,6 +70,7 @@ struct Args {
 
 fn parse_args(args: &[String]) -> Option<Args> {
     let start = args.iter().position(|arg| arg == "verification-setup")? + 1;
+    let mut worker_uid = None;
     let mut host_mnt = None;
     let mut checkout = None;
     let mut policy = None;
@@ -82,6 +88,10 @@ fn parse_args(args: &[String]) -> Option<Args> {
         }
         let value = args.get(index + 1)?;
         match arg.as_str() {
+            "--worker-uid" => {
+                let (uid, gid) = value.split_once(':')?;
+                worker_uid = Some((uid.parse().ok()?, gid.parse().ok()?));
+            }
             "--host-mnt" => host_mnt = Some(value.clone()),
             "--checkout" => checkout = Some(PathBuf::from(value)),
             "--policy" => policy = Some(PathBuf::from(value)),
@@ -94,6 +104,7 @@ fn parse_args(args: &[String]) -> Option<Args> {
         index += 2;
     }
     Some(Args {
+        worker_uid,
         host_mnt: host_mnt?,
         checkout: checkout?,
         policy: policy?,
@@ -120,6 +131,15 @@ fn enter(parsed: &Args) -> i32 {
     {
         return fail("loopback", error);
     }
+    // Keep a private reference to the writable setup proc mount. Checks see
+    // only the read-only proc mounted below; map writes happen before exec.
+    let mapping_proc = if parsed.worker_uid.is_some() {
+        use std::os::unix::fs::OpenOptionsExt;
+        match fs::OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC).open("/proc") {
+            Ok(file) => Some(file),
+            Err(error) => return fail("mapping-proc", error.raw_os_error().unwrap_or(0)),
+        }
+    } else { None };
     let libraries = match Command::new("/usr/bin/ldd").arg(&parsed.git).output_gated() {
         Ok(output) if output.status.success() => {
             super::manifest::parse_ldd(&String::from_utf8_lossy(&output.stdout))
@@ -132,7 +152,14 @@ fn enter(parsed: &Args) -> i32 {
     if let Err(errno) = switch_root(&scratch, parsed, &libraries) {
         return fail("root", errno);
     }
-    if !drop_privileges() { return fail("drop-privileges", 0); }
+    if !drop_privileges(parsed.worker_uid.is_some()) { return fail("drop-privileges", 0); }
+    if mapping_proc.is_some() {
+        // Disable ordinary same-namespace inspection as defense in depth.
+        // Cross-user-namespace ptrace checks deny the check access to /proc/1/fd.
+        if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 { return fail("mapping-fence", 0); }
+    }
+    use std::os::fd::AsRawFd;
+    let worker_identity = parsed.worker_uid.map(|(uid, gid)| (uid, gid, mapping_proc.as_ref().expect("owner mapping proc").as_raw_fd()));
     let bytes = match fs::read(&parsed.policy) {
         Ok(bytes) => bytes,
         Err(error) => return fail("policy", error.raw_os_error().unwrap_or(0)),
@@ -193,13 +220,13 @@ fn enter(parsed: &Args) -> i32 {
         return EXIT_CHECKS;
     }
     let code = if policy.version == 2 {
-        match super::repetitions::execute(&policy, &parsed.checkout) {
+        match super::repetitions::execute(&policy, &parsed.checkout, worker_identity) {
             Ok(code) => code,
             Err(error) if error.kind() == std::io::ErrorKind::TimedOut => return 78,
             Err(error) => return fail("exec", error.raw_os_error().unwrap_or(0)),
         }
     } else {
-        let status = match super::check_command(&checks[0])
+        let status = match super::check_command(&checks[0], worker_identity)
             .args(&checks[1..])
             .current_dir(&parsed.checkout)
             .stdin(std::process::Stdio::null())
@@ -575,19 +602,35 @@ unsafe extern "C" fn enter_verification_setup_hook() {
 }
 
 // A check must not remount owner toolchain binds writable or regain privileges.
-fn drop_privileges() -> bool {
-    #[repr(C)] struct Header { version: u32, pid: i32 }
-    #[repr(C)] #[derive(Clone, Copy)] struct Data { effective: u32, permitted: u32, inheritable: u32 }
-    let last = match fs::read_to_string("/proc/sys/kernel/cap_last_cap").ok().and_then(|s| s.trim().parse::<i32>().ok()) {
-        Some(last) if (0..=63).contains(&last) => last,
-        _ => return false,
-    };
+pub(super) fn drop_privileges(retain_setfcap: bool) -> bool {
+    let Some(last) = cap_last_cap() else { return false; };
+    drop_bounding_set(last) && clear_capabilities(retain_setfcap)
+}
+
+// Read before fork; the child hook must not allocate or access the filesystem.
+pub(super) fn cap_last_cap() -> Option<i32> {
+    fs::read_to_string("/proc/sys/kernel/cap_last_cap").ok()
+        .and_then(|s| s.trim().parse::<i32>().ok())
+        .filter(|last| (0..=63).contains(last))
+}
+
+// Only prctl syscalls: safe in the post-fork hook while CAP_SETPCAP is held.
+pub(super) fn drop_bounding_set(last: i32) -> bool {
     for capability in 0..=last {
         // SAFETY: a numeric Linux capability, with no pointer arguments.
         if unsafe { libc::prctl(libc::PR_CAPBSET_DROP, capability, 0, 0, 0) } != 0 { return false; }
     }
+    true
+}
+
+// Only capset/prctl syscalls: safe to share with the post-fork mapping hook.
+pub(super) fn clear_capabilities(retain_setfcap: bool) -> bool {
+    #[repr(C)] struct Header { version: u32, pid: i32 }
+    #[repr(C)] #[derive(Clone, Copy)] struct Data { effective: u32, permitted: u32, inheritable: u32 }
     let header = Header { version: 0x20080522, pid: 0 };
-    let data = [Data { effective: 0, permitted: 0, inheritable: 0 }; 2];
+    let mut data = [Data { effective: 0, permitted: 0, inheritable: 0 }; 2];
+    // Linux 5.12+ requires parent CAP_SETFCAP to map parent uid 0.
+    if retain_setfcap { data[0].effective = 1 << 31; data[0].permitted = 1 << 31; }
     // SAFETY: Linux capset receives two v3 capability records; prctl has no pointers.
     unsafe {
         libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0
@@ -613,5 +656,25 @@ fn enable_loopback() -> Result<(), i32> {
         };
         libc::close(fd);
         result
+    }
+}
+
+// The availability probe uses the same privilege drop and gated mapping hook
+// as checks, inside the same outer root-mapped namespace.
+fn probe_worker_uid(args: &[String]) -> i32 {
+    use std::os::fd::AsRawFd;
+    let Some((uid, gid)) = args.get(3).and_then(|s| s.split_once(':'))
+        .and_then(|(u, g)| Some((u.parse::<u32>().ok()?, g.parse::<u32>().ok()?))) else { return EXIT_SETUP; };
+    let Ok(proc) = fs::OpenOptions::new().read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC).open("/proc") else { return EXIT_SETUP; };
+    if !drop_privileges(true) { return EXIT_SETUP; }
+    if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 { return EXIT_SETUP; }
+    let script = format!("[ $(/usr/bin/id -u) = {uid} ] && [ $(/usr/bin/id -g) = {gid} ] && \
+        /usr/bin/awk '/^Cap(Bnd|Prm|Eff|Inh|Amb):/ {{ count++; if ($2 !~ /^0+$/) bad=1 }} \
+        END {{ exit (bad || count != 5) }}' /proc/self/status");
+    match super::check_command("/bin/sh", Some((uid, gid, proc.as_raw_fd())))
+        .args(["-c", &script]).status_gated() {
+        Ok(status) if status.success() => 0,
+        _ => EXIT_SETUP,
     }
 }

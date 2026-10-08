@@ -42,6 +42,7 @@ struct Running {
     stderr: thread::JoinHandle<()>,
     observation: Value,
 }
+#[allow(clippy::too_many_arguments)]
 fn start(
     args: &[String],
     checkout: &Path,
@@ -50,6 +51,7 @@ fn start(
     name: &str,
     repetition: u8,
     source_sequence: Option<u64>,
+    worker_uid: Option<(u32, u32, i32)>,
 ) -> std::io::Result<Running> {
     budget()?;
     let observation = json!({"sequence": *sequence, "kind": kind, "check": name,
@@ -58,7 +60,7 @@ fn start(
         "tests": {"status":"unavailable","reason":"incomplete","results":[]}});
     *sequence += 1;
     eprintln!("hp-verify observation={observation}");
-    let mut child = super::check_command(&args[0])
+    let mut child = super::check_command(&args[0], worker_uid)
         .args(&args[1..])
         .current_dir(checkout)
         .stdin(Stdio::null())
@@ -114,6 +116,7 @@ fn finish(mut running: Running) -> std::io::Result<Option<i32>> {
     budget()?;
     Ok(code)
 }
+#[allow(clippy::too_many_arguments)]
 fn check(
     policy: &ExecutionPolicy,
     args: &[String],
@@ -122,13 +125,14 @@ fn check(
     kind: &str,
     name: &str,
     repetition: u8,
+    worker_uid: Option<(u32, u32, i32)>,
 ) -> std::io::Result<Option<i32>> {
     let source_sequence = *sequence;
     let first = finish(start(
-        args, checkout, sequence, kind, name, repetition, None,
+        args, checkout, sequence, kind, name, repetition, None, worker_uid,
     )?)?;
     if first != Some(0) {
-        reruns(policy, args, checkout, sequence, source_sequence, name)?;
+        reruns(policy, args, checkout, sequence, source_sequence, name, worker_uid)?;
     }
     Ok(first)
 }
@@ -139,6 +143,7 @@ fn reruns(
     sequence: &mut u64,
     source_sequence: u64,
     name: &str,
+    worker_uid: Option<(u32, u32, i32)>,
 ) -> std::io::Result<()> {
     for rerun in 1..=policy.rerun_on_failure {
         let code = finish(start(
@@ -149,6 +154,7 @@ fn reruns(
             name,
             rerun,
             Some(source_sequence),
+            worker_uid,
         )?)?;
         if code == Some(0) {
             break;
@@ -156,7 +162,7 @@ fn reruns(
     }
     Ok(())
 }
-pub(super) fn execute(policy: &ExecutionPolicy, checkout: &Path) -> std::io::Result<Option<i32>> {
+pub(super) fn execute(policy: &ExecutionPolicy, checkout: &Path, worker_uid: Option<(u32, u32, i32)>) -> std::io::Result<Option<i32>> {
     let mut sequence = 0;
     let mut code = check(
         policy,
@@ -166,6 +172,7 @@ pub(super) fn execute(policy: &ExecutionPolicy, checkout: &Path) -> std::io::Res
         "check",
         "checks",
         0,
+        worker_uid,
     )?;
     if let Some(stress) = &policy.stress {
         for repetition in 1..=stress.repetitions {
@@ -182,6 +189,7 @@ pub(super) fn execute(policy: &ExecutionPolicy, checkout: &Path) -> std::io::Res
                         name,
                         repetition,
                         None,
+                        worker_uid,
                     )?);
                 }
                 let result = check(
@@ -192,6 +200,7 @@ pub(super) fn execute(policy: &ExecutionPolicy, checkout: &Path) -> std::io::Res
                     "stress",
                     name,
                     repetition,
+                    worker_uid,
                 )?;
                 if code == Some(0) && result != Some(0) {
                     code = result;
@@ -202,7 +211,7 @@ pub(super) fn execute(policy: &ExecutionPolicy, checkout: &Path) -> std::io::Res
                         .expect("native sequence");
                     let result = finish(child)?;
                     if result != Some(0) {
-                        reruns(policy, load, checkout, &mut sequence, source_sequence, name)?;
+                        reruns(policy, load, checkout, &mut sequence, source_sequence, name, worker_uid)?;
                     }
                     if code == Some(0) && result != Some(0) {
                         code = result;

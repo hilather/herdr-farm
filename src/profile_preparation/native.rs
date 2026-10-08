@@ -507,7 +507,7 @@ fn verify_prepared(
         Some(Path::new(&profile.config.path)),
         Some(&socket),
         &crate::profile_config::frozen_isolation_hides(profile)?,
-    )?;
+    )?.with_worker_uid(crate::profile_config::frozen_worker_uid(profile, &project)?);
     let isolation = crate::profile_config::share_login(isolation, profile, execution_home)?;
     let argv = crate::worker_supervision::isolated_gated_command(
         Path::new(&profile.agent.path),

@@ -344,6 +344,31 @@ See the [Codex configuration reference](https://developers.openai.com/codex/conf
 
 ### Filesystem isolation
 
+The owner can opt one project into `worker_uid = "owner"` under
+`[safety."<canonical project path>"]` in the external owner config (see the
+[config reference](operations.md)). The default `"root"` preserves the existing
+command. The mount-setup namespace stays root; only the inner agent namespace
+maps the host uid/gid captured in approved launch inputs. Native profile probes
+use this policy too. Reprepare and approve a new attempt after a config change.
+A running attempt and its verification checks retain the launched identity.
+
+The owner uid mapping requires util-linux >= 2.38 for `--map-user`. It is a
+compatibility measure for tools that refuse uid 0, not a hardening measure:
+the agent can still create another user namespace and map itself to root.
+
+Nothing gets broader: host identity and file ownership are unchanged, and the
+inner namespace loses root capabilities at exec. Mounts, hidden paths and
+read-only paths retain their existing restrictions. Private HOME and Git
+quarantine files belong to the same host owner under either mapping, so no chown
+is needed. The token wrapper still reads its inherited descriptor, and shared
+login files retain their original inode and ownership. Codex's nested sandbox
+and permission profile keep the same writable roots; this option only controls
+Herdr's inner exec identity. A tool that explicitly creates another root-mapped
+user namespace can still see uid 0 within its own namespace. No agent CLI or
+Unreal installation was run during sandbox validation; their live acceptance
+checks belong to the owner deployment.
+
+
 On Linux the gate also isolates the worker's filesystem view before the agent
 starts: the projects root is covered except the worker's own project, the
 owner's key and credential directories (`~/.ssh`, `~/.gnupg`, `~/.codex`, `~/.claude`,

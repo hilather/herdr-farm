@@ -1017,7 +1017,7 @@ mod tests {
             .runtime_bindings
             .iter()
             .map(|binding| PreparedLaunch {
-                inputs: LaunchInputs {
+                inputs: LaunchInputs { worker_uid: None,
                     task_contract: None, version: 2,
                     project_store: std::fs::canonicalize(&path).unwrap().display().to_string(),
                     task: binding.task.clone().unwrap(),

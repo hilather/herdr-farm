@@ -497,3 +497,40 @@ fn canonical_creation_installs_memory_or_explains_signer_fallback() {
     assert!(!home.root().join("legacy/.state/state.db").exists());
     assert_eq!(fs::read(home.root().join("legacy/MEMORY.md")).unwrap(), index);
 }
+
+#[test]
+fn worker_uid_is_strict_per_project_owner_policy() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    let home = Home::new();
+    home.ok(&["new", "--legacy", "demo"]);
+    home.ok(&["new", "--legacy", "other"]);
+    let project = home.root().join("demo").canonicalize().unwrap();
+    let config = home.0.path().join(".config/herdr-farm/config.toml");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    assert!(home.ok(&["safety", "show", "demo"]).contains("worker_uid = \"root\""));
+    let owner = format!("[safety.{:?}]\nworker_uid='owner'\n", project.display().to_string());
+    fs::write(&config, &owner).unwrap();
+    assert!(home.ok(&["safety", "show", "demo"]).contains("worker_uid = \"owner\""));
+    assert!(home.ok(&["safety", "show", "other"]).contains("worker_uid = \"root\""));
+    for value in ["'invalid'", "'OWNER'", "true", "1000"] {
+        fs::write(&config, format!("[safety.{:?}]\nworker_uid={value}\n", project.display().to_string())).unwrap();
+        assert!(home.refused(&["safety", "show", "demo"]).contains("worker_uid"));
+    }
+    fs::write(&config, "[safety.").unwrap();
+    let error = home.refused(&["safety", "show", "demo"]);
+    assert!(error.contains(&format!("invalid safety settings in {}", config.display())), "{error}");
+    fs::write(&config, &owner).unwrap();
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o666)).unwrap();
+    assert!(home.refused(&["safety", "show", "demo"]).contains("external owner-owned configuration"));
+    fs::remove_file(&config).unwrap();
+    let local = project.join("config.toml");
+    fs::write(&local, &owner).unwrap();
+    symlink(&local, &config).unwrap();
+    assert!(home.refused(&["safety", "show", "demo"]).contains("external owner-owned configuration"));
+    fs::remove_file(&config).unwrap();
+    fs::write(&config, "").unwrap();
+    for header in ["worker_uid='owner'", "[safety]\nworker_uid='owner'"] {
+        fs::write(project.join("PROJECT.md"), format!("+++\nname='Demo'\n{header}\n+++\nInstructions\n")).unwrap();
+        assert!(home.refused(&["safety", "show", "demo"]).contains("worker_uid is owner-only"));
+    }
+}
