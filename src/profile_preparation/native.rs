@@ -830,6 +830,16 @@ fn verify_prompt(
                 readiness_failure = "agent process identity pending";
                 false
             }
+            Err(error) if error.chain().any(|cause| {
+                let message = cause.to_string();
+                message == "agent process changed: executable mismatch"
+                    || message == "agent process changed: arguments digest mismatch"
+            }) && observation.agent_setup_pending()? => {
+                // A released gate can still be preparing the sandbox before
+                // execing the agent. The readiness deadline bounds this wait.
+                readiness_failure = "agent sandbox setup pending";
+                false
+            }
             Err(error) => {
                 let class = if error.chain().any(|cause| {
                     let message = cause.to_string();

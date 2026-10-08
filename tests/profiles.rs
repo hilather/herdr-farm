@@ -251,6 +251,7 @@ fn readiness_scenario(mode: &str, delay: u64, wall: u64, failure_class: Option<&
     fs::write(&lab.config, config).unwrap();
     fs::write(lab.path("agent-home/mode"), mode).unwrap();
     fs::write(lab.path("delay"), delay.to_string()).unwrap();
+    fs::write(lab.path("setup-delay"), if mode == "w" { "true" } else { "false" }).unwrap();
     fs::write(lab.path("server.py"), include_str!("fixtures/probe_readiness_server.py")).unwrap();
     fs::write(lab.path("herdr"), format!("#!/bin/sh\nexec /usr/bin/python3 '{}' \"$@\"\n", lab.path("server.py").display())).unwrap();
     let compiled = Command::new("/usr/bin/cc").args(["-O0", "-o"]).arg(lab.path("claude"))
@@ -265,6 +266,10 @@ fn readiness_scenario(mode: &str, delay: u64, wall: u64, failure_class: Option<&
             assert!(result.status.success(), "mode {mode}, delay {delay}: {}", String::from_utf8_lossy(&result.stderr));
             let proof: Value = serde_json::from_slice(&result.stdout).unwrap();
             assert_eq!(proof["preparation"]["launchable"], true);
+            if mode == "w" {
+                assert!(lab.path("agent-home/.hp-verify-work/setup-pending").exists(),
+                    "setup wrapper must have run");
+            }
             assert!(lab.ok(&["profile", "inspect", "worker", "--project", "demo"])["probe_failures"].as_array().unwrap().is_empty());
         }
         Some(failure_class) => {
@@ -292,6 +297,8 @@ fn readiness_scenario(mode: &str, delay: u64, wall: u64, failure_class: Option<&
     }
 }
 
+#[test]
+fn native_readiness_waits_for_setup_wrapper_exec() { readiness_scenario("w", 0, 120, None); }
 #[test]
 fn native_readiness_retries_empty_process_title() { readiness_scenario("e", 4, 120, None); }
 #[test]

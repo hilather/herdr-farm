@@ -475,7 +475,9 @@ for prompt acknowledgment, final identity checks and cleanup. The total deadline
 is capped at 120 seconds and honors a shorter caller deadline or configured
 worker wall budget; there is no separate 30-second readiness cap. Incomplete or
 empty process command identities during startup are pending observations and
-are polled again every 100 ms. Complete executable/argument mismatches and live
+are polled again every 100 ms. Executable/argument mismatches are also pending
+while the released gate's sandbox setup wrapper is observed, bounded by the same
+readiness deadline. After setup, complete executable/argument mismatches and live
 identity changes remain fatal. No automatic probe retry is added to `launch run`:
 the longer in-process wait tolerates cold startup without a second launch under
 host load. Prompt submission remains one-shot.

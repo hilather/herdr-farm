@@ -12,6 +12,18 @@ int main(int argc, char **argv) {
     FILE *mode = fopen("../mode", "r");
     int mutation = mode ? fgetc(mode) : '0';
     if (mode) fclose(mode);
+    if (mutation == 'w') {
+        mode = fopen("../mode", "w");
+        if (!mode) return 2;
+        fputs("0", mode);
+        fclose(mode);
+        /* Match the released sandbox wrapper's public process identity,
+           then restore the exact agent argv by exec in the same child. */
+        execl("/bin/sh", "/bin/sh", "-c",
+            "touch setup-pending; sleep 2; exec \"$1\"",
+            "herdr-farm-worker-sandbox", argv[0], (char *)NULL);
+        return 3;
+    }
     /* Wait until the public readiness request proves initial identity passed. */
     while (access("readiness-started", F_OK) != 0) usleep(10000);
     if (mutation == 'a') {

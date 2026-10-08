@@ -40,6 +40,12 @@ while True:
     elif method == 'pane.send_input':
         s['child'].stdin.write(params['text'].encode())
         s['child'].stdin.flush()
+        if open(os.path.join(os.path.dirname(__file__), 'setup-delay')).read() == 'true':
+            deadline = time.monotonic() + 10
+            while not os.path.exists(os.path.join(s['cwd'], 'setup-pending')):
+                if time.monotonic() >= deadline:
+                    raise RuntimeError('setup wrapper did not start')
+                time.sleep(0.01)
         s['released'] = time.monotonic()
     elif method == 'agent.list':
         result = dict(type='agent_list', agents=[agent])
