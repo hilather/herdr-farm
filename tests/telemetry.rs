@@ -565,8 +565,9 @@ fn sidecar_streams_upgrade_v2_store() {
     let f = Fixture::new();
     f.rollout(&f.home, SID, &["head.jsonl"], &f.worktree(), f.decided + 1_000, "0.154.0");
     f.cli("collect");
-    // Back to a v2 sidecar: no streams table, no codex 0003 indexes.
-    f.sidecar().execute_batch("ALTER TABLE operation_storage_samples DROP COLUMN worktrees_covered; ALTER TABLE operation_storage_samples DROP COLUMN worktrees_expected; DROP TABLE rollout_scope_skips; DROP TABLE telemetry_streams; DROP VIEW otlp_ledger_sources; DROP TABLE otlp_records; DROP TABLE gemini_file_cursors; DROP TABLE otlp_attempt_tokens; DROP INDEX codex_usage_by_path; DROP INDEX rollout_sources_by_attempt;
+    // Back to a v2 sidecar: no streams table, no codex 0003 indexes,
+    // and neither table introduced by codex 0006/0007.
+    f.sidecar().execute_batch("ALTER TABLE operation_storage_samples DROP COLUMN worktrees_covered; ALTER TABLE operation_storage_samples DROP COLUMN worktrees_expected; DROP TABLE native_probe_failures; DROP TABLE rollout_scope_skips; DROP TABLE telemetry_streams; DROP VIEW otlp_ledger_sources; DROP TABLE otlp_records; DROP TABLE gemini_file_cursors; DROP TABLE otlp_attempt_tokens; DROP INDEX codex_usage_by_path; DROP INDEX rollout_sources_by_attempt;
         DROP INDEX codex_usage_by_turn; DROP INDEX codex_usage_by_response; PRAGMA user_version = 2").unwrap();
     let streams = |f: &Fixture| f.sidecar().prepare("SELECT stream,version FROM telemetry_streams ORDER BY stream").unwrap()
         .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))).unwrap().map(Result::unwrap).collect::<Vec<_>>();
@@ -581,17 +582,20 @@ fn sidecar_streams_upgrade_v2_store() {
     assert_eq!(tree(&state), before, "a read neither upgrades nor creates a file");
 
     f.cli("collect");
+    // A subsequent collect must not rerun 0007 or discard its observations.
+    f.sidecar().execute("INSERT INTO native_probe_failures(profile,payload) VALUES('upgrade-probe','{}')", []).unwrap();
     f.cli("collect");
+    assert_eq!(f.sidecar().query_row("SELECT payload FROM native_probe_failures WHERE profile='upgrade-probe'", [], |r| r.get::<_, String>(0)).unwrap(), "{}");
     // Every lane stream with migrations is at its latest version beside `codex`.
     let expected = |extra: (&str, i64)| {
         let mut streams: std::collections::BTreeMap<String, i64> = herdr_farm::telemetry::LANES.iter().filter(|l| !l.migrations.is_empty())
             .map(|l| (l.stream.to_owned(), l.migrations.len() as i64)).collect();
-        streams.insert("codex".to_owned(), 6);
+        streams.insert("codex".to_owned(), 7);
         streams.insert(extra.0.to_owned(), extra.1);
         streams.into_iter().collect::<Vec<_>>()
     };
-    assert_eq!(streams(&f), expected(("codex", 6)));
-    assert_eq!(user_version(&f), 6);
+    assert_eq!(streams(&f), expected(("codex", 7)));
+    assert_eq!(user_version(&f), 7);
     let before = tree(&state);
     assert_eq!(f.cli_args(&["usage", "--json"]).1, v2, "usage is byte-identical after the upgrade");
     assert_eq!(metric(&f.report(), "M08")["value"], 1000);
@@ -816,10 +820,10 @@ fn newer_codex_usage_provenance_coverage_and_recollection() {
     assert_eq!(serde_json::from_str::<serde_json::Value>(&measurement).unwrap()["certification"], "newer_than_certified");
     // Historical fixture: persisted as the previous collector would refuse it.
     f.as_if_collected_uncertified();
-    f.sidecar().execute_batch("DROP TABLE rollout_scope_skips; UPDATE telemetry_streams SET version=4 WHERE stream='codex'; PRAGMA user_version=4;").unwrap();
+    f.sidecar().execute_batch("DROP TABLE native_probe_failures; DROP TABLE rollout_scope_skips; UPDATE telemetry_streams SET version=4 WHERE stream='codex'; PRAGMA user_version=4;").unwrap();
     assert_eq!(attempt_usage(&f.cli_args(&["usage", "--json"]).0)["reason"], "cli_version_uncertified");
     assert_eq!(f.cli("collect").0["collected"]["reevaluated"], 2);
-    assert_eq!(f.sidecar().query_row("SELECT version FROM telemetry_streams WHERE stream='codex'", [], |r| r.get::<_, i64>(0)).unwrap(), 6);
+    assert_eq!(f.sidecar().query_row("SELECT version FROM telemetry_streams WHERE stream='codex'", [], |r| r.get::<_, i64>(0)).unwrap(), 7);
     assert_eq!(attempt_usage(&f.cli_args(&["usage", "--json"]).0), usage);
     f.as_if_collected_uncertified();
     f.cli_args(&["accounting", "sync"]);

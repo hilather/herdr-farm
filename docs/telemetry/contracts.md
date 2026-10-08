@@ -1040,7 +1040,13 @@ classification. Canonical schema is unchanged. See contracts-analytics.md M63/M9
 ### Native probe failure observations
 
 `native_probe_failures` lives in the telemetry sidecar, Codex stream v7
-(`migrations/telemetry/0007_native_probe_failures.sql`). Failed probes write no
+(`migrations/telemetry/0007_native_probe_failures.sql`). Migration 0007 alone
+creates the table and index, advancing both the Codex stream and `user_version`
+to 7 in the migration transaction. Historical upgrade fixtures that rewind a
+current sidecar below v7 must remove this table, just as fixtures below v6
+remove `rollout_scope_skips`; retaining it would misrepresent the older schema.
+Repeated opens and collection preserve the migrated table and its observations.
+Failed probes write no
 canonical rows. Its version-1 JSON payload is
 bounded to 4096 bytes and contains `profile`, `kind`, `agent_version`, `step`,
 `failure_class`, `reason`, `started_unix_ms`, and `finished_unix_ms`. Early
