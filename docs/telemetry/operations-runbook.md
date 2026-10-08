@@ -119,6 +119,7 @@ may only be shortened.
 ```text
 $ herdr-farm telemetry demo maintenance classes
 retention.v1
+sidecar.native_probe_failures retain - source_of_truth destructive
 sidecar.launch_load retain - source_of_truth destructive
 sidecar.ticker_errors retain - source_of_truth destructive
 sidecar.submission_diff retain - source_of_truth destructive
@@ -458,6 +459,7 @@ $ herdr-farm telemetry demo backup restore --from <tmp>/backup-2026-09-30 --forc
     "host_checks": 0,
     "muse_events": 0,
     "muse_parents": 0,
+    "native_probe_failures": 0,
     "opencode_messages": 0,
     "opencode_tools": 0,
     "operating_clock": 0,
