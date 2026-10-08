@@ -46,10 +46,20 @@ impl Fixture {
         f
     }
 
-    fn reserved_with_lineage(work_item: Option<&str>) -> Self {
+    /// A separate project whose retained profile uses an existing execution home.
+    pub fn sharing_home(home: &Path) -> Self {
+        let f = Self::reserved_with_home(None, Some(home));
+        f.bind();
+        f
+    }
+
+    fn reserved_with_lineage(work_item: Option<&str>) -> Self { Self::reserved_with_home(work_item, None) }
+
+    fn reserved_with_home(work_item: Option<&str>, shared_home: Option<&Path>) -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let base = fs::canonicalize(tmp.path()).unwrap();
         let (root, home) = (base.join("root"), base.join("codex-home"));
+        let home = shared_home.map(Path::to_path_buf).unwrap_or(home);
         let project = root.join("demo");
         fs::create_dir_all(project.join(".state")).unwrap();
         fs::create_dir_all(base.join("home")).unwrap();
@@ -71,8 +81,9 @@ impl Fixture {
         db.record_observations(snapshot.head, &[herdr_farm::reconcile::RuntimeObservation { binding: binding.id.clone(), binding_revision: binding.revision,
             task_revision: Some(snapshot.tasks[0].revision), observed_unix_ms: unix_ms(), collector: "herdr-git-v1".into(), config_digest: Some(digest.clone()),
             ..herdr_farm::reconcile::RuntimeObservation::default() }]).unwrap();
-        let snapshot = db.read_snapshot(None).unwrap();
-        db.set_project_state(snapshot.head, snapshot.control.unwrap().revision, ProjectState::Active, unix_ms(), Some(&digest)).unwrap();
+        // Observation writes leave the control revision unchanged. Avoid a full
+        // snapshot between the fresh observation and its admission check.
+        db.set_project_state(db.current_head().unwrap(), snapshot.control.unwrap().revision, ProjectState::Active, unix_ms(), Some(&digest)).unwrap();
         drop(db);
         plant_profile(&db_path, codex_profile(&config, "codex", "codex", Some(&home)));
         SqliteStore::open(&db_path).unwrap().record_native_capability_evidence(unix_ms(), unix_ms() + 3_600_000).unwrap();

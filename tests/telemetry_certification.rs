@@ -552,7 +552,7 @@ fn quota_window_consumption_is_native_units_only() {
     let f = Fixture::new();
     let d = f.decided;
     let resets = d / 1000 + 3_600;
-    plant(&f.home, "quota", &Rollout::new(&sid(0x0801), &f.worktree(), d - 180_000)
+    plant(&f.home, "quota", &Rollout::new(&sid(0x0801), &f.project.display().to_string(), d - 180_000)
         .rate(d - 120_000, 40.0, 300, resets)
         .line(json!({"timestamp": iso(d - 90_000), "type": "event_msg", "payload": {"type": "error", "message": "You've hit your usage limit. Try again later."}}))
         .rate(d - 60_000, 55.0, 300, resets).text());

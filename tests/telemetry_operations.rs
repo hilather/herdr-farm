@@ -837,6 +837,7 @@ fn compact_storage_upgrade_preserves_envelopes_lineage_and_pinned_answers() {
         ALTER TABLE legacy_providers RENAME TO analytics_provider_aggregates;
         UPDATE telemetry_streams SET version=11 WHERE stream='ingest';
         UPDATE telemetry_streams SET version=3 WHERE stream='analytics';
+        DROP TABLE rollout_scope_skips;
         UPDATE telemetry_streams SET version=3 WHERE stream='codex';
         UPDATE telemetry_streams SET version=15 WHERE stream='accounting';
         PRAGMA user_version=3;
