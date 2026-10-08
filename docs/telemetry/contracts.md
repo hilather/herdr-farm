@@ -1103,7 +1103,8 @@ is a scope correction independent of normal retention ages. The canonical schema
 is unchanged.
 
 Inventory-budget hotfix: runtime conflict scans retain their existing eligibility
-and use one root-wide 16,384-record / 50 MiB / ten-second budget.
+and use one root-wide 16,384-record / 50 MiB / ten-second budget, including
+legacy brief delivery scans of canonical neighbours.
 `runtime.launch_release` is the start-gate release, not a resource release.
 Retiring finished launch history needs a real close/release signal and remains
 follow-up work (LAUNCH-BUDGET-1). This adds no canonical or telemetry schema

@@ -4,6 +4,10 @@
 use std::{path::{Path,PathBuf},fs};
 use anyhow::{Result,Context,ensure};
 use crate::{project::{Project,Coordinator},thread::{self,Thread},source_tree::Control,paths};
+#[cfg(feature="state-store")]
+use herdr_farm::store::identity_inventory::MAX_INVENTORY_RECORDS;
+#[cfg(not(feature="state-store"))]
+const MAX_INVENTORY_RECORDS:usize=1024;
 fn exists(path:&Path)->Result<bool>{match fs::symlink_metadata(path){Ok(_)=>Ok(true),Err(e) if e.kind()==std::io::ErrorKind::NotFound=>Ok(false),Err(e)=>Err(e.into())}}
 fn location(value:&str)->Result<PathBuf> {
     let path=Path::new(value);ensure!(path.is_absolute(),"terminal reference lacks absolute session");
@@ -16,7 +20,7 @@ impl Inventory<'_> {
         self.bytes=self.bytes.checked_add(text.as_ref().map_or(0,String::len)).context("terminal inventory overflow")?;ensure!(self.bytes<=50*1024*1024,"terminal inventory exceeds byte budget");self.control.check()?;Ok(text)
     }
     fn check(&mut self,machine:&str,socket:&str,pane:&str)->Result<()> {
-        self.control.check()?;self.records+=1;ensure!(self.records<=1024,"terminal inventory exceeds 1024 references");
+        self.control.check()?;self.records+=1;ensure!(self.records<=MAX_INVENTORY_RECORDS,"terminal inventory exceeds {MAX_INVENTORY_RECORDS} references");
         if !pane.is_empty()&&pane==self.pane {
             // SSH aliases (including loopback) cannot prove distinct terminal
             // servers. A matching pane anywhere is therefore a conflict when
@@ -48,7 +52,7 @@ fn inventory(project:&Project,t:&Thread,socket:&Path,control:&Control,coordinato
             anyhow::bail!("canonical neighbor requires a state-store build for terminal identity inventory");
             #[cfg(feature="state-store")]
             {
-                let mut budget=herdr_farm::store::identity_inventory::Budget::new(50*1024*1024-scan.bytes,1024-scan.records,control.deadline,control.cancellation.clone())?;
+                let mut budget=herdr_farm::store::identity_inventory::Budget::new(50*1024*1024-scan.bytes,MAX_INVENTORY_RECORDS-scan.records,control.deadline,control.cancellation.clone())?;
                 let bindings=herdr_farm::migration::read_identity_inventory(&dir,&mut budget)?;
                 let targets=herdr_farm::migration::read_launch_target_inventory(&dir,&mut budget)?;
                 scan.bytes+=budget.used();

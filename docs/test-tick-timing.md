@@ -152,3 +152,10 @@ minute summary to check accumulated counts and suppressed log lines,
 cancels one attempt within the existing 60-second lab budget, and checks that
 observations continue while the other worker remains running. Socket-bound
 validation still requires the steward's unrestricted environment.
+
+INVENTORY-BUDGET-1d keeps the coordinator replacement fixture at 350 retained
+launches: three counted records per launch still exceed the old 1,024 candidate
+cap. Its lab stop retries the public `ticker stop` command for up to 30 seconds,
+since a stop requested mid-pass can exceed the scaled CLI stop wait. Production
+stop timing and resting-pass observation remain unchanged; budgeting the full
+worker-attention snapshot is follow-up work.

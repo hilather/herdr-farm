@@ -132,7 +132,16 @@ impl Lab {
             .unwrap()
     }
     fn stop(&self) {
-        self.ok(&["ticker", "stop"]);
+        let args = ["ticker", "stop"];
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let out = self.cli(&args);
+            if out.status.success() { return; }
+            // A stop requested mid-pass can outlast the scaled CLI wait.
+            assert!(std::time::Instant::now() < until,
+                "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
 }
 impl Drop for Lab {
@@ -337,7 +346,9 @@ fn socket_open_primes_owned_coordinator_retries_swallowed_prompt_and_recreates_c
     l.ok(&["pause", "history"]);
     let history = l.root.join("history");
     migration::apply(&history, &migration::inspect(&history).unwrap(), true).unwrap();
-    inventory_history::seed(&history, 1040);
+    // Three counted records per launch: 350 * 3 = 1050 exceeds the old
+    // 1024 controller-hint candidate budget without slowing the lab stop pass.
+    inventory_history::seed(&history, 350);
     l.settled_ok(&["open", "demo", "--reprime"]);
     l.stop();
     assert_eq!(l.state()["prompts"].as_array().unwrap().len(), 3);

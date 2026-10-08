@@ -1102,7 +1102,8 @@ for `refused` or `error` retain the cause. Resolve the conflicting work before r
 
 ### Conflict inventory bounds
 
-Root-wide ownership checks (including `open --reprime`) and worker pane/worktree
+Root-wide ownership checks (including `open --reprime` and legacy brief delivery
+across canonical neighbours) and worker pane/worktree
 allocation share a ceiling of 16,384 candidate records, 50 MiB of charged input,
 and at most ten seconds per scan. Each reader consumes the same root budget;
 creating a new project does not reset it. A separate per-project allowance would
