@@ -428,32 +428,6 @@ worker exits 125 before the agent runs. Inside the sandbox `result submit`
 and the review worker channel go through the submission spool: the ticker
 ingests the request and writes back the receipt the command prints.
 
-Native-probe fixture investigation (WORKER-USERNS-UID-2c): the profiles lab
-sets the controller's `HOME` to its temporary directory and places the
-execution home below it. The sandbox binds that owner-home anchor recursively
-read-only, then binds the execution home with `--rbind -o rw`. GitHub tests
-run on Ubuntu 24.04 with `TMPDIR=${{ runner.temp }}`; this same nested lab
-layout therefore encounters the owner-home read-only anchor regardless of
-whether runner scratch itself lies under the account home. The projects-root
-cover exposes needed paths, private scratch mounts keep their needed entries,
-and hidden-secret mounts cannot cover the execution home: isolation rejects
-that configuration.
-
-The observed CI read-only execution home is consistent with inherited bind
-mount flags, rather than an intentional read-only-home option. The local
-util-linux 2.42.3 `mount(8)` manual documents that the classic mount syscall
-inherits the source's read-only VFS flag for a writable bind, whereas the new
-mount API (available since util-linux 2.39) can clear it. This explanation has
-not been verified by inspecting mounts on a GitHub runner. The supported
-isolation configuration offers `hide`, `share_login`, and `login`; it cannot
-force a read-only execution home, and verification requires the home outside
-the read-only project. A portable test asserting a read-only home therefore
-needs an explicit sandbox facility or a confirmed supported way to select the
-CI mount behavior. Host `chmod 0555` is unsuitable because native verification
-prepares the agent configuration and probe directory before sandbox launch.
-The requested test change is stopped pending that facility; no read-only
-assertion is simulated, and the existing host chmod remains unresolved.
-
 See [the worker isolation review](reviews/2026-09-29-worker-isolation.md) for
 the full list, what stays visible and the residual risks.
 

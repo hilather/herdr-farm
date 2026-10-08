@@ -257,8 +257,8 @@ fn codex_shared_home_survives_root_owner_root_with_a_stale_daemon_link() {
     fs::create_dir_all(&control).unwrap();
     let link = control.join("app-server-control.sock");
     std::os::unix::fs::symlink("/tmp/codex-daemon-0/old-session", &link).unwrap();
-    // Also deny ordinary home writes locally; CI mounts this home read-only.
-    fs::set_permissions(lab.path("agent-home"), fs::Permissions::from_mode(0o555)).unwrap();
+    // The read-only condition runs on CI, where the sandbox mounts home read-only.
+    // Host chmod was removed by owner decision: host preparation writes config here.
     let base = fs::read_to_string(&lab.config).unwrap();
     let mut started = Vec::new();
     for identity in ["root", "owner", "root"] {
@@ -269,12 +269,18 @@ fn codex_shared_home_survives_root_owner_root_with_a_stale_daemon_link() {
             panic!("{diagnostic}");
         }
         assert!(result.status.success(), "{identity}: {}", String::from_utf8_lossy(&result.stderr));
-        started.extend(fs::read_to_string(lab.path("child-stderr")).unwrap().lines()
+        let child_stderr = fs::read_to_string(lab.path("child-stderr")).unwrap();
+        let home_modes: Vec<_> = child_stderr.lines()
+            .filter_map(|line| line.strip_prefix("probe-fixture home="))
+            .collect();
+        assert_eq!(home_modes.len(), 1, "{identity}: {child_stderr}");
+        assert!(matches!(home_modes[0], "ro" | "rw"), "{identity}: {child_stderr}");
+        eprintln!("probe-fixture {identity} home={}", home_modes[0]);
+        started.extend(child_stderr.lines()
             .filter_map(|line| line.strip_prefix("probe-fixture started uid="))
             .map(|uid| uid.parse::<u32>().unwrap()));
         assert_eq!(fs::read_link(&link).unwrap(), PathBuf::from("/tmp/codex-daemon-0/old-session"));
     }
-    fs::set_permissions(lab.path("agent-home"), fs::Permissions::from_mode(0o755)).unwrap();
     let owner = unsafe { libc::geteuid() };
     assert_eq!(started, vec![0, owner, 0]);
 }

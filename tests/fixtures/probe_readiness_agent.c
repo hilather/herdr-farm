@@ -34,6 +34,14 @@ int main(int argc, char **argv) {
         }
         /* The server opens stderr outside the sandbox; home may be read-only. */
         fprintf(stderr, "probe-fixture started uid=%u\n", (unsigned)geteuid());
+        char write_probe[4096];
+        snprintf(write_probe, sizeof write_probe, "%s/.probe-fixture-ro-check", home);
+        FILE *probe = fopen(write_probe, "wx");
+        if (probe) {
+            fclose(probe);
+            unlink(write_probe);
+        }
+        fprintf(stderr, "probe-fixture home=%s\n", probe ? "rw" : "ro");
         fflush(stderr);
         mutation = '0';
     }
