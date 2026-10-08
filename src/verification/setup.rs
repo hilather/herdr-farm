@@ -603,15 +603,24 @@ unsafe extern "C" fn enter_verification_setup_hook() {
 
 // A check must not remount owner toolchain binds writable or regain privileges.
 pub(super) fn drop_privileges(retain_setfcap: bool) -> bool {
-    let last = match fs::read_to_string("/proc/sys/kernel/cap_last_cap").ok().and_then(|s| s.trim().parse::<i32>().ok()) {
-        Some(last) if (0..=63).contains(&last) => last,
-        _ => return false,
-    };
+    let Some(last) = cap_last_cap() else { return false; };
+    drop_bounding_set(last) && clear_capabilities(retain_setfcap)
+}
+
+// Read before fork; the child hook must not allocate or access the filesystem.
+pub(super) fn cap_last_cap() -> Option<i32> {
+    fs::read_to_string("/proc/sys/kernel/cap_last_cap").ok()
+        .and_then(|s| s.trim().parse::<i32>().ok())
+        .filter(|last| (0..=63).contains(last))
+}
+
+// Only prctl syscalls: safe in the post-fork hook while CAP_SETPCAP is held.
+pub(super) fn drop_bounding_set(last: i32) -> bool {
     for capability in 0..=last {
         // SAFETY: a numeric Linux capability, with no pointer arguments.
         if unsafe { libc::prctl(libc::PR_CAPBSET_DROP, capability, 0, 0, 0) } != 0 { return false; }
     }
-    clear_capabilities(retain_setfcap)
+    true
 }
 
 // Only capset/prctl syscalls: safe to share with the post-fork mapping hook.
@@ -660,7 +669,9 @@ fn probe_worker_uid(args: &[String]) -> i32 {
         .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC).open("/proc") else { return EXIT_SETUP; };
     if !drop_privileges(true) { return EXIT_SETUP; }
     if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 { return EXIT_SETUP; }
-    let script = format!("[ $(/usr/bin/id -u) = {uid} ] && [ $(/usr/bin/id -g) = {gid} ]");
+    let script = format!("[ $(/usr/bin/id -u) = {uid} ] && [ $(/usr/bin/id -g) = {gid} ] && \
+        /usr/bin/awk '/^Cap(Bnd|Prm|Eff|Inh|Amb):/ {{ count++; if ($2 !~ /^0+$/) bad=1 }} \
+        END {{ exit (bad || count != 5) }}' /proc/self/status");
     match super::check_command("/bin/sh", Some((uid, gid, proc.as_raw_fd())))
         .args(["-c", &script]).status_gated() {
         Ok(status) if status.success() => 0,

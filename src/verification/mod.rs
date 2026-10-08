@@ -1002,6 +1002,7 @@ pub(super) fn check_command(program: &str, identity: Option<(u32, u32, i32)>) ->
         // Equivalent to unshare --user --map-user=uid --map-group=gid. The
         // parent mapped the host owner to 0. Use its private writable proc
         // mount for these writes, without making the check's /proc writable.
+        let cap_last_cap = setup::cap_last_cap();
         let uid_map = format!("{uid} 0 1\n");
         let gid_map = format!("{gid} 0 1\n");
         // SAFETY: the gated spawn runs this in its child before exec. All
@@ -1009,6 +1010,7 @@ pub(super) fn check_command(program: &str, identity: Option<(u32, u32, i32)>) ->
         // proc_fd remains live in the parent, closes here before check exec,
         // and is CLOEXEC as an additional fence. Parent dumpability is off.
         unsafe { command.pre_exec(move || {
+            let last = cap_last_cap.ok_or_else(|| std::io::Error::from_raw_os_error(libc::EIO))?;
             if libc::unshare(libc::CLONE_NEWUSER) != 0 { return Err(std::io::Error::last_os_error()); }
             // Mapping proc inodes must belong to this child, not global root.
             if libc::prctl(libc::PR_SET_DUMPABLE, 1, 0, 0, 0) != 0 { return Err(std::io::Error::last_os_error()); }
@@ -1024,6 +1026,7 @@ pub(super) fn check_command(program: &str, identity: Option<(u32, u32, i32)>) ->
             libc::close(proc_fd);
             // unshare grants child-namespace capabilities; remove every one
             // before executing the check, including the setup-only SETFCAP.
+            if !setup::drop_bounding_set(last) { return Err(std::io::Error::last_os_error()); }
             if !setup::clear_capabilities(false) { return Err(std::io::Error::last_os_error()); }
             Ok(())
         }); }

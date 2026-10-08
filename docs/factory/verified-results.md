@@ -340,7 +340,10 @@ reopening it through `/proc/1/fd`; supervisor dumpability is also disabled.
 No proc mount becomes writable to checks.
 Recorded argv includes the frozen identity.
 The automatic isolation probe exercises this same mapping and verifies both uid
-and gid before claiming work. Historical imported attempts without sealed launch
+and gid before claiming work. It also requires zero bounding, permitted, effective,
+inheritable and ambient capability sets. The mapped check drops its entire
+bounding set before clearing its other capabilities, while it still holds
+CAP_SETPCAP in the new namespace. Historical imported attempts without sealed launch
 inputs retain root behavior. Nothing gets broader: the inner check namespace
 loses root capabilities at exec, host identity is unchanged, and hidden host
 paths and read-only mounts stay enforced. HOME remains the private `/tmp` for
