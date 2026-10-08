@@ -31,6 +31,18 @@ pub enum UnknownUsage {
     Block,
 }
 
+/// Product-owned interactive arguments. Disabling Codex's managed daemon keeps
+/// private-/tmp sessions from sharing a uid-keyed control symlink in HOME.
+/// Include these arguments in the frozen identity so old evidence cannot launch.
+pub(crate) fn agent_arguments(kind: &str, extra: &[String]) -> Vec<String> {
+    let mut arguments = Vec::new();
+    if kind == "codex" {
+        arguments.push("--no-daemon".into());
+    }
+    arguments.extend_from_slice(extra);
+    arguments
+}
+
 impl ProfileDefinition {
     /// Validate user intent without echoing arguments, environment values or
     /// malformed source. This establishes no adapter capability or authority.
@@ -239,7 +251,7 @@ pub(crate) fn frozen_definition(profile: &crate::domain::FrozenProfile) -> anyho
     ensure!(
         format!(
             "{:x}",
-            Sha256::digest(serde_json::to_vec(&definition.extra_args)?)
+            Sha256::digest(serde_json::to_vec(&agent_arguments(&definition.kind, &definition.extra_args))?)
         ) == profile.arguments_digest,
         "effective worker arguments changed"
     );

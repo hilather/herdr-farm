@@ -987,6 +987,14 @@ Owner-only `[safety."<canonical project path>"]` also accepts
 worker_uid = "owner"
 ```
 
+Codex workers and native probes run with `--no-daemon`, so root and owner
+sessions sharing one execution home do not contend over the managed daemon's
+uid-keyed socket symlink. Refresh Codex profile preparation and native interaction
+evidence, then obtain new launch approval after deploying this change; its
+product-owned argument changes the frozen argument digest. No daemon control
+files are removed. An early probe exit includes a bounded terminal tail for the
+operator; raw terminal diagnostics are not persisted in probe telemetry.
+
 Only that project opts in. Unknown values and non-string values refuse.
 `PROJECT.md` cannot supply this setting, including through a nested safety
 table. The config must be an external owner-owned file without group or other

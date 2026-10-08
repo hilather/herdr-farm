@@ -334,6 +334,25 @@ loopback inside their private network namespace; host loopback services, DNS,
 direct outbound traffic and proxied outbound requests remain unavailable.
 The agent itself retains the provider connectivity needed to work.
 
+Codex interactive launches and native probes include the product-owned
+`--no-daemon` argument. Each TUI uses its own app server instead of the managed
+daemon's uid-keyed control socket. A private `/tmp` makes persisted daemon socket
+links stale; sharing a home between root and owner mappings otherwise causes
+`File exists` failures and concurrent sessions race on the same link. Herdr uses
+the native TUI readiness, prompt interface and rollout files; it does not require
+the managed daemon's cross-session lifecycle. Disabling that daemon keeps shared
+homes, authentication and telemetry paths intact without deleting another
+session's control files. The flag is part of `arguments_digest`: existing Codex
+profile evidence must be prepared, verified and approved again before launch.
+User-configured `extra_args` must still be empty for native verification.
+
+If the probe's retained supervisor pidfds show an early exit, verification reports
+`native probe agent exited before readiness` with the last terminal output
+(including stderr, and an exit status when the terminal reports one). The tail is
+limited to 12 lines and 2048 characters, with terminal controls removed. Raw
+terminal content is shown only to the invoking operator; retained telemetry
+keeps the existing generic failure reason.
+
 Attempt writable roots stay on argv as an inline table under
 `-c permissions.herdr-farm-worker.filesystem`, mapping each exact existing
 `agent_writable_roots` path to `"write"`. Concurrent attempts sharing a profile

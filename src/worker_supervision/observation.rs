@@ -507,6 +507,13 @@ impl SupervisorObservation {
         Ok(())
     }
 
+    /// The retained namespace init has exited; Linux then kills its remaining
+    /// children. This does not prove that the host-side wrapper has finished.
+    #[cfg(feature = "state-store")]
+    pub(crate) fn namespace_exited(&self) -> Result<bool> {
+        exited(&self.init)
+    }
+
     /// Both exact processes have exited. Linux kills a PID namespace's remaining
     /// processes when its init exits; idle/absent terminal observations are not
     /// used as evidence here. Callers must separately meet preservation and

@@ -56,7 +56,7 @@ pub(super) fn command(
     }
     crate::worker_supervision::gated_command(
         Path::new(&profile.agent.path),
-        &definition.extra_args,
+        &crate::profile_config::agent_arguments(&profile.kind, &definition.extra_args),
         wall,
         &release_token(operation),
     )
@@ -84,7 +84,7 @@ pub(super) fn agent_arguments(
         let roots = crate::worker_supervision::agent_writable_roots(project, &worktrees, attempt.as_str())?;
         arguments.extend(["-c".to_owned(), format!("permissions.herdr-farm-worker.filesystem={}", toml::Value::Table(roots.into_iter().map(|root| (root, toml::Value::String("write".into()))).collect()))]);
     }
-    arguments.extend(definition.extra_args.iter().cloned());
+    arguments.extend(crate::profile_config::agent_arguments(&profile.kind, &definition.extra_args));
     Ok(arguments)
 }
 

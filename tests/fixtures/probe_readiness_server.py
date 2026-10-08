@@ -78,7 +78,12 @@ while True:
         ready = time.monotonic() - s['readiness_started'] >= delay
         result = dict(type='agent_explain', explain=dict(agent='codex', state='idle', manifest_source='bundled', manifest_version='2026.09.14.1', matched_rule=dict(id='prompt', state='idle'), visible_idle=ready, visible_blocker=not ready, visible_working=False, screen_detection_skipped=False, skip_state_update=False, local_override_shadowing_remote=False, fallback_reason=None, warning=None))
     elif method == 'pane.read':
-        result = dict(type='pane_read', text='Welcome. Trust. Press enter. Network. PRIVATE_SCREEN_TOKEN')
+        if s['child'].poll() is not None:
+            text = open(os.path.join(os.path.dirname(__file__), 'child-stderr')).read()
+            text += '\nexit status: %s' % s['child'].returncode
+        else:
+            text = 'Welcome. Trust. Press enter. Network. PRIVATE_SCREEN_TOKEN'
+        result = dict(type='pane_read', text=text)
     elif method == 'agent.prompt':
         result = dict(type='agent_prompted', agent=agent)
     f.write(json.dumps(dict(id=request['id'], result=result)) + '\n')

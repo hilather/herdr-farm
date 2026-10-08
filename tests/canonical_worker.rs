@@ -1757,8 +1757,10 @@ fn an_isolated_codex_worker_commits_through_codex_workspace_write_sandbox() {
     let roots = [common.display().to_string(), gitdir.clone(), format!("{}/.state/spool/{}", project.display(), attempt.as_str()),
         format!("{}/.state/worker-output/{}", project.display(), attempt.as_str())];
     let args: Vec<&str> = report.lines().filter_map(|l| l.strip_prefix("arg ")).collect();
-    assert_eq!(args.len(), 2, "{report}");
+    assert_eq!(args.len(), 3, "{report}");
     assert_eq!(args[0], "-c");
+    // Product-owned: Codex runs without its shared managed daemon.
+    assert_eq!(args[2], "--no-daemon");
     let settings: toml::Value = toml::from_str(args[1]).unwrap();
     let grants = settings["permissions"]["herdr-farm-worker"]["filesystem"].as_table().unwrap();
     assert_eq!(grants.len(), roots.len());
