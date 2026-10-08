@@ -266,12 +266,16 @@ downloaded to `/tmp/herdr-canonical-source`. No upstream source was changed.
   submission result. It is not an argv execution API or typed start receipt.
   The new POSIX command encoder quotes every argument, including metacharacters.
   The viewer adapter accepts that silent zero exit specifically for `pane run`;
-  JSON-returning commands still require their reply. Previously the generic
-  JSON adapter classified this successful submission as failed and immediately
-  closed the viewer tab, independently of launch locks or server sweep timing.
-  The operator-launch viewer lifecycle lab reproduces the native silent response
-  and checks persisted viewer ownership, reopen/focus, and diagnostic cleanup
-  after a genuine submission failure. It requires Unix socket permissions.
+  JSON-returning commands still require their reply. Submit without `--`, which
+  Herdr 0.9.1 preserves as shell source. The first encoded word is the quoted
+  absolute `/usr/bin/env` path, so it cannot be mistaken for an option.
+  Three best-effort visible pane reads share a two-second startup deadline,
+  with 64 KiB capture per read. Recognized shell execution errors remove the
+  newly created viewer and report it unavailable without failing the worker.
+  Unsupported reads retain the viewer; this bounded check is not a typed attach
+  receipt. The operator-launch CLI lifecycle lab checks exact submitted source,
+  persisted ownership, reopen/focus, submission failure, and silent submission
+  followed by a shell error. It requires Unix socket permissions.
 - `src/app/api/layouts.rs::handle_layout_apply` accepts literal command vectors through
   `layout.apply`. Supplying a workspace and omitting a tab creates a new tab;
   supplying a tab replaces it and is unsuitable for unowned resources. An isolated

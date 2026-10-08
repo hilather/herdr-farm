@@ -402,11 +402,16 @@ focuses its existing tab. The dedicated worker server keeps its own shell and
 bundled manifests; the viewer uses a private product config allowing nesting,
 without changing the owner's Herdr config. If the coordinator session is
 unavailable, launch still succeeds and reports the viewer as unavailable.
-Native `herdr pane run` acknowledges submission with a silent successful exit;
-the viewer tab and its recovery record are retained after that acknowledgement.
-A failed submission closes the newly created tab and reports the Herdr diagnostic
-(or exit status when there is no diagnostic) in `viewer.reason`. Submission does
-not prove that the nested terminal client has finished starting.
+Native `herdr pane run` acknowledges submission with a silent successful exit.
+The command is submitted without `--`: Herdr 0.9.1 keeps that token in the shell
+source. The POSIX encoder starts the source with quoted absolute `/usr/bin/env`,
+so its first word cannot be parsed as an option. After submission, up to three
+visible pane reads share a two-second deadline and a 64 KiB capture limit per
+read. Recognized shell command errors close the newly created tab, remove its
+recovery record, and report the diagnostic in `viewer.reason`; worker launch
+still succeeds. Unsupported or unavailable reads are best-effort and retain the
+viewer. A successful observation does not prove that the client finished attaching.
+A failed submission likewise reports its Herdr diagnostic or exit status.
 
 The profile's `max_wall_seconds` ends a worker that runs out of time. After an
 `attempt.ended_without_submission` inbox notice, run

@@ -65,7 +65,10 @@ def serve(path):
   elif m in ['tab.focus','pane.run']:res={'type':'ok'}
   elif m=='pane.list':res={'panes':[pane] if live else []}
   elif m=='pane.get':res={'pane':dict(pane,agent=kind)}
-  elif m=='pane.read':res={'type':'pane_read','text':screen}
+  elif m=='pane.read':
+   viewer=p.get('pane_id','').startswith('viewer-')
+   failed=os.path.exists(os.path.join(root,'fail-viewer-command'))
+   res={'type':'pane_read','text':('bash: command not found: --' if failed else 'Herdr client attached') if viewer else screen}
   elif m=='pane.process_info':res={'process_info':{'pane_id':'w1:p1','foreground_processes':[{'pid':s['pid'],'argv':s['argv']}] if live else []}}
   elif m=='pane.send_input':
    fd=os.open(s['fifo'],os.O_WRONLY);os.write(fd,p['text'].encode());os.close(fd);s['released']=True;res={'type':'ok'}
@@ -85,7 +88,7 @@ if args[:2] in [['tab','list'],['tab','create'],['tab','close'],['tab','focus'],
  elif method=='tab.create':params={'workspace_id':args[3],'cwd':args[5],'label':args[7],'focus':False}
  elif method=='tab.rename':params={'tab_id':args[2],'label':args[3]}
  elif method.startswith('tab.'):params={'tab_id':args[2]}
- else:params={'pane_id':args[2],'command':args[4:]}
+ else:params={'pane_id':args[2],'command':args[3:]}
  probe=None;bridge=json.dumps({'id':'viewer','method':method,'params':params}).encode()+b'\n'
 else:
  assert probe or args==['remote-api-bridge']
@@ -1117,9 +1120,13 @@ fn canonical_worker_viewers_create_reopen_focus_and_close_only_the_recorded_tab(
     assert!(fs::read_to_string(&config).unwrap().contains("allow_nested = true"));
     let calls = owner.calls();
     assert_eq!(calls.iter().filter(|c| c["method"] == "tab.create").count(), 1);
-    let command = calls.iter().find(|c| c["method"] == "pane.run").unwrap()["params"]["command"].to_string();
-    assert!(command.contains(config.to_str().unwrap()));
-    assert!(command.contains(launched["herdr_socket"].as_str().unwrap()));
+    let expected_command = herdr_farm::worker_supervision::posix_command(&[
+        "/usr/bin/env".into(), format!("HERDR_CONFIG_PATH={}", config.display()),
+        format!("HERDR_SOCKET_PATH={}", launched["herdr_socket"].as_str().unwrap()),
+        lab.home.join("bin/herdr").display().to_string(),
+    ]).unwrap();
+    let command = &calls.iter().find(|c| c["method"] == "pane.run").unwrap()["params"]["command"];
+    assert_eq!(command, &serde_json::json!([expected_command]));
     let record_path = lab.root.join(".herdr-run/demo-visible/herdr/server.json");
     let record: Value = serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
     assert_eq!(&record["viewer"], viewer, "silent pane submission retains the viewer");
@@ -1178,6 +1185,16 @@ fn canonical_worker_viewers_create_reopen_focus_and_close_only_the_recorded_tab(
     assert!(record.get("viewer").is_none());
     lab.ok(&["launch", "demo", "stop", "--task", "visible"]);
     fs::remove_file(rejected).unwrap();
+    // Silent submission can still leave a shell error; worker launch succeeds.
+    let failure = owner.socket.parent().unwrap().join("fail-viewer-command");
+    fs::write(&failure, "").unwrap();
+    let failed = lab.ok(&args);
+    assert_eq!(failed["viewer"]["status"], "unavailable");
+    assert!(failed["viewer"]["reason"].as_str().unwrap().contains("bash: command not found: --"));
+    let record: Value = serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
+    assert!(record.get("viewer").is_none());
+    lab.ok(&["launch", "demo", "stop", "--task", "visible"]);
+    fs::remove_file(failure).unwrap();
     owner.child.kill().unwrap();
     owner.child.wait().unwrap();
     let unavailable = lab.ok(&args);

@@ -474,11 +474,13 @@ fn open_viewer(ctx: &Ctx, project: &Path, directory: &Path, task: &str, socket: 
         close_viewer(ctx, &record);
         return Err(error.into());
     }
+    // The quoted absolute /usr/bin/env path cannot be parsed as an option.
+    // Herdr 0.9.1 treats a `--` separator as part of the shell source.
     let command = herdr_farm::worker_supervision::posix_command(&[
         "/usr/bin/env".into(), format!("HERDR_CONFIG_PATH={}", config.display()),
         format!("HERDR_SOCKET_PATH={}", socket.display()), ctx.env.herdr_bin().to_string(),
     ])?;
-    if let Err(error) = h.pane_run(&created.pane_id, &command) {
+    if let Err(error) = h.pane_run(&created.pane_id, &command).and_then(|()| h.verify_viewer(&created.pane_id)) {
         close_viewer(ctx, &record);
         record.as_object_mut().context("invalid server record")?.remove("viewer");
         fs::write(&path, serde_json::to_vec_pretty(&record)?)?;
