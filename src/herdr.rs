@@ -345,7 +345,39 @@ impl<'a> Herdr<'a> {
 
     pub fn pane_run(&self, pane: &str, command: &str) -> Result<(), HerdrError> {
         // Native pane run submits shell source and exits successfully without JSON.
-        self.call_with_silent_success(&["pane", "run", pane, "--", command], CALL_TIMEOUT, true).map(|_| ())
+        self.call_with_silent_success(&["pane", "run", pane, command], CALL_TIMEOUT, true).map(|_| ())
+    }
+
+    /// Best-effort startup observation: unsupported reads do not reject a viewer.
+    /// A silent submission receipt alone cannot reveal a shell execution failure.
+    pub fn verify_viewer(&self, pane: &str) -> Result<(), HerdrError> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        for attempt in 0..3 {
+            let mut cmd = self.cmd(deadline.saturating_duration_since(std::time::Instant::now()))
+                .arg("remote-api-bridge")
+                .stdin(serde_json::json!({"id":"viewer-startup","method":"pane.read",
+                    "params":{"pane_id":pane,"source":"visible"}}).to_string() + "\n");
+            cmd.deadline = Some(deadline);
+            cmd.capture_limit = 64 * 1024;
+            let Ok(out) = self.runner.run(&cmd) else { break; };
+            if !out.success() || out.timed_out || out.cancelled || out.stdout_truncated { break; }
+            let Some(reply) = reply_json(&out) else { break; };
+            if reply.get("error").is_some() { break; }
+            let Some(text) = reply["result"]["text"].as_str() else { break; };
+            if let Some(line) = text.lines().find(|line| {
+                let line = line.trim();
+                (line.starts_with("bash:") || line.starts_with("sh:") || line.starts_with("zsh:")
+                    || line.starts_with("/usr/bin/env:"))
+                    && ["command not found", "not found", "No such file", "Permission denied"]
+                        .iter().any(|error| line.contains(error))
+            }) {
+                return Err(HerdrError { code: "failed".into(), message: format!("viewer command failed: {line}") });
+            }
+            if attempt < 2 && std::time::Instant::now() + Duration::from_millis(100) < deadline {
+                std::thread::sleep(Duration::from_millis(100));
+            } else { break; }
+        }
+        Ok(())
     }
 
     /// Creates a worktree-backed workspace. Returns the ids and the checkout

@@ -279,10 +279,10 @@ fn delegated_scenario() -> Scenario {
     fs::write(&policy_path, r#"{"version":1,"checks":["/usr/bin/git","status"]}"#).unwrap();
     let rejected = verify("wrong-policy");
     assert!(!rejected.status.success());
-    let rejected: serde_json::Value = serde_json::from_slice(&rejected.stdout).unwrap();
-    assert_eq!(rejected["state"], "rejected");
-    assert_eq!(rejected["reason"], "policy_digest_mismatch");
-    assert!(rejected["receipt"].is_null()); assert!(!work_path.exists());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("policy_digest_mismatch"));
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("omit --policy-file"));
+    assert!(!work_path.exists());
+    assert_eq!(raw_result.query_row("SELECT count(*) FROM verification_runs", [], |row| row.get::<_,u64>(0)).unwrap(), 0);
     assert_eq!(raw_result.query_row("SELECT count(*) FROM verified_results", [], |row| row.get::<_,u64>(0)).unwrap(), 0);
     fs::write(&policy_path, verifier_policy).unwrap();
     let verified = accepted(verify("verify-original"));

@@ -440,10 +440,7 @@ fn same_namespace_exits_without_calling_mount() {
 }
 
 #[test]
-fn policy_digest_mismatch_rejects_without_a_result() {
-    if !require_unshare() {
-        return;
-    }
+fn policy_digest_mismatch_is_refused_without_a_result() {
     let world = world(false);
     let checkout = world.work.join("checkout");
     let body = git_diff_policy(&checkout);
@@ -458,10 +455,8 @@ fn policy_digest_mismatch_rejects_without_a_result() {
     .unwrap();
     outcome_request.submission_id = submission;
     let mut db = SqliteStore::open(&world.db_path).unwrap();
-    let outcome = verify(&mut db, &outcome_request).unwrap();
-    assert_eq!(outcome.state, "rejected");
-    assert_eq!(outcome.reason.as_deref(), Some("policy_digest_mismatch"));
-    assert!(outcome.receipt.is_none());
+    let error = verify(&mut db, &outcome_request).err().unwrap();
+    assert!(error.to_string().contains("policy_digest_mismatch"));
     assert_eq!(db.verified_result_count().unwrap(), 0);
 }
 

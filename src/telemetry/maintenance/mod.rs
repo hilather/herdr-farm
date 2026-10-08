@@ -94,6 +94,8 @@ pub struct Class {
 
 /// `retention.v1`: doc 09's defaults, one row per sidecar table group and on-disk artefact.
 pub const CLASSES: &[Class] = &[
+    Class { id: "sidecar.native_probe_failures", store: "telemetry.db", scope: "native_probe_failures", default_days: None, basis: "source_of_truth", destructive: true,
+        action: Action::Retain, age_from: "sequence", requires: "producer caps latest 1024 observations; retained in full sidecar backups" },
     Class { id: "sidecar.launch_load", store: "telemetry.db", scope: "operation_launch_load", default_days: None, basis: "source_of_truth", destructive: true,
         action: Action::Retain, age_from: "sampled_unix_ms", requires: "launch metadata cannot be replayed; retained in full sidecar backups" },
     Class { id: "sidecar.ticker_errors", store: "telemetry.db", scope: "operation_ticker_errors", default_days: None, basis: "source_of_truth", destructive: true,
@@ -110,7 +112,7 @@ pub const CLASSES: &[Class] = &[
         action: Action::Retain, age_from: "created_unix_ms", requires: "hashed credentials and revocations retained in full backups; no plaintext tokens; expiry remains absolute" },
     Class { id: "secret.otlp_tokens", store: "<config_dir>/otlp-<project-digest>.token", scope: "per-project bearer tokens", default_days: None, basis: "source_of_truth", destructive: true,
         action: Action::External, age_from: "-", requires: "never included in telemetry backups; delete to rotate while receiver stopped" },
-    Class { id: SESSIONS, store: "telemetry.db", scope: "per native session: muse_events, muse_parents, claude_turn_lines, claude_messages, claude_tool_results, opencode_messages, opencode_tools, codex_*, rollout_*, collect_offsets, codex_tool_sources, source_bindings, source_observations, ingest_quarantine, coverage_gaps, source_cursors, usage_entries, usage_dispositions, model_segments, quota_window_observations, session_graph_nodes",
+    Class { id: SESSIONS, store: "telemetry.db", scope: "content-free rollout_scope_skips discovery cache (until file disappears); per native session: muse_events, muse_parents, claude_turn_lines, claude_messages, claude_tool_results, opencode_messages, opencode_tools, codex_*, rollout_*, collect_offsets, codex_tool_sources, source_bindings, source_observations, ingest_quarantine, coverage_gaps, source_cursors, usage_entries, usage_dispositions, model_segments, quota_window_observations, session_graph_nodes",
         default_days: Some(90), basis: "derivable_from_native_source", destructive: true, action: Action::Prune, age_from: "last durable acceptance (rollout_sources.observed_unix_ms)",
         requires: "bound attempt terminal; accounting ledger synced after acceptance with no unresolved or conflicting disposition; no quarantined record" },
     Class { id: ATTENTION, store: "telemetry.db", scope: "attention_samples", default_days: Some(90), basis: "source_of_truth", destructive: true, action: Action::Prune,
@@ -166,7 +168,7 @@ fn class(id: &str) -> Option<&'static Class> { CLASSES.iter().find(|c| c.id == i
 /// Tables deleted per session, by the column that names it (`retention.v1`
 /// deletion scope). A sidecar table with a `session_id` or `path_digest`
 /// column outside these lists refuses `apply`: it would escape deletion.
-const BY_PATH: &[&str] = &["collect_offsets", "rollout_sources", "rollout_metadata", "rollout_threads", "rollout_subagents", "rollout_ingest_state", "rollout_forks",
+const BY_PATH: &[&str] = &["rollout_scope_skips", "collect_offsets", "rollout_sources", "rollout_metadata", "rollout_threads", "rollout_subagents", "rollout_ingest_state", "rollout_forks",
     "rollout_turn_ends", "rollout_turn_terminations", "codex_tool_sources", "source_bindings", "session_graph_nodes", "usage_dispositions", "accounting_source_summary"];
 const BY_SESSION: &[&str] = &["codex_usage", "codex_usage_times", "codex_quarantine", "codex_discrepancy", "codex_rate_limits", "codex_rate_limit_windows", "codex_turns",
     "muse_events", "muse_parents", "claude_turn_lines", "claude_messages", "claude_tool_results", "opencode_messages", "opencode_tools", "codex_tool_calls", "codex_tool_namespaces", "codex_exec_items", "codex_session_items", "codex_session_turns", "codex_session_clock", "codex_exec_classes", "codex_mcp_calls", "codex_agent_items", "codex_turn_aborts", "codex_fork_reconciliation", "usage_entries",
@@ -867,7 +869,7 @@ pub fn enforce(db: &mut Connection, tombstones: &Tombstones) -> Result<BTreeMap<
 }
 
 /// Interned metadata follows its surviving source/revision references.
-fn compact_dictionaries(db: &Connection) -> Result<()> {
+pub(crate) fn compact_dictionaries(db: &Connection) -> Result<()> {
     if table(db, "source_observation_rows")? {
         db.execute_batch("DELETE FROM source_observation_strings WHERE id NOT IN (
             SELECT source_id FROM source_observation_rows UNION SELECT producer_id FROM source_observation_rows

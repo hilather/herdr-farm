@@ -12,6 +12,14 @@ fn schema(db: &Connection) -> Result<()> {
 }
 
 impl SqliteStore {
+    /// Latest 32 sidecar failure observations; reports never confer launch authority.
+    pub fn native_probe_failures(&mut self, name: &str) -> Result<Vec<serde_json::Value>> {
+        let path = Path::new(self.connection.path().ok_or_else(|| StoreError::Invalid("store path missing".into()))?);
+        let project = path.parent().and_then(Path::parent).ok_or_else(|| StoreError::Invalid("project path missing".into()))?;
+        crate::telemetry::codex::probe_failures_for_profile(project, Some(name))
+            .map_err(|e| StoreError::Io(e.to_string()))
+    }
+
     /// Preflight before an expensive probe; upgrades must remain explicit.
     pub fn check_native_profile_retention(&self) -> Result<()> {
         schema(&self.connection)

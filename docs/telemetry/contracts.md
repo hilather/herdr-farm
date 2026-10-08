@@ -24,7 +24,10 @@ needs a new reviewed revision, not a silent reinterpretation.
 - Sidecar streams (phase 2, card S0): `telemetry.db` is versioned per stream
   in `telemetry_streams(stream, version)`: `codex` (§5, migrations under
   `migrations/telemetry/`, also `user_version`; 3 adds TM5.1's read indexes,
-  certificate-scale.md §5; 4 adds lossless storage compaction, §4.15), and
+  certificate-scale.md §5; 4 adds lossless storage compaction, §4.15;
+  6 adds content-free shared-home scope markers and collection cleanup,
+  “Shared execution-home collection scope” below; 7 adds bounded native probe
+  failure observations, “Native probe failure observations” below), and
   one stream per lane under
   `migrations/telemetry/<stream>/`: `ingest`, `accounting` (0025 adds product CLI metadata, §7), `quality` (0004 adds DG6d/e rerun observations; contracts-quality.md §6),
   `review`,
@@ -391,7 +394,9 @@ S3 refinements:
 
 **Source.** Rollout JSONL files under
 `<execution_home>/.codex/sessions/**/rollout-*.jsonl` for each Codex profile's
-`execution_home`. The collector reads only `session_meta`, `turn_context`,
+`execution_home`. Before ingesting any content it checks a bounded metadata
+header for project worktree scope and the earliest dispatch time (Codex v6;
+see “Shared execution-home collection scope” below). The collector reads only `session_meta`, `turn_context`,
 `token_usage_record`, `event_msg` of type `token_count`, `task_started`,
 `task_complete`, `turn_aborted` (A8), `item_completed`, and `response_item`
 of type `custom_tool_call`, `function_call`, `custom_tool_call_output`,
@@ -624,6 +629,13 @@ S6 refinements:
   `adapter_absent` (terminated non-Codex) and `incomplete` by first failing
   reason: `not_bound`, `quarantined`, `cli_version_uncertified`,
   `records_not_accepted` (a source's `records` ≠ its accepted rows).
+- Current quota headroom uses only the newest started window per account,
+  limit id, kind and duration (latest observation breaks equal-start ties).
+  Provider early resets supersede older windows before their nominal reset;
+  history remains available in `accounting quota`, alongside a per-account
+  `current_windows` list.
+  Health exposes the selected reading's age and retains `not_certified`
+  semantics. See contracts-accounting.md §5.
 - M40 is the extended form of `accounting quota` (contracts-accounting.md
   §5): `definition` `M40.quota-windows-v2`, `stale_after_ms` 900000,
   `decisions` in attempt order, each `{attempt_id, decided_unix_ms, service,
@@ -1024,3 +1036,68 @@ MET-M90-M63-1: sidecar operations **v3**,
 worktree coverage columns to storage samples. These share the existing
 `sidecar.storage_samples` 90-day retention, tombstones and source-of-truth backup
 classification. Canonical schema is unchanged. See contracts-analytics.md M63/M90.
+
+### Native probe failure observations
+
+`native_probe_failures` lives in the telemetry sidecar, Codex stream v7
+(`migrations/telemetry/0007_native_probe_failures.sql`). Migration 0007 alone
+creates the table and index, advancing both the Codex stream and `user_version`
+to 7 in the migration transaction. Historical upgrade fixtures that rewind a
+current sidecar below v7 must remove this table, just as fixtures below v6
+remove `rollout_scope_skips`; retaining it would misrepresent the older schema.
+Repeated opens and collection preserve the migrated table and its observations.
+Failed probes write no
+canonical rows. Its version-1 JSON payload is
+bounded to 4096 bytes and contains `profile`, `kind`, `agent_version`, `step`,
+`failure_class`, `reason`, `started_unix_ms`, and `finished_unix_ms`. Early
+setup (`probe_setup`) and preparation failures have null kind/version. Reasons use fixed diagnostic text
+and allowlisted screen categories, never terminal content or provider responses.
+`transient_readiness` denotes readiness deadline expiry; cancellation is
+`cancelled`; complete identity mismatches are `process_changed`, and other
+readiness identity errors are `process_observation_failed`. Failures outside the
+readiness step are `verification_failed`. Retrieval through
+profile inspection and telemetry source inspection is limited to 32 records.
+The producer retains the latest 1024 observations per project, with 32 returned
+per inspection (filtered by profile for profile inspection). Maintenance class
+`sidecar.native_probe_failures` is source-of-truth, producer-bounded retention,
+included in full sidecar backups. Existing canonical failure events remain
+historical audit data; new observations are stored only in the sidecar. Reports do
+not confer capabilities, and success does not erase historical failures.
+
+### Shared execution-home collection scope (Codex stream v6)
+
+`migrations/telemetry/0006_collection_scope.sql` adds `rollout_scope_skips`.
+Worker rollouts are admitted before content ingestion using only a bounded
+64 KiB first `session_meta` line. A worker cwd must identify a worktree beneath this
+project's `.state/worktrees/`; dot and parent components are refused. Worker sessions
+whose metadata timestamp predates the earliest recorded dispatch decision are
+skipped before reading subsequent lines. An empty sidecar uses stable home and
+rollout-path discovery order for its first ingestion. Once sources are recorded,
+homes with live bindings are preferred, then recent dispatches; within a home
+discovery prefers newest rollout paths so historical backlogs cannot consume the
+ticker budget ahead of current work.
+Codex sessions whose cwd is exactly this project root retain the existing
+`coordinator-scope-v2` exception, including coordinator history before the first
+worker dispatch. The separately scoped Claude coordinator directory keeps its
+existing collection rules. A foreign project root is never this exception.
+
+Negative discovery markers retain only path digest, size and nanosecond mtime;
+unchanged rejected files are not reopened. Marker additions, admission removals
+and disappeared-path cleanup commit together once per collection, rather than
+acquiring a write transaction for each rejected file. An interrupted pass may
+rediscover uncached files; it still validates scope before ingesting content.
+No foreign cwd, metadata, text or excerpt is retained. Incomplete, malformed or
+oversized metadata is cached and retried when the file changes, without content
+ingestion. The markers are a
+derivable collection cache, included in full sidecar
+backups under `sidecar.normalized_sessions`, and removed with their path during
+session purge; markers for files no longer discovered are discarded. This cache
+follows file presence rather than the session retention age. They contain no
+session content and may be discarded for rediscovery.
+
+Each collection also removes legacy unbound Codex sources outside the project
+worktree scope using the normalized-session purge and dictionary compaction,
+including envelopes, excerpts, cursors and derived accounting rows. The exact
+project-root coordinator exception is preserved. This cleanup
+is a scope correction independent of normal retention ages. The canonical schema
+is unchanged.

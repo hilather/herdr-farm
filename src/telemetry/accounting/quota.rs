@@ -478,20 +478,38 @@ pub(crate) fn stored_headroom(db: &Connection, attempt: &str, home: &str, decide
     body.map(|b| serde_json::from_str(&b).map_err(Into::into)).transpose()
 }
 
+/// Current provider window per execution home, limit, kind and duration.
+/// A successor ends its predecessor early, regardless of the nominal reset.
+/// Shared by health and the history report; `w` is the window and `?1` is now.
+pub(crate) const CURRENT_WINDOW_SQL: &str = "w.window_start_unix_ms<=?1 AND w.resets_unix_ms>?1
+    AND NOT EXISTS(SELECT 1 FROM quota_windows successor
+        WHERE successor.account=w.account AND successor.limit_id=w.limit_id
+        AND successor.window_kind=w.window_kind AND successor.window_minutes=w.window_minutes
+        AND successor.window_start_unix_ms<=?1
+        AND (successor.window_start_unix_ms>w.window_start_unix_ms
+            OR (successor.window_start_unix_ms=w.window_start_unix_ms
+                AND successor.last_observed_unix_ms>w.last_observed_unix_ms)))";
+
 /// `accounting quota`: synced windows, observation trust, M38/M39 and extended
 /// M40 per dispatch decision. Read-only; `ledger_not_synced` before a sync.
 pub fn read(project: &Path, db: &Connection) -> Result<Value> {
     if !synced(db)? { return Ok(unavailable("ledger_not_synced")); }
-    let mut windows: Vec<Value> = db.prepare("SELECT window_id,account,limit_id,window_kind,unit,window_minutes,window_start_unix_ms,resets_unix_ms,start_evidence,
-        first_observed_unix_ms,last_observed_unix_ms,first_used,used,remaining,observed_increase,plan_type,observations,flagged
-        FROM quota_windows ORDER BY account,limit_id,window_kind,resets_unix_ms")?
-        .query_map([], |r| Ok(json!({"window_id": r.get::<_, String>(0)?, "service": "codex", "account": r.get::<_, String>(1)?, "limit_id": r.get::<_, String>(2)?,
+    let now = jiff::Timestamp::now().as_millisecond();
+    let mut windows: Vec<Value> = db.prepare(&format!("SELECT window_id,account,limit_id,window_kind,unit,window_minutes,window_start_unix_ms,resets_unix_ms,start_evidence,
+        first_observed_unix_ms,last_observed_unix_ms,first_used,used,remaining,observed_increase,plan_type,observations,flagged,
+        ({CURRENT_WINDOW_SQL}) FROM quota_windows w ORDER BY account,limit_id,window_kind,resets_unix_ms"))?
+        .query_map([now], |r| Ok(json!({"window_id": r.get::<_, String>(0)?, "service": "codex", "account": r.get::<_, String>(1)?, "limit_id": r.get::<_, String>(2)?,
             "window_kind": r.get::<_, String>(3)?, "unit": r.get::<_, String>(4)?, "window_minutes": r.get::<_, i64>(5)?,
             "window_start_unix_ms": r.get::<_, i64>(6)?, "resets_unix_ms": r.get::<_, i64>(7)?, "start_evidence": r.get::<_, String>(8)?,
             "first_observed_unix_ms": r.get::<_, i64>(9)?, "last_observed_unix_ms": r.get::<_, i64>(10)?, "first_used": r.get::<_, String>(11)?,
             "used": r.get::<_, String>(12)?, "remaining": r.get::<_, String>(13)?, "observed_increase": r.get::<_, String>(14)?,
-            "plan_type": r.get::<_, Option<String>>(15)?, "observations": r.get::<_, i64>(16)?, "flagged": r.get::<_, i64>(17)?})))?
+            "plan_type": r.get::<_, Option<String>>(15)?, "observations": r.get::<_, i64>(16)?, "flagged": r.get::<_, i64>(17)?, "current": r.get::<_, bool>(18)?})))?
         .collect::<rusqlite::Result<_>>()?;
+    let mut current_windows = Vec::new();
+    for window in &mut windows {
+        let current = window.as_object_mut().expect("quota window object").remove("current");
+        if current == Some(json!(true)) { current_windows.push(window.clone()); }
+    }
     // Windows of different accounts with the same limit, kind, length and reset (within the jitter
     // tolerance of the group's earliest reset): one provider window seen from several homes.
     let mut groups = BTreeMap::<(String, String, i64, i64), Vec<(String, String)>>::new();
@@ -557,7 +575,7 @@ pub fn read(project: &Path, db: &Connection) -> Result<Value> {
     let mut m40 = super::metric("M40", "quota_headroom_at_dispatch", json!({"decisions": list, "stale_after_ms": STALE_AFTER_MS}));
     m40["definition"] = json!("M40.quota-windows-v2");
     metrics.insert("M40".to_owned(), m40);
-    Ok(json!({"semantics": "not_certified", "account_basis": ACCOUNT_BASIS, "windows": windows, "evidence_windows": evidence_windows, "runway": runway, "not_reported": not_reported, "shared_window_candidates": shared, "observations": trust,
+    Ok(json!({"semantics": "not_certified", "account_basis": ACCOUNT_BASIS, "windows": windows, "evidence_windows": evidence_windows, "current_windows": current_windows, "runway": runway, "not_reported": not_reported, "shared_window_candidates": shared, "observations": trust,
         "evidence": {"rate_limit_reached_type": {"snapshots": reached, "semantics": "not_certified", "certified": "fixture"}}, "metrics": metrics}))
 }
 
@@ -644,6 +662,10 @@ pub fn text(value: &Value) -> String {
             w["account"].as_str().unwrap_or(""), w["limit_id"].as_str().unwrap_or(""), w["window_kind"].as_str().unwrap_or(""), w["resets_unix_ms"],
             w["used"].as_str().unwrap_or(""), w["remaining"].as_str().unwrap_or(""), w["observed_increase"].as_str().unwrap_or(""),
             w["observations"], w["flagged"], w["start_evidence"].as_str().unwrap_or(""));
+    }
+    for w in value["current_windows"].as_array().into_iter().flatten() {
+        out += &format!("current window {}: remaining {}% last_observed_unix_ms={}\n",
+            w["window_id"].as_str().unwrap_or(""), w["remaining"].as_str().unwrap_or(""), w["last_observed_unix_ms"]);
     }
     for c in value["shared_window_candidates"].as_array().into_iter().flatten() {
         let accounts: Vec<&str> = c["accounts"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();

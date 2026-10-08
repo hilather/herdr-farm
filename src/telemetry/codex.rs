@@ -230,6 +230,34 @@ pub fn profile_versions(project: &Path) -> Result<Vec<Value>> {
     Ok(out)
 }
 
+/// Bounded redacted observations, independent of canonical launch state.
+pub(crate) fn retain_probe_failure(project: &Path, record: &Value) -> Result<()> {
+    let payload = serde_json::to_string(record)?;
+    anyhow::ensure!(payload.len() <= 4096, "native probe failure exceeds limit");
+    let mut db = super::sidecar::open(project, true)?.expect("created sidecar");
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    tx.execute("INSERT INTO native_probe_failures(profile,payload) VALUES(?1,?2)",
+        params![record["profile"].as_str().unwrap_or_default(), payload])?;
+    tx.execute("DELETE FROM native_probe_failures WHERE sequence NOT IN (SELECT sequence FROM native_probe_failures ORDER BY sequence DESC LIMIT 1024)", [])?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Latest 32 observations; reading never creates or migrates a sidecar.
+pub fn probe_failures(project: &Path) -> Result<Vec<Value>> {
+    probe_failures_for_profile(project, None)
+}
+
+pub(crate) fn probe_failures_for_profile(project: &Path, profile: Option<&str>) -> Result<Vec<Value>> {
+    let Some(db) = super::sidecar::read(project)? else { return Ok(Vec::new()); };
+    if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='native_probe_failures')", [], |r| r.get::<_, bool>(0))? {
+        return Ok(Vec::new());
+    }
+    let mut statement = db.prepare("SELECT payload FROM native_probe_failures WHERE (?1 IS NULL OR profile=?1) AND length(payload)<=4096 ORDER BY sequence DESC LIMIT 32")?;
+    let rows = statement.query_map([profile], |row| row.get::<_, String>(0))?;
+    rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+}
+
 /// How to pin a profile to a certified Codex binary, for the warnings above.
 pub const PIN_ADVICE: &str = "pin the profile to a certified Codex binary by its resolved path, not a version manager shim (e.g. `profile prepare <slug> <profile> --agent-executable ~/.local/share/mise/installs/codex/0.154.0/bin/codex ...`); versions at or above the lowest live-certified version are accepted";
 
@@ -278,6 +306,63 @@ pub fn collection_configured(project: &Path) -> Result<bool> {
     Ok(false)
 }
 
+type ScopeChanges = Vec<(String, Option<(i64, i64, i64)>)>;
+
+/// Inspect only the bounded metadata line; foreign content never reaches ingest.
+fn in_project(db: &Connection, file: &Path, worktrees: &str, earliest: Option<i64>, changes: &mut ScopeChanges) -> Result<bool> {
+    let Ok(stats) = std::fs::symlink_metadata(file) else { return Ok(false) };
+    if !stats.is_file() { return Ok(false); }
+    let key = digest(file.as_os_str().as_encoded_bytes());
+    let previous: Option<(i64, i64, i64)> = db.prepare_cached(
+        "SELECT size,mtime,mtime_nsec FROM rollout_scope_skips WHERE path_digest=?1")?.query_row(
+        [&key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
+    if previous == Some((stats.len() as i64, stats.mtime(), stats.mtime_nsec())) { return Ok(false); }
+    let input = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(file)?;
+    let mut line = Vec::new();
+    BufReader::new(input.take(64 << 10)).read_until(b'\n', &mut line)?;
+    let mut skip = || -> Result<bool> {
+        changes.push((key.clone(), Some((stats.len() as i64, stats.mtime(), stats.mtime_nsec()))));
+        Ok(false)
+    };
+    // Incomplete metadata is retried when its size or modification time changes.
+    if line.last() != Some(&b'\n') { return skip(); }
+    let Ok(value) = serde_json::from_slice::<Value>(&line) else { return skip() };
+    if value["type"] != "session_meta" { return skip(); }
+    let payload = &value["payload"];
+    // Existing coordinator-scope-v2: exact project cwd, outside task worktrees.
+    if payload["cwd"].as_str().is_some_and(|cwd| Some(cwd) == worktrees.strip_suffix("/.state/worktrees/")) {
+        if previous.is_some() { changes.push((key, None)); }
+        return Ok(true);
+    }
+    let at = payload["timestamp"].as_str().and_then(|s| s.parse::<jiff::Timestamp>().ok()).map(|t| t.as_millisecond());
+    let belongs = payload["cwd"].as_str().is_some_and(|cwd| cwd_attempt(cwd, worktrees).is_some());
+    if !belongs || earliest.zip(at).is_some_and(|(first, at)| at < first) { return skip(); }
+    // An unchanged admitted rollout can be observed beside an existing writer.
+    // Even a DELETE matching zero rows would unnecessarily acquire its lock.
+    if previous.is_some() { changes.push((key, None)); }
+    Ok(true)
+}
+
+/// Upgrade previously collected shared-home data using the retention deletion scope.
+/// `cwd_attempt` was computed from the raw cwd before home-prefix sanitization;
+/// its absence is the durable scope check, avoiding sanitized-path collisions.
+fn clean_foreign(db: &mut Connection, project: &Path) -> Result<()> {
+    let rows: Vec<String> = db.prepare("SELECT DISTINCT session_id FROM rollout_sources WHERE cwd_attempt IS NULL AND binding='unbound' AND coalesce(originator,'') NOT LIKE 'otlp:%' AND coalesce(originator,'') NOT IN ('claude-code','claude','gemini','gemini-cli','muse','opencode') AND cwd<>?1")?
+        .query_map([sanitize::home_prefix(&project.display().to_string())], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+    if rows.is_empty() { return Ok(()); }
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    for session in rows {
+        // A resumed session can have both foreign and local source files. Clear
+        // all its cursors together so admitted local files rebuild consistently.
+        let paths = tx.prepare("SELECT path_digest FROM rollout_sources WHERE session_id=?1")?
+            .query_map([&session], |r| r.get(0))?.collect::<rusqlite::Result<Vec<String>>>()?;
+        super::maintenance::purge_session(&tx, &session, &paths)?;
+    }
+    super::maintenance::compact_dictionaries(&tx)?;
+    tx.commit()?;
+    Ok(())
+}
+
 /// Scan every Codex execution home, ingest complete new lines, recompute bindings.
 /// `create` false: a project without Codex homes gets no sidecar.
 pub fn collect(project: &Path, budget: Budget, create: bool) -> Result<Option<Collected>> {
@@ -298,6 +383,23 @@ pub fn collect(project: &Path, budget: Budget, create: bool) -> Result<Option<Co
     let tombstones = super::maintenance::Tombstones::of(project)?;
     let project = std::fs::canonicalize(project)?;
     let worktrees = format!("{}/.state/worktrees/", project.display());
+    clean_foreign(&mut db, &project)?;
+    // Keep the first full ingestion in stable discovery order. Prioritization
+    // is useful on later passes with a backlog, but reversing an empty sidecar's
+    // history slows its initial ingest and delays the first accounting frontier.
+    let initial = !db.query_row("SELECT EXISTS(SELECT 1 FROM rollout_sources)", [], |r| r.get::<_, bool>(0))?;
+    if !initial {
+        // Prefer homes with a live binding, then the most recent dispatch, so an
+        // older profile's backlog cannot take the budget ahead of current workers.
+        homes.sort_by_key(|home| std::cmp::Reverse(attempts.iter().filter(|a| a.home.as_ref() == Some(home))
+            .map(|a| (matches!(&a.binding, Binding::Active(_)) && a.terminated.is_none(), a.decided_unix_ms)).max()));
+    }
+
+    let earliest = if project.join(".state/state.db").exists() {
+        let canonical = super::read_only(&project.join(".state/state.db"))?;
+        let decisions: bool = canonical.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='dispatch_decisions' AND type='table')", [], |r| r.get(0))?;
+        if decisions { canonical.query_row("SELECT min(decided_unix_ms) FROM dispatch_decisions", [], |r| r.get::<_, Option<i64>>(0))? } else { None }
+    } else { None };
     let mut test_classes = ProjectTestClasses::load(&project);
     let mut done = Collected::default();
     let mut remaining = budget.bytes;
@@ -308,6 +410,7 @@ pub fn collect(project: &Path, budget: Budget, create: bool) -> Result<Option<Co
     // that is certified now (A7): their measurement is superseded.
     let from_start: std::collections::BTreeSet<String> = reread.iter().chain(&backfill(&db)?).chain(&recertify(&db)?).cloned().collect();
     let mut seen = std::collections::BTreeSet::new();
+    let mut scope_changes = ScopeChanges::new();
     let mut unwritable = false;
     // A termination observed since the last collect ends its open turn before
     // this pass could record it missing; the binding is the last collect's.
@@ -329,7 +432,17 @@ pub fn collect(project: &Path, budget: Budget, create: bool) -> Result<Option<Co
         if !owner_source && attempts.iter().any(|a| a.kind.as_deref() == Some("opencode") && a.home.as_ref() == Some(home)) {
             opencode::collect(&mut db, home, &worktrees, &tombstones, &mut remaining, &mut done)?;
         }
-        files.sort();
+        let codex_root = Path::new(home).join(".codex/sessions");
+        if initial {
+            files.sort();
+        } else {
+            files.sort_by(|a, b| match (a.starts_with(&codex_root), b.starts_with(&codex_root)) {
+                (true, true) => b.cmp(a),
+                (false, false) => a.cmp(b),
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+            });
+        }
         // Coordinator identities cannot match any attempt execution-home digest.
         let home_key = if owner_source { digest(format!("coordinator-source:{home}").as_bytes()) } else { digest(home.as_bytes()) };
         seen.extend(files.iter().map(|file| digest(file.as_os_str().as_encoded_bytes())));
@@ -339,6 +452,7 @@ pub fn collect(project: &Path, budget: Budget, create: bool) -> Result<Option<Co
                 done.budget_exhausted |= remaining == 0;
                 break;
             }
+            if !owner_source && file.starts_with(Path::new(home).join(".codex/sessions")) && !in_project(&db, &file, &worktrees, earliest, &mut scope_changes)? { continue; }
             let mut span = (0, 0);
             let read = match tail(&mut db, &file, &home_key, &worktrees, remaining, budget.bytes <= Budget::TICK.bytes, &from_start, &tombstones, &mut done, &mut span, owner_source || file.starts_with(Path::new(home).join(".claude/projects")), owner_source, native.get(&file), muse_sources.get(&file), &mut test_classes) {
                 Ok(read) => read,
@@ -354,6 +468,22 @@ pub fn collect(project: &Path, budget: Budget, create: bool) -> Result<Option<Co
             };
             remaining -= read.min(remaining);
         }
+    }
+    // Removed files need no negative cache entry; surviving markers remain cheap.
+    let skips: Vec<String> = db.prepare("SELECT path_digest FROM rollout_scope_skips")?
+        .query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+    for key in skips { if !seen.contains(&key) { scope_changes.push((key, None)); } }
+    if !scope_changes.is_empty() {
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for (key, fingerprint) in scope_changes {
+            if let Some((size, mtime, mtime_nsec)) = fingerprint {
+                tx.prepare_cached("INSERT OR REPLACE INTO rollout_scope_skips VALUES(?1,?2,?3,?4)")?
+                    .execute(params![key, size, mtime, mtime_nsec])?;
+            } else {
+                tx.prepare_cached("DELETE FROM rollout_scope_skips WHERE path_digest=?1")?.execute([key])?;
+            }
+        }
+        tx.commit()?;
     }
     done.budget_exhausted |= remaining == 0;
     if !unwritable { reconcile_forks(&mut db)?; }

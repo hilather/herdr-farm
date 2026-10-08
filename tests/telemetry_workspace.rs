@@ -136,7 +136,9 @@ fn live_fleet(f: &Fixture) -> (String, String) {
         .replace("@T1@", &jiff::Timestamp::from_millisecond(f.decided - 60_000).unwrap().to_string()).replace("@R1@", &resets.to_string());
     let fixture = f.tmp.path().join("quota-single.jsonl");
     fs::write(&fixture, text).unwrap();
-    f.rollout(&f.home, "quota", &[fixture.to_str().unwrap()], &f.worktree(), f.decided - 60_000, "0.154.0");
+    // Provider quota before the first worker dispatch comes from this project's
+    // coordinator scope, rather than a pre-dispatch worker rollout.
+    f.rollout(&f.home, "quota", &[fixture.to_str().unwrap()], f.project.to_str().unwrap(), f.decided - 60_000, "0.154.0");
     f.cli("collect");
     f.cli_args(&["accounting", "sync"]);
     // Sealed before the planted rows below, which the store's own open would refuse (no reservations behind them).

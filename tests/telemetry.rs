@@ -195,7 +195,7 @@ fn invariant_violation_is_not_accepted() {
 }
 
 #[test]
-fn rollout_before_decision_or_elsewhere_is_unbound() {
+fn rollout_before_decision_or_elsewhere_is_skipped() {
     type RolloutCase = (&'static str, fn(&Fixture) -> (PathBuf, String, i64));
     let cases: [RolloutCase; 3] = [
         ("earlier", |f| (f.home.clone(), f.worktree(), f.decided - 60_000)),
@@ -207,7 +207,8 @@ fn rollout_before_decision_or_elsewhere_is_unbound() {
         let (home, cwd, ts) = case(&f);
         f.rollout(&home, SID, &["head.jsonl"], &cwd, ts, "0.154.0");
         let (report, _) = f.cli("collect");
-        assert_eq!(f.binding(), ("unbound".to_owned(), None), "{name}");
+        if name == "other-home" { assert_eq!(f.binding(), ("unbound".to_owned(), None)); }
+        else { assert_eq!(f.count("rollout_sources"), 0, "{name}"); }
         assert_eq!(attempt_usage(&report), unavailable("not_bound"), "{name}");
     }
 }
@@ -364,35 +365,44 @@ fn digest(path: &Path) -> String { format!("sha256:{:x}", <sha2::Sha256 as sha2:
 /// once `accounting sync` built the quota tables.
 #[test]
 fn quota_headroom_at_dispatch() {
-    // `quota-single.jsonl`: used 37.5% of the 300-minute `codex` window, one minute
-    // before dispatch; the window resets an hour after it → remaining 100 − 37.5 = 62.5, fresh.
-    let f = Fixture::new();
+    // A prior dispatch establishes project scope. `quota-single.jsonl` observes
+    // used 37.5% of the 300-minute `codex` window before the next dispatch; the window resets an hour after it → remaining 100 − 37.5 = 62.5, fresh.
+    let mut f = Fixture::new();
+    let prior_at = f.decided;
+    let prior_attempt = f.attempt.clone();
+    f.readmit("codex");
+    (f.attempt, f.decided) = rusqlite::Connection::open(f.project.join(".state/state.db")).unwrap()
+        .query_row("SELECT attempt_id,decided_unix_ms FROM dispatch_decisions ORDER BY decided_unix_ms DESC LIMIT 1", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+    f.bind();
+    let observed = prior_at + 1;
+    let age = f.decided - observed;
+    assert!(age > 0);
     let resets = f.decided / 1000 + 3_600;
     let text = fs::read_to_string(Path::new(ACCOUNTING).join("quota-single.jsonl")).unwrap()
-        .replace("@T1@", &jiff::Timestamp::from_millisecond(f.decided - 60_000).unwrap().to_string()).replace("@R1@", &resets.to_string());
+        .replace("@T1@", &jiff::Timestamp::from_millisecond(observed).unwrap().to_string()).replace("@R1@", &resets.to_string());
     let fixture = f.tmp.path().join("quota-single.jsonl");
     fs::write(&fixture, text).unwrap();
-    f.rollout(&f.home, "quota", &[fixture.to_str().unwrap()], &f.worktree(), f.decided - 60_000, "0.154.0");
+    f.rollout(&f.home, "quota", &[fixture.to_str().unwrap()], &f.worktree(), observed, "0.154.0");
     f.cli("collect");
     // Before a sync the quota tables do not exist yet: unavailable, never 0.
     let m40 = metric(&f.report(), "M40");
     assert_eq!((&m40["definition"], &m40["name"], &m40["stale_after_ms"]), (&"M40.quota-windows-v2".into(), &"quota_headroom_at_dispatch".into(), &900_000.into()));
-    assert_eq!(m40["decisions"], serde_json::json!([{"attempt_id": f.attempt, "decided_unix_ms": f.decided, "service": "codex",
+    assert_eq!(m40["decisions"], serde_json::json!([{"attempt_id": prior_attempt, "decided_unix_ms": prior_at, "service": "codex", "value": unavailable("ledger_not_synced")}, {"attempt_id": f.attempt, "decided_unix_ms": f.decided, "service": "codex",
         "value": unavailable("ledger_not_synced")}]));
     f.cli_args(&["accounting", "sync"]);
     let account = digest(&f.home);
     let report = f.report();
-    assert_eq!(metric(&report, "M40")["decisions"], serde_json::json!([{"attempt_id": f.attempt, "decided_unix_ms": f.decided, "service": "codex",
+    assert_eq!(metric(&report, "M40")["decisions"], serde_json::json!([{"attempt_id": prior_attempt, "decided_unix_ms": prior_at, "service": "codex", "account": account, "account_basis": "execution_home", "value": unavailable("no_observation")}, {"attempt_id": f.attempt, "decided_unix_ms": f.decided, "service": "codex",
         "account": account, "account_basis": "execution_home", "windows": [
             {"limit_id": "codex", "window_kind": "primary", "unit": "percent", "window_id": format!("codex:{account}:codex:primary:{}", resets * 1000),
-             "window_minutes": 300, "resets_unix_ms": resets * 1000, "observed_unix_ms": f.decided - 60_000, "age_ms": 60_000,
+             "window_minutes": 300, "resets_unix_ms": resets * 1000, "observed_unix_ms": observed, "age_ms": age,
              "value": "62.5", "used": "37.5", "freshness": "fresh"}]}]));
     // The same decisions as `accounting quota`.
     assert_eq!(metric(&report, "M40")["decisions"], f.cli_args(&["accounting", "quota", "--json"]).0["metrics"]["M40"]["decisions"]);
     // Text (the fleet pane's body): one line per decision and limit window.
     let text = f.text(&["report"]);
     let m40: Vec<&str> = text.lines().filter(|l| l.starts_with("M40 ")).collect();
-    assert_eq!(m40, [format!("M40 quota_headroom_at_dispatch {} codex primary remaining 62.5% age_ms=60000 fresh", f.attempt)], "{text}");
+    assert_eq!(m40, [format!("M40 quota_headroom_at_dispatch {prior_attempt} n/a (no_observation)"), format!("M40 quota_headroom_at_dispatch {} codex primary remaining 62.5% age_ms={age} fresh", f.attempt)], "{text}");
     assert_eq!(text.lines().filter(|l| l.starts_with("limit ") && l.contains("secondary")).count(), 1);
     fs::write(f.project.join("PROJECT.md"), "# demo\n").unwrap();
     let pane = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", f.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
@@ -403,15 +413,23 @@ fn quota_headroom_at_dispatch() {
 
     // `head.jsonl` reports a window that reset at 1790003600 s (September 2026),
     // before any decision made now: its remaining value no longer applies.
-    let f = Fixture::new();
-    f.rollout(&f.home, SID, &["head.jsonl"], &f.worktree(), f.decided - 60_000, "0.154.0");
+    let mut f = Fixture::new();
+    let prior_at = f.decided;
+    f.readmit("codex");
+    (f.attempt, f.decided) = rusqlite::Connection::open(f.project.join(".state/state.db")).unwrap()
+        .query_row("SELECT attempt_id,decided_unix_ms FROM dispatch_decisions ORDER BY decided_unix_ms DESC LIMIT 1", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+    f.bind();
+    let observed = prior_at + 1;
+    let age = f.decided - observed;
+    assert!(age > 0);
+    f.rollout(&f.home, SID, &["head.jsonl"], &f.worktree(), observed, "0.154.0");
     f.cli("collect");
     f.cli_args(&["accounting", "sync"]);
     let report = f.report();
-    let primary = metric(&report, "M40")["decisions"][0]["windows"][0].clone();
+    let primary = metric(&report, "M40")["decisions"][1]["windows"][0].clone();
     assert_eq!((&primary["value"], &primary["age_ms"], &primary["resets_unix_ms"], primary.get("freshness")),
-        (&unavailable("window_reset_since_observation"), &60_000.into(), &1_790_003_600_000i64.into(), None));
-    assert!(f.text(&["report"]).lines().any(|l| l == format!("M40 quota_headroom_at_dispatch {} codex primary n/a (window_reset_since_observation) age_ms=60000", f.attempt)));
+        (&unavailable("window_reset_since_observation"), &age.into(), &1_790_003_600_000i64.into(), None));
+    assert!(f.text(&["report"]).lines().any(|l| l == format!("M40 quota_headroom_at_dispatch {} codex primary n/a (window_reset_since_observation) age_ms={age}", f.attempt)));
     // Rate limits are metadata, kept for an uncertified version; counters are not.
     assert_eq!(metric(&report, "M08")["value"], unavailable("no_certified_source"));
 
@@ -547,8 +565,9 @@ fn sidecar_streams_upgrade_v2_store() {
     let f = Fixture::new();
     f.rollout(&f.home, SID, &["head.jsonl"], &f.worktree(), f.decided + 1_000, "0.154.0");
     f.cli("collect");
-    // Back to a v2 sidecar: no streams table, no codex 0003 indexes.
-    f.sidecar().execute_batch("ALTER TABLE operation_storage_samples DROP COLUMN worktrees_covered; ALTER TABLE operation_storage_samples DROP COLUMN worktrees_expected; DROP TABLE telemetry_streams; DROP VIEW otlp_ledger_sources; DROP TABLE otlp_records; DROP TABLE gemini_file_cursors; DROP TABLE otlp_attempt_tokens; DROP INDEX codex_usage_by_path; DROP INDEX rollout_sources_by_attempt;
+    // Back to a v2 sidecar: no streams table, no codex 0003 indexes,
+    // and neither table introduced by codex 0006/0007.
+    f.sidecar().execute_batch("ALTER TABLE operation_storage_samples DROP COLUMN worktrees_covered; ALTER TABLE operation_storage_samples DROP COLUMN worktrees_expected; DROP TABLE native_probe_failures; DROP TABLE rollout_scope_skips; DROP TABLE telemetry_streams; DROP VIEW otlp_ledger_sources; DROP TABLE otlp_records; DROP TABLE gemini_file_cursors; DROP TABLE otlp_attempt_tokens; DROP INDEX codex_usage_by_path; DROP INDEX rollout_sources_by_attempt;
         DROP INDEX codex_usage_by_turn; DROP INDEX codex_usage_by_response; PRAGMA user_version = 2").unwrap();
     let streams = |f: &Fixture| f.sidecar().prepare("SELECT stream,version FROM telemetry_streams ORDER BY stream").unwrap()
         .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))).unwrap().map(Result::unwrap).collect::<Vec<_>>();
@@ -563,17 +582,20 @@ fn sidecar_streams_upgrade_v2_store() {
     assert_eq!(tree(&state), before, "a read neither upgrades nor creates a file");
 
     f.cli("collect");
+    // A subsequent collect must not rerun 0007 or discard its observations.
+    f.sidecar().execute("INSERT INTO native_probe_failures(profile,payload) VALUES('upgrade-probe','{}')", []).unwrap();
     f.cli("collect");
+    assert_eq!(f.sidecar().query_row("SELECT payload FROM native_probe_failures WHERE profile='upgrade-probe'", [], |r| r.get::<_, String>(0)).unwrap(), "{}");
     // Every lane stream with migrations is at its latest version beside `codex`.
     let expected = |extra: (&str, i64)| {
         let mut streams: std::collections::BTreeMap<String, i64> = herdr_farm::telemetry::LANES.iter().filter(|l| !l.migrations.is_empty())
             .map(|l| (l.stream.to_owned(), l.migrations.len() as i64)).collect();
-        streams.insert("codex".to_owned(), 5);
+        streams.insert("codex".to_owned(), 7);
         streams.insert(extra.0.to_owned(), extra.1);
         streams.into_iter().collect::<Vec<_>>()
     };
-    assert_eq!(streams(&f), expected(("codex", 5)));
-    assert_eq!(user_version(&f), 5);
+    assert_eq!(streams(&f), expected(("codex", 7)));
+    assert_eq!(user_version(&f), 7);
     let before = tree(&state);
     assert_eq!(f.cli_args(&["usage", "--json"]).1, v2, "usage is byte-identical after the upgrade");
     assert_eq!(metric(&f.report(), "M08")["value"], 1000);
@@ -608,7 +630,7 @@ fn sources(f: &Fixture) -> Vec<(String, String, Option<String>, String)> {
 /// collector binding, written when the attempt is launched (the real launch is
 /// checked in tests/cli.rs; here `Fixture::bind` plants it). A revocation keeps
 /// rollouts bound before it with their accepted usage and binds none started
-/// after it; a rollout from another project's worktree stays unbound; an
+/// after it; a rollout from another project's worktree is skipped; an
 /// attempt from before 0052 falls back to contracts §5 rules 1-4.
 #[test]
 fn rollout_binds_only_through_canonical_binding() {
@@ -625,7 +647,7 @@ fn rollout_binds_only_through_canonical_binding() {
     session(&f, "elsewhere", ELSEWHERE, &format!("{}/other/.state/worktrees/{}/repo-00", f.root.display(), f.attempt), f.decided + 1_000);
     let (report, _) = f.cli("collect");
     assert_eq!(attempt_usage(&report), unavailable("not_bound"), "reserved, never launched");
-    assert_eq!(sources(&f), [unbound(ELSEWHERE, "no_match"), unbound(SID, "no_binding")]);
+    assert_eq!(sources(&f), [unbound(SID, "no_binding")]);
     assert_eq!(f.cli_args(&["collectors", "bindings"]).0["bindings"], serde_json::json!([]));
 
     f.bind();
@@ -635,7 +657,7 @@ fn rollout_binds_only_through_canonical_binding() {
     assert_eq!(bindings, serde_json::json!([{"attempt_id": f.attempt, "revision": 1, "state": "active", "collector": "codex", "unix_ms": launched}]));
     let (report, _) = f.cli("collect");
     assert_eq!(attempt_usage(&report), one);
-    assert_eq!(sources(&f), [unbound(ELSEWHERE, "no_match"), bound(SID, "collector_binding")]);
+    assert_eq!(sources(&f), [bound(SID, "collector_binding")]);
 
     let (revoked, _) = f.cli_args(&["collectors", "revoke", &f.attempt]);
     let at = revoked["binding"]["unix_ms"].as_i64().unwrap();
@@ -647,8 +669,8 @@ fn rollout_binds_only_through_canonical_binding() {
     session(&f, "later", LATER, &f.worktree(), at + 1_000);
     let (report, _) = f.cli("collect");
     assert_eq!(attempt_usage(&report), one, "accepted usage bound before the revocation is kept");
-    assert_eq!(sources(&f), [unbound(ELSEWHERE, "no_match"), unbound(LATER, "binding_revoked"), bound(SID, "collector_binding")]);
-    assert_eq!(f.usage().iter().filter(|r| r.2 == 1).count(), 3, "every record is accepted; binding only attributes");
+    assert_eq!(sources(&f), [unbound(LATER, "binding_revoked"), bound(SID, "collector_binding")]);
+    assert_eq!(f.usage().iter().filter(|r| r.2 == 1).count(), 2, "every record is accepted; binding only attributes");
     assert!(f.cli_fail(&["collectors", "revoke", "no-such-attempt"]).contains("has no collector binding"));
 
     // An attempt reserved before 0052 keeps rules 1-4 and cannot be revoked.
@@ -798,10 +820,10 @@ fn newer_codex_usage_provenance_coverage_and_recollection() {
     assert_eq!(serde_json::from_str::<serde_json::Value>(&measurement).unwrap()["certification"], "newer_than_certified");
     // Historical fixture: persisted as the previous collector would refuse it.
     f.as_if_collected_uncertified();
-    f.sidecar().execute_batch("UPDATE telemetry_streams SET version=4 WHERE stream='codex'; PRAGMA user_version=4;").unwrap();
+    f.sidecar().execute_batch("DROP TABLE native_probe_failures; DROP TABLE rollout_scope_skips; UPDATE telemetry_streams SET version=4 WHERE stream='codex'; PRAGMA user_version=4;").unwrap();
     assert_eq!(attempt_usage(&f.cli_args(&["usage", "--json"]).0)["reason"], "cli_version_uncertified");
     assert_eq!(f.cli("collect").0["collected"]["reevaluated"], 2);
-    assert_eq!(f.sidecar().query_row("SELECT version FROM telemetry_streams WHERE stream='codex'", [], |r| r.get::<_, i64>(0)).unwrap(), 5);
+    assert_eq!(f.sidecar().query_row("SELECT version FROM telemetry_streams WHERE stream='codex'", [], |r| r.get::<_, i64>(0)).unwrap(), 7);
     assert_eq!(attempt_usage(&f.cli_args(&["usage", "--json"]).0), usage);
     f.as_if_collected_uncertified();
     f.cli_args(&["accounting", "sync"]);

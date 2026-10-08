@@ -136,10 +136,13 @@ pub(crate) enum Fault {
     BumpFence,
 }
 
+#[derive(Clone)]
 pub struct VerifyRequest {
     pub submission_id: String,
     pub policy_id: String,
     pub policy_path: PathBuf,
+    /// Use the installed signed policy rather than an operator file.
+    pub contract_policy: bool,
     pub idempotency_key: String,
     pub timeout: Duration,
     pub work_dir: PathBuf,
@@ -161,6 +164,7 @@ impl VerifyRequest {
             submission_id: submission_id.into(),
             policy_id: policy_id.into(),
             policy_path: policy_path.into(),
+            contract_policy: false,
             idempotency_key: idempotency_key.into(),
             timeout,
             work_dir: work_dir.into(),
@@ -405,6 +409,7 @@ pub fn recorded_run(store: &mut SqliteStore, project_store: &str, key: &str) -> 
 /// Automatic runs never fall back to an unsandboxed check. Probe the same
 /// namespaces the verifier uses before any claim is taken.
 pub fn isolation_available() -> Result<()> {
+    crate::self_executable::real_path()?;
     let unshare = Path::new("/usr/bin/unshare");
     if !unshare_ready(unshare) {
         bail!("isolation unavailable: /usr/bin/unshare is missing or not root-owned");
@@ -438,7 +443,12 @@ pub fn verify(store: &mut SqliteStore, request: &VerifyRequest) -> Result<Verify
 
 fn verify_owned(store: &mut SqliteStore, request: &VerifyRequest, ownership: Option<&mut dyn CheckOwnership>) -> Result<VerifyOutcome> {
     let target = store.load_verify_target(&request.submission_id, &request.policy_id)?;
-    let policy_bytes = read_policy(&request.policy_path)?;
+    let mut resolved_request = request.clone();
+    if request.contract_policy {
+        resolved_request.policy_path = request.work_dir.join("signed-policy.json");
+    }
+    let request = &resolved_request;
+    let policy_bytes = if request.contract_policy { target.policy_body.as_bytes().to_vec() } else { read_policy(&request.policy_path)? };
     let payload_digest = sha256(&format!(
         "{}\0{}\0{}\0{}",
         target.submission_id,
@@ -465,21 +475,10 @@ fn verify_owned(store: &mut SqliteStore, request: &VerifyRequest, ownership: Opt
         return Ok(replayed);
     }
     if policy_bytes != target.policy_body.as_bytes() {
-        return persist(
-            store,
-            &target,
-            request,
-            payload_digest,
-            Vec::new(),
-            Vec::new(),
-            None,
-            Some("policy_digest_mismatch"),
-            None,
-            String::new(),
-            None,
-            None,
-        );
+        bail!("policy_digest_mismatch: supplied digest {:x} differs from signed contract digest {}; omit --policy-file to use the signed policy, or export exact bytes with result <slug> policy --submission {} --policy-id {} --out FILE",
+            Sha256::digest(&policy_bytes), target.policy_digest, target.submission_id, target.policy_id);
     }
+    crate::self_executable::real_path()?;
     let checks = parse_checks(&policy_bytes)?;
     let toolchain = match toolchains::for_policy(Path::new(&target.project_store).parent().and_then(Path::parent).context("project path")?, &policy_bytes) {
         Ok(resolved) => resolved,
@@ -498,6 +497,7 @@ fn verify_owned(store: &mut SqliteStore, request: &VerifyRequest, ownership: Opt
         &target.object_format,
         Some((Path::new(&target.repository), &target.base_oid)),
     )?;
+    if request.contract_policy { fs::write(&request.policy_path, &policy_bytes)?; }
     let diff_counts = checkout::diff_counts(&checkout.path, &target.base_oid, &target.candidate_oid);
     if let Some(project) = Path::new(&target.project_store).parent().and_then(Path::parent) {
         let counts = diff_counts;
@@ -659,6 +659,7 @@ fn verify_owned(store: &mut SqliteStore, request: &VerifyRequest, ownership: Opt
             (ran, target)
         },
     };
+    crate::self_executable::real_path()?;
     let output = match ran {
         // A cancelled check is no verdict: record nothing and let the caller retry.
         Ok(output) if output.cancelled => bail!("verification cancelled before a verdict"),
@@ -1029,3 +1030,18 @@ pub fn attempt_report(project: &Path, attempt: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests;
+
+/// Export the installed signed contract text verbatim, without a newline.
+pub fn export_policy(project: &Path, submission: &str, policy: &str, out: &Path) -> Result<()> {
+    let mut store = crate::migration::open_active_unchecked(project)?;
+    export_policy_from_store(&mut store, submission, policy, out)
+}
+
+/// Public store ingress for exact signed policy export.
+pub fn export_policy_from_store(store: &mut SqliteStore, submission: &str, policy: &str, out: &Path) -> Result<()> {
+    use std::io::Write;
+    let target = store.load_verify_target(submission, policy)?;
+    let mut file = fs::OpenOptions::new().write(true).create_new(true).open(out)?;
+    file.write_all(target.policy_body.as_bytes())?;
+    Ok(())
+}

@@ -3580,3 +3580,38 @@ assertions were corrected; its final complete suite passes all 12 tests.
 Clippy has no warnings in changed lines; unrelated existing warnings remain.
 
 The `state-store` feature is enabled by default; build recipes above use that default.
+
+### TRAIN-25 first-ingestion comparison (2026-10-08)
+
+The existing `ticker_collects_recorded_sources_before_observing_a_new_sidecar`
+workflow generated 200 attempts, four homes and about 4,000 events (39 rollout
+files, 780 usage records). Scratch timing prints were removed after measurement.
+Debug builds used locked offline Cargo, three build jobs, nice 19, idle I/O
+priority, disk-backed checkout `target/tmp`, and one test thread. Every isolated
+CLI/ticker retained the shared test time scale; the 15-second deadline is unchanged.
+
+| Measurement | Main `c6bf0e2` | Train `23b34c9` | Fixed train |
+| --- | --- | --- | --- |
+| First collector pass, public collector entry point | 2.00 s | 2.25 s | 2.03 s; repeats 2.02–2.17 s |
+| Ticker start to all usage entries ingested | 2.47 s | 3.22 s | 2.47, 2.51, 2.46, 2.70, 2.51 s |
+
+Instrumentation of the original train's first pass attributed 5.4 ms to all
+scope/header checks and 0.08 ms to legacy foreign-row cleanup. Holding those
+checks fixed, three alternating runs averaged 2.16 s with prioritized discovery
+and 2.10 s with stable discovery. The measurable ordering cost is modest; these
+sandbox runs did **not** reproduce the steward's intermittent 15-second failure,
+so they do not establish the cause of that larger slowdown. The fix restores
+main's discovery order for an empty sidecar and retains prioritization after
+sources are recorded. Skip-marker changes also use one transaction per pass,
+avoiding per-file commits when discovering a foreign backlog. Header admission,
+legacy cleanup, marker invalidation and coordinator exceptions remain enforced;
+no schema or test-deadline change is involved. External validation remains needed
+for the steward's reported intermittent failure.
+
+Validation: the isolated deadline workflow passed five of five runs. The complete
+`telemetry_scale` suite passed four tests (13 scale benches/helpers ignored), and
+`telemetry_collect` passed seven tests. `telemetry` passed 25 tests; its sole
+failure, `attempts_show_attention_summary`, was the sandbox's `Operation not
+permitted` at `UnixListener::bind`, requiring the steward's outside-sandbox run.
+The requested all-targets state-store clippy check completed successfully with
+existing warnings outside the changed code and none in `src/telemetry/codex.rs`.

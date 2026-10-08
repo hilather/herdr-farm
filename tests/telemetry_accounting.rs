@@ -178,6 +178,9 @@ fn normalized_totals_match_doc05_golden() {
     let f = Fixture::new();
     let at = f.decided + 1_000;
     let a = f.rollout(&f.home, "a", &[RECORD], &f.worktree(), at, "0.154.0");
+    // Observe the original before the resumed rollout arrives. The accepted
+    // provenance is first-observed, independent of discovery priority.
+    f.cli("collect");
     let b = f.rollout(&f.home, "b", &[RECORD, LOWER], &f.worktree(), at, "0.154.0");
     let (a, b) = (digest(&a), digest(&b));
     f.cli("collect");
@@ -683,7 +686,10 @@ fn quota_rollout_in(f: &Fixture, home: &Path, name: &str, fixture: &str, start: 
     for (n, r) in resets.iter().enumerate() { text = text.replace(&format!("@R{}@", n + 1), &r.to_string()); }
     let path = f.tmp.path().join(fixture);
     fs::write(&path, text).unwrap();
-    f.rollout(home, name, &[path.to_str().unwrap()], &f.worktree(), start, "0.154.0");
+    // Quota history before the project's first worker dispatch is observed by
+    // its coordinator; it is not a pre-dispatch worker session.
+    let cwd = if start < f.decided { f.project.display().to_string() } else { f.worktree() };
+    f.rollout(home, name, &[path.to_str().unwrap()], &cwd, start, "0.154.0");
 }
 
 /// M40 at the fixture's one dispatch decision, per window, from `accounting quota`.
@@ -1347,7 +1353,7 @@ fn tool_volume_success_and_latency_are_honest() {
     let part = |name: &str| format!("{ACCOUNTING}/{name}");
     f.rollout(&f.home, "a", &[&part("tools.jsonl")], &f.worktree(), at, "0.154.0");
     f.rollout(&f.home, "b", &[&part("tools.jsonl"), &part("tools-resume.jsonl")], &f.worktree(), at, "0.154.0");
-    f.rollout(&f.home, "u", &[&part("tools-unbound.jsonl")], &format!("{}/repo", f.project.display()), at, "0.154.0");
+    f.rollout(&f.home, "u", &[&part("tools-unbound.jsonl")], &format!("{}/.state/worktrees/unmatched/repo", f.project.display()), at, "0.154.0");
     f.cli("collect");
 
     let (tools, first) = f.cli_args(&["accounting", "tools", "--json"]);
@@ -2058,7 +2064,7 @@ fn provider_charges_reconcile_allocate_and_convert() {
     let part = |name: &str| format!("{ACCOUNTING}/{name}");
     let (ts, late) = (f.decided + 1_000, f.decided + 5_000);
     f.rollout(&f.home, "charged", &[&part("charged.jsonl")], &f.worktree(), ts, "0.154.0");
-    f.rollout(&f.home, "unbound", &[&part("charged-unbound.jsonl")], &f.tmp.path().display().to_string(), ts, "0.154.0");
+    f.rollout(&f.home, "unbound", &[&part("charged-unbound.jsonl")], &format!("{}/.state/worktrees/unmatched/repo", f.project.display()), ts, "0.154.0");
     f.rollout(&f.home, "uncounted", &[&part("charged-uncounted.jsonl")], &f.worktree(), late, "0.154.0");
     f.cli("collect");
     f.cli_args(&["accounting", "sync"]);
@@ -3159,7 +3165,7 @@ fn attempt_totals_include_only_native_separate_children() {
     f.bind();
     let path = f.rollout(&f.home, "another", &[&format!("{ACCOUNTING}/parent.jsonl")], &f.worktree(), f.decided + 1000, "0.154.0");
     fs::write(&path, fs::read_to_string(&path).unwrap().replace(PARENT, "00000000-0000-4000-8000-0000000b7099")).unwrap();
-    let path = f.rollout(&f.home, "unbound", &[&format!("{ACCOUNTING}/parent.jsonl")], f.project.to_str().unwrap(), f.decided + 1000, "0.154.0");
+    let path = f.rollout(&f.home, "unbound", &[&format!("{ACCOUNTING}/parent.jsonl")], &format!("{}/.state/worktrees/unmatched/repo", f.project.display()), f.decided + 1000, "0.154.0");
     fs::write(&path, fs::read_to_string(&path).unwrap().replace(PARENT, "00000000-0000-4000-8000-0000000b7098")).unwrap();
     f.cli("collect"); f.cli_args(&["accounting", "sync"]);
     let mut card: serde_json::Value = serde_json::from_str(include_str!("fixtures/telemetry/accounting/rates-budget.json")).unwrap();

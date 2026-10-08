@@ -414,3 +414,99 @@ fn post_termination_usage_is_visible_without_changing_accounting() {
     assert_eq!(f.report()["metrics"]["M08"]["value"], 2000);
 
 }
+
+/// Two projects share a profile home; only B's metadata and usage reach B.
+#[test]
+fn shared_home_scope_skips_backlog_and_cleans_legacy_foreign_rows() {
+    let b = Fixture::new();
+    let a = Fixture::sharing_home(&b.home);
+    const FOREIGN_SID: &str = "00000000-0000-4000-8000-00000000aaaa";
+    const OLD_SID: &str = "00000000-0000-4000-8000-00000000bbbb";
+    let foreign = a.rollout(&b.home, "aa-foreign", &["head.jsonl"], &a.worktree(), a.decided + 1_000, "0.154.0");
+    fs::write(&foreign, fs::read_to_string(&foreign).unwrap().replace(SID, FOREIGN_SID)).unwrap();
+    a.cli("collect");
+    assert_eq!(a.binding(), ("bound".into(), Some(a.attempt.clone())));
+    append(&foreign, "FOREIGN_SECRET\n");
+    // Older A filenames precede B in the former oldest-first order. Sparse
+    // content keeps the lab cheap while exceeding even the CLI budget.
+    fs::OpenOptions::new().write(true).open(&foreign).unwrap().set_len(40 << 20).unwrap();
+    for n in 0..7 {
+        let path = a.rollout(&b.home, &format!("aa-foreign-{n}"), &["head.jsonl"], &a.worktree(), a.decided + 1_000, "0.154.0");
+        fs::write(&path, fs::read_to_string(&path).unwrap().replace(SID, FOREIGN_SID)).unwrap();
+        fs::OpenOptions::new().write(true).open(path).unwrap().set_len(40 << 20).unwrap();
+    }
+    let local = b.rollout(&b.home, "zz-local", &["head.jsonl"], &b.worktree(), b.decided + 1_000, "0.154.0");
+    let old = b.rollout(&b.home, "aa-old", &["head.jsonl"], &b.worktree(), b.decided - 60_000, "0.154.0");
+    fs::write(&old, fs::read_to_string(&old).unwrap().replace(SID, OLD_SID)).unwrap();
+    append(&old, &format!("{}\n", "OLD_SECRET".repeat(1 << 20)));
+    let (report, _) = b.cli("collect");
+    assert_eq!(report["collected"]["budget_exhausted"], false);
+    assert_eq!(report["collected"]["bytes"], fs::metadata(&local).unwrap().len());
+    assert!(report["collected"]["bytes"].as_u64().unwrap() < 8 << 20, "fits the ticker budget too");
+    assert_eq!(b.binding(), ("bound".into(), Some(b.attempt.clone())));
+    assert_eq!(b.count("rollout_sources"), 1);
+    assert_eq!(b.count("rollout_scope_skips"), 9);
+    // A fresh CLI process must reuse the durable negative cache without opening
+    // rejected content, even when the files are no longer readable.
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&foreign, fs::Permissions::from_mode(0o000)).unwrap();
+    fs::set_permissions(&old, fs::Permissions::from_mode(0o000)).unwrap();
+    let db = b.sidecar();
+    let payloads: String = db.query_row("SELECT group_concat(payload) FROM source_observations", [], |r| r.get(0)).unwrap();
+    assert!(!payloads.contains("FOREIGN_SECRET") && !payloads.contains("OLD_SECRET"));
+    assert!(!payloads.contains(FOREIGN_SID) && !payloads.contains(OLD_SID));
+    let sessions: Vec<String> = db.prepare("SELECT session_id FROM rollout_sources").unwrap()
+        .query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
+    assert_eq!(sessions, [SID]);
+    // Model a pre-upgrade sidecar, including the ingest envelopes/dictionary.
+    // A formerly local rollout becomes foreign in the persisted legacy source.
+    db.execute("UPDATE rollout_sources SET cwd=?1,cwd_attempt=NULL,binding='unbound',attempt_id=NULL", [a.worktree()]).unwrap();
+    fs::remove_file(local).unwrap();
+    b.cli("collect");
+    assert_eq!(b.count("rollout_sources"), 0);
+    assert_eq!(b.count("source_observations"), 0);
+    assert_eq!(b.count("source_observation_payloads"), 0);
+    assert_eq!(b.count("codex_usage"), 0);
+    b.cli("collect");
+    assert_eq!(b.count("rollout_scope_skips"), 9);
+
+    // Preserve the existing exact-project-root coordinator exception, including
+    // its history before worker dispatch, without admitting A's coordinator.
+    const COORDINATOR: &str = "00000000-0000-4000-8000-00000000cccc";
+    let coordinator = b.rollout(&b.home, "coordinator", &["head.jsonl"], b.project.to_str().unwrap(), b.decided - 60_000, "0.154.0");
+    fs::write(&coordinator, fs::read_to_string(&coordinator).unwrap().replace(SID, COORDINATOR)).unwrap();
+    let other = a.rollout(&b.home, "foreign-coordinator", &["head.jsonl"], a.project.to_str().unwrap(), b.decided - 60_000, "0.154.0");
+    fs::write(&other, fs::read_to_string(&other).unwrap().replace(SID, FOREIGN_SID)).unwrap();
+    for _ in 0..2 {
+        b.cli("collect");
+        let sessions: Vec<String> = b.sidecar().prepare("SELECT session_id FROM rollout_sources").unwrap()
+            .query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
+        assert_eq!(sessions, [COORDINATOR]);
+        assert_eq!(b.count("rollout_scope_skips"), 10);
+    }
+
+    // Partial and oversized headers admit no content. A changed file can become
+    // eligible on the next pass; admission removes its previous skip marker.
+    const REPAIRED: &str = "00000000-0000-4000-8000-00000000dddd";
+    let repaired = b.rollout(&b.home, "repair", &["head.jsonl"], &b.worktree(), b.decided + 1_000, "0.154.0");
+    let valid = fs::read_to_string(&repaired).unwrap().replace(SID, REPAIRED);
+    fs::write(&repaired, "{\"type\":\"session_meta\"").unwrap();
+    b.cli("collect");
+    assert_eq!(b.count("rollout_sources"), 1);
+    assert_eq!(b.count("rollout_scope_skips"), 11);
+    fs::write(&repaired, format!("{}\n{}", "x".repeat(65 << 10), valid)).unwrap();
+    b.cli("collect");
+    assert_eq!(b.count("rollout_sources"), 1);
+    assert_eq!(b.count("rollout_scope_skips"), 11);
+    fs::write(&repaired, valid).unwrap();
+    b.cli("collect");
+    assert_eq!(b.count("rollout_sources"), 2);
+    assert_eq!(b.count("rollout_scope_skips"), 10);
+    let binding: (String, String) = b.sidecar().query_row(
+        "SELECT binding,attempt_id FROM rollout_sources WHERE session_id=?1", [REPAIRED],
+        |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+    assert_eq!(binding, ("bound".into(), b.attempt.clone()));
+    fs::remove_file(other).unwrap();
+    b.cli("collect");
+    assert_eq!(b.count("rollout_scope_skips"), 9);
+}

@@ -6,13 +6,19 @@ isolated verifier through the CLI after a result has been submitted:
 ```sh
 herdr-projects --root /path/to/projects result demo verify SUBMISSION_ID \
   --policy-id builds \
-  --policy-file /path/to/policy.json \
   --idempotency-key verify-submission-1 \
   --work-dir /path/to/new-verification-scratch \
   --timeout-seconds 60
 ```
 
-The policy file must match the acceptance policy text in the installed signed
+When `--policy-file` is omitted, verification uses the installed signed contract policy directly. To export its exact bytes (no added newline), run:
+
+```sh
+herdr-farm --root /path/to/projects result demo policy \
+  --submission SUBMISSION_ID --policy-id builds --out /path/to/new-policy.json
+```
+
+The output file must not already exist. An optional policy file must match the acceptance policy text in the installed signed
 contract byte-for-byte, including whitespace. The command cannot substitute a
 worker's claimed checks for that policy. Policy input must be a regular,
 non-symlink file of at most 4,000 bytes. The check subprocess timeout is 1–3600
@@ -25,7 +31,7 @@ The project store must already be migrated; this command does not upgrade it.
 
 Successful verification prints a JSON outcome with `state: "accepted"` and a
 trusted receipt. A recorded rejection prints its JSON outcome and exits nonzero.
-Policy mismatch records a rejection without running the substituted policy.
+Policy mismatch is an operator input error: the command names both digests and refuses it before recording any new run. Existing historical mismatch rejections remain readable. This preserves worker metrics from new operator input mistakes.
 Input/setup errors can fail before an outcome is recorded. Submission by itself
 still does not verify work, satisfy prerequisites, or release attempt capacity.
 
@@ -351,3 +357,5 @@ Source repository configuration is not copied; no LFS or other filter drivers
 are configured, so their execution is avoided and LFS pointers stay pointers.
 Candidate files remain untrusted: running their scripts on the host uses operator
 privileges. This command does not change integration policy or responsibility.
+
+The ticker checks the identity of its executable each pass. Deletion or replacement logs `herdr-farm binary was deleted or replaced since this process started; restart the ticker` and files one deduplicated operator inbox notice per project/process. Automatic verification and integration remain pending/paused for this host condition, and a failure detected after claim remains retryable without a worker rejection. Re-exec pins the running image from `/proc/self/exe`: namespace setup inherits a sealed executable descriptor (closed before checks), and ordinary child helpers use `/proc/<pid>/exe`; delayed launches and filesystem layouts require an unchanged real path. Restart the ticker after reinstalling the binary.

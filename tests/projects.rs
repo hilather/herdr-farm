@@ -447,3 +447,53 @@ fn coordinator_permissions_follow_target_and_owner_policy() {
             .any(|r| r["status"] == "rejected" && r["decision_reason"] == "network forbidden")
     );
 }
+
+/// New canonical memory is immediately usable; signer-less creation retains
+/// Markdown and can later use the ordinary adoption command.
+#[cfg(feature = "state-store")]
+#[test]
+fn canonical_creation_installs_memory_or_explains_signer_fallback() {
+    let home = Home::new();
+    home.ok(&["new", "signed"]);
+    let inspect = |name: &str| -> serde_json::Value {
+        serde_json::from_str(&home.ok(&["memory", name, "inspect"])).unwrap()
+    };
+    let memory = inspect("signed");
+    assert_eq!(memory["authority"], "sqlite-v1");
+    assert_eq!(memory["policies"].as_array().unwrap().len(), 1);
+    let index = fs::read(home.root().join("signed/MEMORY.md")).unwrap();
+    let doctor = home.cli(&["doctor"]);
+    assert!(String::from_utf8_lossy(&doctor.stdout).contains("memory=sqlite-v1"));
+    let body = home.0.path().join("decision.md");
+    fs::write(&body, "Keep all builds offline.\n").unwrap();
+    home.ok(&["memory", "signed", "record", "--title", "Offline builds", "--provenance", "owner decision", "--body-file", body.to_str().unwrap()]);
+    assert_eq!(inspect("signed")["records"].as_array().unwrap().len(), 1);
+    assert_eq!(fs::read(home.root().join("signed/MEMORY.md")).unwrap(), index);
+
+    // A busy root ticker lock cannot block setup of an unpublished project.
+    let ticker = fs::File::create(home.root().join(".ticker.lock")).unwrap();
+    ticker.lock().unwrap();
+    home.ok(&["new", "busy-root"]);
+    assert_eq!(inspect("busy-root")["authority"], "sqlite-v1");
+    ticker.unlock().unwrap();
+
+    let config = home.0.path().join(".config/herdr-farm");
+    let key = config.join("owner-approval");
+    let saved = home.0.path().join("saved-key");
+    fs::rename(&key, &saved).unwrap();
+    let output = home.ok(&["new", "unsigned"]);
+    assert_eq!(output.lines().filter(|line| line.contains("owner signer unavailable")).count(), 1);
+    assert!(output.contains("herdr-farm memory unsigned adopt"));
+    let memory = inspect("unsigned");
+    assert_eq!(memory["authority"], "legacy-markdown");
+    assert!(memory["policies"].as_array().unwrap().is_empty());
+    fs::rename(saved, key).unwrap();
+    home.ok(&["memory", "unsigned", "adopt"]);
+    assert_eq!(inspect("unsigned")["authority"], "sqlite-v1");
+    assert_eq!(inspect("signed")["records"].as_array().unwrap().len(), 1);
+
+    home.ok(&["new", "--legacy", "legacy"]);
+    assert!(!home.root().join("legacy/.state/format.json").exists());
+    assert!(!home.root().join("legacy/.state/state.db").exists());
+    assert_eq!(fs::read(home.root().join("legacy/MEMORY.md")).unwrap(), index);
+}

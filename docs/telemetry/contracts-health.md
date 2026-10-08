@@ -92,6 +92,12 @@ not certified for Codex (contracts-accounting §5), so `service_throttled`
 stays `unknown`; an exhausted quota window (`remaining 0`) is the certified
 throttle signal and makes `quota_headroom` critical.
 
+Quota headroom excludes superseded windows: per account, limit, kind and
+duration, only the latest started window (latest observation breaks equal-start
+ties) is current until its reset. A provider early reset can end an older
+window before its nominal reset. The selected reading retains `lowest.age_ms`
+and `semantics: not_certified`; quota history is preserved (accounting §5).
+
 ## 3. Alerts: deduplication, cooldown, outages
 
 At most one **open** alert per rule key (the labels' canonical JSON). On

@@ -49,7 +49,7 @@ column named in `age_from`).
 
 | Class | Store | Default | Basis | Action |
 | --- | --- | --- | --- | --- |
-| `sidecar.normalized_sessions` | `telemetry.db`, per native session: `muse_events`, `muse_parents`, `claude_messages`, `claude_tool_results`, `opencode_messages`, `opencode_tools`, `codex_*`, `rollout_*`, `collect_offsets`, `codex_tool_sources`, `source_bindings`, `source_observations`, `ingest_quarantine`, `coverage_gaps`, `source_cursors`, `usage_entries`, `usage_dispositions`, `model_segments`, `quota_window_observations`, `session_graph_nodes` | 90 d | derivable from the native rollout (tombstoned: never again) | prune, destructive |
+| `sidecar.normalized_sessions` | `telemetry.db`, content-free `rollout_scope_skips` discovery cache (until file disappears); per native session: `muse_events`, `muse_parents`, `claude_messages`, `claude_tool_results`, `opencode_messages`, `opencode_tools`, `codex_*`, `rollout_*`, `collect_offsets`, `codex_tool_sources`, `source_bindings`, `source_observations`, `ingest_quarantine`, `coverage_gaps`, `source_cursors`, `usage_entries`, `usage_dispositions`, `model_segments`, `quota_window_observations`, `session_graph_nodes` | 90 d (sessions); file presence (scope markers) | derivable from the native rollout (tombstoned: never again) | prune, destructive |
 | `sidecar.ticker_errors` | `operation_ticker_errors` | producer caps 90 d / 100000 passes | source of truth; root-wide classes/counts | retain; full sidecar backup |
 | `sidecar.submission_diff` | `operation_submission_diff` | no TTL | source of truth; aggregate verifier counts | retain; full sidecar backup |
 | `sidecar.operating_intervals` | `operating_intervals`, `operating_clock`, `operating_gaps` | no TTL | source of truth (ticker observations) | retain; full sidecar backup |
@@ -119,6 +119,7 @@ may only be shortened.
 ```text
 $ herdr-farm telemetry demo maintenance classes
 retention.v1
+sidecar.native_probe_failures retain - source_of_truth destructive
 sidecar.launch_load retain - source_of_truth destructive
 sidecar.ticker_errors retain - source_of_truth destructive
 sidecar.submission_diff retain - source_of_truth destructive
@@ -458,6 +459,7 @@ $ herdr-farm telemetry demo backup restore --from <tmp>/backup-2026-09-30 --forc
     "host_checks": 0,
     "muse_events": 0,
     "muse_parents": 0,
+    "native_probe_failures": 0,
     "opencode_messages": 0,
     "opencode_tools": 0,
     "operating_clock": 0,
@@ -472,6 +474,7 @@ $ herdr-farm telemetry demo backup restore --from <tmp>/backup-2026-09-30 --forc
     "otlp_records": 0,
     "provider_charges": 0,
     "rate_cards": 0,
+    "rollout_scope_skips": 0,
     "rollout_sources": 0,
     "source_observations": 0,
     "valuation_revisions": 0

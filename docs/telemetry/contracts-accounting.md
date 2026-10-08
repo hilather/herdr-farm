@@ -463,6 +463,17 @@ reset − `window_minutes`, first/last trusted observation, `first_used`,
 (account-wide: never attributed to a task, as the window's invocation scope
 is not certified), latest `plan_type`, trusted `observations` and `flagged`.
 
+**Early reset and supersession.** For each (account, limit id, window kind,
+window minutes), the started window with the latest `window_start_unix_ms`
+(tie: latest `last_observed_unix_ms`) supersedes older windows, even before
+their nominal reset. Only that window can be current, and only until its
+reset. Health evaluates accounts independently and reports the selected
+reading's `age_ms`; quota semantics remain `not_certified`. `accounting quota`
+keeps historical `windows` and `evidence_windows` unchanged and exposes a
+separate per-account `current_windows` list (also printed in text). M40 remains an as-of-dispatch
+reading of the latest trusted observation, excluding future observations.
+Supersession requires no schema change or deletion of history.
+
 **Account identity and merge rule (TFIX-2).** Observations retain execution
 home digests; credentials are never read. Trusted windows from different homes
 with the same limit id, kind, minutes and resets within 60000 ms of the group's

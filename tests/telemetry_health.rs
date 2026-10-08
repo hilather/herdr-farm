@@ -392,6 +392,57 @@ fn low_quota_headroom_and_throttled_service() {
 
 }
 
+/// Provider early resets supersede unexpired windows only within the same account.
+#[test]
+fn early_quota_reset_supersedes_old_window_and_preserves_history() {
+    let p = Planted::new();
+    p.sidecar_created();
+    let now = unix_ms();
+    let db = p.sidecar();
+    quota_window(&db, "13", now + HOUR, now - HOUR);
+    assert_eq!(state(&p.evaluate(), "quota_headroom")["state"], "warn");
+    // The replacement started an hour ago; both nominal resets are still ahead.
+    db.execute("INSERT INTO quota_windows SELECT 'replacement',service,account,limit_id,window_kind,unit,window_minutes,?1,?2,start_evidence,
+        ?3,?3,'3','3','97','0',plan_type,1,0 FROM quota_windows LIMIT 1",
+        rusqlite::params![now - HOUR, now + 4 * HOUR, now - MINUTE]).unwrap();
+    let out = p.evaluate();
+    let s = state(&out, "quota_headroom");
+    assert_eq!(s["state"], "ok");
+    assert_eq!(s["evidence"]["lowest"]["remaining"], "97");
+    assert_eq!(s["evidence"]["current_windows"], 1);
+    assert_eq!(s["evidence"]["semantics"], "not_certified");
+    assert!(s["evidence"]["lowest"]["age_ms"].as_i64().unwrap() >= MINUTE);
+    assert!(open_alert(&p.alerts(), "quota_headroom").is_none());
+    let history = p.json(&["accounting", "quota", "--json"]);
+    let windows = history["evidence_windows"].as_array().unwrap();
+    assert_eq!(windows.len(), 2);
+    assert_eq!(history["current_windows"].as_array().unwrap().len(), 1);
+    assert_eq!(history["current_windows"][0]["window_id"], "replacement");
+    assert_eq!(history["windows"].as_array().unwrap().len(), 2);
+    // A second account's old window remains current despite the first's reset.
+    db.execute("INSERT INTO quota_windows SELECT 'other-account',service,'sha256:other',limit_id,window_kind,unit,window_minutes,
+        window_start_unix_ms,resets_unix_ms,start_evidence,first_observed_unix_ms,last_observed_unix_ms,first_used,used,remaining,
+        observed_increase,plan_type,observations,flagged FROM quota_windows WHERE remaining='13'", []).unwrap();
+    let out = p.evaluate();
+    let s = state(&out, "quota_headroom");
+    assert_eq!(s["state"], "warn");
+    assert_eq!(s["evidence"]["current_windows"], 2);
+    assert_eq!(s["evidence"]["lowest"]["remaining"], "13");
+    let history = p.json(&["accounting", "quota", "--json"]);
+    let current = history["current_windows"].as_array().unwrap();
+    assert_eq!(current.len(), 2);
+    assert_eq!(current.iter().find(|w| w["remaining"] == "13").unwrap()["account"], "sha256:other");
+    // Equal starts use the last observation, rather than the nominal reset.
+    db.execute("INSERT INTO quota_windows SELECT 'tie',service,account,limit_id,window_kind,unit,window_minutes,
+        window_start_unix_ms,resets_unix_ms+1000,start_evidence,first_observed_unix_ms,?1,first_used,'5','95',
+        observed_increase,plan_type,observations,flagged FROM quota_windows WHERE window_id='replacement'", [now]).unwrap();
+    db.execute("DELETE FROM quota_windows WHERE window_id='other-account'", []).unwrap();
+    let out = p.evaluate();
+    let s = state(&out, "quota_headroom");
+    assert_eq!(s["evidence"]["current_windows"], 1);
+    assert_eq!(s["evidence"]["lowest"]["remaining"], "95");
+}
+
 /// A running attempt launched at T−8m10s, sampled `blocked` every 30 s from
 /// T−8m to T−30s: one open wait of 450000 ms (≥ 5 min: warn, < 30 min).
 #[test]

@@ -99,8 +99,8 @@ struct Case {
 
 /// The shared conformance corpus. `complete`, `edge`, `child`, `guardian`,
 /// `tools` and the two live-2 cases are certified and bound; `uncertified` is
-/// bound with a version no live run certified; the rest are certified but must
-/// stay unbound.
+/// bound with a version no live run certified; foreign and pre-project cases are
+/// skipped, and the in-project other-home case stays unbound.
 const CASES: &[Case] = &[
     Case { name: "complete", sid: SID, parts: &["head.jsonl", "tail.jsonl"], version: "0.154.0", place: Place::Bound },
     Case { name: "edge", sid: EDGE_SID, parts: &["head.jsonl", EDGE], version: "0.154.0", place: Place::Bound },
@@ -215,8 +215,8 @@ fn corpus_replays_identically_in_any_chunking() {
     let f = Fixture::new();
     let paths: Vec<PathBuf> = CASES.iter().map(|c| plant(&f, c.name)).collect();
     let (first, _) = f.cli("collect");
-    // complete 2 + edge 3 + uncertified 2 + three unbound heads + child 2 + guardian 1 + live2-fork 1 (tools and live2-tools have none).
-    assert_eq!(first["collected"]["records"], 14);
+    // complete 2 + edge 3 + uncertified 2 + one unbound head (foreign and pre-project heads are skipped) + child 2 + guardian 1 + live2-fork 1 (tools and live2-tools have none).
+    assert_eq!(first["collected"]["records"], 12);
     let once = ledger(&f);
     let (again, _) = f.cli("collect");
     assert_eq!((&again["collected"]["records"], &again["collected"]["bytes"]), (&0.into(), &0.into()));
@@ -321,33 +321,30 @@ fn malformed_lines_are_quarantined_with_reasons() {
 }
 
 /// Binding is required on every output that attributes usage: rollouts that
-/// are unbound (cwd outside the worktree, another home, before the decision)
-/// are collected and listed, yet counted in no attempt, metric or ledger
-/// attribution.
+/// are foreign or pre-project are skipped; an in-project rollout from another
+/// home remains unbound and is counted in no attempt, metric or ledger attribution.
 #[test]
 fn unbound_rollouts_are_never_attributed() {
     let f = Fixture::new();
     for name in ["complete", "edge", "cwd-outside", "other-home", "earlier"] { plant(&f, name); }
     let (report, _) = f.cli("collect");
-    assert_eq!(report["collected"]["records"], 8, "unbound rollouts are still read");
+    assert_eq!(report["collected"]["records"], 6, "foreign and pre-project rollouts are skipped");
     assert_eq!(attempt_usage(&report), bound_sums());
     assert_eq!(attempt_usage(&f.cli_args(&["usage", "--json"]).0), bound_sums());
     assert_eq!(f.cli_args(&["attempts", "--json"]).0["attempts"][0]["usage"], bound_sums());
     let sessions: Vec<(String, String, Value)> = report["sessions"].as_array().unwrap().iter()
         .map(|s| (s["session_id"].as_str().unwrap().to_owned(), s["binding"].as_str().unwrap().to_owned(), s["attempt_id"].clone())).collect();
     let bound = json!(f.attempt);
-    assert_eq!(sessions, [(SID.to_owned(), "bound".to_owned(), bound.clone()), (case("cwd-outside").sid.into(), "unbound".into(), Value::Null),
-        (case("other-home").sid.into(), "unbound".into(), Value::Null), (case("earlier").sid.into(), "unbound".into(), Value::Null),
-        (EDGE_SID.into(), "bound".into(), bound)]);
+    assert_eq!(sessions, [(SID.to_owned(), "bound".to_owned(), bound.clone()), (case("other-home").sid.into(), "unbound".into(), Value::Null), (EDGE_SID.into(), "bound".into(), bound)]);
     let m08 = f.report()["metrics"]["M08"].clone();
-    assert_eq!((&m08["value"], &m08["coverage"]), (&2800.into(), &json!({"certified_sessions": 2, "excluded": {"unbound": 3}})));
-    // The accounting session graph keeps every rollout, attributed to an attempt only when bound.
+    assert_eq!((&m08["value"], &m08["coverage"]), (&2800.into(), &json!({"certified_sessions": 2, "excluded": {"unbound": 1}})));
+    // The accounting session graph keeps admitted rollouts, attributed to an attempt only when bound.
     f.cli_args(&["accounting", "sync"]);
     let (graph, _) = f.cli_args(&["accounting", "sessions"]);
     let attributed: Vec<(String, Value)> = graph["sessions"].as_array().unwrap().iter()
         .flat_map(|s| s["rollouts"].as_array().unwrap().iter().map(|r| (s["session_id"].as_str().unwrap().to_owned(), r["attempt_id"].clone()))).collect();
     let unbound = |name: &str| (case(name).sid.to_owned(), Value::Null);
-    assert_eq!(attributed, [(SID.to_owned(), json!(f.attempt)), unbound("cwd-outside"), unbound("other-home"), unbound("earlier"), (EDGE_SID.to_owned(), json!(f.attempt))]);
+    assert_eq!(attributed, [(SID.to_owned(), json!(f.attempt)), unbound("other-home"), (EDGE_SID.to_owned(), json!(f.attempt))]);
 }
 
 /// A version no live run certified keeps no counters in usage rows, makes its
@@ -440,10 +437,10 @@ fn planted_sentinels_never_leak() {
         assert_eq!(contains_sentinel(&fs::read(state.join(name)).unwrap()), None, "{name}");
     }
     assert_eq!(contains_sentinel(&output), None, "{}", String::from_utf8_lossy(&output));
-    // complete, edge, uncertified, three unbound heads, child 8 (A6: its
+    // complete, edge, uncertified, one unbound head (foreign and pre-project heads are skipped), child 8 (A6: its
     // function_call), guardian 4, tools 13 (every line), live2-tools 25 (every
     // line, A8: its `turn_aborted`) and live2-fork 6.
-    assert_eq!(f.count("source_observations"), 10 + 11 + 10 + 3 * 6 + 8 + 4 + 13 + 25 + 6, "the collects read the whole corpus");
+    assert_eq!(f.count("source_observations"), 10 + 11 + 10 + 6 + 8 + 4 + 13 + 25 + 6, "the collects read the whole corpus");
     drop(reader);
 }
 
@@ -712,7 +709,7 @@ fn capabilities_match_emitted_fields() {
     assert_eq!(valued, emitted, "every available field has fixture evidence");
     let unavailable = declared(false);
     assert!(emitted.iter().all(|path| !unavailable.iter().any(|u| path == u || path.starts_with(&format!("{u}.")))));
-    assert_eq!(rows.len(), 10 + 11 + 10 + 3 * 6 + 8 + 4 + 13 + 25 + 6 + 8);
+    assert_eq!(rows.len(), 10 + 11 + 10 + 6 + 8 + 4 + 13 + 25 + 6 + 8);
 }
 
 fn rows<T: rusqlite::types::FromSql>(f: &Fixture, sql: &str) -> Vec<Vec<T>> {
@@ -804,9 +801,12 @@ fn session_metadata_record_times_and_child_usage_are_collected() {
 fn resume_across_files_dedupes_history_and_quarantines_an_ordinal_restart() {
     let f = Fixture::new();
     let complete = plant(&f, "complete");
+    // The original is observed before its later resume. Newest-first discovery
+    // must not change an observation's already accepted provenance.
+    assert_eq!(f.cli("collect").0["collected"]["records"], 2);
     let resumed = f.rollout(&f.home, "resumed", &["head.jsonl", "tail.jsonl", RESUMED], &f.worktree(), f.decided + 1_000, "0.154.0");
     let (report, _) = f.cli("collect");
-    assert_eq!(report["collected"]["records"], 3, "the replayed history stores nothing");
+    assert_eq!(report["collected"]["records"], 1, "the replayed history stores nothing");
     // 1500/500/0/180/100/1680 once, plus the resumed record 7/0/0/3/0/10.
     assert_eq!(attempt_usage(&report), json!({"input_tokens": 1507, "cached_input_tokens": 500, "cache_write_input_tokens": 0, "output_tokens": 183,
         "reasoning_output_tokens": 100, "total_tokens": 1690, "records": 3}));

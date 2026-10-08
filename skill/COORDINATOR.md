@@ -79,13 +79,15 @@ herdr-farm result <slug> submit-captured ATTEMPT
 herdr-farm result <slug> show
 herdr-farm result <slug> jobs
 herdr-farm result <slug> host-check --task TASK --name NAME --log FILE -- ./tools/run-tests.sh
-herdr-farm result <slug> verify SUBMISSION --policy-id POLICY --policy-file /absolute/policy.json --idempotency-key KEY --work-dir /absolute/new-scratch
+herdr-farm result <slug> verify SUBMISSION --policy-id POLICY --idempotency-key KEY --work-dir /absolute/new-scratch
 herdr-farm result <slug> integrate RESULT --repository /absolute/repo --idempotency-key KEY --work-dir /absolute/new-scratch
 herdr-farm operations <slug> inspect
 herdr-farm inbox list <slug>
 herdr-farm inbox done <slug> ITEM
 herdr-farm inbox <slug> wait
 ```
+
+Omit `--policy-file` to verify using the installed signed contract policy. Export exact bytes for external tools with `herdr-farm result <slug> policy --submission SUBMISSION --policy-id POLICY --out /absolute/new-policy.json`. Never rebuild policy JSON with jq: whitespace changes its digest. A mismatching operator file is refused without recording a verdict.
 
 Use the event head printed by context for `--expected-head`; refresh after a
 conflict. Launch automatically refreshes missing or stale launchable profile

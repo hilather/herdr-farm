@@ -1019,7 +1019,11 @@ Herdr workspace. `herdr-farm launch PROJECT view --task T` reopens a viewer, or
 focuses its existing tab. The dedicated worker server keeps its own shell and
 bundled manifests; the viewer uses a private product config allowing nesting,
 without changing the owner's Herdr config. If the coordinator session is
-unavailable, launch still succeeds and reports the viewer as unavailable.
+unavailable, launch still succeeds and reports the viewer as unavailable. The viewer
+command uses quoted absolute `/usr/bin/env` and no `--` separator (Herdr 0.9.1
+would execute that separator). Bounded best-effort pane reads catch shell startup
+errors and report the viewer unavailable while preserving worker launch.
+Unsupported reads retain the viewer; submission is not proof of attachment.
 
 The profile's `max_wall_seconds` ends a worker that runs out of time. After an
 `attempt.ended_without_submission` inbox notice, run

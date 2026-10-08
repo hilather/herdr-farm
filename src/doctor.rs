@@ -120,7 +120,7 @@ fn report(
         let _ = writeln!(out, "[{mark}] {label}: {detail}");
     };
 
-    let binary = std::env::current_exe()
+    let binary = herdr_farm::self_executable::real_path()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|e| format!("unknown ({e})"));
     let _ = writeln!(out, "binary:     {binary}");
@@ -290,7 +290,7 @@ fn report(
                     check(&mut out, Some(false), &label, format!("unknown format.memory `{memory}`; preserve and repair .state/format.json"));
                     continue;
                 }
-                check(&mut out, Some(true), &label, format!("migrated runtime={runtime} memory={memory}; legacy thread/inbox files are pre-cutover originals"));
+                check(&mut out, Some(true), &label, format!("store runtime={runtime} memory={memory}; legacy thread/inbox files are pre-cutover originals"));
                 #[cfg(feature="state-store")]
                 {
                     if let Some(warning) = herdr_farm::memory::legacy_owner_memory_warning(&dir) { check(&mut out, None, &label, warning); }

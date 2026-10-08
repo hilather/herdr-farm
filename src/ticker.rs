@@ -242,7 +242,7 @@ unsafe extern "C" {
 /// with the process group of whatever started it (an agent's shell tool).
 fn spawn(root: &Path) -> Result<()> {
     use std::os::unix::process::CommandExt;
-    let binary = std::env::current_exe().context("could not find this binary's own path")?;
+    let binary = herdr_farm::self_executable::real_path().context("could not find this binary's own path")?;
     let mut command = Command::new(binary);
     command
         .env("HERDR_FARM_TICKER_CHILD", "1")
@@ -506,6 +506,26 @@ pub fn tick(ctx: &Ctx, log: &Log, memory: &mut Memory) -> bool {
     #[cfg(feature="state-store")]
     let _telemetry_start=TELEMETRY_START.get_or_init(Instant::now);
     memory.tick += 1;
+    if let Err(error) = herdr_farm::self_executable::real_path() {
+        log.error(&format!("{error:#}"));
+        #[cfg(feature="state-store")]
+        for slug in project::list_slugs(&ctx.root) {
+            let project = ctx.root.join(&slug);
+            if !project.join(".state/state.db").is_file() { continue; }
+            let notice = (|| -> Result<()> {
+                let _guard = herdr_farm::execution_guard::ProjectGuard::acquire(&project)?;
+                let mut store = herdr_farm::migration::open_active_unchecked(&project)?;
+                let content = herdr_farm::domain::InboxContent {
+                    id: format!("telemetry-health-ticker-binary-{}-{}", std::process::id(), memory.started.as_millisecond()),
+                    kind: "telemetry-health".into(), subject: "ticker-binary".into(),
+                    summary: error.to_string(), ..Default::default()
+                };
+                store.deliver_telemetry_notice(store.current_head()?, &content, jiff::Timestamp::now().as_millisecond())?;
+                Ok(())
+            })();
+            if let Err(error) = notice { log.error(&format!("{slug}: ticker binary notice: {error:#}")); }
+        }
+    }
     if let Some(reads)=memory.local_reports.as_mut(){reads.begin_pass();}
     if let Some(reads)=memory.local_observations.as_mut(){reads.begin_pass();}
     #[cfg(feature="state-store")]

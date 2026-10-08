@@ -439,8 +439,9 @@ fn evaluate_rule(ctx: &mut Ctx, rule: &'static Rule) -> Result<Vec<Outcome>> {
             // order. No dispatch-history M40 JSON or historical windows.
             // Keep milli's exact validation; SQLite REAL casts would accept
             // extra precision and malformed decimals that the rule excludes.
-            let mut stmt = db.prepare("SELECT remaining,used,unit,window_kind,window_minutes,window_start_unix_ms,resets_unix_ms,last_observed_unix_ms
-                FROM quota_windows WHERE resets_unix_ms>?1 ORDER BY account,limit_id,window_kind,resets_unix_ms")?;
+            let current_window = crate::telemetry::accounting::quota::CURRENT_WINDOW_SQL;
+            let mut stmt = db.prepare(&format!("SELECT remaining,used,unit,window_kind,window_minutes,window_start_unix_ms,resets_unix_ms,last_observed_unix_ms
+                FROM quota_windows w WHERE {current_window} ORDER BY account,limit_id,window_kind,resets_unix_ms"))?;
             let mut rows = stmt.query([now])?;
             let (mut current, mut below_warn, mut lowest) = (0usize, 0usize, None::<(Value, i64, i64)>);
             while let Some(row) = rows.next()? {

@@ -850,6 +850,7 @@ fn check_passes(
     toolchain: Option<&verification::toolchains::Resolved>,
     repository: &Path,
 ) -> Result<bool> {
+    crate::self_executable::real_path()?;
     let checks = match parse_checks(body.as_bytes()) {
         Ok(checks) => checks,
         Err(_) => return Ok(false),
@@ -877,10 +878,14 @@ fn check_passes(
         toolchain: toolchain.cloned(),
         repository: Some(repository.to_path_buf()),
     });
-    let Ok(launch) = launch else {
-        return Ok(false);
+    let launch = match launch {
+        Ok(launch) => launch,
+        Err(error) if error.is::<crate::self_executable::Unavailable>() => return Err(error),
+        Err(_) => return Ok(false),
     };
-    let output = match RealRunner.run(&launch.cmd) {
+    let ran = RealRunner.run(&launch.cmd);
+    crate::self_executable::real_path()?;
+    let output = match ran {
         Ok(output) => output,
         Err(_) => return Ok(false),
     };

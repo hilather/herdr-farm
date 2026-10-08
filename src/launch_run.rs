@@ -474,11 +474,13 @@ fn open_viewer(ctx: &Ctx, project: &Path, directory: &Path, task: &str, socket: 
         close_viewer(ctx, &record);
         return Err(error.into());
     }
+    // The quoted absolute /usr/bin/env path cannot be parsed as an option.
+    // Herdr 0.9.1 treats a `--` separator as part of the shell source.
     let command = herdr_farm::worker_supervision::posix_command(&[
         "/usr/bin/env".into(), format!("HERDR_CONFIG_PATH={}", config.display()),
         format!("HERDR_SOCKET_PATH={}", socket.display()), ctx.env.herdr_bin().to_string(),
     ])?;
-    if let Err(error) = h.pane_run(&created.pane_id, &command) {
+    if let Err(error) = h.pane_run(&created.pane_id, &command).and_then(|()| h.verify_viewer(&created.pane_id)) {
         close_viewer(ctx, &record);
         record.as_object_mut().context("invalid server record")?.remove("viewer");
         fs::write(&path, serde_json::to_vec_pretty(&record)?)?;
@@ -1195,6 +1197,10 @@ pub fn adopt_memory(ctx: &Ctx, project: &Path, dry_run: bool, explicit: Option<P
 }
 
 fn memory_signer(ctx: &Ctx, project: &Path, explicit: Option<PathBuf>) -> Result<PathBuf> {
+    memory_signer_in(&ctx.config_dir, project, explicit)
+}
+
+fn memory_signer_in(config_dir: &Path, project: &Path, explicit: Option<PathBuf>) -> Result<PathBuf> {
     let config = migration::status(project)?.plan.config.context("pinned owner config missing")?;
     let path = Path::new(&config.path);
     let value: toml::Value = toml::from_str(&String::from_utf8(migration::read_plan_file(path)?)?)?;
@@ -1204,7 +1210,7 @@ fn memory_signer(ctx: &Ctx, project: &Path, explicit: Option<PathBuf>) -> Result
             ensure!(Path::new(key).is_absolute(), "coordinator.signing_key must be an absolute path");
             Some(PathBuf::from(key))
         } else { None };
-    resolve_signer(selected, &[path.parent().context("config parent missing")?.to_owned(), ctx.config_dir.clone()], value["authority"]["approval_public_key"].as_str().context("owner approval key missing")?)
+    resolve_signer(selected, &[path.parent().context("config parent missing")?.to_owned(), config_dir.to_owned()], value["authority"]["approval_public_key"].as_str().context("owner approval key missing")?)
 }
 
 pub fn record_memory(ctx: &Ctx, project: &Path, title: &str, provenance: &str, body_file: &Path) -> Result<Value> {
@@ -1217,4 +1223,22 @@ pub fn record_memory(ctx: &Ctx, project: &Path, title: &str, provenance: &str, b
         fs::write(&document, bytes)?;
         fs::read(sign(&key, authority::MEMORY_SIGNATURE_NAMESPACE, &document)?).map_err(Into::into)
     })
+}
+
+/// Use the same automatic signer and signed cutover as owner adoption.
+pub fn initialize_memory(config_dir: &Path, project: &Path) -> Result<()> {
+    let key = match memory_signer_in(config_dir, project, None) {
+        Ok(key) => key,
+        Err(_) => {
+            println!("memory=legacy-markdown: owner signer unavailable; configure the owner signing key, then run `herdr-farm memory {} adopt`.", project.file_name().context("project name missing")?.to_string_lossy());
+            return Ok(());
+        }
+    };
+    let temp = ProbeDirectory(herdr_farm::short_socket::fresh()?);
+    let document = temp.0.join("memory.json");
+    authority::initialize_memory(project, |bytes| {
+        fs::write(&document, bytes)?;
+        fs::read(sign(&key, authority::MEMORY_SIGNATURE_NAMESPACE, &document)?).map_err(Into::into)
+    })?;
+    Ok(())
 }

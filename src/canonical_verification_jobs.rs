@@ -96,7 +96,7 @@ fn execute(input:&Input,control:&Control)->Result<()> {
         match (recorded(&mut db,&payload,&operation),result) {
             (Err(_),_)=>Outcome::Ambiguous{observation_required:"adapter failed after delivery began; observe effect before retry (details withheld)".into()},
             (Ok(Some(run)),_)=>Outcome::Confirmed{observed_identity:run},
-            (Ok(None),Err(error)) if error.is::<verification::FenceChanged>()=>Outcome::Retryable{no_effect_evidence:format!("{error}; no run is recorded under the job key; redeliver with the same key")},
+            (Ok(None),Err(error)) if error.is::<verification::FenceChanged>() || error.is::<herdr_farm::self_executable::Unavailable>()=>Outcome::Retryable{no_effect_evidence:format!("{error}; no run is recorded under the job key; redeliver with the same key")},
             (Ok(None),_) if control.check().is_err()=>Outcome::Retryable{no_effect_evidence:"verifier cancelled before a verdict; no run is recorded under the job key".into()},
             (Ok(None),error)=>Outcome::PermanentFailure{diagnostic:format!("verifier stopped before recording a verdict: {}; retry with `result <slug> retry-verification`",
                 error.err().map_or_else(||"no run recorded".into(),|e|format!("{e:#}")).chars().take(2048).collect::<String>())},

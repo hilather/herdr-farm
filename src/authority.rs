@@ -701,6 +701,18 @@ pub fn configure_assignment(project:&Path,mode:&str,policies:&[crate::domain::Po
 /// are verified before creating objects; cutover retains the ordinary receipt.
 pub fn adopt_memory(project: &Path, expected: &crate::memory::AdoptPlan, mut sign: impl FnMut(&[u8]) -> Result<Vec<u8>>) -> Result<crate::memory::MemoryJournal> {
     let _guard = migration::maintenance(project)?;
+    adopt_memory_held(project, expected, &mut sign)
+}
+
+/// Creation already holds the project barrier and has never published this store.
+pub fn initialize_memory(project: &Path, mut sign: impl FnMut(&[u8]) -> Result<Vec<u8>>) -> Result<crate::memory::MemoryJournal> {
+    ensure!(fs::symlink_metadata(project.join(".creating"))?.file_type().is_file(), "new project creation marker required");
+    let plan = crate::memory::adopt_plan(project)?;
+    ensure!(plan.plan.sources.iter().all(|s| s.path == "MEMORY.md"), "new memory must be empty");
+    adopt_memory_held(project, &plan, &mut sign)
+}
+
+fn adopt_memory_held(project: &Path, expected: &crate::memory::AdoptPlan, mut sign: impl FnMut(&[u8]) -> Result<Vec<u8>>) -> Result<crate::memory::MemoryJournal> {
     let launch_guard = fs::File::open(project.join(".state/state.db"))?;
     launch_guard.try_lock().context("adopt refused: a worker is mid-launch")?;
     if let Some(journal) = recover_memory_adopt_held(project)? { return Ok(journal); }

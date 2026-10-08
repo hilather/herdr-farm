@@ -66,7 +66,7 @@ impl Reads {
             return Ok(Poll::Pending);
         }
         ensure!(t.thread_dir.len()<=4096&&std::path::Path::new(&t.thread_dir).is_absolute(),"local report source must be a bounded absolute path");
-        let mut command=Cmd::new(std::env::current_exe()?.to_str().context("report helper path is not UTF-8")?,Duration::from_secs(10)).args(["report-hash","--path",&t.thread_dir]);
+        let mut command=Cmd::new(herdr_farm::self_executable::real_path()?.to_str().context("report helper path is not UTF-8")?,Duration::from_secs(10)).args(["report-hash","--path",&t.thread_dir]);
         command.env_clear=true;command.capture_limit=1024;
         let deadline=Instant::now()+QUEUE_BUDGET;command.deadline=Some(deadline);
         let identity=Identity{operation:format!("local-report:{}",t.id),revision:1,project:key.0.clone(),machine:"local-report-read".into(),terminal:None};

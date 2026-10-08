@@ -14,7 +14,9 @@ const STREAMS_TABLE: &str = "CREATE TABLE IF NOT EXISTS telemetry_streams (strea
 const CODEX: &[&str] = &[include_str!("../../migrations/telemetry/0001_codex_usage.sql"), include_str!("../../migrations/telemetry/0002_reevaluation.sql"),
     include_str!("../../migrations/telemetry/0003_read_indexes.sql"),
     include_str!("../../migrations/telemetry/0004_compact_native.sql"),
-    include_str!("../../migrations/telemetry/0005_usage_schema_unrecognized.sql")];
+    include_str!("../../migrations/telemetry/0005_usage_schema_unrecognized.sql"),
+    include_str!("../../migrations/telemetry/0006_collection_scope.sql"),
+    include_str!("../../migrations/telemetry/0007_native_probe_failures.sql")];
 
 // Compaction in older binaries could silently remove 0012's capture triggers.
 // Check the actual schema even when every migration version is current.

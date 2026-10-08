@@ -31,6 +31,11 @@ The `state-store` feature is enabled by default; build recipes above use that de
 
 New projects use the canonical SQLite store by default: `herdr-farm new demo`
 creates the project at its final path, paused, even while the ticker runs.
+With an automatic owner signer available, creation also installs owner-signed
+SQLite memory (`memory=sqlite-v1`), ready for `memory demo record`, and retains
+`MEMORY.md` as the owner’s index. If no signer is available, creation keeps
+`legacy-markdown` memory and prints how to configure signing and run
+`memory demo adopt` later. Existing projects keep their current authority.
 `open demo` or `launch demo run` activates it. Use `new --legacy demo` for
 legacy Markdown behavior. Migration is only needed for existing legacy projects.
 Canonical projects pin their absolute path; choose the final name and location

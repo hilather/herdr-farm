@@ -26,10 +26,19 @@ and collection serialize filesystem transitions; failed deletion cannot certify
 purge. Immutable revisions, accepted proposals/evidence and import candidates retain
 their referenced bytes. Release/forget policy remains unfinished.
 
-Markdown remains authoritative until signed cutover changes `format.memory` to
+For existing projects with legacy memory, Markdown remains authoritative until
+signed cutover changes `format.memory` to
 `sqlite-v1`. Afterward it is an export/projection, never fallback authority.
 `memory PROJECT inspect` reports records and ownership. Hard-rule, import-ack and
 revocation policy still use owner-signed `memory@herdr-projects` documents.
+
+New canonical projects install the same owner-signed `sqlite-v1` memory policy
+as empty-project adoption before publication, without a ticker quiet window.
+`MEMORY.md` remains the owner’s index and `memory PROJECT record` works immediately.
+If the automatic owner signer is unavailable, `new` retains `legacy-markdown`
+and prints the later `memory PROJECT adopt` command. Existing projects and
+`new --legacy` retain their current behavior; adoption of existing projects still
+requires its normal maintenance barrier.
 
 ## Adopt existing owner decisions
 
