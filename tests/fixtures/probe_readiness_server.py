@@ -41,7 +41,7 @@ while True:
         s['child'].stdin.write(params['text'].encode())
         s['child'].stdin.flush()
         if open(os.path.join(os.path.dirname(__file__), 'setup-delay')).read() == 'true':
-            deadline = time.monotonic() + 10
+            deadline = time.monotonic() + 8  # inside the probe's 10 s request timeout
             while not os.path.exists(os.path.join(s['cwd'], 'setup-pending')):
                 if time.monotonic() >= deadline:
                     here = os.path.dirname(__file__)
@@ -51,7 +51,7 @@ while True:
                         except OSError as error:
                             return 'unreadable: ' + error.strerror
                     with open(os.path.join(here, 'socket-error'), 'w') as diagnostic:
-                        diagnostic.write('setup wrapper did not start within 10 s; child exit=%r; mode=%r; cwd=%r; stderr=%r' % (
+                        diagnostic.write('setup wrapper did not start within 8 s; child exit=%r; mode=%r; cwd=%r; stderr=%r' % (
                             s['child'].poll(), read(os.path.join(s['cwd'], '..', 'mode')),
                             sorted(os.listdir(s['cwd'])) if os.path.isdir(s['cwd']) else 'missing', read(os.path.join(here, 'child-stderr'))))
                     raise RuntimeError('setup wrapper did not start')
