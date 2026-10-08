@@ -1283,8 +1283,12 @@ pub fn isolated_gated_command(
         "-c".into(),
         match isolation.worker_uid {
             None => SANDBOX.into(),
-            Some((uid, gid)) => SANDBOX.replace("exec /usr/bin/unshare --user --map-root-user --",
-                &format!("exec /usr/bin/unshare --user --map-user={uid} --map-group={gid} --")),
+            Some((uid, gid)) => {
+                let root_exec = "exec /usr/bin/unshare --user --map-root-user --";
+                ensure!(SANDBOX.matches(root_exec).count() == 1, "worker owner mapping requires exactly one sandbox exec replacement");
+                SANDBOX.replace(root_exec,
+                    &format!("exec /usr/bin/unshare --user --map-user={uid} --map-group={gid} --"))
+            },
         },
         "herdr-farm-worker-sandbox".into(),
     ];

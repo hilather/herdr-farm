@@ -352,6 +352,10 @@ maps the host uid/gid captured in approved launch inputs. Native profile probes
 use this policy too. Reprepare and approve a new attempt after a config change.
 A running attempt and its verification checks retain the launched identity.
 
+The owner uid mapping requires util-linux >= 2.38 for `--map-user`. It is a
+compatibility measure for tools that refuse uid 0, not a hardening measure:
+the agent can still create another user namespace and map itself to root.
+
 Nothing gets broader: host identity and file ownership are unchanged, and the
 inner namespace loses root capabilities at exec. Mounts, hidden paths and
 read-only paths retain their existing restrictions. Private HOME and Git

@@ -975,6 +975,10 @@ Use a regular owner-owned 0600 file outside projects and agent directories.
 The token reaches only the agent environment via an inherited descriptor;
 it is never copied into the home or included in argv.
 
+The owner uid mapping requires util-linux >= 2.38 for `--map-user`. It is a
+compatibility measure for tools that refuse uid 0, not a hardening measure:
+the agent can still create another user namespace and map itself to root.
+
 Owner-only `[safety."<canonical project path>"]` also accepts
 `worker_uid = "root"` (default) or `worker_uid = "owner"`. For example:
 

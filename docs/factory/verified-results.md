@@ -322,6 +322,10 @@ network setting and every path's identity; environment values are not recorded.
 No new storage table is needed: this uses the existing signed policy and bounded
 verification metadata evidence.
 
+The owner uid mapping requires util-linux >= 2.38 for `--map-user`. It is a
+compatibility measure for tools that refuse uid 0, not a hardening measure:
+the agent can still create another user namespace and map itself to root.
+
 Verification and integration rechecks use the attempt's frozen `worker_uid`
 policy from the owner safety configuration, never a fresh project setting.
 Absent/`"root"` preserves the existing verifier command. With `"owner"`, the
@@ -331,8 +335,9 @@ user namespace using the sealed host uid/gid, equivalent to
 `unshare --user --map-user=<uid> --map-group=<gid>`. Since its `/proc` is
 read-only, the gated child performs `unshare(CLONE_NEWUSER)` and the map writes
 before exec using a private descriptor to the setup proc mount. That descriptor
-closes before check exec; the supervisor disables dumpability so checks cannot
-reopen it through `/proc/1/fd`. No proc mount becomes writable to checks.
+closes before check exec; cross-user-namespace ptrace checks prevent checks from
+reopening it through `/proc/1/fd`; supervisor dumpability is also disabled.
+No proc mount becomes writable to checks.
 Recorded argv includes the frozen identity.
 The automatic isolation probe exercises this same mapping and verifies both uid
 and gid before claiming work. Historical imported attempts without sealed launch
@@ -340,6 +345,11 @@ inputs retain root behavior. Nothing gets broader: the inner check namespace
 loses root capabilities at exec, host identity is unchanged, and hidden host
 paths and read-only mounts stay enforced. HOME remains the private `/tmp` for
 toolchain checks; legacy HOME behavior is unchanged.
+
+Owner-mode setup retains only CAP_SETFCAP in its permitted and effective sets
+so Linux 5.12+ permits mapping parent uid 0. After mapping, the gated child
+clears all capabilities before check exec. The root-mode privilege drop is
+unchanged. The availability probe uses the same privilege drop and mapping hook.
 
 Commands beginning with `./` resolve within the copied checkout and may not
 traverse outside it. Checks can write only inside that disposable copy and a

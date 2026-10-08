@@ -435,8 +435,8 @@ fn isolation_available_with_uid(identity: Option<(u32, u32)>) -> Result<()> {
         .into_iter().map(String::from).collect();
     if let Some((uid, gid)) = identity {
         probe.args.pop();
-        probe.args.extend(["/usr/bin/unshare".into(), "--user".into(), format!("--map-user={uid}"), format!("--map-group={gid}"), "--".into(),
-            "/bin/sh".into(), "-c".into(), format!("[ $(/usr/bin/id -u) = {uid} ] && [ $(/usr/bin/id -g) = {gid} ]")]);
+        probe.args.extend([std::env::current_exe()?.display().to_string(),
+            "verification-setup".into(), "--probe-worker-uid".into(), format!("{uid}:{gid}")]);
     }
     probe.env_clear = true;
     let output = RealRunner.run(&probe).context("isolation unavailable")?;
@@ -1022,6 +1022,9 @@ pub(super) fn check_command(program: &str, identity: Option<(u32, u32, i32)>) ->
                 if written != bytes.len() as isize { return Err(error); }
             }
             libc::close(proc_fd);
+            // unshare grants child-namespace capabilities; remove every one
+            // before executing the check, including the setup-only SETFCAP.
+            if !setup::clear_capabilities(false) { return Err(std::io::Error::last_os_error()); }
             Ok(())
         }); }
     }

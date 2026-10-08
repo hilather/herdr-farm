@@ -1118,6 +1118,10 @@ integration checks keep that identity after config edits. PROJECT.md cannot
 supply the setting, and project-local or group/other-writable policy sources
 are refused.
 
+The owner uid mapping requires util-linux >= 2.38 for `--map-user`. It is a
+compatibility measure for tools that refuse uid 0, not a hardening measure:
+the agent can still create another user namespace and map itself to root.
+
 The outer U1 namespace still maps root for bind mounts. Only the final U2 exec
 changes to `unshare --user --map-user=<uid> --map-group=<gid> -- ...`. At exec the
 non-root inner identity loses root capabilities. Nothing gets broader: M1's
@@ -1133,6 +1137,7 @@ Verification keeps its mount/root-switch setup in the outer root namespace and
 runs checks (including repetitions and stress loads) through the corresponding
 inner mapping. The verifier uses an equivalent gated pre-exec unshare/map
 step through a private setup-proc descriptor, which closes before check exec;
-parent dumpability is disabled to prevent reopening it via `/proc/1/fd`.
+cross-user-namespace ptrace checks deny reopening it via `/proc/1/fd`,
+and parent dumpability is disabled as defense in depth.
 The check-visible `/proc` stays read-only. The automatic probe checks both uid
 and gid for that sealed mapping. See [verification](../factory/verified-results.md).

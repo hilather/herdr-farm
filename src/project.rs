@@ -493,7 +493,7 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 pub fn load_safety(config_dir: &Path, canonical_project_dir: &Path) -> Result<Safety> {
     let file=config_dir.join("config.toml");
     let Some(text)=crate::paths::read_root_config(&file).with_context(||format!("cannot load safety settings from {}",file.display()))? else {return Ok(Safety::default());};
-    herdr_farm::profile_config::validate_worker_uid_source(&toml::from_str(&text)?, &file, canonical_project_dir)?;
+    herdr_farm::profile_config::validate_worker_uid_source(&toml::from_str(&text).with_context(||format!("invalid safety settings in {}",file.display()))?, &file, canonical_project_dir)?;
     parse_safety(&text,canonical_project_dir).with_context(||format!("invalid safety settings in {}",file.display()))
 }
 

@@ -516,6 +516,9 @@ fn worker_uid_is_strict_per_project_owner_policy() {
         fs::write(&config, format!("[safety.{:?}]\nworker_uid={value}\n", project.display().to_string())).unwrap();
         assert!(home.refused(&["safety", "show", "demo"]).contains("worker_uid"));
     }
+    fs::write(&config, "[safety.").unwrap();
+    let error = home.refused(&["safety", "show", "demo"]);
+    assert!(error.contains(&format!("invalid safety settings in {}", config.display())), "{error}");
     fs::write(&config, &owner).unwrap();
     fs::set_permissions(&config, fs::Permissions::from_mode(0o666)).unwrap();
     assert!(home.refused(&["safety", "show", "demo"]).contains("external owner-owned configuration"));

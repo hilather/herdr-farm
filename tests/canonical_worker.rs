@@ -92,7 +92,13 @@ impl Lab {
     fn bound(budget: &str, cwd: impl Fn(&std::path::Path) -> PathBuf) -> Self { Self::of_kind("claude", budget, cwd) }
     /// As `bound`, with a `worker` profile of `kind` (`claude` or `codex`).
     fn of_kind(kind: &'static str, budget: &str, cwd: impl Fn(&std::path::Path) -> PathBuf) -> Self {
-        let home = tempfile::tempdir().unwrap();
+        Self::of_kind_in(kind, budget, cwd, None)
+    }
+    fn of_kind_in(kind: &'static str, budget: &str, cwd: impl Fn(&std::path::Path) -> PathBuf, temp: Option<&str>) -> Self {
+        let home = match temp {
+            Some(path) => tempfile::Builder::new().prefix("hf-").tempdir_in(path).unwrap(),
+            None => tempfile::tempdir().unwrap(),
+        };
         let key = home.path().join("owner");
         assert!(Command::new("/usr/bin/ssh-keygen").args(["-q", "-t", "ed25519", "-N", "", "-f"]).arg(&key).output().unwrap().status.success());
         let public = fs::read_to_string(key.with_extension("pub")).unwrap().split_whitespace().take(2).collect::<Vec<_>>().join(" ");
@@ -3469,7 +3475,9 @@ fn worker_uid_owner_and_verification_stay_frozen_with_mounts_enforced() {
 }
 
 fn worker_uid_workflow(owner: bool) {
-    let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+    // Keep the fixture socket below AF_UNIX's path limit even when cargo's
+    // mandated TMPDIR is inside a long worktree path.
+    let mut lab = Lab::of_kind_in("claude", "unknown_usage='allow_with_warning'", |repo| repo.to_owned(), Some("/tmp"));
     let host = Command::new("/usr/bin/id").arg("-u").output().unwrap();
     let uid = String::from_utf8(host.stdout).unwrap().trim().parse::<u32>().unwrap();
     assert_ne!(uid, 0, "this lab requires a regular owner uid");
@@ -3488,7 +3496,12 @@ fn main() {
     assert!(out.status.success());
     let uid = String::from_utf8(out.stdout).unwrap();
     assert_eq!(uid.trim(), args[1]);
-    if uid.trim() != "0" { assert!(fs::read_dir("/proc/1/fd").is_err(), "private supervisor descriptors exposed"); }
+    if uid.trim() != "0" { assert!(fs::read_link("/proc/1/fd/0").is_err(), "private supervisor descriptors exposed"); }
+    let status = fs::read_to_string("/proc/self/status").unwrap();
+    for field in ["CapInh:", "CapPrm:", "CapEff:", "CapBnd:", "CapAmb:"] {
+        let value = status.lines().find(|line| line.starts_with(field)).unwrap().split_whitespace().nth(1).unwrap();
+        assert_eq!(value, "0000000000000000", "check retained {field}");
+    }
     assert!(fs::read(&args[2]).is_err(), "host secret exposed");
     assert_eq!(fs::read_to_string(&args[3]).unwrap(), "READ-ONLY-SENTINEL");
     assert!(fs::write(&args[3], "overwrite").is_err(), "toolchain input was writable");
@@ -3537,6 +3550,14 @@ fn main() {
     let mut ticker = lab.spawn();
     let output = lab.project.join(".state/worker-output").join(attempt.as_str());
     lab.wait(&mut ticker, 120, &|| output.join("uid-before").exists());
+    let argv: Vec<String> = serde_json::from_value(lab.requests().into_iter()
+        .find(|(method, _)| method == "workspace.create_command").unwrap().1["command"].clone()).unwrap();
+    let mapping = if owner {
+        format!("exec /usr/bin/unshare --user --map-user={uid} --map-group={} --", unsafe { libc::getgid() })
+    } else { "exec /usr/bin/unshare --user --map-root-user --".into() };
+    assert_eq!(argv.iter().map(|arg| arg.matches(&mapping).count()).sum::<usize>(), 1,
+        "launched sandbox must contain the selected exec mapping");
+
     assert_eq!(fs::read_to_string(output.join("uid-before")).unwrap().trim(), expected.to_string());
     let replacement = if owner { settings.replace("worker_uid=\"owner\"", "worker_uid=\"root\"") }
         else { format!("{settings}worker_uid=\"owner\"\n") };
@@ -3546,19 +3567,18 @@ fn main() {
     assert_eq!(fs::read_to_string(output.join("uid-after")).unwrap().trim(), expected.to_string());
     assert_eq!(fs::read_to_string(&read_only).unwrap(), "READ-ONLY-SENTINEL");
     assert_eq!(fs::read_to_string(&hidden).unwrap(), "HIDDEN-SENTINEL");
-    drop(ticker);
-    lab.ok(&["runtime", "demo", "state", "active", "--expected-revision", &lab.state().control.unwrap().revision.to_string(), "--expected-head", &lab.head().to_string()]);
-    let captured = lab.ok(&["result", "demo", "submit-captured", attempt.as_str()]);
+    let captured = lab.ok_live(&|| ["result", "demo", "submit-captured", attempt.as_str()].map(String::from).to_vec());
     let submission = captured["submission"]["submission_id"].as_str().unwrap();
     let policy_file = lab.path("uid-policy.json");
     fs::write(&policy_file, policy).unwrap();
     let scratch = lab.path("uid-verification");
-    let verified = lab.ok(&["result", "demo", "verify", submission, "--policy-id", "clean", "--policy-file", policy_file.to_str().unwrap(),
-        "--idempotency-key", "uid-verification", "--work-dir", scratch.to_str().unwrap()]);
+    let verified = lab.ok_live(&|| ["result", "demo", "verify", submission, "--policy-id", "clean", "--policy-file", policy_file.to_str().unwrap(),
+        "--idempotency-key", "uid-verification", "--work-dir", scratch.to_str().unwrap()].map(String::from).to_vec());
     assert_eq!(verified["state"], "accepted", "{verified}");
     assert!(verified["stdout"].as_str().unwrap().contains(&format!("VERIFICATION-UID={expected}")), "{verified}");
-    let shown = lab.ok(&["result", "demo", "show"]);
+    let shown = lab.ok_live(&|| ["result", "demo", "show"].map(String::from).to_vec());
     assert_eq!(shown[0]["verification_runs"][0]["state"], "accepted", "{shown}");
+    lab.stop(ticker);
 }
 
 #[test]
