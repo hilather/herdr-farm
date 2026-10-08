@@ -46,6 +46,30 @@ fn budget(records: usize) -> Budget {
 }
 
 #[test]
+fn complete_history_passes_all_public_inventories_under_the_root_cap() {
+    let root = tempfile::tempdir().unwrap();
+    let current = project(root.path(), "current");
+    let other = project(root.path(), "other");
+    history::seed(&other, 1040);
+    let mut shared = budget(MAX_INVENTORY_RECORDS);
+    for project in [&current, &other] {
+        let expected = if project == &other { 1040 } else { 0 };
+        assert_eq!(
+            migration::read_worktree_inventory(project, &mut shared).unwrap().len(),
+            expected
+        );
+        assert_eq!(
+            migration::read_launch_target_inventory(project, &mut shared).unwrap().len(),
+            expected
+        );
+        assert_eq!(
+            migration::read_identity_inventory(project, &mut shared).unwrap().len(),
+            expected
+        );
+    }
+}
+
+#[test]
 fn terminated_root_history_remains_counted_under_the_stopgap_budget() {
     let root = tempfile::tempdir().unwrap();
     let current = project(root.path(), "current");

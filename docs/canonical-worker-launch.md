@@ -1124,3 +1124,8 @@ launches that remain counted, checks live pane conflicts and shared-budget error
 and extends the public coordinator reprime and worktree preparation workflows.
 The latter two need local Unix sockets and must run outside sandboxes that forbid
 binding them.
+The socket-free public inventory regression also seeds 1,040 launches in the
+second project and scans worktrees, launch targets and bindings with one shared
+16,384-record budget. Historical fixtures retain version-2 profile evidence,
+matching approval grants and consumed uses, and confirmed delivery claim history;
+the effective-profile insertion guard remains enabled while seeding.

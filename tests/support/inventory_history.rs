@@ -8,11 +8,7 @@ pub fn seed(project: &Path, count: usize) -> String {
     let mut db = rusqlite::Connection::open(project.join(".state/state.db")).unwrap();
     db.execute_batch("PRAGMA foreign_keys=ON").unwrap();
     let tx = db.transaction().unwrap();
-    // Simulate retained v1 launches from before v2 became mandatory. Restore
-    // the insertion guard before committing; production schema is unchanged.
-    let guard: String = tx.query_row("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='attempt_inputs_effective_profile'", [], |row| row.get(0)).unwrap();
-    tx.execute_batch("DROP TRIGGER attempt_inputs_effective_profile")
-        .unwrap();
+    // Seed complete v2 history without disabling the effective-profile guard.
     let mut last = String::new();
     for n in 0..count {
         let task = TaskId::new(format!("history-{n}")).unwrap();
@@ -26,6 +22,66 @@ pub fn seed(project: &Path, count: usize) -> String {
             commit: "a".repeat(40),
             tree: "b".repeat(40),
         }];
+        let evidence = VersionedReference {
+            id: "history-evidence".into(),
+            revision: 1,
+            digest: "d".repeat(64),
+        };
+        let supported = CapabilityEvidence::Supported {
+            evidence: evidence.clone(),
+        };
+        let profile = FrozenProfile {
+            version: 1,
+            name: "historical-worker".into(),
+            kind: "claude".into(),
+            definition_digest: "b".repeat(64),
+            config: inputs.config.clone(),
+            arguments_digest: "c".repeat(64),
+            environment_names: vec![],
+            execution_home: None,
+            permission_policy: evidence.clone(),
+            adapter: evidence,
+            agent: ExecutableIdentity {
+                path: "/fixture/agent".into(),
+                digest: "e".repeat(64),
+                version: "1.0.0".into(),
+            },
+            herdr: ExecutableIdentity {
+                path: "/fixture/herdr".into(),
+                digest: "f".repeat(64),
+                version: "1.0.0".into(),
+            },
+            capabilities: ProfileCapabilities {
+                launch: supported.clone(),
+                readiness_observation: supported.clone(),
+                prompt_submission: supported.clone(),
+                stop: supported,
+                checkpoint_acknowledgment: CapabilityEvidence::Unknown,
+                structured_usage: CapabilityEvidence::Unknown,
+                resume: CapabilityEvidence::Unknown,
+            },
+            workflow_certificate: None,
+        };
+        profile.validate_for_launch().unwrap();
+        inputs.version = 2;
+        inputs.profile = profile.reference().unwrap();
+        inputs.effective_profile = Some(profile.clone());
+        let grant = ApprovalGrant {
+            version: 1,
+            scope: ApprovalScope::for_launch(&inputs).unwrap(),
+            policy: profile.permission_policy,
+            issued_unix_ms: 0,
+            expires_unix_ms: 1,
+        };
+        inputs.approval = grant.reference().unwrap();
+        // PreparedApproval is sealed and historical consumption has no public
+        // writer. Retain the same grant/use and completed claim as a real launch.
+        let grant_payload = serde_json::to_string(&grant).unwrap();
+        tx.execute(
+            "INSERT INTO approval_grants(id,payload,payload_hash) VALUES(?1,?2,?3)",
+            params![inputs.approval.id, grant_payload, inputs.approval.digest],
+        )
+        .unwrap();
         let digest = format!("{:x}", Sha256::digest(serde_json::to_vec(&inputs).unwrap()));
         let record = AttemptInputRecord {
             attempt: AttemptId::new(format!("attempt-{digest}")).unwrap(),
@@ -45,6 +101,16 @@ pub fn seed(project: &Path, count: usize) -> String {
                 payload,
                 hash
             ],
+        )
+        .unwrap();
+        tx.execute(
+            "UPDATE operation_delivery SET revision=3,state='confirmed',epoch=1,attempts=1 WHERE operation_id=?1",
+            [record.operation.as_str()],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO approval_uses VALUES(?1,?2,2,1,0)",
+            params![record.inputs.approval.id, record.operation.as_str()],
         )
         .unwrap();
         let target = LaunchTarget {
@@ -162,11 +228,10 @@ pub fn seed(project: &Path, count: usize) -> String {
                 serde_json::json!({"version":1,"target":target,"observed_unix_ms":0}),
             ),
         ] {
-            tx.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES(?1,?2,1,1,?3)", params![kind, record.operation.as_str(), value.to_string()]).unwrap();
+            tx.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES(?1,?2,2,1,?3)", params![kind, record.operation.as_str(), value.to_string()]).unwrap();
         }
         last = record.operation.as_str().to_owned();
     }
-    tx.execute_batch(&guard).unwrap();
     tx.commit().unwrap();
     last
 }
