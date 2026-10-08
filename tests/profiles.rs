@@ -257,7 +257,10 @@ fn codex_shared_home_survives_root_owner_root_with_a_stale_daemon_link() {
     fs::create_dir_all(&control).unwrap();
     let link = control.join("app-server-control.sock");
     std::os::unix::fs::symlink("/tmp/codex-daemon-0/old-session", &link).unwrap();
+    // Also deny ordinary home writes locally; CI mounts this home read-only.
+    fs::set_permissions(lab.path("agent-home"), fs::Permissions::from_mode(0o555)).unwrap();
     let base = fs::read_to_string(&lab.config).unwrap();
+    let mut started = Vec::new();
     for identity in ["root", "owner", "root"] {
         fs::write(&lab.config, format!("{base}\n[safety.{}]\nworker_uid='{identity}'\n",
             serde_json::to_string(lab.project.to_str().unwrap()).unwrap())).unwrap();
@@ -266,15 +269,14 @@ fn codex_shared_home_survives_root_owner_root_with_a_stale_daemon_link() {
             panic!("{diagnostic}");
         }
         assert!(result.status.success(), "{identity}: {}", String::from_utf8_lossy(&result.stderr));
+        started.extend(fs::read_to_string(lab.path("child-stderr")).unwrap().lines()
+            .filter_map(|line| line.strip_prefix("probe-fixture started uid="))
+            .map(|uid| uid.parse::<u32>().unwrap()));
         assert_eq!(fs::read_link(&link).unwrap(), PathBuf::from("/tmp/codex-daemon-0/old-session"));
     }
+    fs::set_permissions(lab.path("agent-home"), fs::Permissions::from_mode(0o755)).unwrap();
     let owner = unsafe { libc::geteuid() };
-    if owner == 0 {
-        assert_eq!(fs::read_to_string(lab.path("agent-home/started-0")).unwrap().lines().count(), 3);
-    } else {
-        assert_eq!(fs::read_to_string(lab.path("agent-home/started-0")).unwrap().lines().count(), 2);
-        assert_eq!(fs::read_to_string(lab.path(&format!("agent-home/started-{owner}"))).unwrap().lines().count(), 1);
-    }
+    assert_eq!(started, vec![0, owner, 0]);
 }
 
 #[test]

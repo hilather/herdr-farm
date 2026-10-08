@@ -21,20 +21,20 @@ int main(int argc, char **argv) {
     }
     if (mutation == 'h') {
         const char *home = getenv("HOME");
-        char directory[4096], link[4096], target[128], started[4096];
+        char directory[4096], link[4096], target[128];
         snprintf(directory, sizeof directory, "%s/.codex/app-server-control", home);
-        mkdir(directory, 0700);
         snprintf(link, sizeof link, "%s/app-server-control.sock", directory);
         snprintf(target, sizeof target, "/tmp/codex-daemon-%u/fixture", (unsigned)geteuid());
-        if (!no_daemon && symlink(target, link) != 0) {
-            perror("daemon control link: File exists");
-            return 17;
+        if (!no_daemon) {
+            mkdir(directory, 0700);
+            if (symlink(target, link) != 0) {
+                perror("daemon control link: File exists");
+                return 17;
+            }
         }
-        snprintf(started, sizeof started, "%s/started-%u", home, (unsigned)geteuid());
-        FILE *record = fopen(started, "a");
-        if (!record) return 18;
-        fprintf(record, "started\n");
-        fclose(record);
+        /* The server opens stderr outside the sandbox; home may be read-only. */
+        fprintf(stderr, "probe-fixture started uid=%u\n", (unsigned)geteuid());
+        fflush(stderr);
         mutation = '0';
     }
     if (mutation == 'w') {
