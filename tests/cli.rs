@@ -6120,3 +6120,78 @@ fn result_checkout_and_bounded_report_cli() {
     std::os::unix::fs::symlink(f.repo.join("src/lib.rs"), &report).unwrap();
     assert!(!show().status.success());
 }
+
+#[cfg(all(feature="state-store",target_os="linux"))]
+#[test]
+fn verification_exact_policy_export_and_operator_input_refusal() {
+    let f = VerifyFixture::new(&[("src/lib.rs", "pub fn result() {}\n".into())]);
+    let body = r#"{"version":1,"checks":["/usr/bin/git","diff","--quiet"]}"#;
+    let submission = f.submit("exact", &[("builds", body.into())]);
+    let policy = f.home.path().join("exported-policy.json");
+    let output = hp(f.home.path(), &["--root", f.r(), "result", "demo", "policy", "--submission", &submission, "--policy-id", "builds", "--out", policy.to_str().unwrap()]);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(std::fs::read(&policy).unwrap(), body.as_bytes());
+    std::fs::write(&policy, format!("{body}\n")).unwrap();
+    let work = f.home.path().join("verification-scratch");
+    let output = hp(f.home.path(), &["--root", f.r(), "result", "demo", "verify", &submission, "--policy-id", "builds", "--policy-file", policy.to_str().unwrap(), "--idempotency-key", "exact", "--work-dir", work.to_str().unwrap()]);
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("policy_digest_mismatch") && error.contains("omit --policy-file"), "{error}");
+    assert_eq!(f.db().query_row("SELECT count(*) FROM verification_runs", [], |r| r.get::<_,u64>(0)).unwrap(), 0);
+    let output = hp(f.home.path(), &["--root", f.r(), "result", "demo", "verify", &submission, "--policy-id", "builds", "--idempotency-key", "exact", "--work-dir", work.to_str().unwrap()]);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let outcome: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(outcome["state"], "accepted");
+    assert_eq!(f.db().query_row("SELECT count(*) FROM verification_runs WHERE state='rejected'", [], |r| r.get::<_,u64>(0)).unwrap(), 0);
+}
+
+#[cfg(all(feature="state-store",target_os="linux"))]
+#[test]
+fn ticker_deleted_or_replaced_image_pauses_verification_without_rejection() {
+    use herdr_farm::operations::DeliveryState;
+    for replace in [false, true] {
+        let f = VerifyFixture::new(&[("src/lib.rs", "pub fn result() {}\n".into())]);
+        f.submit("image", &[("builds", r#"{"version":1,"checks":["/usr/bin/git","diff","--quiet"]}"#.into())]);
+        let image = f.home.path().join("ticker-image");
+        std::fs::copy(BIN, &image).unwrap();
+        let mut child = Ticker(Command::new(&image).env_clear()
+            .env("HERDR_FARM_TEST_TIME_SCALE", include_str!("support/time-scale.txt").trim())
+            .env("HOME", f.home.path()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", "/bin/false")
+            .args(["--root", f.r(), "ticker", "run"])
+            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap());
+        f.wait(&mut child, 240, &|| std::fs::read_to_string(f.root.join(".ticker.log")).unwrap_or_default().contains("started (pid"));
+        if replace {
+            let replacement = f.home.path().join("replacement");
+            std::fs::copy(BIN, &replacement).unwrap();
+            std::fs::rename(replacement, &image).unwrap();
+        } else { std::fs::remove_file(&image).unwrap(); }
+        // Let the binary notice commit before taking the optimistic head for
+        // automation; neither an input race nor a verdict may cause rejection.
+        f.wait(&mut child, 240, &|| herdr_farm::runtime::snapshot(&f.project).unwrap().inbox.iter().any(|i| i.content.subject == "ticker-binary"));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            let head = herdr_farm::runtime::snapshot(&f.project).unwrap().head.to_string();
+            let enabled = hp(f.home.path(), &["--root", f.r(), "result", "demo", "auto", "--verify", "on", "--expected-head", &head]);
+            if enabled.status.success() { break; }
+            let error = String::from_utf8_lossy(&enabled.stderr);
+            assert!(error.contains("lock") || error.contains("head"), "{error}");
+            assert!(std::time::Instant::now() < deadline, "{error}");
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        let paused = || {
+            let jobs = herdr_farm::store::SqliteStore::open(&f.project.join(".state/state.db")).unwrap().verification_jobs().unwrap();
+            jobs.len() == 1 && jobs[0].delivery.state == DeliveryState::Pending
+                && jobs[0].paused.as_deref().is_some_and(|reason| reason.contains("restart the ticker"))
+        };
+        f.wait(&mut child, 240, &paused);
+        let first = std::fs::read_to_string(f.root.join(".ticker.log")).unwrap();
+        assert!(first.contains("binary was deleted or replaced"), "{first}");
+        let passes = first.matches("binary was deleted or replaced").count();
+        f.wait(&mut child, 240, &|| std::fs::read_to_string(f.root.join(".ticker.log")).unwrap_or_default().matches("binary was deleted or replaced").count() > passes);
+        f.stop(&mut child);
+        assert!(paused());
+        assert_eq!(f.db().query_row("SELECT count(*) FROM verification_runs", [], |r| r.get::<_,u64>(0)).unwrap(), 0);
+        let notices = herdr_farm::runtime::snapshot(&f.project).unwrap().inbox;
+        assert_eq!(notices.iter().filter(|i| i.content.subject == "ticker-binary").count(), 1);
+    }
+}

@@ -58,6 +58,7 @@ fn now()->i64 {jiff::Timestamp::now().as_millisecond()}
 fn outcome_of(result:Result<IntegrateOutcome>)->Outcome {
     match result {
         Ok(outcome)=>classify(outcome),
+        Err(error) if error.is::<herdr_farm::self_executable::Unavailable>()=>Outcome::Retryable{no_effect_evidence:format!("{error}; no publication; restart and resume")},
         Err(error)=>match error.downcast_ref::<Refused>() {
             Some(Refused::CheckedOut)=>Outcome::Retryable{no_effect_evidence:format!("{error}: the target is checked out in a user worktree; nothing was published")},
             Some(refused@Refused::TargetMoved{..})=>Outcome::PermanentFailure{diagnostic:format!("{refused}; {RETRY}")},

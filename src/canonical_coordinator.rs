@@ -340,7 +340,7 @@ fn permissions(ctx: &Ctx, dir: &Path, slug: &str) -> Result<String> {
     let file = parent.join("claude-settings.json");
     let mut prefixes = vec![coordinator::current_prefix(&ctx.root)?];
     let alias = ctx.env.home.join("git/herdr-projects");
-    if alias.canonicalize().ok() == Some(std::env::current_exe()?.canonicalize()?) {
+    if alias.canonicalize().ok() == Some(herdr_farm::self_executable::real_path()?.canonicalize()?) {
         prefixes.push(coordinator::command_prefix(&alias, &ctx.root));
     }
     ensure!(prefixes.iter().all(|p| !p.contains(['*', '\n', '\r'])),
@@ -349,7 +349,7 @@ fn permissions(ctx: &Ctx, dir: &Path, slug: &str) -> Result<String> {
         "skill".into(), format!("context {slug}"), "inbox list".into(), "inbox done".into(), format!("inbox {slug} wait"),
         format!("task {slug} list"), format!("task {slug} show"), format!("task {slug} add"), format!("task {slug} rename"),
         format!("launch {slug} run"), format!("launch {slug} stop"),
-        format!("result {slug} show"), format!("result {slug} jobs"), format!("result {slug} capture"), format!("result {slug} submit-captured"),
+        format!("result {slug} show"), format!("result {slug} jobs"), format!("result {slug} policy"), format!("result {slug} capture"), format!("result {slug} submit-captured"),
         format!("scheduler {slug} inspect"), format!("operations {slug} inspect"),
         format!("runtime {slug} inspect"), "doctor".into(),
     ];
@@ -875,7 +875,8 @@ Wrap host checks so they are recorded (not acceptance evidence): {p} result {slu
 {p} memory {slug} show CANDIDATE\n\
 {p} memory {slug} approve CANDIDATE --reason REASON\n\
 {p} memory {slug} reject CANDIDATE --reason REASON\n\
-{p} result {slug} verify SUBMISSION --policy-id POLICY --policy-file FILE --idempotency-key KEY --work-dir SCRATCH\n\
+{p} result {slug} verify SUBMISSION --policy-id POLICY --idempotency-key KEY --work-dir SCRATCH\n\
+Omit --policy-file to use exact signed contract bytes. For an external tool, export with {p} result {slug} policy --submission SUBMISSION --policy-id POLICY --out FILE; never reconstruct policy JSON with jq.\n\
 {p} result {slug} integrate RESULT --repository REPO --idempotency-key KEY --work-dir SCRATCH\n\
 {p} operations {slug} inspect\n\
 {p} inbox list {slug}\n\

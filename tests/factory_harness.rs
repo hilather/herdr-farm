@@ -305,7 +305,7 @@ mod slice {
         );
         let policy_path = work.join(format!("policy-{key}.json"));
         fs::write(&policy_path, body).unwrap();
-        let request = VerifyRequest::new(
+        let mut request = VerifyRequest::new(
             db.show_results(None)
                 .unwrap()
                 .into_iter()
@@ -318,6 +318,9 @@ mod slice {
             Duration::from_secs(60),
             work,
         );
+        // The public store ingress uses the same exact-policy path as the CLI.
+        request.contract_policy = true;
+        fs::remove_file(&policy_path).unwrap();
         let outcome = verification::verify(&mut db, &request).unwrap();
         assert_eq!(
             outcome.state, "accepted",
@@ -1410,32 +1413,38 @@ fn outcome_rejected_verification_reason_is_excerpted() {
     let conn = rusqlite::Connection::open(&db_path).unwrap();
     let (attempt, digest, repository, oid): (String, String, String, String) = conn.query_row(
         "SELECT a.id,c.raw_digest,c.repository,c.base_oid FROM attempts a JOIN task_contracts c ON c.task_id=a.task_id", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).unwrap();
+    fs::write(Path::new(&repository).join("README"), "outside the signed write scope\n").unwrap();
+    git(Path::new(&repository), &["add", "README"]);
+    git(Path::new(&repository), &["commit", "-qm", "out of scope candidate"]);
+    let candidate = git(Path::new(&repository), &["rev-parse", "HEAD"]).trim().to_owned();
+    let objects: Vec<_> = git(Path::new(&repository), &["rev-list", "--objects", "--no-object-names", "HEAD"]).lines()
+        .map(|oid| serde_json::json!({"oid":oid,"relative_path":format!("{}/{}", &oid[..2], &oid[2..])})).collect();
     let work = tmp.path().join("work");
     fs::create_dir_all(&work).unwrap();
     let policy = work.join("policy.json");
-    fs::write(&policy, b"{\"version\":1,\"checks\":[\"/bin/false\"]}").unwrap();
+    fs::write(&policy, PLANNING_POLICY).unwrap();
     let mut db = SqliteStore::open(&db_path).unwrap();
     let submission = serde_json::json!({"idempotency_key": "submit-rej", "task_id": "rej", "contract_revision": 1, "contract_digest": digest,
-        "attempt_id": attempt, "repository": repository, "base_oid": oid, "candidate_oid": oid, "object_format": "sha1",
+        "attempt_id": attempt, "repository": repository, "base_oid": oid, "candidate_oid": candidate, "object_format": "sha1",
         "artifact_manifest": [{"path": "README", "oid": oid}], "claimed_checks": ["worker prose is not evidence"],
-        "objects": [{"oid": oid, "relative_path": format!("{}/{}", &oid[..2], &oid[2..])}]});
+        "objects": objects});
     let submitted = db.submit_result(&serde_json::to_vec(&submission).unwrap()).unwrap().submission_id;
     let request = herdr_farm::verification::VerifyRequest::new(submitted.clone(), "builds", &policy, "verify-rej", Duration::from_secs(5), &work);
     let outcome = herdr_farm::verification::verify(&mut db, &request).unwrap();
-    assert_eq!((outcome.state.as_str(), outcome.reason.as_deref()), ("rejected", Some("policy_digest_mismatch")));
+    assert_eq!((outcome.state.as_str(), outcome.reason.as_deref()), ("rejected", Some("scope_violation")));
     let notices = db.read_snapshot(None).unwrap().inbox;
     for kind in ["result.submitted", "verification.rejected"] {
         let notice = notices.iter().find(|i| i.content.kind == kind).unwrap();
         assert!(!notice.seen && !notice.done);
         assert!(notice.content.summary.contains(&attempt) && notice.content.summary.contains(&submitted));
     }
-    assert!(notices.iter().find(|i| i.content.kind == "verification.rejected").unwrap().content.summary.contains("policy_digest_mismatch"));
+    assert!(notices.iter().find(|i| i.content.kind == "verification.rejected").unwrap().content.summary.contains("scope_violation"));
     let submitted_ms: i64 = conn.query_row("SELECT created_unix_ms FROM result_submissions", [], |r| r.get(0)).unwrap();
     let report = telemetry_attempts(&project);
     let record = &report["attempts"][0];
-    assert_eq!(record["result"], serde_json::json!({"candidate_oid": oid, "created_unix_ms": submitted_ms, "state": "submitted", "submission_id": submitted, "submissions": 1}));
-    assert_eq!(record["verification"], serde_json::json!({"reason": "policy_digest_mismatch", "state": "rejected",
-        "policies": [{"policy_id": "builds", "reason": "policy_digest_mismatch", "state": "rejected"}]}));
+    assert_eq!(record["result"], serde_json::json!({"candidate_oid": candidate, "created_unix_ms": submitted_ms, "state": "submitted", "submission_id": submitted, "submissions": 1}));
+    assert_eq!(record["verification"], serde_json::json!({"reason": "scope_violation", "state": "rejected",
+        "policies": [{"policy_id": "builds", "reason": "scope_violation", "state": "rejected"}]}));
     assert_eq!((&record["integration"], &record["accepted"]), (&serde_json::json!({"state": "not_applicable"}), &serde_json::json!(false)));
     // Verifier reasons are fixed codes today; a free-text reason is still shown only as an excerpt.
     conn.execute("INSERT INTO verification_runs(run_id,project_store,idempotency_key,payload_digest,submission_id,task_id,contract_revision,contract_digest,attempt_id,policy_id,policy_digest,commit_oid,tree_oid,object_format,memory_fence,isolation,argv,library_manifest,state,reason,exit_status,receipt_digest,store_device,store_inode,created_unix_ms)
@@ -1984,8 +1993,14 @@ fn planning_gate_ten_logical_workers() {
     };
     let work = tmp.path().join("work");
     fs::create_dir_all(&work).unwrap();
-    let mismatch = work.join("policy.json");
-    fs::write(&mismatch, b"{\"version\":1,\"checks\":[\"/bin/false\"]}").unwrap();
+    fs::write(Path::new(&repository).join("README"), "outside the signed write scope\n").unwrap();
+    git(Path::new(&repository), &["add", "README"]);
+    git(Path::new(&repository), &["commit", "-qm", "out of scope candidate"]);
+    let candidate = git(Path::new(&repository), &["rev-parse", "HEAD"]).trim().to_owned();
+    let objects: Vec<_> = git(Path::new(&repository), &["rev-list", "--objects", "--no-object-names", "HEAD"]).lines()
+        .map(|oid| serde_json::json!({"oid":oid,"relative_path":format!("{}/{}", &oid[..2], &oid[2..])})).collect();
+    let policy = work.join("policy.json");
+    fs::write(&policy, PLANNING_POLICY).unwrap();
     let mut db = SqliteStore::open(&db_path).unwrap();
     for index in 1..=3 {
         let submission = serde_json::json!({
@@ -1996,11 +2011,11 @@ fn planning_gate_ten_logical_workers() {
             "attempt_id": attempt,
             "repository": repository,
             "base_oid": oid,
-            "candidate_oid": oid,
+            "candidate_oid": candidate,
             "object_format": object_format,
             "artifact_manifest": [{"path": "README", "oid": oid}],
             "claimed_checks": ["worker prose is not evidence"],
-            "objects": [{"oid": oid, "relative_path": object_path}]
+            "objects": objects
         });
         let receipt = db
             .submit_result(&serde_json::to_vec(&submission).unwrap())
@@ -2009,14 +2024,14 @@ fn planning_gate_ten_logical_workers() {
         let request = herdr_farm::verification::VerifyRequest::new(
             receipt.submission_id,
             "builds",
-            &mismatch,
+            &policy,
             format!("verify-{index}"),
             Duration::from_secs(5),
             &work,
         );
         let outcome = herdr_farm::verification::verify(&mut db, &request).unwrap();
         assert_eq!(outcome.state, "rejected", "{:?}", outcome.reason);
-        assert_eq!(outcome.reason.as_deref(), Some("policy_digest_mismatch"));
+        assert_eq!(outcome.reason.as_deref(), Some("scope_violation"));
         assert!(outcome.receipt.is_none());
     }
     let feedback: Vec<String> = {
@@ -2040,7 +2055,7 @@ fn planning_gate_ten_logical_workers() {
     assert_eq!(
         sql_count(
             &db_path,
-            "SELECT count(*) FROM feedback_items WHERE task_id='w-00' AND category='verifier_rejection' AND reason='policy_digest_mismatch'"
+            "SELECT count(*) FROM feedback_items WHERE task_id='w-00' AND category='verifier_rejection' AND reason='scope_violation'"
         ),
         3
     );
@@ -3746,18 +3761,29 @@ fn fault_campaign_and_restore_rehearsal() {
         sql_count(&db_path, "SELECT count(*) FROM result_submissions"),
         1
     );
+    // Replay a real worker rejection rather than an operator policy mistake.
+    fs::write(repo.join("README"), "outside the signed write scope\n").unwrap();
+    git(&repo, &["add", "README"]);
+    git(&repo, &["commit", "-qm", "out of scope candidate"]);
+    let candidate = git(&repo, &["rev-parse", "HEAD"]).trim().to_owned();
+    let mut out_of_scope = submission.clone();
+    out_of_scope["idempotency_key"] = serde_json::json!("submit-out-of-scope");
+    out_of_scope["candidate_oid"] = serde_json::json!(candidate);
+    out_of_scope["objects"] = serde_json::json!(git(&repo, &["rev-list", "--objects", "--no-object-names", "HEAD"]).lines()
+        .map(|oid| serde_json::json!({"oid":oid,"relative_path":format!("{}/{}", &oid[..2], &oid[2..])})).collect::<Vec<_>>());
+    let rejected_submission = db.submit_result(&serde_json::to_vec(&out_of_scope).unwrap()).unwrap();
     let work = tmp.path().join("work");
     fs::create_dir_all(&work).unwrap();
-    let mismatch = work.join("policy.json");
-    fs::write(&mismatch, b"{\"version\":1,\"checks\":[\"/bin/false\"]}").unwrap();
+    let policy = work.join("policy.json");
+    fs::write(&policy, PLANNING_POLICY).unwrap();
     let other = work.join("other-policy.json");
     fs::write(&other, b"{\"version\":1,\"checks\":[\"/bin/true\"]}").unwrap();
     let request = herdr_farm::verification::VerifyRequest::new(
-        stored.submission_id.clone(),
+        rejected_submission.submission_id.clone(),
         "builds",
-        &mismatch,
+        &policy,
         "verify-old",
-        Duration::from_secs(5),
+        Duration::from_secs(30),
         &work,
     );
     let outcome = herdr_farm::verification::verify(&mut db, &request).unwrap();

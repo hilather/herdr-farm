@@ -836,7 +836,8 @@ impl Isolation {
         // it invokes for `result submit` and the review worker channel (the
         // controller deriving this sandbox is that binary).
         isolation.add_executable(Path::new(&agent), true)?;
-        if let Ok(product) = std::env::current_exe() {
+        {
+            let product = crate::self_executable::real_path()?;
             isolation.add_executable(&product, false)?;
             isolation.product = product.canonicalize().ok().and_then(|p| p.parent().and_then(|d| normal(d).ok()))
                 .filter(|dir| !dir.contains(':') && dir != "/usr/bin" && dir != "/bin");

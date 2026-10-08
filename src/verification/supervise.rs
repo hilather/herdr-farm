@@ -31,6 +31,7 @@ pub struct Launch {
 }
 
 pub fn launch(spec: &Spec) -> Result<Launch> {
+    crate::self_executable::real_path()?;
     if spec.checks.is_empty() || spec.timeout.is_zero() {
         bail!("verification command is empty");
     }
@@ -40,13 +41,13 @@ pub fn launch(spec: &Spec) -> Result<Launch> {
         .to_str()
         .context("mount namespace is not utf-8")?
         .to_string();
-    let program = std::env::current_exe()
-        .context("current executable")?
-        .display()
-        .to_string();
+    let image = crate::self_executable::Image::pin()?;
+    let program = image.path().display().to_string();
     if program.is_empty() {
         bail!("verification command is empty");
     }
+    // The inherited image descriptor survives both user and PID namespaces,
+    // including remounting proc. Setup closes it before running policy checks.
     let mut args = vec![
         "--user".into(),
         "--map-root-user".into(),
@@ -109,6 +110,8 @@ pub fn launch(spec: &Spec) -> Result<Launch> {
             spec.scratch.display().to_string(),
         ),
     ];
+    cmd.env.push(("HP_VERIFY_IMAGE_FD".into(), image.fd().to_string()));
+    cmd.executable_image = Some(image);
     if let Some(resolved) = &spec.toolchain {
         cmd.env.push(("HP_VERIFY_CHECK_ENV".into(), serde_json::to_string(&resolved.toolchain.env)?));
     }

@@ -898,13 +898,16 @@ enum ResultCommand {
     Verify {
         submission: String,
         #[arg(long)] policy_id: String,
-        #[arg(long)] policy_file: PathBuf,
+        #[arg(long)] policy_file: Option<PathBuf>,
         #[arg(long)] idempotency_key: String,
         /// New absolute scratch directory; must not already exist.
         #[arg(long)] work_dir: PathBuf,
         #[arg(long, default_value_t=60, value_parser=clap::value_parser!(u64).range(1..=3600))]
         timeout_seconds: u64,
     },
+    /// Export exact signed policy bytes for a retained submission.
+    #[cfg(target_os="linux")]
+    Policy { #[arg(long)] submission: String, #[arg(long)] policy_id: String, #[arg(long)] out: PathBuf },
     /// Commit a sandboxed worker's uncommitted edits on its attempt branch with a fixed identity; prints the candidate OID. Not evidence.
     #[cfg(target_os="linux")]
     Capture { attempt:String, #[arg(long)] message:Option<String> },
@@ -1701,8 +1704,12 @@ pub fn run(#[cfg(feature="state-store")] capture: &mut crate::cli_invocation::Ca
                     None=>println!("{}",serde_json::to_string_pretty(&herdr_farm::store::submit_untrusted_result(&dir,&input_file)?)?),
                 },
                 #[cfg(target_os="linux")]
+                ResultCommand::Policy{submission,policy_id,out}=>herdr_farm::verification::export_policy(&dir,&submission,&policy_id,&out)?,
+                #[cfg(target_os="linux")]
                 ResultCommand::Verify{submission,policy_id,policy_file,idempotency_key,work_dir,timeout_seconds}=> {
-                    let request=herdr_farm::verification::VerifyRequest::new(submission,policy_id,policy_file,idempotency_key,std::time::Duration::from_secs(timeout_seconds),work_dir);
+                    let contract_policy=policy_file.is_none();
+                    let mut request=herdr_farm::verification::VerifyRequest::new(submission,policy_id,policy_file.unwrap_or_default(),idempotency_key,std::time::Duration::from_secs(timeout_seconds),work_dir);
+                    request.contract_policy=contract_policy;
                     let outcome=herdr_farm::verification::verify_project(&dir,&request)?;
                     println!("{}",serde_json::to_string_pretty(&outcome)?);
                     if outcome.state != "accepted" { anyhow::bail!("verification rejected: {}",outcome.reason.as_deref().unwrap_or("rejected")); }

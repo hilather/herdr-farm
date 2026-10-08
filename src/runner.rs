@@ -57,6 +57,8 @@ pub struct Cmd {
     pub stdout_file: Option<(PathBuf, usize)>,
     pub cancellation: Option<Cancellation>,
     pub inherited_locks: Vec<InheritedLock>,
+    /// Sealed running image for namespace re-exec; unrelated children never inherit it.
+    pub executable_image: Option<crate::self_executable::Image>,
 }
 
 impl Cmd {
@@ -78,6 +80,7 @@ impl Cmd {
             stdout_file: None,
             cancellation: None,
             inherited_locks: Vec::new(),
+            executable_image: None,
         }
     }
 
@@ -255,9 +258,10 @@ impl Runner for RealRunner {
             if fd<0 {return Err(io::Error::last_os_error());}
             Ok(unsafe{std::fs::File::from_raw_fd(fd)})
         }).collect::<io::Result<Vec<_>>>()?;
-        if !inherited.is_empty() {
+        if !inherited.is_empty() || cmd.executable_image.is_some() {
             use std::os::unix::process::CommandExt;
-            let descriptors=inherited.iter().map(AsRawFd::as_raw_fd).collect::<Vec<_>>();
+            let mut descriptors=inherited.iter().map(AsRawFd::as_raw_fd).collect::<Vec<_>>();
+            if let Some(image) = &cmd.executable_image { descriptors.push(image.fd()); }
             // SAFETY: only fcntl syscalls and errno reads after fork; descriptors
             // are owned above and no allocation or Rust locks occur here.
             unsafe{command.pre_exec(move || {

@@ -66,7 +66,7 @@ pub(crate) fn plan(state: &Path, command_digest: &str) -> Result<Launch> {
         command_digest.len() == 64 && command_digest.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
         "invalid launch command digest"
     );
-    let launcher = std::env::current_exe()?.canonicalize()?;
+    let launcher = crate::self_executable::real_path()?.canonicalize()?;
     ensure!(launcher.is_file(), "launcher executable missing");
     let spec = path(&state.canonicalize()?, command_digest);
     let line = format!("exec {} {SUBCOMMAND} {}", safe(&launcher)?, safe(&spec)?);

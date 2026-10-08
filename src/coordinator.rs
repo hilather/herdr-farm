@@ -28,7 +28,7 @@ pub fn command_prefix(binary: &Path, root: &Path) -> String {
 }
 
 pub fn current_prefix(root: &Path) -> Result<String> {
-    let binary = std::env::current_exe().context("could not find this binary's own path")?;
+    let binary = herdr_farm::self_executable::real_path().context("could not find this binary's own path")?;
     Ok(command_prefix(&binary, root))
 }
 

@@ -120,7 +120,7 @@ fn report(
         let _ = writeln!(out, "[{mark}] {label}: {detail}");
     };
 
-    let binary = std::env::current_exe()
+    let binary = herdr_farm::self_executable::real_path()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|e| format!("unknown ({e})"));
     let _ = writeln!(out, "binary:     {binary}");

@@ -35,6 +35,7 @@ pub mod runner;
 /// Typed calls to the herdr CLI, shared by the CLI and the telemetry attention sampler.
 pub mod herdr;
 pub mod execution_guard;
+pub mod self_executable;
 pub mod supervision;
 pub mod status_notice;
 pub mod copy_receipt;

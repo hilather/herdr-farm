@@ -36,6 +36,14 @@ pub fn setup_from_args(args: &[String]) -> i32 {
         eprintln!("hp-verify same-namespace");
         return EXIT_SAME_NS;
     }
+    // Only the trusted runner can create the sealed inherited image. Do not
+    // leave its descriptor visible to untrusted policy commands.
+    if let Ok(value) = std::env::var("HP_VERIFY_IMAGE_FD") {
+        let Ok(fd) = value.parse::<i32>() else { return fail("image-fd", 0); };
+        if fd < 3 { return fail("image-fd", 0); }
+        // SAFETY: this is the runner's explicitly inherited executable handle.
+        if unsafe { libc::close(fd) } != 0 { return fail("image-fd", 0); }
+    }
     enter(&parsed)
 }
 
