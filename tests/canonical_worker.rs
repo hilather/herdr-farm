@@ -3484,7 +3484,7 @@ fn worker_uid_workflow(owner: bool) {
     let expected = if owner { uid } else { 0 };
     let hidden = lab.path("secret-dir/secret");
     plant(&hidden, "HIDDEN-SENTINEL");
-    let read_only = lab.repo.join("owner-read-only");
+    let read_only = lab.path("owner-read-only");
     plant(&read_only, "READ-ONLY-SENTINEL");
     let checker = lab.path("bin/uid-check");
     let source = lab.path("uid-check.rs");
