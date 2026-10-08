@@ -41,6 +41,7 @@ fn read_selected(
         let scope = if operation.is_some() { " AND r.entity=?1" } else { "" };
         let orphan:bool=tx.query_row(&format!("SELECT EXISTS(SELECT 1 FROM events r LEFT JOIN events c ON c.entity=r.entity AND c.kind='runtime.worktrees_creation' WHERE r.kind='runtime.worktrees_ready' AND c.entity IS NULL{scope})"),rusqlite::params_from_iter(parameters.iter()),|r|r.get(0))?;
         ensure!(!orphan, "worktree receipt lacks creation provenance");
+        budget.reader("worktree inventory",path);
         let scope = if operation.is_some() { " AND e.entity=?1" } else { "" };
         let mut statement=tx.prepare(&format!("SELECT e.entity,e.payload,i.payload,i.payload_hash,a.id,a.task_id,
             o.task_id,o.kind,o.target,o.expected_revision,o.payload,o.payload_hash,o.payload_version,o.idempotency_key,

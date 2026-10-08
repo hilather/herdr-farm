@@ -1514,10 +1514,23 @@ fn ticker_native_merged_finalization_resolves_and_replays_notice_after_restart()
 #[cfg(target_os="linux")]
 #[test]
 fn ticker_native_briefs_confirm_or_recover_uncertainty_without_replay() {
+    #[cfg(feature="state-store")]
+    mod inventory_history { include!("support/inventory_history.rs"); }
     use std::{fs,time::{Duration,Instant},process::Stdio,os::unix::{fs::PermissionsExt,net::UnixListener}};
     for outcome in ["confirmed","lost"] {
         let home=tempfile::tempdir().unwrap();let root=home.path().join("root");let r=root.to_str().unwrap();
         assert!(hp(home.path(),&["--root",r,"new","demo"]).status.success());let project=root.join("demo");
+        #[cfg(feature="state-store")]
+        {
+            // Delivery must scan a canonical neighbour with more than 1024
+            // retained references and still send exactly once below.
+            assert!(hp(home.path(),&["--root",r,"new","history"]).status.success());
+            assert!(hp(home.path(),&["--root",r,"pause","history"]).status.success());
+            let history=root.join("history");
+            let plan=herdr_farm::migration::inspect(&history).unwrap();
+            herdr_farm::migration::apply(&history,&plan,true).unwrap();
+            inventory_history::seed(&history, 520);
+        }
         let socket=home.path().join("session.sock");let _listener=UnixListener::bind(&socket).unwrap();
         fs::write(project.join(".state/coordinator.json"),serde_json::json!({"socket":socket}).to_string()).unwrap();
         let source=home.path().join("source");fs::create_dir(&source).unwrap();

@@ -8,6 +8,7 @@ use std::{
     path::PathBuf,
     process::{Command, Output},
 };
+mod inventory_history { include!("support/inventory_history.rs"); }
 const BIN: &str = env!("CARGO_BIN_EXE_herdr-farm");
 // A deterministic fake Herdr and fake agent. The listener provides a genuine
 // session incarnation; the fake CLI implements the public Herdr command/API
@@ -131,7 +132,16 @@ impl Lab {
             .unwrap()
     }
     fn stop(&self) {
-        self.ok(&["ticker", "stop"]);
+        let args = ["ticker", "stop"];
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let out = self.cli(&args);
+            if out.status.success() { return; }
+            // A stop requested mid-pass can outlast the scaled CLI wait.
+            assert!(std::time::Instant::now() < until,
+                "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
 }
 impl Drop for Lab {
@@ -331,6 +341,14 @@ fn socket_open_primes_owned_coordinator_retries_swallowed_prompt_and_recreates_c
     done["status"] = json!("done");
     done["accepted"] = json!(false);
     fs::write(l.home.path().join("herdr-state.json"), serde_json::to_vec(&done).unwrap()).unwrap();
+    // Append-only launch history across the root must not stall reprime.
+    l.ok(&["new", "history"]);
+    l.ok(&["pause", "history"]);
+    let history = l.root.join("history");
+    migration::apply(&history, &migration::inspect(&history).unwrap(), true).unwrap();
+    // Three counted records per launch: 350 * 3 = 1050 exceeds the old
+    // 1024 controller-hint candidate budget without slowing the lab stop pass.
+    inventory_history::seed(&history, 350);
     l.settled_ok(&["open", "demo", "--reprime"]);
     l.stop();
     assert_eq!(l.state()["prompts"].as_array().unwrap().len(), 3);

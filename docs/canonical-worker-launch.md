@@ -1099,3 +1099,34 @@ An active attempt retains its write claims. A conflicting launch reports
 `launch run stopped at step N (launch failed: refused: ... resource_conflict: ... overlaps ... )`
 on one line, including the conflicting paths and holding task/attempt, so filters
 for `refused` or `error` retain the cause. Resolve the conflicting work before retrying.
+
+### Conflict inventory bounds
+
+Root-wide ownership checks (including `open --reprime` and legacy brief delivery
+across canonical neighbours) and worker pane/worktree
+allocation share a ceiling of 16,384 candidate records, 50 MiB of charged input,
+and at most ten seconds per scan. Each reader consumes the same root budget;
+creating a new project does not reset it. A separate per-project allowance would
+multiply the total read budget, so this hotfix retains one bounded root scan.
+Bindings and target rows each consume a record; worktree creation rows and each
+retained plan consume records separately. Root enumeration remains bounded to
+1,024 entries and legacy thread enumeration to 256 entries per project. Errors
+identify the reader, project and consumed record/byte count.
+
+`runtime.launch_release` records the start-gate release that lets the agent begin,
+not a resource release. Workspace history and bindings remain conflict references;
+started, terminated launch targets retain the existing eligibility rules and
+pane reads use the retained launch-resource projection. Retiring finished launch
+history requires a real close/release signal and is follow-up work (LAUNCH-BUDGET-1).
+No canonical schema, backup or retention classification changes are made.
+
+E2E coverage uses two isolated published projects with more than 1,024 terminated
+launches that remain counted, checks live pane conflicts and shared-budget errors,
+and extends the public coordinator reprime and worktree preparation workflows.
+The latter two need local Unix sockets and must run outside sandboxes that forbid
+binding them.
+The socket-free public inventory regression also seeds 1,040 launches in the
+second project and scans worktrees, launch targets and bindings with one shared
+16,384-record budget. Historical fixtures retain version-2 profile evidence,
+matching approval grants and consumed uses, and confirmed delivery claim history;
+the effective-profile insertion guard remains enabled while seeding.

@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{fs, os::unix::fs::{MetadataExt, PermissionsExt}, path::PathBuf, process::{Child, Command, Output, Stdio}, time::{Duration, Instant}};
 
+mod inventory_history { include!("support/inventory_history.rs"); }
 const BIN: &str = env!("CARGO_BIN_EXE_herdr-farm");
 
 /// A Herdr server on `argv[1]` that runs `workspace.create_command` for real
@@ -2921,6 +2922,11 @@ fn submit_captured_retains_remember_from_the_attempt_report_and_replays_once() {
     lab.install_work_contract("verify_only");
     let (_,attempt)=lab.reserve("Retained instructions");
     lab.serve();
+    lab.ok(&["new", "--legacy", "history"]);
+    lab.ok(&["pause", "history"]);
+    let history = lab.path("root/history");
+    migration::apply(&history, &migration::inspect(&history).unwrap(), true).unwrap();
+    inventory_history::seed(&history, 1040);
     let state=lab.state();
     let record=state.attempt_inputs.iter().find(|r|r.attempt==attempt).unwrap();
     let receipts=herdr_farm::worktree_preparation::prepare(&lab.project,&record.operation,1,Instant::now()+Duration::from_secs(45),Default::default()).unwrap();
