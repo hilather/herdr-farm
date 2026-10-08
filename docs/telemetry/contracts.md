@@ -1071,18 +1071,24 @@ Worker rollouts are admitted before content ingestion using only a bounded
 64 KiB first `session_meta` line. A worker cwd must identify a worktree beneath this
 project's `.state/worktrees/`; dot and parent components are refused. Worker sessions
 whose metadata timestamp predates the earliest recorded dispatch decision are
-skipped before reading subsequent lines. Homes with live bindings are preferred,
-then recent dispatches; within a home discovery prefers newest rollout paths
-so historical backlogs cannot consume the ticker budget ahead of current work.
+skipped before reading subsequent lines. An empty sidecar uses stable home and
+rollout-path discovery order for its first ingestion. Once sources are recorded,
+homes with live bindings are preferred, then recent dispatches; within a home
+discovery prefers newest rollout paths so historical backlogs cannot consume the
+ticker budget ahead of current work.
 Codex sessions whose cwd is exactly this project root retain the existing
 `coordinator-scope-v2` exception, including coordinator history before the first
 worker dispatch. The separately scoped Claude coordinator directory keeps its
 existing collection rules. A foreign project root is never this exception.
 
 Negative discovery markers retain only path digest, size and nanosecond mtime;
-unchanged rejected files are not reopened. No foreign cwd, metadata, text or
-excerpt is retained. Incomplete, malformed or oversized metadata is cached and
-retried when the file changes, without content ingestion. The markers are a
+unchanged rejected files are not reopened. Marker additions, admission removals
+and disappeared-path cleanup commit together once per collection, rather than
+acquiring a write transaction for each rejected file. An interrupted pass may
+rediscover uncached files; it still validates scope before ingesting content.
+No foreign cwd, metadata, text or excerpt is retained. Incomplete, malformed or
+oversized metadata is cached and retried when the file changes, without content
+ingestion. The markers are a
 derivable collection cache, included in full sidecar
 backups under `sidecar.normalized_sessions`, and removed with their path during
 session purge; markers for files no longer discovered are discarded. This cache

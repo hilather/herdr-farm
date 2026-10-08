@@ -306,20 +306,22 @@ pub fn collection_configured(project: &Path) -> Result<bool> {
     Ok(false)
 }
 
+type ScopeChanges = Vec<(String, Option<(i64, i64, i64)>)>;
+
 /// Inspect only the bounded metadata line; foreign content never reaches ingest.
-fn in_project(db: &Connection, file: &Path, worktrees: &str, earliest: Option<i64>) -> Result<bool> {
+fn in_project(db: &Connection, file: &Path, worktrees: &str, earliest: Option<i64>, changes: &mut ScopeChanges) -> Result<bool> {
     let Ok(stats) = std::fs::symlink_metadata(file) else { return Ok(false) };
     if !stats.is_file() { return Ok(false); }
     let key = digest(file.as_os_str().as_encoded_bytes());
-    let previous: Option<(i64, i64, i64)> = db.query_row(
-        "SELECT size,mtime,mtime_nsec FROM rollout_scope_skips WHERE path_digest=?1",
+    let previous: Option<(i64, i64, i64)> = db.prepare_cached(
+        "SELECT size,mtime,mtime_nsec FROM rollout_scope_skips WHERE path_digest=?1")?.query_row(
         [&key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
     if previous == Some((stats.len() as i64, stats.mtime(), stats.mtime_nsec())) { return Ok(false); }
     let input = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(file)?;
     let mut line = Vec::new();
     BufReader::new(input.take(64 << 10)).read_until(b'\n', &mut line)?;
-    let skip = || -> Result<bool> {
-        db.execute("INSERT OR REPLACE INTO rollout_scope_skips VALUES(?1,?2,?3,?4)", params![key, stats.len() as i64, stats.mtime(), stats.mtime_nsec()])?;
+    let mut skip = || -> Result<bool> {
+        changes.push((key.clone(), Some((stats.len() as i64, stats.mtime(), stats.mtime_nsec()))));
         Ok(false)
     };
     // Incomplete metadata is retried when its size or modification time changes.
@@ -329,7 +331,7 @@ fn in_project(db: &Connection, file: &Path, worktrees: &str, earliest: Option<i6
     let payload = &value["payload"];
     // Existing coordinator-scope-v2: exact project cwd, outside task worktrees.
     if payload["cwd"].as_str().is_some_and(|cwd| Some(cwd) == worktrees.strip_suffix("/.state/worktrees/")) {
-        if previous.is_some() { db.execute("DELETE FROM rollout_scope_skips WHERE path_digest=?1", [&key])?; }
+        if previous.is_some() { changes.push((key, None)); }
         return Ok(true);
     }
     let at = payload["timestamp"].as_str().and_then(|s| s.parse::<jiff::Timestamp>().ok()).map(|t| t.as_millisecond());
@@ -337,7 +339,7 @@ fn in_project(db: &Connection, file: &Path, worktrees: &str, earliest: Option<i6
     if !belongs || earliest.zip(at).is_some_and(|(first, at)| at < first) { return skip(); }
     // An unchanged admitted rollout can be observed beside an existing writer.
     // Even a DELETE matching zero rows would unnecessarily acquire its lock.
-    if previous.is_some() { db.execute("DELETE FROM rollout_scope_skips WHERE path_digest=?1", [&key])?; }
+    if previous.is_some() { changes.push((key, None)); }
     Ok(true)
 }
 
@@ -368,10 +370,6 @@ pub fn collect(project: &Path, budget: Budget, create: bool) -> Result<Option<Co
     let coordinator = claude::coordinator_dir(project)?;
     // A separate source root prevents worker discovery in the owner home.
     if let Some(path) = &coordinator { homes.push(path.display().to_string()); }
-    // Prefer homes with a live binding, then the most recent dispatch, so an
-    // older profile's backlog cannot take the budget ahead of current workers.
-    homes.sort_by_key(|home| std::cmp::Reverse(attempts.iter().filter(|a| a.home.as_ref() == Some(home))
-        .map(|a| (matches!(&a.binding, Binding::Active(_)) && a.terminated.is_none(), a.decided_unix_ms)).max()));
     super::gemini::collect(project, budget, &attempts)?;
     let Some(mut db) = super::sidecar::open(project, create || !homes.is_empty())? else { return Ok(None) };
     // Foreground collection races the same accounting/analytics writers. A
@@ -386,6 +384,17 @@ pub fn collect(project: &Path, budget: Budget, create: bool) -> Result<Option<Co
     let project = std::fs::canonicalize(project)?;
     let worktrees = format!("{}/.state/worktrees/", project.display());
     clean_foreign(&mut db, &project)?;
+    // Keep the first full ingestion in stable discovery order. Prioritization
+    // is useful on later passes with a backlog, but reversing an empty sidecar's
+    // history slows its initial ingest and delays the first accounting frontier.
+    let initial = !db.query_row("SELECT EXISTS(SELECT 1 FROM rollout_sources)", [], |r| r.get::<_, bool>(0))?;
+    if !initial {
+        // Prefer homes with a live binding, then the most recent dispatch, so an
+        // older profile's backlog cannot take the budget ahead of current workers.
+        homes.sort_by_key(|home| std::cmp::Reverse(attempts.iter().filter(|a| a.home.as_ref() == Some(home))
+            .map(|a| (matches!(&a.binding, Binding::Active(_)) && a.terminated.is_none(), a.decided_unix_ms)).max()));
+    }
+
     let earliest = if project.join(".state/state.db").exists() {
         let canonical = super::read_only(&project.join(".state/state.db"))?;
         let decisions: bool = canonical.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='dispatch_decisions' AND type='table')", [], |r| r.get(0))?;
@@ -401,6 +410,7 @@ pub fn collect(project: &Path, budget: Budget, create: bool) -> Result<Option<Co
     // that is certified now (A7): their measurement is superseded.
     let from_start: std::collections::BTreeSet<String> = reread.iter().chain(&backfill(&db)?).chain(&recertify(&db)?).cloned().collect();
     let mut seen = std::collections::BTreeSet::new();
+    let mut scope_changes = ScopeChanges::new();
     let mut unwritable = false;
     // A termination observed since the last collect ends its open turn before
     // this pass could record it missing; the binding is the last collect's.
@@ -423,12 +433,16 @@ pub fn collect(project: &Path, budget: Budget, create: bool) -> Result<Option<Co
             opencode::collect(&mut db, home, &worktrees, &tombstones, &mut remaining, &mut done)?;
         }
         let codex_root = Path::new(home).join(".codex/sessions");
-        files.sort_by(|a, b| match (a.starts_with(&codex_root), b.starts_with(&codex_root)) {
-            (true, true) => b.cmp(a),
-            (false, false) => a.cmp(b),
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-        });
+        if initial {
+            files.sort();
+        } else {
+            files.sort_by(|a, b| match (a.starts_with(&codex_root), b.starts_with(&codex_root)) {
+                (true, true) => b.cmp(a),
+                (false, false) => a.cmp(b),
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+            });
+        }
         // Coordinator identities cannot match any attempt execution-home digest.
         let home_key = if owner_source { digest(format!("coordinator-source:{home}").as_bytes()) } else { digest(home.as_bytes()) };
         seen.extend(files.iter().map(|file| digest(file.as_os_str().as_encoded_bytes())));
@@ -438,7 +452,7 @@ pub fn collect(project: &Path, budget: Budget, create: bool) -> Result<Option<Co
                 done.budget_exhausted |= remaining == 0;
                 break;
             }
-            if !owner_source && file.starts_with(Path::new(home).join(".codex/sessions")) && !in_project(&db, &file, &worktrees, earliest)? { continue; }
+            if !owner_source && file.starts_with(Path::new(home).join(".codex/sessions")) && !in_project(&db, &file, &worktrees, earliest, &mut scope_changes)? { continue; }
             let mut span = (0, 0);
             let read = match tail(&mut db, &file, &home_key, &worktrees, remaining, budget.bytes <= Budget::TICK.bytes, &from_start, &tombstones, &mut done, &mut span, owner_source || file.starts_with(Path::new(home).join(".claude/projects")), owner_source, native.get(&file), muse_sources.get(&file), &mut test_classes) {
                 Ok(read) => read,
@@ -458,7 +472,19 @@ pub fn collect(project: &Path, budget: Budget, create: bool) -> Result<Option<Co
     // Removed files need no negative cache entry; surviving markers remain cheap.
     let skips: Vec<String> = db.prepare("SELECT path_digest FROM rollout_scope_skips")?
         .query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
-    for key in skips { if !seen.contains(&key) { db.execute("DELETE FROM rollout_scope_skips WHERE path_digest=?1", [key])?; } }
+    for key in skips { if !seen.contains(&key) { scope_changes.push((key, None)); } }
+    if !scope_changes.is_empty() {
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for (key, fingerprint) in scope_changes {
+            if let Some((size, mtime, mtime_nsec)) = fingerprint {
+                tx.prepare_cached("INSERT OR REPLACE INTO rollout_scope_skips VALUES(?1,?2,?3,?4)")?
+                    .execute(params![key, size, mtime, mtime_nsec])?;
+            } else {
+                tx.prepare_cached("DELETE FROM rollout_scope_skips WHERE path_digest=?1")?.execute([key])?;
+            }
+        }
+        tx.commit()?;
+    }
     done.budget_exhausted |= remaining == 0;
     if !unwritable { reconcile_forks(&mut db)?; }
     for key in reread.difference(&seen) {
