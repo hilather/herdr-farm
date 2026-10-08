@@ -24,7 +24,8 @@ pub fn real_path() -> Result<PathBuf> {
 }
 
 /// Pin re-exec/bind to this process's image. `self` would refer to an
-/// intervening launcher (e.g. unshare), so qualify the proc path by our PID.
+/// intervening launcher, so qualify the proc path by our PID. This path must
+/// not cross PID/mount namespaces; use `real_path` or an inherited `Image` there.
 pub fn reexec() -> Result<PathBuf> {
     let path = PathBuf::from(format!("/proc/{}/exe", std::process::id()));
     std::fs::metadata(&path).context(Unavailable)?;

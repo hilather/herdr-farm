@@ -143,7 +143,7 @@ fn supports_live(output:&Output)->Result<()> {
 }
 struct Helpers {local:String,ssh:String}
 impl Helpers {
-    fn production()->Result<Self> {Ok(Self{local:herdr_farm::self_executable::reexec()?.to_str().context("copy executable path is not UTF-8")?.into(),ssh:"ssh".into()})}
+    fn production()->Result<Self> {Ok(Self{local:herdr_farm::self_executable::real_path()?.to_str().context("copy executable path is not UTF-8")?.into(),ssh:"ssh".into()})}
     fn ssh(&self,target:&str,script:&str,timeout:Duration)->Result<Cmd> {
         let mut cmd=remote::ssh_command(target,script,timeout)?;cmd.program=self.ssh.clone();Ok(cmd)
     }

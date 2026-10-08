@@ -230,14 +230,31 @@ pub fn profile_versions(project: &Path) -> Result<Vec<Value>> {
     Ok(out)
 }
 
-/// Bounded failure observations, including probes that produced no rollout or
-/// successful native evidence. Uses canonical reports without reading agent data.
+/// Bounded redacted observations, independent of canonical launch state.
+pub(crate) fn retain_probe_failure(project: &Path, record: &Value) -> Result<()> {
+    let payload = serde_json::to_string(record)?;
+    anyhow::ensure!(payload.len() <= 4096, "native probe failure exceeds limit");
+    let mut db = super::sidecar::open(project, true)?.expect("created sidecar");
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    tx.execute("INSERT INTO native_probe_failures(profile,payload) VALUES(?1,?2)",
+        params![record["profile"].as_str().unwrap_or_default(), payload])?;
+    tx.execute("DELETE FROM native_probe_failures WHERE sequence NOT IN (SELECT sequence FROM native_probe_failures ORDER BY sequence DESC LIMIT 1024)", [])?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Latest 32 observations; reading never creates or migrates a sidecar.
 pub fn probe_failures(project: &Path) -> Result<Vec<Value>> {
-    let path = project.join(".state/state.db");
-    if !path.exists() { return Ok(Vec::new()); }
-    let db = super::read_only(&path)?;
-    let mut statement = db.prepare("SELECT payload FROM events WHERE kind='profile.native_failed' AND length(payload)<=4096 ORDER BY sequence DESC LIMIT 32")?;
-    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+    probe_failures_for_profile(project, None)
+}
+
+pub(crate) fn probe_failures_for_profile(project: &Path, profile: Option<&str>) -> Result<Vec<Value>> {
+    let Some(db) = super::sidecar::read(project)? else { return Ok(Vec::new()); };
+    if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='native_probe_failures')", [], |r| r.get::<_, bool>(0))? {
+        return Ok(Vec::new());
+    }
+    let mut statement = db.prepare("SELECT payload FROM native_probe_failures WHERE (?1 IS NULL OR profile=?1) AND length(payload)<=4096 ORDER BY sequence DESC LIMIT 32")?;
+    let rows = statement.query_map([profile], |row| row.get::<_, String>(0))?;
     rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
 }
 

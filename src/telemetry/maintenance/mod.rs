@@ -94,6 +94,8 @@ pub struct Class {
 
 /// `retention.v1`: doc 09's defaults, one row per sidecar table group and on-disk artefact.
 pub const CLASSES: &[Class] = &[
+    Class { id: "sidecar.native_probe_failures", store: "telemetry.db", scope: "native_probe_failures", default_days: None, basis: "source_of_truth", destructive: true,
+        action: Action::Retain, age_from: "sequence", requires: "producer caps latest 1024 observations; retained in full sidecar backups" },
     Class { id: "sidecar.launch_load", store: "telemetry.db", scope: "operation_launch_load", default_days: None, basis: "source_of_truth", destructive: true,
         action: Action::Retain, age_from: "sampled_unix_ms", requires: "launch metadata cannot be replayed; retained in full sidecar backups" },
     Class { id: "sidecar.ticker_errors", store: "telemetry.db", scope: "operation_ticker_errors", default_days: None, basis: "source_of_truth", destructive: true,

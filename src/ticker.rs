@@ -242,7 +242,7 @@ unsafe extern "C" {
 /// with the process group of whatever started it (an agent's shell tool).
 fn spawn(root: &Path) -> Result<()> {
     use std::os::unix::process::CommandExt;
-    let binary = herdr_farm::self_executable::reexec().context("could not find this binary's own path")?;
+    let binary = herdr_farm::self_executable::real_path().context("could not find this binary's own path")?;
     let mut command = Command::new(binary);
     command
         .env("HERDR_FARM_TICKER_CHILD", "1")

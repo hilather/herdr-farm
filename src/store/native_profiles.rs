@@ -12,26 +12,12 @@ fn schema(db: &Connection) -> Result<()> {
 }
 
 impl SqliteStore {
-    /// Bounded, redacted verifier failure payload in the existing immutable event
-    /// journal. Ordinary canonical backup/retention includes these observations.
-    pub(crate) fn retain_native_probe_failure(&mut self, record: &serde_json::Value) -> Result<()> {
-        let payload = serde_json::to_string(record).map_err(|e| StoreError::Invalid(e.to_string()))?;
-        if payload.len() > 4096 { return Err(StoreError::Limit("native probe failure exceeds limit".into())); }
-        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        schema(&tx)?;
-        tx.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES('profile.native_failed',?1,1,1,?2)",
-            params![record["profile"].as_str().unwrap_or_default(), payload])?;
-        tx.commit()?;
-        Ok(())
-    }
-
-    /// Latest 32 failure observations; reports never confer launch authority.
-    /// Telemetry consumers may also read `profile.native_failed` journal events.
+    /// Latest 32 sidecar failure observations; reports never confer launch authority.
     pub fn native_probe_failures(&mut self, name: &str) -> Result<Vec<serde_json::Value>> {
-        schema(&self.connection)?;
-        let mut statement = self.connection.prepare("SELECT payload FROM events WHERE kind='profile.native_failed' AND entity=?1 AND length(payload)<=4096 ORDER BY sequence DESC LIMIT 32")?;
-        let rows = statement.query_map([name], |row| row.get::<_, String>(0))?;
-        rows.map(|row| serde_json::from_str(&row?).map_err(|_| StoreError::Corrupt("invalid native probe failure".into()))).collect()
+        let path = Path::new(self.connection.path().ok_or_else(|| StoreError::Invalid("store path missing".into()))?);
+        let project = path.parent().and_then(Path::parent).ok_or_else(|| StoreError::Invalid("project path missing".into()))?;
+        crate::telemetry::codex::probe_failures_for_profile(project, Some(name))
+            .map_err(|e| StoreError::Io(e.to_string()))
     }
 
     /// Preflight before an expensive probe; upgrades must remain explicit.

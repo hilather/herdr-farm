@@ -62,17 +62,7 @@ permission_policy='interactive'\nextra_args={extra_args}\n{budget}", "A".repeat(
         let before = runtime::snapshot(&self.project).unwrap();
         let out = self.profile(verb, extra);
         assert!(!out.status.success(), "{verb} accepted: {}", String::from_utf8_lossy(&out.stdout));
-        let mut after = runtime::snapshot(&self.project).unwrap();
-        // Probe failures append an audit event but do not change project state.
-        if verb != "prepare" {
-            assert_eq!(after.head, before.head + 1);
-            assert_eq!(after.events.len(), before.events.len() + 1);
-            let failure = after.events.pop().unwrap();
-            assert_eq!(failure.kind, "profile.native_failed");
-            assert_eq!(failure.entity, "worker");
-            assert_eq!(failure.sequence, before.head + 1);
-            after.head = before.head;
-        }
+        let after = runtime::snapshot(&self.project).unwrap();
         assert_eq!(after, before, "{verb} refusal changed project state");
         String::from_utf8_lossy(&out.stderr).into_owned()
     }
@@ -143,6 +133,7 @@ fn verify_native_does_not_retain_a_helper_that_only_answers_its_version() {
     assert!(failures[0]["finished_unix_ms"].as_i64().unwrap() >= failures[0]["started_unix_ms"].as_i64().unwrap());
     assert_eq!(herdr_farm::store::SqliteStore::open(&lab.project.join(".state/state.db")).unwrap()
         .native_probe_failures("worker").unwrap(), *failures);
+    assert_eq!(herdr_farm::telemetry::codex::probe_failures(&lab.project).unwrap(), *failures);
     assert_eq!(lab.calls("herdr").last().map(String::as_str), Some("server"));
     let retained = lab.cli(&["profile", "retained", "demo", &digest]);
     assert!(!retained.status.success() && String::from_utf8_lossy(&retained.stderr).contains("retained native profile not found"));

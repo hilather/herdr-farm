@@ -26,7 +26,8 @@ needs a new reviewed revision, not a silent reinterpretation.
   `migrations/telemetry/`, also `user_version`; 3 adds TM5.1's read indexes,
   certificate-scale.md §5; 4 adds lossless storage compaction, §4.15;
   6 adds content-free shared-home scope markers and collection cleanup,
-  “Shared execution-home collection scope” below), and
+  “Shared execution-home collection scope” below; 7 adds bounded native probe
+  failure observations, “Native probe failure observations” below), and
   one stream per lane under
   `migrations/telemetry/<stream>/`: `ingest`, `accounting` (0025 adds product CLI metadata, §7), `quality` (0004 adds DG6d/e rerun observations; contracts-quality.md §6),
   `review`,
@@ -1038,8 +1039,9 @@ classification. Canonical schema is unchanged. See contracts-analytics.md M63/M9
 
 ### Native probe failure observations
 
-`profile.native_failed` uses the existing canonical immutable `events` journal;
-there is no schema version change or new table. Its version-1 JSON payload is
+`native_probe_failures` lives in the telemetry sidecar, Codex stream v7
+(`migrations/telemetry/0007_native_probe_failures.sql`). Failed probes write no
+canonical rows. Its version-1 JSON payload is
 bounded to 4096 bytes and contains `profile`, `kind`, `agent_version`, `step`,
 `failure_class`, `reason`, `started_unix_ms`, and `finished_unix_ms`. Early
 setup (`probe_setup`) and preparation failures have null kind/version. Reasons use fixed diagnostic text
@@ -1049,8 +1051,11 @@ and allowlisted screen categories, never terminal content or provider responses.
 readiness identity errors are `process_observation_failed`. Failures outside the
 readiness step are `verification_failed`. Retrieval through
 profile inspection and telemetry source inspection is limited to 32 records.
-Events have the existing canonical durable audit/backup retention classification;
-no telemetry-sidecar table or maintenance classification is added. Reports do
+The producer retains the latest 1024 observations per project, with 32 returned
+per inspection (filtered by profile for profile inspection). Maintenance class
+`sidecar.native_probe_failures` is source-of-truth, producer-bounded retention,
+included in full sidecar backups. Existing canonical failure events remain
+historical audit data; new observations are stored only in the sidecar. Reports do
 not confer capabilities, and success does not erase historical failures.
 
 ### Shared execution-home collection scope (Codex stream v6)

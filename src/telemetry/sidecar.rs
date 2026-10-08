@@ -15,7 +15,8 @@ const CODEX: &[&str] = &[include_str!("../../migrations/telemetry/0001_codex_usa
     include_str!("../../migrations/telemetry/0003_read_indexes.sql"),
     include_str!("../../migrations/telemetry/0004_compact_native.sql"),
     include_str!("../../migrations/telemetry/0005_usage_schema_unrecognized.sql"),
-    include_str!("../../migrations/telemetry/0006_collection_scope.sql")];
+    include_str!("../../migrations/telemetry/0006_collection_scope.sql"),
+    include_str!("../../migrations/telemetry/0007_native_probe_failures.sql")];
 
 // Compaction in older binaries could silently remove 0012's capture triggers.
 // Check the actual schema even when every migration version is current.

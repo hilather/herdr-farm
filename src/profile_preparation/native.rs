@@ -316,8 +316,7 @@ fn retain_unprepared_failure(
     let record = json!({"version":1,"profile":name,"kind":null,"agent_version":null,
         "step":step,"failure_class":"verification_failed","reason":reason,
         "started_unix_ms":started_unix_ms,"finished_unix_ms":crate::canonical_worker::now()});
-    crate::store::SqliteStore::open(&project.join(".state/state.db"))?
-        .retain_native_probe_failure(&record)
+    crate::telemetry::codex::retain_probe_failure(project, &record)
         .with_context(|| format!("failed to retain native probe failure after: {error:#}"))
 }
 
@@ -375,8 +374,7 @@ pub(super) fn verify(
             "reason": readiness.map(|r| r.to_string()).unwrap_or_else(|| "native verification failed (details withheld)".into()),
             "started_unix_ms": started_unix_ms, "finished_unix_ms": crate::canonical_worker::now(),
         });
-        crate::store::SqliteStore::open(&project.join(".state/state.db"))?
-            .retain_native_probe_failure(&record)
+        crate::telemetry::codex::retain_probe_failure(project, &record)
             .with_context(|| format!("failed to retain native probe failure after: {error:#}"))?;
     }
     result

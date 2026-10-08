@@ -5351,7 +5351,7 @@ fn doctor_checks_coordinator_identity_priming_and_memory_owner_without_writing()
     let format = project.join(".state/format.json");
     fs::write(&format, r#"{"version":1,"runtime":"sqlite-v2","memory":"sqlite-v1","migration":"abc","reconciliation_required":true}"#).unwrap();
     let (text, _) = doctor();
-    assert!(text.contains("migrated runtime=sqlite-v2 memory=sqlite-v1"), "{text}");
+    assert!(text.contains("store runtime=sqlite-v2 memory=sqlite-v1"), "{text}");
     assert!(!text.contains("coordinator kind mismatch"), "{text}");
     assert!(!text.contains("capability mismatch"), "{text}");
     let instructions = fs::read_to_string(project.join("PROJECT.md")).unwrap();
@@ -5755,7 +5755,7 @@ fn canonical_new_bootstraps_owner_and_stays_inert_until_complete() {
     assert!(run(&["runtime", "demo", "inspect"]).contains("bindings"));
     let marker: serde_json::Value = serde_json::from_slice(&fs::read(root.join("demo/.state/format.json")).unwrap()).unwrap();
     assert_eq!(marker["runtime"], "sqlite-v2");
-    assert_eq!(marker["memory"], "legacy-markdown");
+    assert_eq!(marker["memory"], "sqlite-v1");
     let journal: serde_json::Value = serde_json::from_slice(&fs::read(root.join("demo/.state/migration/journal.json")).unwrap()).unwrap();
     assert_eq!(journal["phase"], "active");
     assert!(journal["plan"]["config"]["path"].as_str().unwrap().ends_with("config.toml"));
