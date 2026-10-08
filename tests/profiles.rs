@@ -36,29 +36,44 @@ permission_policy='interactive'\nextra_args={extra_args}\n{budget}", "A".repeat(
         lab
     }
     fn path(&self, name: &str) -> PathBuf { self.home.path().join(name) }
-    fn cli(&self, args: &[&str]) -> Output {
-        Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin")
-            .args(["--root", self.path("root").to_str().unwrap()]).args(args).output().unwrap()
+    fn cli_command(&self, args: &[&str]) -> Command {
+        let mut command = Command::new(BIN);
+        command.env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin")
+            .args(["--root", self.path("root").to_str().unwrap()]).args(args);
+        command
     }
+    fn cli(&self, args: &[&str]) -> Output { self.cli_command(args).output().unwrap() }
     fn ok(&self, args: &[&str]) -> Value {
         let out = self.cli(args);
         assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
         serde_json::from_slice(&out.stdout).unwrap_or(Value::Null)
     }
     /// `profile <verb> demo worker` over the fixture executables.
-    fn profile(&self, verb: &str, extra: &[&str]) -> Output {
+    fn profile_command(&self, verb: &str, extra: &[&str]) -> Command {
         let (herdr, agent, home) = (self.path("herdr"), self.path("claude"), self.path("agent-home"));
         let mut args = vec!["profile", verb, "demo", "worker", "--herdr-executable", herdr.to_str().unwrap(),
             "--agent-executable", agent.to_str().unwrap(), "--execution-home", home.to_str().unwrap()];
         args.extend(extra);
-        self.cli(&args)
+        self.cli_command(&args)
     }
+    fn profile(&self, verb: &str, extra: &[&str]) -> Output { self.profile_command(verb, extra).output().unwrap() }
     /// A refused `profile <verb>` that changed no project state; returns its stderr.
     fn refused(&self, verb: &str, extra: &[&str]) -> String {
         let before = runtime::snapshot(&self.project).unwrap();
         let out = self.profile(verb, extra);
         assert!(!out.status.success(), "{verb} accepted: {}", String::from_utf8_lossy(&out.stdout));
-        assert_eq!(runtime::snapshot(&self.project).unwrap(), before, "{verb} was refused but wrote");
+        let mut after = runtime::snapshot(&self.project).unwrap();
+        // Probe failures append an audit event but do not change project state.
+        if verb != "prepare" {
+            assert_eq!(after.head, before.head + 1);
+            assert_eq!(after.events.len(), before.events.len() + 1);
+            let failure = after.events.pop().unwrap();
+            assert_eq!(failure.kind, "profile.native_failed");
+            assert_eq!(failure.entity, "worker");
+            assert_eq!(failure.sequence, before.head + 1);
+            after.head = before.head;
+        }
+        assert_eq!(after, before, "{verb} refusal changed project state");
         String::from_utf8_lossy(&out.stderr).into_owned()
     }
     fn calls(&self, name: &str) -> Vec<String> { fs::read_to_string(self.path(&format!("{name}-calls"))).unwrap_or_default().lines().map(str::to_owned).collect() }
@@ -119,6 +134,15 @@ fn verify_native_does_not_retain_a_helper_that_only_answers_its_version() {
     let error = lab.refused("verify-native", &["--retain"]);
     // The helper cannot serve the disposable probe session, so nothing is observed.
     assert!(error.contains("native probe server exited"), "{error}");
+    let inspected = lab.ok(&["profile", "inspect", "worker", "--project", "demo"]);
+    let failures = inspected["probe_failures"].as_array().unwrap();
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0]["agent_version"], "2.1.0-preview.1");
+    assert_eq!(failures[0]["failure_class"], "verification_failed");
+    assert_eq!(failures[0]["step"], "native_verification");
+    assert!(failures[0]["finished_unix_ms"].as_i64().unwrap() >= failures[0]["started_unix_ms"].as_i64().unwrap());
+    assert_eq!(herdr_farm::store::SqliteStore::open(&lab.project.join(".state/state.db")).unwrap()
+        .native_probe_failures("worker").unwrap(), *failures);
     assert_eq!(lab.calls("herdr").last().map(String::as_str), Some("server"));
     let retained = lab.cli(&["profile", "retained", "demo", &digest]);
     assert!(!retained.status.success() && String::from_utf8_lossy(&retained.stderr).contains("retained native profile not found"));
@@ -215,4 +239,89 @@ fn invalid_pins_are_refused_without_echoing_them() {
         assert!(!stderr.contains("Private") && !stderr.contains("PRIVATE"), "{stderr}");
         assert_eq!(runtime::snapshot(&lab.project).unwrap(), before);
     }
+}
+
+/// Real public native probe: delayed detector evidence, live argv title races,
+/// and sanitized persisted failures inspected in a separate CLI process.
+fn readiness_scenario(mode: &str, delay: u64, wall: u64, failure_class: Option<&str>) {
+    let lab = Lab::new("[]");
+    let config = fs::read_to_string(&lab.config).unwrap().replace("kind='claude'", "kind='codex'")
+        .replace("max_wall_seconds=60", &format!("max_wall_seconds={wall}"));
+    let config = format!("{config}\n[worker_isolation]\nshare_login=false\n");
+    fs::write(&lab.config, config).unwrap();
+    fs::write(lab.path("agent-home/mode"), mode).unwrap();
+    fs::write(lab.path("delay"), delay.to_string()).unwrap();
+    fs::write(lab.path("server.py"), include_str!("fixtures/probe_readiness_server.py")).unwrap();
+    fs::write(lab.path("herdr"), format!("#!/bin/sh\nexec /usr/bin/python3 '{}' \"$@\"\n", lab.path("server.py").display())).unwrap();
+    let compiled = Command::new("/usr/bin/cc").args(["-O0", "-o"]).arg(lab.path("claude"))
+        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/probe_readiness_agent.c")).output().unwrap();
+    assert!(compiled.status.success(), "{}", String::from_utf8_lossy(&compiled.stderr));
+    let result = lab.profile("verify-interaction", &[]);
+    if let Ok(diagnostic) = fs::read_to_string(lab.path("socket-error")) {
+        panic!("{diagnostic}");
+    }
+    match failure_class {
+        None => {
+            assert!(result.status.success(), "mode {mode}, delay {delay}: {}", String::from_utf8_lossy(&result.stderr));
+            let proof: Value = serde_json::from_slice(&result.stdout).unwrap();
+            assert_eq!(proof["preparation"]["launchable"], true);
+            assert!(lab.ok(&["profile", "inspect", "worker", "--project", "demo"])["probe_failures"].as_array().unwrap().is_empty());
+        }
+        Some(failure_class) => {
+            assert!(!result.status.success(), "unready or changed agent must fail");
+            let text = String::from_utf8_lossy(&result.stderr);
+            if failure_class == "transient_readiness" {
+                assert!(text.contains("worker lacks verified visible prompt readiness"), "{text}");
+                assert!(text.contains("trust") && text.contains("network"), "{text}");
+            } else { assert!(text.contains("process_changed"), "{text}"); }
+            assert!(!text.contains("PRIVATE_SCREEN_TOKEN"), "{text}");
+            let inspected = lab.ok(&["profile", "inspect", "worker", "--project", "demo"]);
+            let record = &inspected["probe_failures"][0];
+            assert_eq!(record["failure_class"], failure_class);
+            assert_eq!(record["step"], "prompt_readiness");
+            assert_eq!(record["agent_version"], "0.154.0");
+            if failure_class == "transient_readiness" {
+                assert!(record["reason"].as_str().unwrap().contains("trust"));
+            }
+            assert!(!inspected.to_string().contains("PRIVATE_SCREEN_TOKEN"));
+            let telemetry = lab.ok(&["telemetry", "demo", "collectors", "capabilities", "--json"]);
+            let codex = telemetry["adapters"].as_array().unwrap().iter()
+                .find(|adapter| adapter["adapter"] == "codex").unwrap();
+            assert_eq!(codex["probe_failures"][0], *record);
+        }
+    }
+}
+
+#[test]
+fn native_readiness_retries_empty_process_title() { readiness_scenario("e", 4, 120, None); }
+#[test]
+fn native_readiness_retries_non_terminated_process_title() { readiness_scenario("n", 4, 120, None); }
+#[test]
+fn native_readiness_accepts_cold_start_beyond_thirty_seconds() { readiness_scenario("0", 32, 120, None); }
+#[test]
+fn native_readiness_timeout_retains_categories_visible_in_cli() { readiness_scenario("0", 999, 60, Some("transient_readiness")); }
+
+#[test]
+fn native_readiness_rejects_changed_arguments() { readiness_scenario("a", 999, 120, Some("process_changed")); }
+#[test]
+fn native_readiness_rejects_changed_executable() { readiness_scenario("x", 999, 120, Some("process_changed")); }
+
+/// An isolated, unwritable runtime directory fails before native process creation;
+/// the public CLI must still retain a bounded, redacted setup observation.
+#[test]
+fn native_probe_setup_failure_is_retained_without_starting_executables() {
+    let lab = Lab::new("[]");
+    let runtime = tempfile::Builder::new().prefix("hp-probe-").tempdir_in("/tmp").unwrap();
+    fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o500)).unwrap();
+    let result = lab.profile_command("verify-native", &[]).env("XDG_RUNTIME_DIR", runtime.path()).output().unwrap();
+    fs::set_permissions(runtime.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("cannot create"));
+    let inspection = lab.ok(&["profile", "inspect", "worker", "--project", "demo"]);
+    let record = &inspection["probe_failures"][0];
+    assert_eq!(record["step"], "probe_setup");
+    assert_eq!(record["failure_class"], "verification_failed");
+    assert!(record["kind"].is_null() && record["agent_version"].is_null());
+    assert!(record.to_string().len() <= 4096);
+    assert!(lab.calls("herdr").is_empty() && lab.calls("claude").is_empty());
 }

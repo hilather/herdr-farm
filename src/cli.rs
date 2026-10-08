@@ -61,7 +61,11 @@ enum ProfileCommand {
     #[cfg(all(feature="state-store", target_os="linux"))]
     Revalidate { slug: String, digest: String },
     /// Validate one named profile and print redacted JSON; does not launch an agent
-    Inspect { name: String },
+    Inspect {
+        name: String,
+        /// Include retained probe failures for this project.
+        #[arg(long)] project: Option<String>,
+    },
     /// Resolve a named profile or unique kind into a budget envelope; does not launch
     Resolve {
         name: Option<String>,
@@ -1142,7 +1146,19 @@ pub fn run(#[cfg(feature="state-store")] capture: &mut crate::cli_invocation::Ca
                 herdr_farm::store::SqliteStore::open(&root.join(slug).join(".state/state.db"))?
                     .native_profile_report(&reference)?.context("retained native profile not found")?
             }
-            ProfileCommand::Inspect { name } => serde_json::to_value(crate::agents::profiles::inspect(&path, name)?)?,
+            ProfileCommand::Inspect { name, project: slug } => {
+                let mut value = serde_json::to_value(crate::agents::profiles::inspect(&path, name)?)?;
+                #[cfg(all(feature="state-store", target_os="linux"))]
+                if let Some(slug) = slug {
+                    let root = paths::resolve_root(cli.root.as_deref(), &env, &config_dir)?;
+                    project::validate_slug(slug)?;
+                    value["probe_failures"] = serde_json::to_value(herdr_farm::store::SqliteStore::open(
+                        &root.join(slug).join(".state/state.db"))?.native_probe_failures(name)?)?;
+                }
+                #[cfg(not(all(feature="state-store", target_os="linux")))]
+                if slug.is_some() { bail!("probe failure inspection requires Linux state-store support"); }
+                value
+            },
             ProfileCommand::Resolve { name, agent } => {
                 let resolved = match (name.as_deref(), agent.as_deref()) {
                     (Some(name), None) => crate::agents::resolve::resolve(name, &path, None)?,

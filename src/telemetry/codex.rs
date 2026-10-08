@@ -230,6 +230,17 @@ pub fn profile_versions(project: &Path) -> Result<Vec<Value>> {
     Ok(out)
 }
 
+/// Bounded failure observations, including probes that produced no rollout or
+/// successful native evidence. Uses canonical reports without reading agent data.
+pub fn probe_failures(project: &Path) -> Result<Vec<Value>> {
+    let path = project.join(".state/state.db");
+    if !path.exists() { return Ok(Vec::new()); }
+    let db = super::read_only(&path)?;
+    let mut statement = db.prepare("SELECT payload FROM events WHERE kind='profile.native_failed' AND length(payload)<=4096 ORDER BY sequence DESC LIMIT 32")?;
+    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+    rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+}
+
 /// How to pin a profile to a certified Codex binary, for the warnings above.
 pub const PIN_ADVICE: &str = "pin the profile to a certified Codex binary by its resolved path, not a version manager shim (e.g. `profile prepare <slug> <profile> --agent-executable ~/.local/share/mise/installs/codex/0.154.0/bin/codex ...`); versions at or above the lowest live-certified version are accepted";
 

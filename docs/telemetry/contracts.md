@@ -1031,3 +1031,20 @@ MET-M90-M63-1: sidecar operations **v3**,
 worktree coverage columns to storage samples. These share the existing
 `sidecar.storage_samples` 90-day retention, tombstones and source-of-truth backup
 classification. Canonical schema is unchanged. See contracts-analytics.md M63/M90.
+
+### Native probe failure observations
+
+`profile.native_failed` uses the existing canonical immutable `events` journal;
+there is no schema version change or new table. Its version-1 JSON payload is
+bounded to 4096 bytes and contains `profile`, `kind`, `agent_version`, `step`,
+`failure_class`, `reason`, `started_unix_ms`, and `finished_unix_ms`. Early
+setup (`probe_setup`) and preparation failures have null kind/version. Reasons use fixed diagnostic text
+and allowlisted screen categories, never terminal content or provider responses.
+`transient_readiness` denotes readiness deadline expiry; cancellation is
+`cancelled`; complete identity mismatches are `process_changed`, and other
+readiness identity errors are `process_observation_failed`. Failures outside the
+readiness step are `verification_failed`. Retrieval through
+profile inspection and telemetry source inspection is limited to 32 records.
+Events have the existing canonical durable audit/backup retention classification;
+no telemetry-sidecar table or maintenance classification is added. Reports do
+not confer capabilities, and success does not erase historical failures.

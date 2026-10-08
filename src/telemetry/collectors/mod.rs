@@ -360,7 +360,7 @@ fn capabilities(project: &Path) -> Result<Value> {
     adapters.insert(0, super::codex::claude::capabilities());
     adapters.insert(0, super::codex::opencode::capabilities());
     adapters.insert(0, json!({"adapter": "codex", "interface": "rollout_jsonl", "certified_versions": super::codex::CERTIFIED,
-        "version_rule":"at_or_above_lowest_live_certified", "uncertified_version": "cli_version_uncertified", "fields": out, "profiles": super::codex::profile_versions(project)?}));
+        "version_rule":"at_or_above_lowest_live_certified", "uncertified_version": "cli_version_uncertified", "fields": out, "profiles": super::codex::profile_versions(project)?, "probe_failures": super::codex::probe_failures(project)?}));
     Ok(json!({"adapters": adapters}))
 }
 

@@ -442,7 +442,7 @@ field records which one was verified. The current verified mapping requires empt
 vendor subcommands must not run a task during this transport check. The exact
 configured agent runs with the explicit execution home; the agent can read its credentials/configuration there.
 No task prompt is submitted. Use an empty temporary home for an unauthenticated
-transport check. The command does not reserve a task or mutate project records.
+transport check. The command does not reserve a task. Failed probes append a redacted audit report to the project event journal.
 
 A successful check verifies the exact gated supervisor, executable/argument
 identity, native agent kind and terminal incarnation, and termination of the
@@ -470,6 +470,31 @@ execution-home options as `verify-native`. It additionally waits for positive
 bundled-detector readiness, rechecks the exact native agent and kernel process,
 and submits one fixed diagnostic prompt asking for an opaque token without tools
 or file changes. The prompt is never retried after a lost or rejected response.
+Readiness uses the remaining overall probe deadline with ten seconds reserved
+for prompt acknowledgment, final identity checks and cleanup. The total deadline
+is capped at 120 seconds and honors a shorter caller deadline or configured
+worker wall budget; there is no separate 30-second readiness cap. Incomplete or
+empty process command identities during startup are pending observations and
+are polled again every 100 ms. Complete executable/argument mismatches and live
+identity changes remain fatal. No automatic probe retry is added to `launch run`:
+the longer in-process wait tolerates cold startup without a second launch under
+host load. Prompt submission remains one-shot.
+
+On readiness timeout the error reports the last fixed readiness observation and
+only these screen categories: trust, theme, sign in, log in, update available,
+press enter, welcome, network, model. Screen text, tokens, and provider responses
+are never included. Failed native probes automatically append a bounded (4 KiB)
+`profile.native_failed` event, independently of `--retain`. Reports contain the
+profile, kind, agent version, step, failure class, sanitized reason, and start/end
+timestamps. Setup failures before any executable starts are retained too.
+Kind/version are unknown (`null`) if setup or installation preparation failed
+before establishing them. `profile inspect NAME --project PROJECT` returns the
+latest 32 failure records, and telemetry's Codex source inspection includes the
+latest 32 failures across profiles, even when no rollout exists. These are audit
+observations and never grant launch authority. Appending a failure advances the
+canonical audit head without changing tasks or successful evidence. Successful evidence handling is
+unchanged.
+
 An `agent_prompted` reply must identify the exact workspace, tab, pane, terminal,
 working directory and agent kind. Generic success text is insufficient.
 

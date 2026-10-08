@@ -8,6 +8,7 @@ use std::path::Path;
 mod observation;
 #[cfg(target_os = "linux")]
 pub use observation::{
+    AgentIdentityPending,
     AgentProcessObservation, GateObservation, ProcessMarkerObservation, SupervisorObservation,
 };
 

@@ -279,7 +279,7 @@ pub fn verify_native(
         deadline,
         cancellation,
         false,
-        Lab::new()?,
+        probe_lab(project, name)?,
     )
 }
 
@@ -303,8 +303,33 @@ pub fn verify_interaction(
         deadline,
         cancellation,
         true,
-        Lab::new()?,
+        probe_lab(project, name)?,
     )
+}
+
+fn retain_unprepared_failure(
+    project: &Path, name: &str, step: &'static str, started_unix_ms: i64,
+    error: &anyhow::Error,
+) -> Result<()> {
+    let reason = if step == "probe_setup" { "native probe setup failed (details withheld)" }
+        else { "installation preparation failed (details withheld)" };
+    let record = json!({"version":1,"profile":name,"kind":null,"agent_version":null,
+        "step":step,"failure_class":"verification_failed","reason":reason,
+        "started_unix_ms":started_unix_ms,"finished_unix_ms":crate::canonical_worker::now()});
+    crate::store::SqliteStore::open(&project.join(".state/state.db"))?
+        .retain_native_probe_failure(&record)
+        .with_context(|| format!("failed to retain native probe failure after: {error:#}"))
+}
+
+fn probe_lab(project: &Path, name: &str) -> Result<Lab> {
+    let started = crate::canonical_worker::now();
+    match Lab::new() {
+        Ok(lab) => Ok(lab),
+        Err(error) => {
+            retain_unprepared_failure(project, name, "probe_setup", started, &error)?;
+            Err(error)
+        }
+    }
 }
 
 pub(super) fn verify(
@@ -319,7 +344,8 @@ pub(super) fn verify(
     mut lab: Lab,
 ) -> Result<NativePreparation> {
     let deadline = deadline.min(Instant::now() + Duration::from_secs(120));
-    let mut preparation = prepare(
+    let started_unix_ms = crate::canonical_worker::now();
+    let preparation = prepare(
         project,
         name,
         herdr_path,
@@ -327,7 +353,44 @@ pub(super) fn verify(
         execution_home,
         deadline,
         cancellation.clone(),
-    )?;
+    );
+    let preparation = match preparation {
+        Ok(preparation) => preparation,
+        Err(error) => {
+            retain_unprepared_failure(project, name, "preparation", started_unix_ms, &error)?;
+            return Err(error);
+        }
+    };
+    let failure_profile = preparation.profile.clone();
+    let result = verify_prepared(project, execution_home, deadline, cancellation, interaction, preparation, &mut lab);
+    // Finish bounded cleanup before appending a failure observation.
+    drop(lab);
+    if let Err(error) = &result {
+        let readiness = error.downcast_ref::<ReadinessFailure>();
+        let record = json!({
+            "version": 1, "profile": failure_profile.name, "kind": failure_profile.kind,
+            "agent_version": failure_profile.agent.version,
+            "step": if readiness.is_some() { "prompt_readiness" } else { "native_verification" },
+            "failure_class": readiness.map(|r| r.class).unwrap_or("verification_failed"),
+            "reason": readiness.map(|r| r.to_string()).unwrap_or_else(|| "native verification failed (details withheld)".into()),
+            "started_unix_ms": started_unix_ms, "finished_unix_ms": crate::canonical_worker::now(),
+        });
+        crate::store::SqliteStore::open(&project.join(".state/state.db"))?
+            .retain_native_probe_failure(&record)
+            .with_context(|| format!("failed to retain native probe failure after: {error:#}"))?;
+    }
+    result
+}
+
+fn verify_prepared(
+    project: &Path,
+    execution_home: &Path,
+    deadline: Instant,
+    cancellation: Cancellation,
+    interaction: bool,
+    mut preparation: ProfilePreparation,
+    lab: &mut Lab,
+) -> Result<NativePreparation> {
     let project = project.canonicalize()?;
     let guard = crate::execution_guard::RootGuard::exclusive(
         project.parent().context("project root missing")?,
@@ -353,7 +416,7 @@ pub(super) fn verify(
             .map_err(|_| anyhow::anyhow!("invalid profile configuration (contents withheld)"))?;
     let definition: crate::profile_config::ProfileDefinition = value
         .get("profiles")
-        .and_then(|v| v.get(name))
+        .and_then(|v| v.get(&profile.name))
         .context("profile missing")?
         .clone()
         .try_into()
@@ -363,6 +426,7 @@ pub(super) fn verify(
         "native probe definition changed"
     );
     let wall = definition.validate_gated_preparation(0)?.min(120);
+    let deadline = deadline.min(Instant::now() + Duration::from_secs(wall));
     // Positional text and vendor subcommands can execute a task at startup.
     // Until their interactive mapping is verified, a transport check must not
     // treat arbitrary owner-configured arguments as harmless display options.
@@ -721,6 +785,20 @@ fn ready(api: &Api<'_>, route: &RuntimeRoute, terminal: &str) -> Result<String> 
     Ok(manifest)
 }
 
+#[derive(Debug)]
+struct ReadinessFailure {
+    observation: &'static str,
+    categories: Vec<&'static str>,
+    class: &'static str,
+}
+impl std::fmt::Display for ReadinessFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "native probe did not establish prompt readiness ({}): {}; screen categories: {}",
+            self.class, self.observation, if self.categories.is_empty() { "none".into() } else { self.categories.join(", ") })
+    }
+}
+impl std::error::Error for ReadinessFailure {}
+
 fn verify_prompt(
     api: &Api<'_>,
     observation: &SupervisorObservation,
@@ -730,30 +808,69 @@ fn verify_prompt(
     token: &str,
     (expected_pins, execution_home): (&crate::agent_home::Pins, &Path),
 ) -> Result<InteractionEvidence> {
-    let wait_until = api.deadline.min(Instant::now() + Duration::from_secs(30));
-    let mut readiness_failure = None;
+    // Reserve ten seconds for prompt acknowledgment, identity checks and stop.
+    // The enclosing probe is capped at 120 seconds (or the caller's deadline).
+    let wait_until = api.deadline.checked_sub(Duration::from_secs(10)).unwrap_or(api.deadline);
+    let readiness_api = Api {
+        profile: api.profile, socket: api.socket.clone(), session: api.session.clone(),
+        deadline: wait_until, cancellation: api.cancellation.clone(), locks: api.locks.clone(),
+    };
+    let mut readiness_failure = "no readiness observation";
+    let mut categories = Vec::new();
+    let mut next_screen_observation = Instant::now();
     loop {
-        if let Err(error) = check(wait_until, &api.cancellation) {
-            #[cfg(test)]
-            if let Ok(screen) = api.call("pane.read", json!({"pane_id":route.pane_id,"source":"visible"})) {
-                // Report only fixed diagnostic categories, never terminal text,
-                // login details, tokens or provider responses.
-                let text = screen.to_string().to_lowercase();
-                for category in ["trust", "theme", "sign in", "log in", "update available", "press enter", "welcome", "network", "model"] {
-                    if text.contains(category) { eprintln!("Native readiness screen category: {category}"); }
+        if check(wait_until, &api.cancellation).is_err() {
+            return Err(ReadinessFailure { observation: readiness_failure, categories,
+                class: if api.cancellation.is_cancelled() { "cancelled" } else { "transient_readiness" } }.into());
+        }
+        let process_ready = match observation.agent_process(Path::new(&api.profile.agent.path), &api.profile.arguments_digest)
+            .and_then(|process| process.check()) {
+            Ok(()) => true,
+            Err(error) if error.downcast_ref::<crate::worker_supervision::AgentIdentityPending>().is_some() => {
+                readiness_failure = "agent process identity pending";
+                false
+            }
+            Err(error) => {
+                let class = if error.chain().any(|cause| {
+                    let message = cause.to_string();
+                    message == "agent process changed: executable mismatch"
+                        || message == "agent process changed: arguments digest mismatch"
+                        || message == "supervisor argv changed"
+                        || message == "supervisor executable differs from installed helper"
+                }) { "process_changed" } else { "process_observation_failed" };
+                return Err(error).context(ReadinessFailure {
+                    observation: readiness_failure, categories, class,
+                });
+            }
+        };
+        if process_ready {
+            match ready(&readiness_api, route, terminal) {
+                Ok(_) => break,
+                Err(error) => {
+                    // These observations are fixed validator messages. Unknown API
+                    // errors are withheld so terminal/provider content cannot leak.
+                    if let Some(observation) = ["worker lacks verified visible prompt readiness",
+                        "worker is not ready for its brief", "invalid native agent inventory",
+                        "native agent inventory missing", "native agent inventory exceeds limit",
+                        "native probe agent absent or ambiguous", "invalid native readiness response",
+                        "readiness manifest missing"].into_iter()
+                        .find(|message| error.chain().any(|cause| cause.to_string() == *message)) {
+                        readiness_failure = observation;
+                    } else if readiness_failure == "no readiness observation" {
+                        readiness_failure = "native readiness observation unavailable";
+                    }
+                    // A request expiring at the boundary must not erase the last
+                    // actual readiness observation with a generic deadline error.
                 }
             }
-            return Err(error).context(format!("native probe did not establish prompt readiness: {}", readiness_failure.as_deref().unwrap_or("no readiness observation")));
         }
-        observation
-            .agent_process(
-                Path::new(&api.profile.agent.path),
-                &api.profile.arguments_digest,
-            ).context("native probe process unavailable before prompt readiness")?
-            .check().context("native probe process changed before prompt readiness")?;
-        match ready(api, route, terminal) {
-            Ok(_) => break,
-            Err(error) => readiness_failure = Some(format!("{error:#}")),
+        if Instant::now() >= next_screen_observation {
+            next_screen_observation = Instant::now() + Duration::from_secs(1);
+            if let Ok(screen) = readiness_api.call("pane.read", json!({"pane_id":route.pane_id,"source":"visible"})) {
+                let text = screen.to_string().to_lowercase();
+                categories = ["trust", "theme", "sign in", "log in", "update available", "press enter", "welcome", "network", "model"]
+                    .into_iter().filter(|category| text.contains(category)).collect();
+            }
         }
         std::thread::sleep(Duration::from_millis(100));
     }

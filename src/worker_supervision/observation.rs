@@ -7,6 +7,17 @@ use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 
+/// A child has not yet published a complete command identity. Only readiness
+/// polling may retry this; it never constitutes process identity evidence.
+#[derive(Debug)]
+pub struct AgentIdentityPending;
+impl std::fmt::Display for AgentIdentityPending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("agent child command identity pending")
+    }
+}
+impl std::error::Error for AgentIdentityPending {}
+
 /// Retains pidfds and a namespace descriptor so PID or inode reuse cannot turn
 /// a later unrelated process into this observed supervisor. This establishes
 /// OS process structure only, not launch authority, agent readiness, artifact
@@ -53,16 +64,15 @@ pub struct AgentProcessObservation {
 }
 impl AgentProcessObservation {
     pub fn check(&self) -> Result<()> {
-        ensure!(
-            !self.supervisor.exited()? && !exited(&self.child)?,
-            "observed agent exited"
-        );
-        verify_child_membership(self.pid, self.supervisor.identity())?;
-        verify_command(self.pid, &self.command)?;
-        ensure!(
-            !self.supervisor.exited()? && !exited(&self.child)?,
-            "agent changed during observation"
-        );
+        ensure!(!self.supervisor.exited()?, "observed agent supervisor exited");
+        if exited(&self.child)? { return Err(AgentIdentityPending.into()); }
+        if let Err(error) = verify_child_membership(self.pid, self.supervisor.identity())
+            .and_then(|()| verify_command(self.pid, &self.command)) {
+            if exited(&self.child)? { return Err(AgentIdentityPending.into()); }
+            return Err(error);
+        }
+        ensure!(!self.supervisor.exited()?, "agent supervisor changed during observation");
+        if exited(&self.child)? { return Err(AgentIdentityPending.into()); }
         Ok(())
     }
 }
@@ -323,6 +333,7 @@ impl SupervisorObservation {
             "agent child inventory exceeds bounds"
         );
         let mut found = None;
+        let mut different_command = false;
         let mut seen = std::collections::BTreeSet::new();
         for pid in children {
             ensure!(seen.insert(pid), "duplicate agent child identity");
@@ -343,35 +354,40 @@ impl SupervisorObservation {
             let bytes = match read_bounded(&format!("/proc/{pid}/cmdline"), 65536) {
                 Ok(bytes) => bytes,
                 Err(_) if exited(&child)? => continue,
+                Err(error) if error.downcast_ref::<io::Error>().is_some_and(|e|
+                    matches!(e.raw_os_error(), Some(libc::ENOENT | libc::ESRCH))) => {
+                    return Err(AgentIdentityPending.into());
+                }
                 Err(error) => return Err(error),
             };
             if exited(&child)? {
                 continue;
             }
-            ensure!(bytes.last() == Some(&0), "incomplete agent child command");
+            if bytes.last() != Some(&0) || bytes == [0] {
+                return Err(AgentIdentityPending.into());
+            }
             let words: Vec<_> = bytes[..bytes.len() - 1].split(|b| *b == 0).collect();
             if words.first().copied() != executable.to_str().map(str::as_bytes) {
+                different_command = true;
                 continue;
             }
             let command = words
                 .into_iter()
                 .map(|s| std::str::from_utf8(s).map(str::to_owned))
                 .collect::<std::result::Result<Vec<_>, _>>()?;
-            if command.len() > 129
-                || format!("{:x}", Sha256::digest(serde_json::to_vec(&command[1..])?))
-                    != arguments_digest
-            {
-                continue;
-            }
+            ensure!(command.len() <= 129
+                && format!("{:x}", Sha256::digest(serde_json::to_vec(&command[1..])?))
+                    == arguments_digest, "agent process changed: arguments digest mismatch");
             verify_child_membership(pid, &self.identity)?;
-            ensure!(!exited(&child)?, "agent changed during selection");
+            if exited(&child)? { return Err(AgentIdentityPending.into()); }
             ensure!(
                 found.is_none(),
                 "multiple exact agents under namespace init"
             );
             found = Some((pid, child, command));
         }
-        let (pid, child, command) = found.context("exact agent absent from namespace init")?;
+        ensure!(found.is_some() || !different_command, "agent process changed: executable mismatch");
+        let (pid, child, command) = found.ok_or(AgentIdentityPending)?;
         let observation = AgentProcessObservation {
             supervisor,
             child,
@@ -679,8 +695,14 @@ fn verify_child_membership(pid: u32, supervisor: &SupervisorIdentity) -> Result<
 }
 
 fn verify_command(pid: u32, expected: &[String]) -> Result<()> {
-    let bytes = read_bounded(&format!("/proc/{pid}/cmdline"), 65536)?;
-    ensure!(bytes.last() == Some(&0), "incomplete supervisor argv");
+    let bytes = match read_bounded(&format!("/proc/{pid}/cmdline"), 65536) {
+        Err(error) if error.downcast_ref::<io::Error>().is_some_and(|e|
+            matches!(e.raw_os_error(), Some(libc::ENOENT | libc::ESRCH))) => {
+            return Err(AgentIdentityPending.into());
+        }
+        result => result?,
+    };
+    if bytes.last() != Some(&0) || bytes == [0] { return Err(AgentIdentityPending.into()); }
     let words = bytes[..bytes.len() - 1]
         .split(|b| *b == 0)
         .collect::<Vec<_>>();
