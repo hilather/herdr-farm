@@ -58,33 +58,40 @@ pub(crate) fn publish_control_marker_controlled(project:&Path,db:&crate::store::
     sync_dir(&project.join(".state"))?;sync_dir(&project.join(".state/migration"))?;Ok(())
 }
 pub fn read_identity_inventory(project:&Path,budget:&mut Budget)->Result<Vec<RuntimeBinding>> {
+    budget.reader("binding inventory",&project.join(".state/state.db"));
     let(project,publication)=publication(project,budget)?;
     crate::store::identity_inventory::read(&project.join(".state/state.db"),&publication,budget)
 }
 /// Candidate bindings for a pane conflict check; malformed pane identities
 /// remain candidates and must pass the ordinary binding/provenance validator.
 pub(crate) fn read_pane_bindings(project:&Path,pane:&str,budget:&mut Budget)->Result<Vec<RuntimeBinding>> {
+    budget.reader("pane binding inventory",&project.join(".state/state.db"));
     let(project,publication)=publication(project,budget)?;
     crate::store::identity_inventory::read_pane_bindings(&project.join(".state/state.db"),&publication,budget,pane)
 }
 /// Local worktree references plus malformed machine/path identities. Retained
-/// nonempty paths remain references regardless of task/attempt terminal state.
+/// nonempty paths remain references until ownership has a release receipt.
 pub(crate) fn read_worktree_bindings(project:&Path,budget:&mut Budget)->Result<Vec<RuntimeBinding>> {
+    budget.reader("worktree binding inventory",&project.join(".state/state.db"));
     let(project,publication)=publication(project,budget)?;
     crate::store::identity_inventory::read_worktree_bindings(&project.join(".state/state.db"),&publication,budget)
 }
 /// Matching staged panes plus malformed identities, with complete selected provenance.
 pub(crate) fn read_pane_targets(project:&Path,pane:&str,budget:&mut Budget)->Result<Vec<(String,crate::domain::LaunchTarget)>> {
+    budget.reader("pane target inventory",&project.join(".state/state.db"));
     let(project,publication)=publication(project,budget)?;
     crate::store::identity_inventory::read_pane_targets(&project.join(".state/state.db"),&publication,budget,pane)
 }
 pub fn read_launch_target_inventory(project:&Path,budget:&mut Budget)->Result<Vec<(String,crate::domain::LaunchTarget)>> {
+    budget.reader("launch target inventory",&project.join(".state/state.db"));
     let(project,publication)=publication(project,budget)?;
     crate::store::identity_inventory::read_launch_targets(&project.join(".state/state.db"),&publication,budget)
 }
 /// Historical worktree paths remain references even when receipt publication
-/// failed or the attempt stopped. Filesystem absence is not a release receipt.
+/// failed or the attempt stopped without a release receipt. Filesystem absence
+/// is not a release receipt. Terminated, durably released launches are excluded.
 pub fn read_worktree_inventory(project:&Path,budget:&mut Budget)->Result<Vec<(String,crate::domain::WorktreePlan)>> {
+    budget.reader("worktree inventory",&project.join(".state/state.db"));
     let(project,publication)=publication(project,budget)?;
     crate::store::identity_inventory::read_worktrees(&project.join(".state/state.db"),&publication,budget)
 }

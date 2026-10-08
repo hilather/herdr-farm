@@ -71,7 +71,7 @@ pub(crate) fn check_worktree_references(ctx:&Ctx,current:&Path,id:&str,path:&Pat
 fn check_references(ctx:&Ctx,current:&Path,skip:Option<&str>,conflicts:impl Fn(&RuntimeIdentity)->Result<bool>)->Result<()> {
     if !exists(&ctx.root)? { return Ok(()); }
     let current=current.canonicalize()?;let mut projects=0;let mut records=0;
-    let mut target_budget=herdr_farm::store::identity_inventory::Budget::new(50*1024*1024,1024,std::time::Instant::now()+std::time::Duration::from_secs(10),Default::default())?;
+    let mut target_budget=herdr_farm::store::identity_inventory::Budget::new(50*1024*1024,herdr_farm::store::identity_inventory::MAX_INVENTORY_RECORDS,std::time::Instant::now()+std::time::Duration::from_secs(10),Default::default())?;
     for entry in fs::read_dir(&ctx.root)?.take(1025) {
         let entry=entry?;projects+=1;ensure!(projects<=1024,"root enumeration exceeds 1024 entries");
         let kind=entry.file_type()?;if !kind.is_dir()&&!kind.is_symlink(){continue;}
@@ -106,7 +106,7 @@ fn check_references(ctx:&Ctx,current:&Path,skip:Option<&str>,conflicts:impl Fn(&
             }
             result
         };
-        for (id,identity) in bindings {records+=1;ensure!(records<=1024,"resource inventory exceeds 1024 bindings");if dir==current&&skip==Some(id.as_str()){continue;}ensure!(!conflicts(&identity)?,"resource is already referenced by {name}/{id}");}
+        for (id,identity) in bindings {records+=1;ensure!(records<=herdr_farm::store::identity_inventory::MAX_INVENTORY_RECORDS,"root resource inventory project {name} exhausted record budget at {records} references");if dir==current&&skip==Some(id.as_str()){continue;}ensure!(!conflicts(&identity)?,"resource is already referenced by {name}/{id}");}
     }
     Ok(())
 }

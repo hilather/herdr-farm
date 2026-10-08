@@ -5,25 +5,31 @@ use std::time::Instant;
 use crate::runner::Cancellation;
 use super::runtime::BindingSelection;
 
-pub struct Budget {pub deadline:Instant,pub cancellation:Cancellation,remaining:usize,records:usize,used:usize,
+/// Root-wide shared record ceiling; byte and deadline limits remain independent.
+pub const MAX_INVENTORY_RECORDS:usize=16_384;
+
+pub struct Budget {pub deadline:Instant,pub cancellation:Cancellation,remaining:usize,records:usize,record_limit:usize,used:usize,reader:String,
     #[cfg(test)] pub(crate) sql_steps:Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
 }
 impl Budget {
     pub fn new(bytes:usize,records:usize,deadline:Instant,cancellation:Cancellation)->Result<Self> {
-        ensure!(bytes<=50*1024*1024&&records<=1024,"identity budget exceeds supported bounds");
-        let budget=Self{deadline:deadline.min(Instant::now()+Duration::from_secs(10)),cancellation,remaining:bytes,records,used:0,#[cfg(test)] sql_steps:None};budget.check()?;Ok(budget)
+        ensure!(bytes<=50*1024*1024&&records<=MAX_INVENTORY_RECORDS,"identity budget exceeds supported bounds");
+        let budget=Self{deadline:deadline.min(Instant::now()+Duration::from_secs(10)),cancellation,remaining:bytes,records,record_limit:records,used:0,reader:String::from("identity inventory"),#[cfg(test)] sql_steps:None};budget.check()?;Ok(budget)
     }
-    pub fn check(&self)->Result<()> {ensure!(!self.cancellation.is_cancelled()&&Instant::now()<self.deadline,"identity inventory cancelled or expired");Ok(())}
+    pub fn check(&self)->Result<()> {ensure!(!self.cancellation.is_cancelled()&&Instant::now()<self.deadline,"{} cancelled or expired after {} records and {} bytes",self.reader,self.record_limit-self.records,self.used);Ok(())}
+    /// Labels subsequent budget errors without resetting any root-wide limits.
+    pub fn select_reader(&mut self,name:&str,project:&Path) {self.reader=format!("{name} project {}",project.display());}
+    pub(crate) fn reader(&mut self,name:&str,path:&Path) {self.select_reader(name,path.parent().and_then(Path::parent).unwrap_or(path));}
     pub fn used(&self)->usize {self.used}
-    pub(crate) fn record(&mut self)->Result<()> {self.check()?;ensure!(self.records>0,"controller hint exceeds candidate budget");self.records-=1;Ok(())}
-    pub(crate) fn charge(&mut self,n:usize)->Result<()> {self.check()?;ensure!(n<=self.remaining,"identity inventory exceeds byte budget");self.remaining-=n;self.used+=n;Ok(())}
+    pub(crate) fn record(&mut self)->Result<()> {self.check()?;ensure!(self.records>0,"{} exceeds candidate budget at {} records (limit {})",self.reader,self.record_limit-self.records,self.record_limit);self.records-=1;Ok(())}
+    pub(crate) fn charge(&mut self,n:usize)->Result<()> {self.check()?;ensure!(n<=self.remaining,"{} exhausted byte budget after {} bytes and {} records",self.reader,self.used,self.record_limit-self.records);self.remaining-=n;self.used+=n;Ok(())}
     pub(crate) fn read(&mut self,path:&Path)->Result<Vec<u8>> {
         use std::{io::Read,os::unix::fs::MetadataExt};
         self.check()?;
         let mut file=OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_NONBLOCK).open(path)?;
         let before=file.metadata()?;ensure!(before.is_file()&&before.nlink()==1,"identity publication must be a single-link regular file");
-        let limit=self.remaining.min(16*1024*1024);ensure!(before.len()<=limit as u64,"identity publication exceeds budget");
-        let mut bytes=Vec::new();(&mut file).take(limit as u64+1).read_to_end(&mut bytes)?;ensure!(bytes.len()<=limit,"identity publication exceeds budget");
+        let limit=self.remaining.min(16*1024*1024);ensure!(before.len()<=limit as u64,"{} publication exceeds byte budget after {} bytes and {} records",self.reader,self.used,self.record_limit-self.records);
+        let mut bytes=Vec::new();(&mut file).take(limit as u64+1).read_to_end(&mut bytes)?;ensure!(bytes.len()<=limit,"{} publication exceeds byte budget after {} bytes and {} records",self.reader,self.used,self.record_limit-self.records);
         let after=file.metadata()?;ensure!(before.len()==after.len()&&before.mtime()==after.mtime()&&before.mtime_nsec()==after.mtime_nsec()&&before.ctime()==after.ctime()&&before.ctime_nsec()==after.ctime_nsec(),"identity publication changed");
         self.charge(bytes.len())?;Ok(bytes)
     }
@@ -179,20 +185,18 @@ fn read_targets(path:&Path,publication:&Publication,budget:&mut Budget,pane:Opti
     read_published(path,publication,budget,|tx,budget|{
         let version:u32=tx.query_row("PRAGMA user_version",[],|r|r.get(0))?;
         if version<11{return Ok(Vec::new());}
-        // Current stores maintain lifecycle eligibility transactionally, so
-        // repeated reuse of a pane does not revisit terminated launch history.
-        // Older read-only stores retain the original indexed-event fallback.
-        let source=match (pane.is_some(),version>=43) {
-            (true,true)=>"(SELECT sequence FROM retained_launch_resources INDEXED BY retained_launch_resources_pane WHERE pane=?1 UNION SELECT sequence FROM retained_launch_resources INDEXED BY retained_launch_resources_unknown WHERE unknown_pane=1) candidates CROSS JOIN events e ON e.sequence=candidates.sequence",
-            (true,false)=>"(SELECT sequence FROM events WHERE kind IN ('runtime.launch_target','runtime.launch_workspace') AND json_extract(payload,'$.route.pane_id')=?1 UNION SELECT sequence FROM events WHERE kind IN ('runtime.launch_target','runtime.launch_workspace') AND (json_type(payload,'$.route.pane_id') IS NOT 'text' OR json_extract(payload,'$.route.pane_id')='')) candidates CROSS JOIN events e ON e.sequence=candidates.sequence",
-            (false,_)=>"events e",
-        };
+        // The persisted pane index predates the release-receipt rule. Read
+        // indexed events directly so uncertain terminated targets stay visible.
+        let source=if pane.is_some() {
+            "(SELECT sequence FROM events WHERE kind IN ('runtime.launch_target','runtime.launch_workspace') AND json_extract(payload,'$.route.pane_id')=?1 UNION SELECT sequence FROM events WHERE kind IN ('runtime.launch_target','runtime.launch_workspace') AND (json_type(payload,'$.route.pane_id') IS NOT 'text' OR json_extract(payload,'$.route.pane_id')='')) candidates CROSS JOIN events e ON e.sequence=candidates.sequence"
+        }else{"events e"};
+        budget.reader("launch target inventory",path);
         let mut stmt=tx.prepare(&format!("SELECT e.entity,e.payload,i.payload,i.payload_hash,a.id,a.task_id,
                 o.task_id,o.kind,o.target,o.expected_revision,o.payload,o.payload_hash,o.payload_version,o.idempotency_key,e.kind FROM {source}
             LEFT JOIN attempt_inputs i ON i.operation_id=e.entity
             LEFT JOIN attempts a ON a.id=i.attempt_id
             LEFT JOIN operations o ON o.id=i.operation_id
-            WHERE (e.kind='runtime.launch_workspace' OR (e.kind='runtime.launch_target' AND (a.id IS NULL OR a.termination_observed=0 OR NOT EXISTS(SELECT 1 FROM events started WHERE started.kind='runtime.launch_started' AND started.entity=e.entity))))"))?;
+            WHERE e.kind IN ('runtime.launch_workspace','runtime.launch_target') AND NOT (coalesce(a.termination_observed,0)=1 AND EXISTS(SELECT 1 FROM events released WHERE released.kind='runtime.launch_release' AND released.entity=e.entity))"))?;
         let mut rows=if let Some(pane)=pane {stmt.query([pane])?}else{stmt.query([])?};let mut targets=Vec::new();let mut seen=std::collections::BTreeSet::new();
         while let Some(row)=rows.next()? {
             budget.record()?;
@@ -273,14 +277,31 @@ fn read_bindings(path:&Path,publication:&Publication,budget:&mut Budget,selectio
     }
     // Measure every field read by runtime::read_all before materializing any
     // payload or provenance blob. The snapshot stays fixed through validation.
-    let scope=selection.filter();let limit=if selection.parameter().is_some() {"?2"}else{"?1"};
+    budget.reader("binding inventory",path);
+    // Match the current binding generation, never merely an old receipt for
+    // the same task. Unobserved task attempts still retain their references.
+    let released=if version>=11 {" AND NOT (
+        NOT EXISTS(SELECT 1 FROM runtime_ownership owned WHERE owned.binding_id=b.id)
+        AND EXISTS(SELECT 1 FROM events released WHERE released.kind='runtime.relinquished'
+            AND released.entity=b.id AND json_extract(released.payload,'$.ownership.binding_revision')=b.revision)
+        AND NOT EXISTS(SELECT 1 FROM attempts a WHERE a.task_id=b.task_id AND a.termination_observed=0)
+    ) AND NOT EXISTS(
+        SELECT 1 FROM runtime_ownership owned
+        JOIN attempts a ON a.id=owned.attempt_id AND a.task_id=b.task_id
+        JOIN attempt_inputs i ON i.attempt_id=a.id
+        JOIN operations operation ON operation.id=i.operation_id AND operation.target=b.id AND operation.kind='runtime.launch'
+        WHERE owned.binding_id=b.id AND owned.binding_revision=b.revision AND a.termination_observed=1
+            AND NOT EXISTS(SELECT 1 FROM attempts live WHERE live.task_id=b.task_id AND live.termination_observed=0)
+            AND EXISTS(SELECT 1 FROM events released WHERE released.kind='runtime.launch_release' AND released.entity=i.operation_id)
+    )"}else{""};
+    let scope=format!("{}{}",if selection.filter().is_empty(){"WHERE 1"}else{selection.filter()},released);let limit=if selection.parameter().is_some() {"?2"}else{"?1"};
     let mut statement=tx.prepare(&format!("SELECT octet_length(b.id),coalesce(octet_length(b.task_id),0),coalesce(octet_length(b.source_path),0),octet_length(b.payload),octet_length(b.payload_hash),coalesce(octet_length(s.digest),0),coalesce(length(s.bytes),0) FROM runtime_bindings b LEFT JOIN legacy_sources s ON s.path=b.source_path {scope} ORDER BY b.id LIMIT {limit}"))?;
     let mut values=Vec::<rusqlite::types::Value>::new();
     if let Some(value)=selection.parameter() {values.push(value.to_owned().into());}
     values.push((budget.records as i64+1).into());
     let mut rows=statement.query(rusqlite::params_from_iter(values))?;let mut count=0;
     while let Some(row)=rows.next()? {
-        budget.check()?;count+=1;ensure!(count<=budget.records,"identity inventory exceeds reference budget");
+        budget.record()?;count+=1;
         for column in 0..7 {let n:usize=row.get(column)?;ensure!(n<=16*1024*1024,"identity field exceeds 16 MiB");budget.charge(n)?;}
     }
     drop(rows);drop(statement);
@@ -288,8 +309,8 @@ fn read_bindings(path:&Path,publication:&Publication,budget:&mut Budget,selectio
     let mut rows=statement.query([])?;
     if let Some(row)=rows.next()? {for column in 0..2 {let n:usize=row.get(column)?;ensure!(n<=16*1024*1024,"identity session provenance exceeds 16 MiB");budget.charge(n)?;}}
     drop(rows);drop(statement);budget.check()?;
-    let bindings=super::runtime::read_selected(tx,selection,None)?;ensure!(bindings.len()==count,"identity inventory changed");budget.check()?;
-    budget.records-=count;Ok(bindings)
+    let bindings=super::runtime::read_selected_filtered(tx,selection,None,released)?;ensure!(bindings.len()==count,"identity inventory changed");budget.check()?;
+    Ok(bindings)
     })
 }
 

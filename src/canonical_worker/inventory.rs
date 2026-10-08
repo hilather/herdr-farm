@@ -55,7 +55,7 @@ pub(super) fn check(
     deadline: Instant,
     cancellation: Cancellation,
 ) -> Result<()> {
-    let mut budget = Budget::new(50 * 1024 * 1024, 1024, deadline, cancellation)?;
+    let mut budget = Budget::new(50 * 1024 * 1024, crate::store::identity_inventory::MAX_INVENTORY_RECORDS, deadline, cancellation)?;
     let endpoint = location(&target.socket)?;
     let reference = |machine: &str, socket: &str, pane: &str| -> Result<()> {
         if !pane.is_empty() && pane == target.pane_id {
@@ -83,6 +83,7 @@ pub(super) fn check(
             continue;
         }
         let dir = entry.path();
+        budget.select_reader("worker pane inventory",&dir);
         if !exists(&dir.join(".state"))? {
             continue;
         }
@@ -172,7 +173,7 @@ pub(super) fn check(
 pub(crate) fn check_worktrees(
     project:&Path,binding:&str,plans:&[WorktreePlan],deadline:Instant,cancellation:Cancellation,
 )->Result<()> {
-    let mut budget=Budget::new(50*1024*1024,1024,deadline,cancellation)?;
+    let mut budget=Budget::new(50*1024*1024,crate::store::identity_inventory::MAX_INVENTORY_RECORDS,deadline,cancellation)?;
     let candidates=plans.iter().map(|p|location(&p.path)).collect::<Result<Vec<_>>>()?;
     let check=|machine:&str,path:&str|->Result<()> {
         if !machine.is_empty()||path.is_empty(){return Ok(());}
@@ -182,7 +183,7 @@ pub(crate) fn check_worktrees(
     for (n,entry) in fs::read_dir(project.parent().context("project root missing")?)?.enumerate() {
         budget.check()?;ensure!(n<1024,"worktree root inventory exceeds bounds");
         let entry=entry?;let kind=entry.file_type()?;ensure!(!kind.is_symlink(),"worktree root inventory contains a symlink");
-        if !kind.is_dir(){continue;}let dir=entry.path();if !exists(&dir.join(".state"))?{continue;}
+        if !kind.is_dir(){continue;}let dir=entry.path();budget.select_reader("worker worktree inventory",&dir);if !exists(&dir.join(".state"))?{continue;}
         ensure!(fs::symlink_metadata(dir.join(".state"))?.is_dir(),"worktree project state is aliased");
         if exists(&dir.join(".state/format.json"))?||exists(&dir.join(".state/migration"))? {
             for other in crate::migration::read_worktree_bindings(&dir,&mut budget)? {

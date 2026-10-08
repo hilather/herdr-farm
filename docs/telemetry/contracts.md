@@ -1101,3 +1101,9 @@ including envelopes, excerpts, cursors and derived accounting rows. The exact
 project-root coordinator exception is preserved. This cleanup
 is a scope correction independent of normal retention ages. The canonical schema
 is unchanged.
+
+Inventory-budget hotfix: runtime conflict scans retire terminated launch evidence
+only with a durable release receipt and use one root-wide 16,384-record / 50 MiB /
+ten-second budget. This changes read eligibility only; it adds no canonical or
+telemetry schema version, tables, backup category or retention category. See
+[conflict inventory bounds](../canonical-worker-launch.md#conflict-inventory-bounds-and-released-history).

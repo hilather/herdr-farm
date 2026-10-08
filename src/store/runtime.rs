@@ -73,7 +73,11 @@ impl<'a> BindingSelection<'a> {
     pub(super) fn is_all(self)->bool {matches!(self,Self::All)}
 }
 pub(super) fn read_selected(db:&Connection,selection:BindingSelection<'_>,budget:Option<&read_budget::ReadBudget>)->Result<Vec<RuntimeBinding>> {
-    let sql=format!("SELECT b.id,b.task_id,b.revision,b.source_path,b.payload,b.payload_hash,s.digest,s.bytes FROM runtime_bindings b LEFT JOIN legacy_sources s ON s.path=b.source_path {} ORDER BY b.id",selection.filter());
+    read_selected_filtered(db,selection,budget,"")
+}
+pub(super) fn read_selected_filtered(db:&Connection,selection:BindingSelection<'_>,budget:Option<&read_budget::ReadBudget>,extra:&str)->Result<Vec<RuntimeBinding>> {
+    let scope=format!("{}{}",if selection.filter().is_empty()&&!extra.is_empty(){"WHERE 1"}else{selection.filter()},extra);
+    let sql=format!("SELECT b.id,b.task_id,b.revision,b.source_path,b.payload,b.payload_hash,s.digest,s.bytes FROM runtime_bindings b LEFT JOIN legacy_sources s ON s.path=b.source_path {} ORDER BY b.id",scope);
     let mut stmt=db.prepare(&sql)?;
     let session={
         let mut statement=db.prepare("SELECT digest,bytes FROM legacy_sources WHERE path='.state/coordinator.json' AND kind='runtime'")?;

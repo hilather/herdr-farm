@@ -8,6 +8,7 @@ use std::{
     path::PathBuf,
     process::{Command, Output},
 };
+mod inventory_history { include!("support/inventory_history.rs"); }
 const BIN: &str = env!("CARGO_BIN_EXE_herdr-farm");
 // A deterministic fake Herdr and fake agent. The listener provides a genuine
 // session incarnation; the fake CLI implements the public Herdr command/API
@@ -331,6 +332,12 @@ fn socket_open_primes_owned_coordinator_retries_swallowed_prompt_and_recreates_c
     done["status"] = json!("done");
     done["accepted"] = json!(false);
     fs::write(l.home.path().join("herdr-state.json"), serde_json::to_vec(&done).unwrap()).unwrap();
+    // Append-only launch history across the root must not stall reprime.
+    l.ok(&["new", "history"]);
+    l.ok(&["pause", "history"]);
+    let history = l.root.join("history");
+    migration::apply(&history, &migration::inspect(&history).unwrap(), true).unwrap();
+    inventory_history::seed(&history, 1040);
     l.settled_ok(&["open", "demo", "--reprime"]);
     l.stop();
     assert_eq!(l.state()["prompts"].as_array().unwrap().len(), 3);
