@@ -58,12 +58,14 @@ pub struct Args {
     /// Stop after the binding is reconciled and the project active, before any
     /// attempt is reserved (see the binding note in `steps`).
     pub prepare_only: bool,
+    pub budget_seconds: u64,
 }
 
 struct Step {
     name: &'static str,
     outcome: &'static str,
     detail: Value,
+    elapsed_ms: u128,
 }
 
 struct Run<'a> {
@@ -71,14 +73,30 @@ struct Run<'a> {
     project: PathBuf,
     slug: String,
     steps: Vec<Step>,
+    step_started: Instant,
+    active_step: &'static str,
+    deadline: Instant,
+    preflight_elapsed_ms: u128,
+    budget_seconds: u64,
 }
 
 impl Run<'_> {
+    fn begin(&mut self, name: &'static str) {
+        self.active_step = name;
+        self.step_started = Instant::now();
+        eprintln!("launch run: {name}");
+    }
+    fn record(&mut self, name: &'static str, outcome: &'static str, detail: Value) {
+        let elapsed_ms = self.step_started.elapsed().as_millis();
+        eprintln!("launch run: {name}: {outcome} ({elapsed_ms} ms)");
+        self.steps.push(Step { name, outcome, detail, elapsed_ms });
+        self.step_started = Instant::now();
+    }
     fn done(&mut self, name: &'static str, detail: Value) {
-        self.steps.push(Step { name, outcome: "done", detail });
+        self.record(name, "done", detail);
     }
     fn skipped(&mut self, name: &'static str, detail: Value) {
-        self.steps.push(Step { name, outcome: "already_done", detail });
+        self.record(name, "already_done", detail);
     }
     fn head(&self) -> Result<u64> {
         Ok(runtime::snapshot(&self.project)?.head)
@@ -127,6 +145,28 @@ fn retry<T>(mut step: impl FnMut() -> Result<T>) -> Result<T> {
                 std::thread::sleep(herdr_farm::timing::retry(Duration::from_millis(50 + 30 * attempt)));
             }
             Err(error) => return Err(error),
+        }
+    }
+    unreachable!()
+}
+
+// Only draft/reserve use this retry: draft writes no reservation, and reserve
+// commits atomically after its proof check. Never retry an external effect here.
+fn budgeted<T>(name: &str, overall: Instant, mut step: impl FnMut(Instant) -> Result<T>) -> Result<T> {
+    let started = Instant::now();
+    for attempt in 1..=3 {
+        let deadline = overall.min(Instant::now() + herdr_farm::profile_preparation::BUDGET);
+        ensure!(Instant::now() < deadline, "{name}: launch overall budget exhausted after {} ms; fresh per-step 60 s budget, at most 3 tries", started.elapsed().as_millis());
+        eprintln!("launch run: {name}: try {attempt}/3; fresh step budget {} ms", deadline.saturating_duration_since(Instant::now()).as_millis());
+        match step(deadline) {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                let exhausted = error.chain().any(|cause| cause.is::<herdr_farm::supervision::BudgetExhausted>()) || Instant::now() >= deadline;
+                if !exhausted || attempt == 3 || Instant::now() >= overall {
+                    return Err(error.context(format!("{name}: elapsed {} ms; budget decision: fresh 60 s per try inside launch admission bound; try {attempt}/3", started.elapsed().as_millis())));
+                }
+                eprintln!("launch run: {name}: budget exhausted; retry {}/3 with fresh deadline", attempt + 1);
+            }
         }
     }
     unreachable!()
@@ -594,6 +634,7 @@ fn profile_plan(ctx: &Ctx, project: &Path, args: &Args, observe: bool) -> Result
 }
 
 pub fn run(ctx: &Ctx, slug: &str, mut args: Args) -> Result<Value> {
+    let operation_started = Instant::now();
     let project = ctx.root.join(slug).canonicalize().with_context(|| format!("project {slug} not found"))?;
     // File locks do not alter SQLite bytes and span the entire multi-step launch.
     let memory_launch_guard = fs::File::open(project.join(".state/state.db"))?;
@@ -740,15 +781,17 @@ pub fn run(ctx: &Ctx, slug: &str, mut args: Args) -> Result<Value> {
             }
         }
     }
-    ensure!(problems.is_empty(), "launch run preflight refused:\n{}", problems.join("\n"));
-    let mut run = Run { ctx, project: project.clone(), slug: slug.to_owned(), steps: Vec::new() };
+    let preflight_elapsed_ms = operation_started.elapsed().as_millis();
+    eprintln!("launch run: preflight: completed ({preflight_elapsed_ms} ms; admission budget {} s)", args.budget_seconds);
+    ensure!(problems.is_empty(), "launch run preflight refused after {preflight_elapsed_ms} ms (admission budget {} s):\n{}", args.budget_seconds, problems.join("\n"));
+    let mut run = Run { ctx, project: project.clone(), slug: slug.to_owned(), steps: Vec::new(), step_started: Instant::now(), active_step: "profile_evidence", deadline: operation_started + Duration::from_secs(args.budget_seconds), preflight_elapsed_ms, budget_seconds: args.budget_seconds };
     match steps(&mut run, &args, plan.context("profile evidence preflight failed")?) {
         Ok(report) => Ok(report),
         Err(error) => {
             let failed = run.steps.len() + 1;
-            let done: Vec<String> = run.steps.iter().map(|s| format!("{} ({})", s.name, s.outcome)).collect();
-            let reason = format!("{error:#}").split_whitespace().collect::<Vec<_>>().join(" ");
-            bail!("launch run stopped at step {failed} (launch failed: refused: {reason}); completed before it: [{}]. Fix the cause and rerun the same command; finished steps are skipped.", done.join(", "))
+            let done: Vec<String> = run.steps.iter().map(|s| format!("{} ({}; {} ms)", s.name, s.outcome, s.elapsed_ms)).collect();
+            let reason = format!("{}: elapsed {} ms; {error:#}", run.active_step, run.step_started.elapsed().as_millis()).split_whitespace().collect::<Vec<_>>().join(" ");
+            bail!("launch run stopped at step {failed} (launch failed: refused: {reason}); preflight {} ms; admission budget {} s; completed before it: [{}]. Fix the cause and rerun the same command; finished steps are skipped.", run.preflight_elapsed_ms, run.budget_seconds, done.join(", "))
         }
     }
 }
@@ -768,14 +811,14 @@ fn steps(run: &mut Run, args: &Args, plan: ProfilePlan) -> Result<Value> {
     let ProfilePlan{candidate,reason,herdr,refresh}=plan;
     let (profile, kind) = if let Some((agent,home))=refresh {
         fs::DirBuilder::new().recursive(true).mode(0o700).create(&home)?;
-        let verified=herdr_farm::profile_preparation::verify_interaction(&project,&args.profile,&herdr,&agent,&home,Instant::now()+Duration::from_secs(120),Default::default())?;
+        let verified=herdr_farm::profile_preparation::verify_interaction(&project,&args.profile,&herdr,&agent,&home,(Instant::now()+Duration::from_secs(120)).min(run.deadline),Default::default())?;
         let report=serde_json::to_value(&verified)?;
         ensure!(report["preparation"]["launchable"]==true, "profile verify-interaction did not produce launchable evidence");
         let value:(VersionedReference,String)=(serde_json::from_value(report["preparation"]["reference"].clone())?,
             report["preparation"]["profile"]["kind"].as_str().context("verified profile kind missing")?.to_owned());
         verified.retain(&project)?;
         eprintln!("launch run: profile_evidence: refreshed ({})", reason.as_deref().unwrap_or("missing evidence"));
-        run.steps.push(Step{name:"profile_evidence",outcome:"refreshed",detail:json!({"profile":value.0,"kind":value.1,"reason":reason})});
+        run.record("profile_evidence", "refreshed", json!({"profile":value.0,"kind":value.1,"reason":reason}));
         value
     } else {
         let value=candidate.context("profile evidence missing")?;
@@ -793,11 +836,11 @@ fn steps(run: &mut Run, args: &Args, plan: ProfilePlan) -> Result<Value> {
 
     // 2. The owner configuration must be acknowledged by an active project
     // before a signed contract can be installed.
-    eprintln!("launch run: project_control");
+    run.begin("project_control");
     activate(run, "project_control", false)?;
 
     // 3. The task and its signed contract.
-    eprintln!("launch run: task");
+    run.begin("task");
     let snapshot = runtime::snapshot(&project)?;
     if snapshot.tasks.iter().any(|t| t.id == task_id) {
         run.skipped("task", json!({"task":args.task}));
@@ -805,7 +848,7 @@ fn steps(run: &mut Run, args: &Args, plan: ProfilePlan) -> Result<Value> {
         let head = retry(|| runtime::add_task(&project, task_id.clone(), args.title.clone().unwrap_or_else(|| args.task.clone()), run.head()?))?;
         run.done("task", json!({"task":args.task,"head":head}));
     }
-    eprintln!("launch run: contract");
+    run.begin("contract");
     if let Some(installed) = runtime::task_contract(&project, &task_id)? {
         let document = migration::open_active(&project)?.task_contract_document(&args.task)?.context("installed contract document missing")?;
         check_requested_contract(args, &repository, run.head()?, &kind, &project, &document)?;
@@ -830,7 +873,7 @@ fn steps(run: &mut Run, args: &Args, plan: ProfilePlan) -> Result<Value> {
 
     // 4. Capacity, queue and the integration target.
     let snapshot = runtime::snapshot(&project)?;
-    eprintln!("launch run: queue");
+    run.begin("queue");
     let scheduler = snapshot.scheduler.as_ref().context("project has no scheduler state: migrate it first")?;
     if snapshot.scheduler.as_ref().is_some_and(|s| s.queue.iter().any(|q| q.task == task_id) && snapshot.tasks.iter().any(|t| t.id == task_id && (t.state == herdr_farm::domain::TaskState::Queued || t.active_attempt.is_some()))) {
         run.skipped("queue", json!({"task":args.task}));
@@ -843,7 +886,7 @@ fn steps(run: &mut Run, args: &Args, plan: ProfilePlan) -> Result<Value> {
         })?;
         run.done("queue", json!({"head":head}));
     }
-    eprintln!("launch run: scheduler_capacity");
+    run.begin("scheduler_capacity");
     let scheduler_policy = &scheduler.policy;
     if scheduler_policy.max_active_workers == args.max_active_workers.unwrap() {
         run.skipped("scheduler_capacity", json!({"max_active_workers":scheduler_policy.max_active_workers}));
@@ -856,7 +899,7 @@ fn steps(run: &mut Run, args: &Args, plan: ProfilePlan) -> Result<Value> {
         run.done("scheduler_capacity", json!({"max_active_workers":args.max_active_workers,"head":head}));
     }
     retry(|| herdr_farm::store::set_project_result_automation(&project, run.head()?, Some(true), None))?;
-    eprintln!("launch run: integration_target");
+    run.begin("integration_target");
     if let Some(reference) = &args.integration_ref {
         retry(|| herdr_farm::integration::configure_project(&project, &repository, reference))?;
         retry(|| herdr_farm::store::set_project_result_automation(&project, run.head()?, Some(true), Some(true)))?;
@@ -864,7 +907,7 @@ fn steps(run: &mut Run, args: &Args, plan: ProfilePlan) -> Result<Value> {
     }
 
     // 5. Herdr server, binding, reconciliation and activation.
-    eprintln!("launch run: herdr_server");
+    run.begin("herdr_server");
     let socket = herdr_server(run, &herdr, &args.task, args.herdr_socket.as_deref())?;
     let directory = run.ctx.root.join(".herdr-run").join(format!("{}-{}", run.slug, args.task)).join("herdr");
     // A server the operator supplied (`--herdr-socket`) is already a session he
@@ -875,7 +918,7 @@ fn steps(run: &mut Run, args: &Args, plan: ProfilePlan) -> Result<Value> {
         viewer_report(open_viewer(run.ctx, &project, &directory, &args.task, &socket, false))
     };
     run.done("viewer", viewer);
-    eprintln!("launch run: binding");
+    run.begin("binding");
     let snapshot = runtime::snapshot(&project)?;
     if let Some(old) = snapshot.runtime_bindings.iter().find(|b| b.task.as_ref() == Some(&task_id)) {
         let history: Vec<_> = snapshot.attempts.iter().filter(|a| a.task == task_id).collect();
@@ -919,7 +962,7 @@ fn steps(run: &mut Run, args: &Args, plan: ProfilePlan) -> Result<Value> {
             (change.binding.id, true)
         }
     };
-    eprintln!("launch run: reconcile_and_activate");
+    run.begin("reconcile_and_activate");
     activate(run, "reconcile_and_activate", created)?;
 
     migration::open_active(&project)?.prepare_task_lineage(&args.task, args.work_item.as_deref().context("work item missing")?, args.role.as_deref().context("role missing")?, args.supersedes.as_deref())?;
@@ -938,6 +981,7 @@ fn steps(run: &mut Run, args: &Args, plan: ProfilePlan) -> Result<Value> {
     }
 
     // 7. Knowledge snapshot, draft, owner approval, import, reservation.
+    run.begin("knowledge_snapshot");
     let dir = run.dir(&args.task)?;
     let mut instructions = String::from_utf8(migration::read_plan_file(&project.join("PROJECT.md"))?).map_err(|_| anyhow::anyhow!("project instructions are not UTF-8"))?;
     if let Some(path) = &args.prompt_file {
@@ -952,7 +996,6 @@ fn steps(run: &mut Run, args: &Args, plan: ProfilePlan) -> Result<Value> {
     let contract = migration::open_active(&project)?.task_contract_document(task_id.as_str())?.context("the task has no installed contract document")?;
     let reference = runtime::task_contract(&project, &task_id)?.context("the task has no installed contract")?;
     instructions.push_str(&finish_instructions(&ctx.root, run.slug.as_str(), &contract, &reference)?);
-    eprintln!("launch run: knowledge_snapshot");
     let knowledge = retry(|| {
         let _guard = herdr_farm::memory::mutation_guard(&project)?;
         let resolved = crate::agents::resolve::resolve(&args.profile, &ctx.config_dir.join("config.toml"), None)?;
@@ -987,22 +1030,21 @@ fn steps(run: &mut Run, args: &Args, plan: ProfilePlan) -> Result<Value> {
         note: None,
     };
     run.done("knowledge_snapshot", json!({"snapshot":selection.knowledge,"omitted_for_budget":knowledge["omitted_for_budget"]}));
-    let deadline = Instant::now() + herdr_farm::profile_preparation::BUDGET;
-    eprintln!("launch run: draft");
-    let drafted = retry(|| launch_preparation::draft(&project, &selection, run.head()?, Duration::from_secs(args.validity_seconds), deadline, Default::default()))?;
+    run.begin("draft");
+    let drafted = budgeted("draft", run.deadline, |deadline| retry(|| launch_preparation::draft(&project, &selection, run.head()?, Duration::from_secs(args.validity_seconds), deadline, Default::default())))?;
     let approval = dir.join("approval.json");
     fs::write(&approval, serde_json::to_vec_pretty(&drafted.approval)?)?;
     run.done("draft", json!({"approval_document":approval,"brief_chars":drafted.brief.prompt_chars}));
     let key = args.sign_with.as_deref().with_context(|| format!("the launch approval needs the owner's signature: pass --sign-with KEY, or sign {} with `ssh-keygen -Y sign -n {} -f KEY`, then `approval import` and `launch reserve`", approval.display(), authority::SIGNATURE_NAMESPACE))?;
-    eprintln!("launch run: approval_import");
+    run.begin("approval_import");
     let imported = retry(|| {
         let signature = sign(key, authority::SIGNATURE_NAMESPACE, &approval)?;
         authority::import_signed(&project, &approval, &signature, run.head()?)
     })?;
     run.done("approval_import", json!({"approval":imported}));
     let approval_reference = VersionedReference { id: format!("approval-{}", imported.digest), revision: 1, digest: imported.digest.clone() };
-    eprintln!("launch run: reserve");
-    let reservation = retry(|| launch_preparation::reserve(&project, &selection, &approval_reference, run.head()?, deadline, Default::default()))?;
+    run.begin("reserve");
+    let reservation = budgeted("reserve", run.deadline, |deadline| retry(|| launch_preparation::reserve(&project, &selection, &approval_reference, run.head()?, deadline, Default::default())))?;
     anyhow::ensure!(reservation.record.inputs == drafted.inputs, "the reservation does not carry the drafted inputs");
     let attempt = reservation.record.attempt.clone();
     let worktree = herdr_farm::domain::worktree_plans(&drafted.inputs, &attempt).map_err(anyhow::Error::msg)?.into_iter().next().map(|p| p.path);
@@ -1028,13 +1070,14 @@ fn report(run: &Run, task: &str, profile: &VersionedReference, kind: &str, herdr
             summary
         }).collect::<Vec<_>>()),
         "worker_wall_seconds":worker_wall_seconds,
+        "launch_budget":{"admission_seconds":run.budget_seconds,"preflight_elapsed_ms":run.preflight_elapsed_ms,"step_seconds":60,"max_budget_tries":3},
         "contract_digest":reference.map(|r| r.digest),
         "write_paths":contract["scope"]["paths"].as_array().map(|paths| paths.iter().filter(|p| p["access"] == "write").map(|p| p["path"].clone()).collect::<Vec<_>>()),
         "outputs":contract["outputs"].as_array().map(|outputs| outputs.iter().map(|o| o["path"].clone()).collect::<Vec<_>>()),
         "project":run.slug,"task":task,"kind":kind,"profile":profile,"attempt":attempt,"worktree":worktree,
         "herdr_socket":socket,
         "viewer":run.steps.iter().find(|s| s.name == "viewer").map(|s| &s.detail),
-        "steps":run.steps.iter().map(|s| json!({"step":s.name,"outcome":s.outcome,"detail":s.detail})).collect::<Vec<_>>(),
+        "steps":run.steps.iter().map(|s| json!({"step":s.name,"outcome":s.outcome,"elapsed_ms":s.elapsed_ms,"detail":s.detail})).collect::<Vec<_>>(),
         "next":[
             format!("The ticker launches the worker using the verified profile Herdr {}.", herdr.display()),
             format!("Watch it with `scheduler {} inspect` and `operations {} inspect`. The worker's brief ends with the submission it must make; if it finishes without submitting, `result {} submit-captured <attempt>` captures its worktree and records the submission, and automatic verification and integration take it from there.", run.slug, run.slug, run.slug),

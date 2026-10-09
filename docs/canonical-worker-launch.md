@@ -1130,3 +1130,34 @@ second project and scans worktrees, launch targets and bindings with one shared
 16,384-record budget. Historical fixtures retain version-2 profile evidence,
 matching approval grants and consumed uses, and confirmed delivery claim history;
 the effective-profile insertion guard remains enabled while seeding.
+
+`launch PROJECT run` records `elapsed_ms` for each completed step in its JSON
+report and prints the timing beside the step outcome. Refusals name the current
+step, its elapsed time, and the completed steps with their timings. The
+`--budget-seconds` admission window defaults to 600 seconds (1–3600 accepted),
+measured from the beginning of the command, including preflight and refresh.
+Draft and reserve each receive a fresh 60-second deadline, capped by that window;
+approval signing/import no longer consumes reserve's 60 seconds. Budget-only
+failures during draft or reserve retry internally at most three times with fresh
+step deadlines, without restarting completed steps. Other failures retain the
+existing refusal behavior. The window bounds admission deadlines; filesystem
+calls and the existing signing subprocess are not forcibly interrupted by it.
+
+Launch repository observations reserve their full five-second command budget
+plus five seconds of supervisor cleanup before starting. Insufficient remaining
+budget is a retryable admission error, never evidence of a completed transfer.
+Draft creates no reservation, and reserve commits atomically after validating
+its live proof, so a budget refusal leaves no partial reservation. The final
+refusal includes the chosen budget and retry count. No store schema changes are
+needed.
+
+Deadline trace: `--base` is resolved locally by gated Git during contract creation
+(no base fetch in `launch run`). Draft/reserve Git observations use the live
+profile proof deadline through `supervision::run`. Retained profile revalidation
+caps that deadline at 60 seconds; time waiting for its root/check locks counts
+against the step budget. Worker worktree preparation is a later operation with its own caller deadline capped
+at 45 seconds and subsequently by the worktree claim lease; its supervised Git
+commands are capped at 20 seconds. Copy jobs use their executor's absolute
+`Control` deadline, capped again at execution entry by the command timeout.
+Neither later operation inherits the operator draft/approval deadline. Native
+profile refresh uses a separate 120-second deadline capped by the launch window.
