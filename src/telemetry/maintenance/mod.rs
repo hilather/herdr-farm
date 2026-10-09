@@ -153,6 +153,8 @@ pub const CLASSES: &[Class] = &[
         default_days: None, basis: "canonical", destructive: true, action: Action::External, age_from: "-", requires: "project lifecycle; never remove while owner commands are running" },
     Class { id: "canonical.coordinator_journal", store: "<project>/.state/canonical-coordinator.json", scope: "version 2 coordinator layout/start/prime effect intent, settings path and acceptance receipt",
         default_days: None, basis: "canonical", destructive: true, action: Action::External, age_from: "-", requires: "retain with project backups; never prune or replay pending effects after restore without live reconciliation" },
+    Class { id: "canonical.coordinator_wake", store: "<project>/.state/canonical-wake.json", scope: "result wake claim/retry, delivered item identities and latest 1024 attempt outcomes",
+        default_days: None, basis: "canonical", destructive: true, action: Action::External, age_from: "sequence", requires: "retain with project backups; unresolved claims fence replay until claimed inbox items are DONE; telemetry reads only" },
     Class { id: "canonical.coordinator_permissions", store: "<project>/.state/coordinator/claude-settings.json", scope: "product-generated coordinator allow, ask and deny rules",
         default_days: None, basis: "derivable", destructive: false, action: Action::External, age_from: "-", requires: "retain with project backups for running-session provenance; regenerated only at coordinator start; telemetry never writes or deletes it" },
     Class { id: "canonical.verification_execution_slots", store: "<project>/.state/verification-load.lock", scope: "ephemeral OFD byte locks (no data)",

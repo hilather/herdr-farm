@@ -13,40 +13,7 @@ const BIN: &str = env!("CARGO_BIN_EXE_herdr-farm");
 // A deterministic fake Herdr and fake agent. The listener provides a genuine
 // session incarnation; the fake CLI implements the public Herdr command/API
 // boundary and persists the simulated agent's observable state between calls.
-const HERDR: &str = r#"#!/usr/bin/python3
-import fcntl,json,os,sys
-root=os.environ['HOME'];lock=open(root+'/herdr-fixture.lock','w');fcntl.flock(lock,fcntl.LOCK_EX);path=root+'/herdr-state.json';a=sys.argv[1:]
-s=json.load(open(path)) if os.path.exists(path) else {'creates':0,'starts':0,'prompts':[],'live':False,'agent':False,'accepted':False}
-def pane():return {'pane_id':s.get('pane','w1:p1'),'workspace_id':'w1','tab_id':'w1:t1','terminal_id':'term'+str(s['creates']),'cwd':s.get('cwd','')}
-def agent():return dict(pane(),agent='claude',name='hp-demo-coordinator',agent_status=s.get('status','working' if s['accepted'] else 'idle'),interactive_ready=True)
-if a==['--version']:print('herdr 0.9.1');sys.exit(0)
-if a==['remote-api-bridge']:
- r=json.loads(sys.stdin.readline());m=r['method'];p=r.get('params') or {};res=None
- if m=='pane.list':res={'panes':[pane()] if s['live'] else []}
- elif m=='agent.list':res={'type':'agent_list','agents':[agent()] if s['live'] and s['agent'] else []}
- elif m=='agent.explain':res={'explain':{'agent':'claude','state':s.get('status','working' if s['accepted'] else 'idle'),'manifest_source':s.get('manifest_source','bundled'),'manifest_version':'fixture-1','matched_rule':{'id':'prompt','state':'idle'},'visible_idle':not s['accepted'],'visible_working':s['accepted'],'visible_blocker':False,'screen_detection_skipped':False,'skip_state_update':False,'local_override_shadowing_remote':s.get('shadow',False),'fallback_reason':None,'warning':None}}
- elif m=='agent.prompt':
-  s['prompts'].append(p['text'])
-  s.pop('status',None)
-  s['accepted']=len(s['prompts'])>s.get('swallow',0)
-  res={'type':'agent_prompted','agent':agent()}
- else:res={'type':'ok'}
- reply={'id':r['id'],'result':res}
-elif a[:2]==['workspace','create']:
- s['creates']+=1;s.update(live=True,agent=False,accepted=False,cwd=a[a.index('--cwd')+1],pane='w1:p'+str(s['creates']))
- reply={'result':{'type':'workspace_created','workspace':{'workspace_id':'w1'},'pane':pane(),'root_pane':pane(),'tab':{'tab_id':'w1:t1'}}}
-elif a[:2]==['agent','start']:
- s['starts']+=1;s['agent']=True;s['args']=a;reply={'result':{'agent':agent()}}
-elif a==['pane','list']:reply={'result':{'panes':[pane()] if s['live'] else []}}
-elif a==['agent','list']:
- if s.get('fail_inventory'):sys.exit(1)
- reply={'result':{'agents':[agent()] if s['agent'] else []}}
-else:reply={'result':{'type':'ok'}}
-json.dump(s,open(path,'w'))
-if a==['remote-api-bridge'] and m=='agent.prompt' and os.path.exists(root+'/lose-prompt-reply'):
- os.unlink(root+'/lose-prompt-reply');sys.exit(1)
-print(json.dumps(reply))
-"#;
+const HERDR: &str = include_str!("support/coordinator-herdr.py");
 struct Lab {
     home: tempfile::TempDir,
     root: PathBuf,
@@ -583,9 +550,19 @@ fn inbox_wait_wakes_for_a_lost_attempt_without_marking_the_notice_seen() {
     assert_eq!((notice["seen"].clone(), notice["done"].clone()), (json!(false), json!(false)));
     let context = lab.ok(&["context", "demo"]);
     assert!(context.contains(notice["content"]["id"].as_str().unwrap()));
+    let after_context: Value = serde_json::from_str(&lab.ok(&["inbox", "demo", "wait", "--timeout", "1"])).unwrap();
+    assert_eq!(after_context, wake, "SEEN does not consume a worker-result wake");
+    let health:Value=serde_json::from_str(&lab.ok(&["telemetry","demo","health","evaluate","--json"])).unwrap();
+    let waiting=health["states"].as_array().unwrap().iter().find(|s|s["rule"]=="result_waiting_on_coordinator").unwrap();
+    assert_eq!(waiting["evidence"]["waiting_items"],1);
+    assert!(waiting["evidence"]["age_ms"].as_i64().is_some_and(|ms|ms>=0));
+    lab.ok(&["inbox", "done", "demo", notice["content"]["id"].as_str().unwrap()]);
     let timeout: Value = serde_json::from_str(&lab.ok(&["inbox", "demo", "wait", "--timeout", "1"])).unwrap();
     assert_eq!(timeout, json!({"items":0,"timed_out":true}));
-    lab.ok(&["inbox", "done", "demo", notice["content"]["id"].as_str().unwrap()]);
+    let health:Value=serde_json::from_str(&lab.ok(&["telemetry","demo","health","evaluate","--json"])).unwrap();
+    let waiting=health["states"].as_array().unwrap().iter().find(|s|s["rule"]=="result_waiting_on_coordinator").unwrap();
+    assert_eq!(waiting["evidence"]["waiting_items"],0);
+    assert_eq!(waiting["state"],"ok");
     assert!(db.unseen_inbox().unwrap().is_empty());
 }
 
@@ -794,4 +771,74 @@ fn canonical_command_list_names_owner_default_acceptance() {
     assert!(text.contains("Code launches automatically carry owner acceptance defaults: godot:./tools/run-tests.sh, shell:./tools/check.sh --fast"), "{text}");
     assert!(text.contains("--no-default-accept opts out for one launch"), "{text}");
     assert!(!text.contains("--accept TOOLCHAIN:COMMAND"), "{text}");
+}
+
+/// Public lifecycle API produces the actual lost-worker notice, rather than
+/// planting an inbox row or preconstructing a delivery receipt.
+fn lose_worker(lab:&Lab, name:&str) -> String {
+    use herdr_farm::domain::{Attempt,AttemptId,AttemptState,TaskState,Commit,Mutation};
+    let mut db=migration::open_active(&lab.project).unwrap();
+    lab.ok(&["task","demo","add",name,"--title","Lost worker","--expected-head",&db.current_head().unwrap().to_string()]);
+    let mut task=db.read_snapshot(None).unwrap().tasks.into_iter().find(|t|t.id.as_str()==name).unwrap();
+    let mut attempt=Attempt{id:AttemptId::new(format!("{name}-attempt")).unwrap(),task:task.id.clone(),revision:1,state:AttemptState::Running,snapshot:None,reservation:format!("{name}-reservation"),termination_observed:false};
+    task.revision+=1;task.state=TaskState::Running;task.active_attempt=Some(attempt.id.clone());
+    db.commit(Commit{expected_head:db.current_head().unwrap(),mutations:vec![Mutation::Task{expected:Some(task.revision-1),next:task},Mutation::Attempt{expected:None,next:attempt.clone()}]}).unwrap();
+    attempt.revision+=1;attempt.state=AttemptState::Lost;
+    db.commit(Commit{expected_head:db.current_head().unwrap(),mutations:vec![Mutation::Attempt{expected:Some(attempt.revision-1),next:attempt}]}).unwrap();
+    db.worker_result_inbox().unwrap().into_iter().find(|i|i.content.subject==name).unwrap().content.id
+}
+fn wake_passes(lab:&Lab, passes:&str) {lab.ok(&["ticker","run","--passes",passes]);}
+fn wake_history(lab:&Lab)->Value {
+    let health:Value=serde_json::from_str(&lab.ok(&["telemetry","demo","health","--json"])).unwrap();
+    health["states"].as_array().unwrap().iter().find(|s|s["rule"]=="result_waiting_on_coordinator").unwrap()["evidence"].clone()
+}
+#[test]
+fn canonical_toast_backoff_and_live_nudge_policy_survive_context_reads() {
+    let l=Lab::new();
+    let _listener=UnixListener::bind(l.home.path().join("s")).expect("socket fixture: sandbox may deny Unix sockets");
+    l.ok(&["open","demo"]);l.stop();
+    let initial=l.state()["prompts"].as_array().unwrap().len();
+    let id=lose_worker(&l,"toast-work");
+    l.ok(&["context","demo"]);
+    let mut native=l.state();native["toast_busy"]=json!(true);
+    fs::write(l.home.path().join("herdr-state.json"),serde_json::to_vec(&native).unwrap()).unwrap();
+    wake_passes(&l,"8");
+    let rejected=wake_history(&l);
+    assert!(rejected["wake"]["attempts"].as_array().unwrap().iter().any(|a|a["outcome"]=="not-shown"),"{rejected}");
+    assert_eq!(l.state()["prompts"].as_array().unwrap().len(),initial);
+    let mut native=l.state();native["toast_busy"]=json!(false);
+    fs::write(l.home.path().join("herdr-state.json"),serde_json::to_vec(&native).unwrap()).unwrap();
+    wake_passes(&l,"30");
+    assert_eq!(wake_history(&l)["wake"]["claim"]["phase"],"confirmed");
+    let before=wake_history(&l)["wake"]["attempts"].as_array().unwrap().len();
+    wake_passes(&l,"5");
+    assert_eq!(wake_history(&l)["wake"]["attempts"].as_array().unwrap().len(),before);
+    let md=l.project.join("PROJECT.md");
+    fs::write(&md,fs::read_to_string(&md).unwrap().replace("nudge = false","nudge = true")).unwrap();
+    fs::write(l.home.path().join("coordinator-status"),"idle").unwrap();
+    wake_passes(&l,"8");
+    assert_eq!(l.state()["prompts"].as_array().unwrap().len(),initial+1,"enabling nudge prompts an already toasted unfinished result");
+    l.ok(&["inbox","done","demo",&id]);
+    assert_eq!(wake_history(&l)["waiting_items"],0);
+}
+#[test]
+fn canonical_wake_lost_reply_fences_replay_until_done_and_releases_new_results() {
+    let l=Lab::new();
+    let _listener=UnixListener::bind(l.home.path().join("s")).expect("socket fixture: sandbox may deny Unix sockets");
+    let md=l.project.join("PROJECT.md");
+    fs::write(&md,fs::read_to_string(&md).unwrap().replace("nudge = false","nudge = true")).unwrap();
+    l.ok(&["open","demo"]);l.stop();
+    fs::write(l.home.path().join("coordinator-status"),"idle").unwrap();
+    let initial=l.state()["prompts"].as_array().unwrap().len();
+    let id=lose_worker(&l,"lost-reply");
+    fs::write(l.home.path().join("lose-prompt-reply"),"").unwrap();
+    wake_passes(&l,"8");
+    assert_eq!(l.state()["prompts"].as_array().unwrap().len(),initial+1);
+    assert_eq!(wake_history(&l)["wake"]["claim"]["phase"],"uncertain");
+    l.ok(&["context","demo"]);wake_passes(&l,"8");
+    assert_eq!(l.state()["prompts"].as_array().unwrap().len(),initial+1);
+    l.ok(&["inbox","done","demo",&id]);
+    lose_worker(&l,"new-result");wake_passes(&l,"8");
+    assert_eq!(l.state()["prompts"].as_array().unwrap().len(),initial+2);
+    assert_eq!(wake_history(&l)["wake"]["claim"]["phase"],"confirmed");
 }

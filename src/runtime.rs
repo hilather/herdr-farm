@@ -392,3 +392,13 @@ pub fn cancel_attempt(project:&Path,id:&crate::domain::AttemptId,revision:u64,he
 pub fn unseen_inbox(project: &Path) -> Result<Vec<crate::domain::InboxItem>> {
     Ok(migration::open_active_read_only(project)?.unseen_inbox()?)
 }
+
+/// Unseen ordinary notices plus unfinished worker-result notices, even after context.
+pub fn wake_inbox(project: &Path) -> Result<Vec<crate::domain::InboxItem>> {
+    Ok(migration::open_active_read_only(project)?.wake_inbox()?)
+}
+
+/// Unfinished worker-result rows through the inbox primary-key prefix index.
+pub fn worker_result_inbox(project: &Path) -> Result<Vec<crate::domain::InboxItem>> {
+    Ok(migration::open_active_read_only(project)?.worker_result_inbox()?)
+}

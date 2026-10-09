@@ -561,7 +561,7 @@ mod memory_reconciliation;
 mod worker_knowledge;
 mod targeted;
 pub(crate) mod effect_rows;
-pub use effect_rows::{BindingOutputRows, FinalizationRows, NotificationRows};
+pub use effect_rows::{CoordinatorWakeRows, BindingOutputRows, FinalizationRows, NotificationRows};
 pub use targeted::{hot_path_uses_snapshot, targeted_mismatch_count, HotPathRead, HOT_PATH_READ};
 mod observability;
 pub use observability::FactoryNumbers;

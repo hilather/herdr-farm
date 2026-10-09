@@ -159,3 +159,18 @@ cap. Its lab stop retries the public `ticker stop` command for up to 30 seconds,
 since a stop requested mid-pass can exceed the scaled CLI stop wait. Production
 stop timing and resting-pass observation remain unchanged; budgeting the full
 worker-attention snapshot is follow-up work.
+
+## Canonical result wake labs (COORD-WAKE-ON-SUBMIT-1)
+
+Canonical result wakes use the shared claim retry/backoff timing and the existing
+executor. Native calls retain their unscaled budgets; a wake job has a 45-second
+real deadline, and its admission uses the canonical work pass while queued.
+The normal healthy ticker target is one 15-second pass plus that budget (60 s)
+after idle is observable. Contention, missing readiness and native failures may
+exceed it; a working coordinator is never intentionally interrupted. The worker
+E2E asserts the real 60-second bound after setting the fake native coordinator
+idle, and asserts only one prompt across repeated submissions and ticker restarts.
+All lab CLI and ticker processes use `tests/support/time-scale.txt`; no owner
+process timing or project configuration is changed. Socket fixtures still need
+the steward's unsandboxed run. Context marks results SEEN but only DONE consumes
+the worker-result wake; the socket-free lost-attempt CLI workflow verifies this.

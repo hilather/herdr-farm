@@ -235,7 +235,7 @@ pub fn wait(ctx: &crate::paths::Ctx, slug: &str, timeout: u64) -> Result<()> {
         let ids: Vec<String>;
         #[cfg(feature="state-store")]
         if project::ensure_legacy(&dir).is_err() {
-            ids = herdr_farm::runtime::unseen_inbox(&dir)?.into_iter().map(|i| i.content.id).collect();
+            ids = herdr_farm::runtime::wake_inbox(&dir)?.into_iter().map(|i| i.content.id).collect();
         } else {
             let project = Project::load(&ctx.root, slug)?;
             let seen = seen(&project);

@@ -466,6 +466,8 @@ pub(crate) fn background_memory(ctx:&Ctx)->Result<Memory> {
     #[cfg(feature="state-store")]
     let runner:std::sync::Arc<dyn crate::runner::Runner+Send+Sync>=std::sync::Arc::new(crate::canonical_notification_jobs::JobRunner{inner:runner});
     #[cfg(feature="state-store")]
+    let runner:std::sync::Arc<dyn crate::runner::Runner+Send+Sync>=std::sync::Arc::new(crate::canonical_coordinator::wake::JobRunner{inner:runner});
+    #[cfg(feature="state-store")]
     let runner:std::sync::Arc<dyn crate::runner::Runner+Send+Sync>=std::sync::Arc::new(crate::attempt_token_jobs::JobRunner{inner:runner,memory:memory.attempt_tokens.clone()});
     #[cfg(feature="state-store")]
     let runner:std::sync::Arc<dyn crate::runner::Runner+Send+Sync>=std::sync::Arc::new(crate::canonical_finalization_jobs::JobRunner{inner:runner});

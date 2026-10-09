@@ -716,17 +716,28 @@ fn editing_submission_lab(route: &str, policy: &str, verify: bool, integrate: bo
 }
 /// As `editing_submission_lab`, with the worker built from `agent`.
 fn editing_submission_lab_with(route: &str, policy: &str, verify: bool, integrate: bool, agent: &str) -> (Lab, AttemptId, PathBuf) {
+    editing_submission_lab_with_wake(route,policy,verify,integrate,agent,false)
+}
+fn editing_submission_lab_with_wake(route: &str, policy: &str, verify: bool, integrate: bool, agent: &str, wake: bool) -> (Lab, AttemptId, PathBuf) {
     let mut lab = Lab::new("unknown_usage='allow_with_warning'\n");
     if !integrate {
         lab.git(&["config", "user.name", "Repository worker"]);
         lab.git(&["config", "user.email", "repository@example.invalid"]);
     }
     let (contract, base) = lab.install_work_contract_policy(route, policy);
+    if wake {
+        let helper=lab.path("coordinator-herdr");
+        fs::write(&helper,include_str!("support/coordinator-herdr.py")).unwrap();
+        fs::set_permissions(&helper,fs::Permissions::from_mode(0o700)).unwrap();
+        let original=fs::read_to_string(&lab.herdr).unwrap();
+        let dispatch=format!("import os,sys\nif os.environ.get('HERDR_SOCKET_PATH','').endswith('coordinator.sock'):os.execv({0:?},[{0:?}]+sys.argv[1:])\n",helper.to_string_lossy());
+        fs::write(&lab.herdr,original.replacen("#!/usr/bin/python3\n",&format!("#!/usr/bin/python3\n{dispatch}"),1)).unwrap();
+    }
     // Reservation freezes the executable digest. Supply attempt-specific data
     // through a fixture file instead of rebuilding the worker afterward.
     let template_path = lab.path("submission-template.json");
     lab.write_agent(agent, &[("ROOT", lab.path("root").canonicalize().unwrap().display().to_string()), ("TEMPLATE_PATH", template_path.display().to_string())]);
-    let (_, attempt) = lab.reserve("Retained instructions");
+    let (_, attempt) = lab.reserve(if wake {"+++\nname = \"demo\"\nnudge = true\n+++\nRetained instructions"} else {"Retained instructions"});
     let worktree = lab.planned_worktree(&attempt);
     let repository = lab.repo.canonicalize().unwrap().display().to_string();
     lab.git(&["branch", "integration"]);
@@ -803,8 +814,10 @@ fn accepted_editing_worker_completes_automatically_after_integration() {
     assert!(context.status.success(), "{}", String::from_utf8_lossy(&context.stderr));
     let text = String::from_utf8(context.stdout).unwrap();
     for item in &notices { assert!(text.contains(item["content"]["id"].as_str().unwrap())); }
-    assert_eq!(lab.ok(&["inbox", "demo", "wait", "--timeout", "1"]), json!({"items":0,"timed_out":true}));
+    let after_context=lab.ok(&["inbox", "demo", "wait", "--timeout", "1"]);
+    assert_eq!(after_context["items"].as_u64(),Some(notices.len() as u64),"{after_context}");
     lab.ok(&["inbox", "done", "demo", "--all"]);
+    assert_eq!(lab.ok(&["inbox", "demo", "wait", "--timeout", "1"]), json!({"items":0,"timed_out":true}));
     lab.run_quiet(5);
     let replayed = lab.ok(&["inbox", "list", "demo"]);
     assert_eq!(replayed.as_array().unwrap().iter().filter(|i| i["content"]["id"].as_str().unwrap().starts_with("worker-result-")).count(), notices.len());
@@ -3979,5 +3992,63 @@ fn stale_sealed_brief_authority_fails_once_without_prompt_or_retry() {
         assert_eq!(lab.events("attempt.launch_failed").len(), 1);
         assert_eq!(lab.state().inbox.iter().filter(|i| i.content.kind == "attempt.launch_failure").count(), 1);
         assert_eq!(lab.count("agent.prompt"), 0);
+    }
+}
+
+/// Real isolated worker submission and verification, native coordinator priming,
+/// scripted context reads, and ticker delivery through their public entry points.
+#[test]
+fn verified_worker_results_wake_idle_coordinator_once_and_defer_while_busy() {
+    use std::os::unix::net::UnixListener;
+    for busy in [false,true] {
+        let (mut lab,attempt,_)=editing_submission_lab_with_wake("verify_only",WORK_POLICY,true,false,SUBMITTING_EDITING_AGENT,true);
+        let _listener=UnixListener::bind(lab.path("coordinator.sock")).expect("socket fixture: sandbox may deny Unix sockets");
+        lab.serve();
+        let open=Command::new(BIN).env_clear().env("HOME",lab.home.path()).env("PATH","/usr/bin:/bin")
+            .env("HERDR_BIN_PATH",&lab.herdr).env("HERDR_SOCKET_PATH",lab.path("coordinator.sock"))
+            .env("HERDR_FARM_TEST_TIME_SCALE",include_str!("support/time-scale.txt").trim())
+            .args(["--root",lab.path("root").to_str().unwrap(),"open","demo"]).output().unwrap();
+        assert!(open.status.success(),"{}",String::from_utf8_lossy(&open.stderr));
+        // Open starts a ticker; stop it before setting the test's readiness state.
+        lab.ok(&["ticker","stop"]);
+        let state=||->Value {serde_json::from_slice(&fs::read(lab.path("herdr-state.json")).unwrap()).unwrap()};
+        let initial=state()["prompts"].as_array().unwrap().len();
+        fs::write(lab.path("coordinator-status"),"working").unwrap();
+        let mut ticker=lab.spawn();
+        lab.wait_for(&mut ticker,"worker submitted and verified",&attempt,120,&|| {
+            let s=lab.state();s.inbox.iter().any(|i|i.content.kind=="verification.accepted")
+        });
+        // context marks notices SEEN; the automatic wake and blocking wait survive.
+        lab.ok_live(&||["context","demo"].map(String::from).to_vec());
+        assert!(lab.ok_live(&||["inbox","demo","wait","--timeout","1"].map(String::from).to_vec())["items"].as_u64().unwrap()>0);
+        assert_eq!(state()["prompts"].as_array().unwrap().len(),initial,"a working coordinator is never interrupted");
+        lab.stop(ticker);
+        if busy {
+            lab.run_quiet(6);
+            assert_eq!(state()["prompts"].as_array().unwrap().len(),initial);
+        }
+        fs::write(lab.path("coordinator-status"),"idle").unwrap();
+        let became_idle=std::time::Instant::now();
+        ticker=lab.spawn();
+        lab.wait_for(&mut ticker,"exactly one coordinator wake",&attempt,60,&||state()["prompts"].as_array().unwrap().len()>initial);
+        assert!(became_idle.elapsed()<std::time::Duration::from_secs(60));
+        lab.stop(ticker);
+        let prompts=state()["prompts"].as_array().unwrap().clone();
+        assert_eq!(prompts.len(),initial+1);
+        assert!(prompts.last().unwrap().as_str().unwrap().starts_with("[herdr-farm ticker: automated, not the user, approves nothing]"));
+        // Replays and a restart while still idle cannot repeat the wake.
+        lab.ok(&["result","demo","submit-captured",attempt.as_str()]);
+        lab.run_quiet(8);
+        assert_eq!(state()["prompts"].as_array().unwrap().len(),initial+1);
+        let health=lab.ok(&["telemetry","demo","health","--json"]);
+        let waiting=health["states"].as_array().unwrap().iter().find(|s|s["rule"]=="result_waiting_on_coordinator").unwrap();
+        assert!(waiting["evidence"]["waiting_items"].as_u64().unwrap()>0);
+        let attempts=waiting["evidence"]["wake"]["attempts"].as_array().unwrap();
+        assert_eq!(attempts.len(),1,"{waiting}");
+        assert_eq!(attempts[0]["outcome"],"confirmed");
+        lab.ok(&["inbox","done","demo","--all"]);
+        lab.run_quiet(5);
+        assert_eq!(lab.ok(&["inbox","demo","wait","--timeout","1"]),json!({"items":0,"timed_out":true}));
+        assert_eq!(state()["prompts"].as_array().unwrap().len(),initial+1);
     }
 }

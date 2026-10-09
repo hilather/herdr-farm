@@ -81,6 +81,20 @@ impl SqliteStore {
         read_unseen(&self.connection)
     }
 
+    /// Waiting clients retain worker-result evidence until an explicit DONE.
+    pub fn wake_inbox(&self) -> Result<Vec<InboxItem>> {
+        check_schema(&self.connection)?;
+        let mut items: std::collections::BTreeMap<_,_>=read_unseen(&self.connection)?.into_iter().map(|i|(i.content.id.clone(),i)).collect();
+        for item in self.worker_result_inbox()? {items.insert(item.content.id.clone(),item);}
+        Ok(items.into_values().collect())
+    }
+
+    /// Prefix-indexed unfinished result evidence, independent of SEEN.
+    pub fn worker_result_inbox(&self) -> Result<Vec<InboxItem>> {
+        check_schema(&self.connection)?;
+        read_matching(&self.connection,"WHERE done=0 AND id GLOB 'worker-result-*'",None)
+    }
+
     /// Safe internal adapter: inspect, insert/deduplicate, and receipt commit in
     /// one SQLite transaction. It never retries an external/terminal effect.
     pub fn drain_inbox(&mut self,expected_head:u64,now:i64)->Result<usize> {

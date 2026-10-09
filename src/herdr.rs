@@ -192,6 +192,11 @@ pub struct Created {
 }
 
 impl<'a> Herdr<'a> {
+    /// Send one bounded JSON API frame through this session's configured runner.
+    pub fn api_request(&self, frame: String) -> Result<Output> {
+        self.runner.run(&self.cmd(CALL_TIMEOUT).arg("remote-api-bridge").stdin(frame))
+    }
+
     /// Runs one herdr command and returns the `result` object of its JSON reply.
     pub fn call(&self, args: &[&str], timeout: Duration) -> Result<serde_json::Value, HerdrError> {
         self.call_with_silent_success(args, timeout, false)

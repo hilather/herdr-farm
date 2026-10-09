@@ -91,7 +91,7 @@ pub fn poll_queued_effects(ctx:&Ctx,path:&Path,turn:u64,reads:&mut observations:
     reads.service_pass(path,result.services_contended);
     Ok(result)
 }
-fn finish_poll(ctx:&Ctx,path:&Path,turn:u64,reachable:bool,observation_error:Option<String>,effects:Option<&mut crate::copy_jobs::Queue>,background_plan:Option<bool>)->Result<PollResult> {
+fn finish_poll(ctx:&Ctx,path:&Path,turn:u64,reachable:bool,observation_error:Option<String>,mut effects:Option<&mut crate::copy_jobs::Queue>,background_plan:Option<bool>)->Result<PollResult> {
     // Background maintenance owns planning. Foreground callers retain their
     // explicit synchronous service; either path still offers independent effects.
     let scheduled=match background_plan {Some(active)=>Ok(herdr_farm::routines::ScheduleTurn{active,diagnostic:None}),None=>herdr_farm::routines::schedule_turn(path,turn)};
@@ -112,7 +112,7 @@ fn finish_poll(ctx:&Ctx,path:&Path,turn:u64,reachable:bool,observation_error:Opt
         match run(path) {Ok(pending)=>pending,Err(error)=>{let text=format!("{name}: {error:#}");if service_lock_contention(&error){service_lock_errors.push(text);}else{errors.push(text);}true}}
     };
     let stop_work=service("barrier stop service",&|path|Ok(herdr_farm::store::service_project_barrier_stops(path)?.pending));
-    let (admission_log,result)=process_next_with_launches(ctx,&path,turn,effects,launch_dispatch_enabled());
+    let (admission_log,result)=process_next_with_launches(ctx,path,turn,effects.as_deref_mut(),launch_dispatch_enabled());
     let wait_work=service("wait service",&|path|Ok(herdr_farm::store::service_project_waits(path)?.pending));
     let replan_work=service("replan request service",&|path|Ok(herdr_farm::store::service_project_replans(path)?.pending));
     let verification_work=service("verification job service",&|path|Ok(herdr_farm::store::service_project_verification_jobs(path)?.pending));
@@ -121,6 +121,17 @@ fn finish_poll(ctx:&Ctx,path:&Path,turn:u64,reachable:bool,observation_error:Opt
         match herdr_farm::store::service_project_result_completions(path) {
             Ok((pending,diagnostic))=>{if let Some(reason)=diagnostic {errors.push(format!("result completion service: {reason}"));}pending},
             Err(error)=>{let text=format!("result completion service: {error:#}");if service_lock_contention(&error){service_lock_errors.push(text);}else{errors.push(text);}true},
+        }
+    };
+    let wake_work=if root_owned {true} else {
+        match crate::canonical_coordinator::wake::needed(path) {
+            Ok(true)=>{
+                let wake=match effects {Some(ref mut queue)=>queue.offer_canonical_wake(ctx,path),None=>crate::canonical_coordinator::wake::run(ctx,path)};
+                if let Err(error)=wake {errors.push(format!("coordinator wake: {error:#}"));}
+                true
+            },
+            Ok(false)=>false,
+            Err(error)=>{errors.push(format!("coordinator wake: {error:#}"));false},
         }
     };
     // An automatic pause (a pane lost before its worker's end was recorded, a
@@ -140,7 +151,7 @@ fn finish_poll(ctx:&Ctx,path:&Path,turn:u64,reachable:bool,observation_error:Opt
         Ok((progress,admission))=>{if let Some(error)=admission {errors.push(format!("admission: {error}"));}(progress,false)}
         Err(error)=>{errors.push(format!("{error:#}"));(false,queued)}
     };
-    Ok(PollResult{reachable:reachable||progress,scheduled_work:routine_work||wait_work||stop_work||replan_work||verification_work||integration_work||completion_work,unknown_effects,operation_error:(!errors.is_empty()).then(||errors.join("; ")),admission_log,services_contended:(!root_owned).then_some(!service_lock_errors.is_empty()),service_lock_errors,notices})
+    Ok(PollResult{reachable:reachable||progress,scheduled_work:wake_work||routine_work||wait_work||stop_work||replan_work||verification_work||integration_work||completion_work,unknown_effects,operation_error:(!errors.is_empty()).then(||errors.join("; ")),admission_log,services_contended:(!root_owned).then_some(!service_lock_errors.is_empty()),service_lock_errors,notices})
 }
 // Only actual effect.lock contention grants a service priority turn.
 fn service_lock_contention(error:&anyhow::Error)->bool {

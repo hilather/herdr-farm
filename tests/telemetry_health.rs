@@ -1296,7 +1296,7 @@ fn rule_table_is_declared_with_bounded_labels() {
     let rules = p.json(&["health", "rules"]);
     assert_eq!((&rules["rules_version"], &rules["labels"]), (&json!("health-rules.v5"), &json!(["project", "family", "rule", "service", "role"])));
     let names: Vec<&str> = rules["rules"].as_array().unwrap().iter().map(|r| r["rule"].as_str().unwrap()).collect();
-    assert_eq!(names, ["launch_stalled", "test_weakening", "verification_flaky", "usage_after_termination", "collector_stale", "usage_coverage", "cost_coverage", "accounting_conflict", "budget_exposure", "fix_reopened", "integration_reverted",
+    assert_eq!(names, ["launch_stalled", "result_waiting_on_coordinator", "test_weakening", "verification_flaky", "usage_after_termination", "collector_stale", "usage_coverage", "cost_coverage", "accounting_conflict", "budget_exposure", "fix_reopened", "integration_reverted",
         "latency_shift", "attempt_cost_shift", "service_throttled", "quota_headroom", "waiting_on_you", "recommendation_stale"]);
     let quota = rules["rules"].as_array().unwrap().iter().find(|r| r["rule"] == "quota_headroom").unwrap();
     assert_eq!(quota["thresholds"], json!({"direction": "below", "warn": 20000, "critical": 5000, "unit": "millipercent_remaining", "window_ms": null, "cooldown_ms": HOUR}));
