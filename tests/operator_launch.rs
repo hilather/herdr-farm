@@ -778,7 +778,16 @@ fn launch_run_with_a_dedicated_server_after_verify_interaction_reserves_both_kin
         let output = format!("docs/{task}.md");
         let mut args = lab.run_args(task, profile, &output, prompt.to_str().unwrap());
         args.push("--prepare-only");
-        let report = lab.ok(&args);
+        // The server record must stay owner-only even with a shared host umask.
+        use std::os::unix::process::CommandExt;
+        let mut command = lab.command(&args);
+        // SAFETY: umask is async-signal-safe and changes only this child.
+        unsafe { command.pre_exec(|| { libc::umask(0o002); Ok(()) }); }
+        let out = command.output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+        let record = lab.root.join(format!(".herdr-run/demo-{task}/herdr/server.json"));
+        assert_eq!(fs::metadata(record).unwrap().mode() & 0o777, 0o600);
         assert!(report["attempt"].is_null(), "{report}");
         assert_eq!(report["viewer"]["status"], "unavailable");
         assert!(Path::new(report["herdr_socket"].as_str().unwrap()).exists(), "{report}");
@@ -1166,7 +1175,9 @@ fn canonical_worker_viewers_create_reopen_focus_and_close_only_the_recorded_tab(
         .env("HERDR_SOCKET_PATH", &owner.socket).output().unwrap();
     assert!(output.status.success());
     fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o660)).unwrap();
     let opened = lab.ok(&["launch", "demo", "view", "--task", "visible"]);
+    assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o600);
     let output = Command::new(lab.home.join("bin/herdr")).args(["tab", "close", opened["viewer"]["tab"].as_str().unwrap()])
         .env("HERDR_SOCKET_PATH", &owner.socket).output().unwrap();
     assert!(output.status.success());

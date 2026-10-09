@@ -3617,6 +3617,25 @@ fn owner_uid_policy_is_retained_in_approved_launch_inputs_without_a_server() {
 }
 
 #[test]
+fn launch_store_commit_abort_and_stale_claim_leave_state_unchanged() {
+    let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+    let (_, attempt) = lab.reserve("Failed commits and wrong observation revisions are read-only.");
+    let before = lab.state();
+    let operation = before.attempt_inputs.iter().find(|i| i.attempt == attempt).unwrap().operation.clone();
+    let revision = before.deliveries.iter().find(|d| d.operation == operation).unwrap().revision;
+    let mut db = migration::open_active(&lab.project).unwrap();
+    assert!(matches!(db.claim_operation(&operation, revision + 1, "fixture", jiff::Timestamp::now().as_millisecond(), 30_000),
+        Err(herdr_farm::store::StoreError::Conflict)));
+    assert_eq!(lab.state(), before);
+    let raw = rusqlite::Connection::open(lab.project.join(".state/state.db")).unwrap();
+    raw.execute_batch("CREATE TRIGGER refuse_claim BEFORE UPDATE ON operation_delivery BEGIN SELECT RAISE(ABORT,'fixture commit failure'); END;").unwrap();
+    let error = db.claim_operation(&operation, revision, "fixture", jiff::Timestamp::now().as_millisecond(), 30_000).unwrap_err();
+    assert!(matches!(&error, herdr_farm::store::StoreError::Io(message) if message.contains("fixture commit failure")), "{error}");
+    assert_eq!(lab.state(), before);
+    assert!(lab.state().inbox.iter().all(|i| i.content.kind != "attempt.launch_failure"));
+}
+
+#[test]
 fn launch_revision_conflict_reselects_without_duplicate_resources_or_brief() {
     let mut lab = Lab::new("unknown_usage='allow_with_warning'");
     let (_, attempt) = lab.reserve("Retry a stale revision through durable boundaries.");
@@ -3629,7 +3648,12 @@ fn launch_revision_conflict_reselects_without_duplicate_resources_or_brief() {
     herdr_farm::canonical_worker::advance_launch(&lab.project, &operation, 1,
         Instant::now() + Duration::from_secs(45), Default::default()).unwrap();
     let mut ticker = lab.spawn();
-    lab.wait(&mut ticker, 120, &|| lab.count("agent.prompt") == 1);
+    lab.wait(&mut ticker, 120, &|| {
+        let state = lab.state();
+        state.attempts.iter().any(|a| a.id == attempt && a.state == AttemptState::Running)
+            && state.operations.iter().filter(|o| o.kind == "runtime.worker_brief").any(|o|
+                state.deliveries.iter().any(|d| d.operation == o.id && d.state == DeliveryState::Confirmed))
+    });
     lab.stop(ticker);
     assert_eq!(lab.count("workspace.create_command"), 1);
     assert_eq!(lab.count("agent.prompt"), 1);
@@ -3669,7 +3693,13 @@ fn persistent_launch_conflict_closes_attempt_and_notifies_once() {
         assert!(notices[0].content.body.contains("launch_conflict"));
         if worktrees_ready {
             assert_eq!(lab.events("runtime.worktrees_ready").len(),1);
-            assert!(lab.planned_worktree(&attempt).is_dir());
+            // Live attempt knowledge is intentionally unavailable after closure.
+            let retained = lab.state().attempt_inputs.into_iter().find(|i| i.attempt == attempt).unwrap();
+            let plans = herdr_farm::domain::worktree_plans(&retained.inputs, &attempt).unwrap();
+            assert!(!plans.is_empty());
+            for plan in plans {
+                assert!(std::path::Path::new(&plan.path).is_dir());
+            }
         }
     }
 }
@@ -3686,6 +3716,8 @@ fn ambiguous_creation_with_removed_dedicated_server_releases_capacity_once() {
         let record_dir = lab.path("root/.herdr-run/demo-work/herdr");
         fs::create_dir_all(&record_dir).unwrap();
         fs::write(record_dir.join("server.json"), serde_json::to_vec(&json!({"project":"demo","task":"work","socket":lab.socket(),"pid":lab.server.as_ref().unwrap().id()})).unwrap()).unwrap();
+        // Match the dedicated server's owner-only record, independent of host umask.
+        fs::set_permissions(record_dir.join("server.json"), fs::Permissions::from_mode(0o600)).unwrap();
         assert!(herdr_farm::canonical_worker::create_resource(&lab.project, &operation, 1,
             Instant::now() + Duration::from_secs(45), Default::default()).is_err());
         assert_eq!(lab.count("workspace.create_command"), 1);
@@ -3727,6 +3759,14 @@ fn ambiguous_creation_with_removed_dedicated_server_releases_capacity_once() {
         holder.kill().unwrap(); holder.wait().unwrap();
         assert!(blocked.is_err());
         assert!(held);
+        if !remove_record {
+            // A group-writable umask can make the old fixture fail this
+            // owner-control check even after its dedicated server disappears.
+            fs::set_permissions(&record_path, fs::Permissions::from_mode(0o660)).unwrap();
+            assert!(!migration::open_active(&lab.project).unwrap().reconcile_missing_launch_server(&operation, jiff::Timestamp::now().as_millisecond()).unwrap());
+            assert!(lab.attempt(&attempt).retains_capacity());
+            fs::set_permissions(&record_path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
         if remove_record {
             fs::create_dir_all(&record_dir).unwrap();
             fs::write(&record_path, serde_json::to_vec(&json!({"managed_by":"operator","project":"demo","task":"work","socket":lab.socket(),"pid":12345})).unwrap()).unwrap();

@@ -1183,12 +1183,22 @@ owned by the current UID or itself absent. When its `herdr/server.json` is
 present, the owner-controlled record must match the recorded socket and
 project/task and contain a valid PID; a missing record permits the same proof.
 A present unreadable, invalid, mismatched or operator-managed record fails closed.
+Dedicated-server creation and viewer updates write owner-only (0600) records
+independently of the host umask, including when rewriting an existing record.
 Unreadable process evidence owned by the current UID also fails closed. A missing socket alone remains retryable. Proven disappearance
 ends the attempt `lost`, releases capacity and retains worktree receipts and
 checkouts. `task cancel-attempt` can use the same proof, including after an earlier
 cancellation request that retained capacity.
 
-Three identical ENOENT, permission or invalid-route recovery errors stop automatic
+Reconciliation validates the caller's expected delivery revision before recording
+server disappearance. A stale caller revision, a store selection/commit error,
+and a failed native start confirmation propagate without launch-failure events.
+Only errors observing the socket pinned by a validated creation intent enter
+bounded recovery escalation. SQLite trigger-aborted writes are failed commits,
+not revision conflicts; brief expiry and aborted commits leave no new events.
+Expired or cancelled brief retries also return before conflict notification.
+
+Three identical ENOENT, permission or invalid-route socket observations stop automatic
 recovery with a permanent delivery diagnostic and one coordinator notice. Without
 proof of resource absence capacity stays held. The `launch_stalled` health rule
 warns after five minutes without launch progress and is critical after fifteen

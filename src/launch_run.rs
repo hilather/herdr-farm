@@ -22,6 +22,15 @@ use std::{
 /// Beside a dedicated server's logs: its process id and socket.
 const SERVER_RECORD: &str = "server.json";
 
+/// Loss recovery requires an owner-controlled record regardless of host umask.
+fn write_server_record(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file = fs::OpenOptions::new().write(true).create(true).truncate(true)
+        .mode(0o600).open(path)?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    file.write_all(bytes)
+}
+
 pub struct Args {
     pub task: String,
     pub profile: String,
@@ -455,7 +464,7 @@ fn herdr_server(run: &mut Run, herdr: &Path, task: &str, existing: Option<&Path>
         .context("Herdr server could not be started")?;
     // The record `launch stop` and the ticker's sweep use to find (and prove
     // they have found) this server again.
-    fs::write(directory.join(SERVER_RECORD), serde_json::to_vec_pretty(&json!({"pid":child.id(),"socket":socket,"project":run.slug,"task":task}))?)?;
+    write_server_record(&directory.join(SERVER_RECORD), &serde_json::to_vec_pretty(&json!({"pid":child.id(),"socket":socket,"project":run.slug,"task":task}))?)?;
     let deadline = Instant::now() + Duration::from_secs(20);
     while std::os::unix::net::UnixStream::connect(&socket).is_err() {
         ensure!(Instant::now() < deadline, "Herdr server did not open {} (see server.log beside it)", socket.display());
@@ -510,7 +519,7 @@ fn open_viewer(ctx: &Ctx, project: &Path, directory: &Path, task: &str, socket: 
     let viewer = json!({"socket":binding.identity.socket,"workspace":created.workspace_id,
         "tab":created.tab_id,"pane":created.pane_id,"label":label,"config":config});
     record["viewer"] = viewer.clone();
-    if let Err(error) = fs::write(&path, serde_json::to_vec_pretty(&record)?) {
+    if let Err(error) = write_server_record(&path, &serde_json::to_vec_pretty(&record)?) {
         close_viewer(ctx, &record);
         return Err(error.into());
     }
@@ -523,7 +532,7 @@ fn open_viewer(ctx: &Ctx, project: &Path, directory: &Path, task: &str, socket: 
     if let Err(error) = h.pane_run(&created.pane_id, &command).and_then(|()| h.verify_viewer(&created.pane_id)) {
         close_viewer(ctx, &record);
         record.as_object_mut().context("invalid server record")?.remove("viewer");
-        fs::write(&path, serde_json::to_vec_pretty(&record)?)?;
+        write_server_record(&path, &serde_json::to_vec_pretty(&record)?)?;
         return Err(error.into());
     }
     if focus { h.tab_focus(&created.tab_id)?; }

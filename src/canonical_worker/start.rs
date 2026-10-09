@@ -475,34 +475,30 @@ fn reconcile_launch_once(
     Ok(true)
 }
 
-/// Recovery stops after three identical non-transient errors. A dedicated
-/// server disappearance is decisive immediately; unproven resources stay held.
-pub fn reconcile_launch(project: &Path, operation: &OperationId, mut expected_revision: u64, deadline: Instant, cancellation: Cancellation) -> Result<bool> {
+/// Only proven failures observing this launch's recorded socket count toward
+/// bounded recovery. Caller revisions, store commits and start replay stay errors.
+pub fn reconcile_launch(project: &Path, operation: &OperationId, expected_revision: u64, deadline: Instant, cancellation: Cancellation) -> Result<bool> {
+    check(deadline, &cancellation)?;
     {
         let _guard = crate::execution_guard::RootGuard::exclusive_by(project.parent().context("project root missing")?, deadline, &cancellation)?;
+        let mut db = crate::migration::open_active_scoped(project, crate::store::controlled::ReadControl::new(deadline, cancellation.clone()))?;
+        // Validate the caller before any disappearance observation can write.
+        db.launch_advancement_selection(operation, expected_revision)?;
+        drop(db);
         if crate::migration::open_active(project)?.reconcile_missing_launch_server(operation, now())? { return Ok(true); }
     }
-    for pass in 0..3 {
-        match reconcile_launch_once(project, operation, expected_revision, deadline, cancellation.clone()) {
-            Ok(value) => return Ok(value),
-            Err(error) => {
-                let conflict = error.chain().any(|e| matches!(e.downcast_ref::<crate::store::StoreError>(), Some(crate::store::StoreError::Conflict)));
-                if conflict && pass < 2 && check(deadline,&cancellation).is_ok() {
-                    let db=crate::migration::open_active_scoped(project,crate::store::controlled::ReadControl::new(deadline,cancellation.clone()))?;
-                    expected_revision=db.current_delivery_revision(operation)?;
-                    continue;
-                }
-                let permanent = error.chain().any(|e| e.downcast_ref::<std::io::Error>().is_some_and(|e| matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::InvalidInput))
-                    || e.is::<serde_json::Error>()
-                    || matches!(e.downcast_ref::<crate::store::StoreError>(),Some(crate::store::StoreError::Invalid(_) | crate::store::StoreError::Corrupt(_))))
-                    || ["route","not a socket","requires a canonical absolute socket","session replaced","session changed"].iter().any(|text|error.to_string().contains(text));
-                if permanent || conflict {
-                    let _guard = crate::execution_guard::RootGuard::exclusive_by(project.parent().context("project root missing")?, Instant::now()+Duration::from_secs(5), &Default::default())?;
-                    if crate::migration::open_active(project)?.record_launch_failure(operation, "resource recovery", &format!("{error:#}"), conflict, now())? { return Ok(true); }
-                }
-                return Err(error);
+    match reconcile_launch_once(project, operation, expected_revision, deadline, cancellation.clone()) {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            let socket_failure = error.is::<super::resources::LaunchSocketFailure>();
+            let permanent = error.chain().any(|e| e.downcast_ref::<std::io::Error>().is_some_and(|e| matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::InvalidInput)))
+                || error.chain().any(|e| ["worker session replaced during resource observation", "worker endpoint is not a socket", "worker session requires a canonical absolute socket"].contains(&e.to_string().as_str()));
+            if socket_failure && permanent {
+                check(deadline, &cancellation)?;
+                let _guard = crate::execution_guard::RootGuard::exclusive_by(project.parent().context("project root missing")?, deadline, &cancellation)?;
+                if crate::migration::open_active(project)?.record_launch_failure(operation, "resource recovery", &format!("{error:#}"), false, now())? { return Ok(true); }
             }
+            Err(error)
         }
     }
-    unreachable!()
 }

@@ -745,7 +745,8 @@ pub fn prepare_brief(project: &Path, attempt: &AttemptId, mut revision: u64, dea
         match prepare_brief_once(project, attempt, revision, deadline, cancellation.clone()) {
             Ok(value) => return Ok(value),
             Err(error) if brief_conflict(&error) => {
-                if pass == 2 || check(deadline, &cancellation).is_err() { notify_brief_conflict(project, attempt, "brief preparation", &error)?; return Err(error); }
+                check(deadline, &cancellation)?;
+                if pass == 2 { notify_brief_conflict(project, attempt, "brief preparation", &error)?; return Err(error); }
                 check(deadline, &cancellation)?;
                 let db=crate::migration::open_active_scoped(project,crate::store::controlled::ReadControl::new(deadline,cancellation.clone()))?;
                 revision=db.current_attempt_revision(attempt)?;
@@ -761,7 +762,8 @@ pub fn deliver_brief(project: &Path, operation: &OperationId, mut revision: u64,
             Ok(value) => return Ok(value),
             Err(error) if brief_conflict(&error) => {
                 let db=crate::migration::open_active_scoped(project,crate::store::controlled::ReadControl::new(Instant::now()+Duration::from_secs(5),Default::default()))?;
-                if pass == 2 || check(deadline, &cancellation).is_err() {
+                check(deadline, &cancellation)?;
+                if pass == 2 {
                     let attempt=db.brief_attempt(operation)?;
                     drop(db);
                     notify_brief_conflict(project, &attempt, "brief delivery", &error)?;

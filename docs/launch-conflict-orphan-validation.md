@@ -308,3 +308,93 @@ The expanded orphan regression failed at that same socket fixture boundary;
 its recovery/cancellation assertions must be exercised by the steward outside
 the sandbox. The three checkout-TMPDIR `copy_jobs` environmental cases remain
 unchanged and were not selected by these suites.
+
+
+## LAUNCH-CONFLICT-ORPHAN-1c
+
+The six steward findings are addressed as follows:
+
+1. `reconcile_launch` validates the supplied revision before any disappearance
+   observation can write. It no longer adopts a fresh revision on a caller's
+   conflict. Selection and commit conflicts propagate without escalation.
+2. Recovery escalation requires a typed socket-observation failure from the API
+   using the validated creation intent. Native start confirmation, store errors,
+   JSON errors and unrelated filesystem failures propagate; they are not evidence
+   that the launch's resources failed. Three identical permanent socket failures
+   still stop recovery with capacity retained, and proven disappearance still
+   records `Lost` immediately.
+3. SQLite `SQLITE_CONSTRAINT_TRIGGER` maps to a failed-commit `Io` diagnostic,
+   rather than the generic constraint `Conflict`. A trigger's explicit abort is
+   not a revision race. Brief preparation/delivery check cancellation and expiry
+   before exhausted-conflict notification. Expiry and failed commits add no
+   failure events or brief obligations. The new E2E
+   `launch_store_commit_abort_and_stale_claim_leave_state_unchanged` creates a
+   signed launch through the CLI, exercises the public store claim API, and
+   compares persisted snapshots including approval consumption and inbox state.
+4. A terminated attempt correctly loses access to live `memory attempt-input`.
+   The persistent-conflict test reads immutable retained launch inputs through
+   the public snapshot instead, requires nonempty worktree plans, and asserts
+   every planned checkout remains. No production knowledge binding changed.
+5. `dedicated_server_gone` rejects `server.json` when `mode & 0o022 != 0`.
+   The old fixture wrote it with default permissions, so a group-writable host
+   umask could reject the intended owner-controlled record. The fixture now
+   explicitly uses mode 0600 and also tests mode 0660 rejection before restoring
+   0600. Production dedicated-record creation and viewer rewrites now explicitly
+   use 0600 too: their former `fs::write` calls had the same umask dependency.
+   Existing operator E2E coverage launches with child-only umask 0002, asserts the
+   persisted record is 0600, and verifies a viewer rewrite repairs a 0660 record.
+   Run-directory ownership, exact recorded socket, socket-parent absence,
+   matching record and the all-process `/proc` scan remain unchanged. The
+   steward's actual host umask/process evidence cannot be observed in this
+   sandbox; full orphan recovery remains subject to outside validation.
+6. The flaky test stopped the ticker once the server logged `agent.prompt`,
+   before the brief transaction necessarily committed. It now waits for both
+   persisted `Running` and a confirmed brief delivery. Its exact one-create,
+   one-prompt and running-attempt assertions and original deadline remain.
+
+Files: `src/canonical_worker.rs`, `src/canonical_worker/resources.rs`,
+`src/canonical_worker/start.rs`, `src/store/mod.rs`,
+`src/launch_run.rs`, `tests/canonical_worker.rs`, `tests/operator_launch.rs`,
+`docs/canonical-worker-launch.md`, and this report.
+No new crates, canonical or sidecar schema changes, migrations, source-text tests,
+unit tests, ignored tests, relaxed assertions or widened deadlines.
+
+
+### 1c validation
+
+Every Cargo invocation used checkout-local `TMPDIR=$PWD/target/tmp`,
+`nice -n 19 ionice -c 3`, `--locked --offline -j 3` and `--features state-store`.
+Suites ran serially with `--test-threads=3`; no socket workaround was used.
+
+| Suite | Result |
+| --- | --- |
+| Focused public-store E2E | 1 passed |
+| Combined library `canonical_worker` + `launch` | 17 passed, 82 socket-only failures, 10 pre-existing ignored |
+| Binary `launch` | 15 passed, 5 socket-only failures |
+| Full CLI `canonical_worker` | 11 passed, 53 socket-only failures |
+| Operator `operator_launch` | 30 passed, 7 socket-only failures |
+| Health `telemetry_health` | 15 passed, 1 socket-only failure |
+| Clippy `--all-targets` | Passed; existing warnings, none on changed lines |
+
+The CLI failures were 50 `Lab::serve` startup waits after Python's bind denial
+and three direct verification-lab bind failures. The library and binary failures
+reported `Operation not permitted` or the resulting native probe exit. The seven
+operator failures likewise reported socket denial/probe exit; health's sole
+failure was `recommendations_and_notices_change_no_canonical_state_and_no_dispatch`
+at its socket bind. Clippy completed successfully and its diagnostic spans were
+checked against the added/changed lines. All exact failure names are already listed in the suite inventories above; no name
+has been omitted or added. The six steward regressions compile, but their socket
+workflows cannot reach the hotfix assertions here.
+
+The three checkout-TMPDIR `copy_jobs` environmental cases were not selected by
+these suites and remain unchanged. They are environmental, not product regressions:
+`artifact_transfer_scopes_nested_thread_dirs_to_one_common_git_dir`,
+`final_worker_recovers_without_sender_and_finishes_copy_after_eligibility_loss`,
+and `retained_recovery_never_refetches_and_config_withdrawal_preserves_intent`.
+
+The binary launch suite was repeated after the final dedicated-record writer edit:
+15 passed and the same five socket-only failures. Across the five full suites,
+88 tests passed, 148 failed only at denied socket fixtures, and 10 existing
+library tests remained ignored. The standalone new public-store E2E also passed.
+No additional non-socket failures remained. Socket workflows, including the
+orphan loss proof and umask/viewer assertions, require the steward's outside run.
