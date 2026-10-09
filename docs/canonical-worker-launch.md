@@ -1130,3 +1130,87 @@ second project and scans worktrees, launch targets and bindings with one shared
 16,384-record budget. Historical fixtures retain version-2 profile evidence,
 matching approval grants and consumed uses, and confirmed delivery claim history;
 the effective-profile insertion guard remains enabled while seeding.
+
+`launch PROJECT run` records `elapsed_ms` for each completed step in its JSON
+report and prints the timing beside the step outcome. Refusals name the current
+step, its elapsed time, and the completed steps with their timings. The
+`--budget-seconds` admission window defaults to 600 seconds (1–3600 accepted),
+measured from the beginning of the command, including preflight and refresh.
+Draft and reserve each receive a fresh 60-second deadline, capped by that window;
+approval signing/import no longer consumes reserve's 60 seconds. Budget-only
+failures during draft or reserve retry internally at most three times with fresh
+step deadlines, without restarting completed steps. Other failures retain the
+existing refusal behavior. The window bounds admission deadlines; filesystem
+calls and the existing signing subprocess are not forcibly interrupted by it.
+
+Launch repository observations reserve their full five-second command budget
+plus five seconds of supervisor cleanup before starting. Insufficient remaining
+budget is a retryable admission error, never evidence of a completed transfer.
+Draft creates no reservation, and reserve commits atomically after validating
+its live proof, so a budget refusal leaves no partial reservation. The final
+refusal includes the chosen budget and retry count. No store schema changes are
+needed.
+
+Deadline trace: `--base` is resolved locally by gated Git during contract creation
+(no base fetch in `launch run`). Draft/reserve Git observations use the live
+profile proof deadline through `supervision::run`. Retained profile revalidation
+caps that deadline at 60 seconds; time waiting for its root/check locks counts
+against the step budget. Worker worktree preparation is a later operation with its own caller deadline capped
+at 45 seconds and subsequently by the worktree claim lease; its supervised Git
+commands are capped at 20 seconds. Copy jobs use their executor's absolute
+`Control` deadline, capped again at execution entry by the command timeout.
+Neither later operation inherits the operator draft/approval deadline. Native
+profile refresh uses a separate 120-second deadline capped by the launch window.
+
+### Launch conflicts and vanished dedicated servers
+
+Launch advancement reselects the current delivery revision on a store conflict,
+with at most three passes through the durable one-use phase boundaries. Worktree,
+workspace, gate and naming intents remain the replay fences. Brief preparation
+and delivery also reselect on conflicts; an uncertain prompt is never resent.
+Exhausted conflicts are recorded as `launch_conflict` in the existing event
+journal and delivery diagnostic. A reservation with no Herdr creation intent releases
+capacity, retaining any worktree receipts and checkouts. An uncertain effect retains its evidence and capacity for recovery.
+One stable `attempt.launch_failure` inbox item names the attempt, phase, error
+and recovery (`relaunch` after release, or `task cancel-attempt` with fresh
+revisions). No canonical or sidecar schema change is required.
+
+Resource recovery proves a dedicated server lost when the socket directory is
+absent and a `/proc` scan finds no process naming that socket in
+`HERDR_SOCKET_PATH`. The route must come from this launch's farm-recorded
+`runtime.launch_creation`. The `.herdr-run/<project>-<task>` directory must be
+owned by the current UID or itself absent. When its `herdr/server.json` is
+present, the owner-controlled record must match the recorded socket and
+project/task and contain a valid PID; a missing record permits the same proof.
+A present unreadable, invalid, mismatched or operator-managed record fails closed.
+Dedicated-server creation and viewer updates write owner-only (0600) records
+independently of the host umask, including when rewriting an existing record.
+Unreadable process evidence owned by the current UID also fails closed. A missing socket alone remains retryable. Proven disappearance
+ends the attempt `lost`, releases capacity and retains worktree receipts and
+checkouts. `task cancel-attempt` can use the same proof, including after an earlier
+cancellation request that retained capacity.
+
+Reconciliation validates the caller's expected delivery revision before recording
+server disappearance. A stale caller revision, a store selection/commit error,
+and a failed native start confirmation propagate without launch-failure events.
+Only errors observing the socket pinned by a validated creation intent enter
+bounded recovery escalation. SQLite trigger-aborted writes are failed commits,
+not revision conflicts; brief expiry and aborted commits leave no new events.
+Expired or cancelled brief retries also return before conflict notification.
+
+Three identical ENOENT, permission or invalid-route socket observations stop automatic
+recovery with a permanent delivery diagnostic and one coordinator notice. Without
+proof of resource absence capacity stays held. The `launch_stalled` health rule
+warns after five minutes without launch progress and is critical after fifteen
+minutes or when recovery stops with capacity retained. Operators should inspect
+the recorded effects and cancel the attempt rather than create another worker.
+
+`insufficient transfer cleanup budget` remains the typed `BudgetExhausted` path
+from LAUNCH-BUDGET-1: draft and reserve have three fresh bounded step budgets and
+never retry an uncertain external creation.
+
+Dedicated server retirement records the disappearance proof before removing its
+server record. A subsequent `cancel-attempt` on that proven lost attempt is an
+idempotent success. Failed attempts with uncertain terminal effects keep their
+task pointer and capacity so the existing cancellation and termination observer
+can still retire an acknowledged gated worker.

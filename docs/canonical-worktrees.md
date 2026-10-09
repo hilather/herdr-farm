@@ -195,3 +195,10 @@ limit still applies to non-ignored work; Git history and index preservation are
 unchanged. Version 4 manifests record the ignored exclusion roots returned by
 Git in `excluded_ignored_paths`; versions 1–3 remain loadable with an empty list.
 This changes no canonical store schema.
+
+Operator launch admission timings and retry budgets are described in
+[canonical worker launch](canonical-worker-launch.md). `launch run` no longer
+shares draft's preparation deadline with reserve. Worktree creation remains a
+later leased operation with its own 45-second cap; copy jobs keep their existing
+executor deadlines. A pre-spawn transfer budget refusal never constitutes a
+worktree or copy receipt.

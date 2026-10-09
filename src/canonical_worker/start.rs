@@ -427,7 +427,7 @@ fn target_agent(result: &Value, pane: &str, name: &str) -> Result<Value> {
 
 /// Continue observation across target discovery and start confirmation. Each
 /// service reacquires execution ownership and checks its original revision.
-pub fn reconcile_launch(
+fn reconcile_launch_once(
     project: &Path,
     operation: &OperationId,
     expected_revision: u64,
@@ -473,4 +473,35 @@ pub fn reconcile_launch(
         )?;
     }
     Ok(true)
+}
+
+/// Only proven failures observing this launch's recorded socket count toward
+/// bounded recovery. Caller revisions, store commits and start replay stay errors.
+pub fn reconcile_launch(project: &Path, operation: &OperationId, expected_revision: u64, deadline: Instant, cancellation: Cancellation) -> Result<bool> {
+    check(deadline, &cancellation)?;
+    {
+        let _guard = crate::execution_guard::RootGuard::exclusive_by(project.parent().context("project root missing")?, deadline, &cancellation)?;
+        let mut db = crate::migration::open_active_scoped(project, crate::store::controlled::ReadControl::new(deadline, cancellation.clone()))?;
+        // Validate the caller before any disappearance observation can write.
+        db.launch_advancement_selection(operation, expected_revision)?;
+        drop(db);
+        if crate::migration::open_active(project)?.reconcile_missing_launch_server(operation, now())? { return Ok(true); }
+    }
+    match reconcile_launch_once(project, operation, expected_revision, deadline, cancellation.clone()) {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            let socket_failure = error.downcast_ref::<super::resources::LaunchSocketFailure>();
+            let missing_directory = socket_failure.and_then(|failure| Path::new(&failure.socket).parent())
+                .is_some_and(|directory| std::fs::symlink_metadata(directory)
+                    .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound));
+            let permanent = error.chain().any(|e| e.downcast_ref::<std::io::Error>().is_some_and(|e| matches!(e.kind(), std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::InvalidInput) || (e.kind() == std::io::ErrorKind::NotFound && missing_directory)))
+                || error.chain().any(|e| ["worker session replaced during resource observation", "worker endpoint is not a socket", "worker session requires a canonical absolute socket"].contains(&e.to_string().as_str()));
+            if socket_failure.is_some() && permanent {
+                check(deadline, &cancellation)?;
+                let _guard = crate::execution_guard::RootGuard::exclusive_by(project.parent().context("project root missing")?, deadline, &cancellation)?;
+                if crate::migration::open_active(project)?.record_launch_failure(operation, "resource recovery", &format!("{error:#}"), false, now())? { return Ok(true); }
+            }
+            Err(error)
+        }
+    }
 }

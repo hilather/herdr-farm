@@ -271,15 +271,20 @@ impl Lab {
         assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
         String::from_utf8(out.stdout).unwrap().trim().to_owned()
     }
-    fn cli(&self, args: &[&str]) -> Output {
+    fn command(&self, args: &[&str]) -> Command {
         let mut legacy_args = args.to_vec();
         if args.first() == Some(&"new") { legacy_args.insert(1, "--legacy"); }
         let args = legacy_args.as_slice();
         // Verification's disposable server socket lives under the temporary directory.
-        Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", &self.home).env("HERDR_PROJECTS_OWNER_HOME", &self.home).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", self.home.join("bin/herdr"))
+        let mut command = Command::new(BIN);
+        command.env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", &self.home).env("HERDR_PROJECTS_OWNER_HOME", &self.home).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", self.home.join("bin/herdr"))
             .env("TMPDIR", std::env::var_os("TMPDIR").unwrap_or("/tmp".into())).env("XDG_RUNTIME_DIR", self.runtime.path())
             .envs(self.extra_env.iter().map(|(k, v)| (k.as_str(), v.as_path())))
-            .args(["--root", self.root.to_str().unwrap()]).args(args).output().unwrap()
+            .args(["--root", self.root.to_str().unwrap()]).args(args);
+        command
+    }
+    fn cli(&self, args: &[&str]) -> Output {
+        self.command(args).output().unwrap()
     }
     fn ok(&self, args: &[&str]) -> Value {
         let out = self.cli(args);
@@ -502,6 +507,8 @@ fn launch_run_reserves_a_planning_task_for_each_kind_and_reruns_safely() {
         let names: Vec<_> = report["steps"].as_array().unwrap().iter().map(|s| s["step"].as_str().unwrap()).collect();
         for step in ["profile_evidence", "project_control", "task", "contract", "queue", "scheduler_capacity", "integration_target", "herdr_server", "binding", "reconcile_and_activate", "knowledge_snapshot", "draft", "approval_import", "reserve"] {
             assert!(names.contains(&step), "{step} missing from {names:?}");
+            let timing = report["steps"].as_array().unwrap().iter().find(|s| s["step"] == step).unwrap();
+            assert!(timing["elapsed_ms"].is_u64(), "missing elapsed time: {timing}");
         }
         let knowledge = report["steps"].as_array().unwrap().iter().find(|s|s["step"] == "knowledge_snapshot").unwrap();
         assert_eq!(knowledge["detail"]["omitted_for_budget"], serde_json::json!(["memory/optional.md"]));
@@ -771,7 +778,16 @@ fn launch_run_with_a_dedicated_server_after_verify_interaction_reserves_both_kin
         let output = format!("docs/{task}.md");
         let mut args = lab.run_args(task, profile, &output, prompt.to_str().unwrap());
         args.push("--prepare-only");
-        let report = lab.ok(&args);
+        // The server record must stay owner-only even with a shared host umask.
+        use std::os::unix::process::CommandExt;
+        let mut command = lab.command(&args);
+        // SAFETY: umask is async-signal-safe and changes only this child.
+        unsafe { command.pre_exec(|| { libc::umask(0o002); Ok(()) }); }
+        let out = command.output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+        let record = lab.root.join(format!(".herdr-run/demo-{task}/herdr/server.json"));
+        assert_eq!(fs::metadata(record).unwrap().mode() & 0o777, 0o600);
         assert!(report["attempt"].is_null(), "{report}");
         assert_eq!(report["viewer"]["status"], "unavailable");
         assert!(Path::new(report["herdr_socket"].as_str().unwrap()).exists(), "{report}");
@@ -1159,7 +1175,9 @@ fn canonical_worker_viewers_create_reopen_focus_and_close_only_the_recorded_tab(
         .env("HERDR_SOCKET_PATH", &owner.socket).output().unwrap();
     assert!(output.status.success());
     fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o660)).unwrap();
     let opened = lab.ok(&["launch", "demo", "view", "--task", "visible"]);
+    assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o600);
     let output = Command::new(lab.home.join("bin/herdr")).args(["tab", "close", opened["viewer"]["tab"].as_str().unwrap()])
         .env("HERDR_SOCKET_PATH", &owner.socket).output().unwrap();
     assert!(output.status.success());
@@ -1981,4 +1999,66 @@ fn owner_default_acceptance_refuses_invalid_entries_and_policy_overflow_before_w
     assert!(context.status.success(), "{}", String::from_utf8_lossy(&context.stderr));
     let context = String::from_utf8(context.stdout).unwrap();
     assert!(context.contains("--accept TOOLCHAIN:COMMAND") && !context.contains("automatically carry owner acceptance defaults"), "{context}");
+}
+
+/// A slow native observation consumes the short admission window. No attempt
+/// is left behind; rerunning with a sufficient bound finishes and transfers the
+/// repository observations used by draft and reserve.
+#[test]
+fn launch_budget_names_consumed_step_and_rerun_reserves_once() {
+    let slow = STATIC_HERDR.replace("[ \"$1 $2\" = 'pane list' ]", "[ \"$1 $2\" = 'pane list' ] && sleep 2\n[ \"$1 $2\" = 'pane list' ]");
+    let lab = Lab::with_herdr(&slow);
+    lab.plant_launchable("codex-sol", "codex", "gpt-6.1-sol");
+    let prompt = lab.home.join("budget-prompt.txt");
+    fs::write(&prompt, "Plan the budget fixture.").unwrap();
+    let socket = lab.socket_inode_once("budget.sock");
+    let mut args = lab.run_args("budget-plan", "codex-sol", "docs/budget.md", prompt.to_str().unwrap());
+    args.extend(["--herdr-socket", socket.to_str().unwrap(), "--budget-seconds", "1"]);
+    let error = lab.fail(&args);
+    assert!(error.contains("draft") && error.contains("budget") && error.contains("ms"), "{error}");
+    let before = herdr_farm::runtime::snapshot(&lab.project).unwrap();
+    assert!(before.attempts.is_empty(), "budget refusal reserved an attempt");
+    *args.last_mut().unwrap() = "600";
+    let report = lab.ok(&args);
+    assert!(report["attempt"].is_string(), "{report}");
+    let after = herdr_farm::runtime::snapshot(&lab.project).unwrap();
+    assert_eq!(after.attempts.len(), 1);
+}
+
+/// Pause the actual CLI at draft ingress past its first preparation deadline.
+/// Draft has no durable reservation effects; it must retry with a fresh budget,
+/// then import approval and reserve exactly once with its own deadline.
+#[test]
+fn slow_draft_retries_internally_and_reserve_gets_a_fresh_budget() {
+    use std::{io::{BufRead, BufReader}, process::Stdio, time::Duration};
+    let lab = Lab::with_herdr(STATIC_HERDR);
+    lab.plant_launchable("codex-sol", "codex", "gpt-6.1-sol");
+    let prompt = lab.home.join("slow-draft.txt");
+    fs::write(&prompt, "Plan after a slow draft.").unwrap();
+    let socket = lab.socket_inode_once("slow-draft.sock");
+    let mut args = lab.run_args("slow-draft", "codex-sol", "docs/slow.md", prompt.to_str().unwrap());
+    args.extend(["--herdr-socket", socket.to_str().unwrap()]);
+    let mut child = lab.command(&args).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    let mut paused = false;
+    let mut diagnostic = String::new();
+    for line in BufReader::new(child.stderr.take().unwrap()).lines() {
+        let line = line.unwrap();
+        diagnostic.push_str(&line);
+        diagnostic.push('\n');
+        if line.starts_with("launch run: draft: try 1/3;") && !paused {
+            let pid = child.id() as libc::pid_t;
+            assert_eq!(unsafe { libc::kill(pid, libc::SIGSTOP) }, 0);
+            // This fixture deliberately exhausts an unscaled external-operation
+            // deadline; ticker acceleration does not shorten preparation budgets.
+            std::thread::sleep(Duration::from_secs(61));
+            assert_eq!(unsafe { libc::kill(pid, libc::SIGCONT) }, 0);
+            paused = true;
+        }
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "{diagnostic}");
+    assert!(paused && diagnostic.contains("draft: budget exhausted; retry 2/3"), "{diagnostic}");
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(report["attempt"].is_string());
+    assert_eq!(herdr_farm::runtime::snapshot(&lab.project).unwrap().attempts.len(), 1);
 }

@@ -154,6 +154,17 @@ impl PaneIdentity {
     }
 }
 
+/// Marks failures observing the socket pinned by a validated creation intent.
+/// Store selection/commit and native start confirmation errors are not resources.
+#[derive(Debug)]
+pub(super) struct LaunchSocketFailure { pub socket: String }
+impl std::fmt::Display for LaunchSocketFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("recorded launch socket observation failed")
+    }
+}
+impl std::error::Error for LaunchSocketFailure {}
+
 struct Api<'a> {
     executable: &'a ExecutableIdentity,
     socket: &'a str,
@@ -163,6 +174,14 @@ struct Api<'a> {
     locks: Vec<InheritedLock>,
 }
 impl Api<'_> {
+    fn check_session(&self) -> Result<()> {
+        (|| {
+            ensure!(session_identity(Path::new(self.socket))? == *self.session,
+                "worker session replaced during resource observation");
+            Ok(())
+        })().context(LaunchSocketFailure { socket: self.socket.to_owned() })
+    }
+
     /// Patched servers advertise `workspace.create_command`; stock servers omit
     /// the capability (or report false) and use the exec-into-shell launcher.
     fn direct_root_transport(&self, operation: &OperationId) -> Result<bool> {
@@ -202,10 +221,7 @@ impl Api<'_> {
     ) -> Result<Value> {
         check(self.deadline, &self.cancellation)?;
         executable(self.executable, self.deadline, &self.cancellation)?;
-        ensure!(
-            session_identity(Path::new(self.socket))? == *self.session,
-            "worker session replaced during resource creation"
-        );
+        self.check_session()?;
         let mut cmd = Cmd::new(&self.executable.path, Duration::from_secs(15))
             .arg("remote-api-bridge")
             .env("HERDR_SOCKET_PATH", self.socket)
@@ -219,10 +235,7 @@ impl Api<'_> {
         check(self.deadline, &self.cancellation)?;
         let output =
             crate::supervision::run(cmd, self.deadline, self.cancellation.clone(), &self.locks)?;
-        ensure!(
-            session_identity(Path::new(self.socket))? == *self.session,
-            "worker session changed during resource creation"
-        );
+        self.check_session()?;
         ensure!(
             output.success(),
             "native resource request failed; retain launch claim"
@@ -263,7 +276,7 @@ pub fn create_resource(
         // connection across an unlocked interval where the store could change.
         drop(db);
         drop(guard);
-        crate::worktree_preparation::prepare(project,operation,expected_revision,deadline,cancellation.clone())?;
+        crate::worktree_preparation::prepare(project,operation,expected_revision,deadline,cancellation.clone()).context("launch phase: worktree creation")?;
         let revision = if initial.attempts==0 {expected_revision.checked_add(1).context("launch revision overflow")?}else{expected_revision};
         (revision, None)
     } else { (expected_revision, Some((db, guard))) };
@@ -276,7 +289,7 @@ pub fn create_resource(
         false,
         false,
         selected_store,
-    )
+    ).context("launch phase: launch creation")
 }
 
 /// Continue only an acknowledged workspace whose gated layout was never attempted.

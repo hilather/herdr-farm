@@ -1,8 +1,18 @@
 //! Surviving Linux supervision for fixed transfer commands. This contains local
 //! descendants; it does not roll back filesystem or remote effects.
 use std::{path::Path,time::{Duration,Instant}};
-use anyhow::{Result,ensure,Context};
+use anyhow::{Result,ensure};
 use crate::runner::{Cmd,InheritedLock,Cancellation,Output,RealRunner,Runner};
+
+/// A preparation deadline or pre-spawn transfer allowance was exhausted.
+/// Callers may retry only stages whose effects are absent or atomic. This error
+/// never represents transfer success.
+#[derive(Debug)]
+pub struct BudgetExhausted(pub String);
+impl std::fmt::Display for BudgetExhausted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(&self.0) }
+}
+impl std::error::Error for BudgetExhausted {}
 
 const CLEANUP_MARGIN:Duration=Duration::from_secs(5);
 const ENVIRONMENT:&[&str]=&["HOME","USER","LOGNAME","PATH","LANG","LC_ALL","LC_CTYPE","TZ","TMPDIR",
@@ -34,9 +44,9 @@ fn command(mut target:Cmd,deadline:Instant,cancellation:Cancellation,locks:&[Inh
     target.env_clear=true;target.env_remove.clear();
     trusted_helpers()?;
     let deadline=target.deadline.map_or(deadline,|end|end.min(deadline));
-    let remaining=deadline.checked_duration_since(Instant::now()).context("transfer deadline elapsed")?;
-    let duration=target.timeout.min(remaining.checked_sub(CLEANUP_MARGIN).context("insufficient transfer cleanup budget")?);
-    ensure!(duration>=Duration::from_millis(1),"insufficient transfer execution budget");
+    let remaining=deadline.saturating_duration_since(Instant::now());
+    let duration=target.timeout.min(remaining.checked_sub(CLEANUP_MARGIN).ok_or_else(|| BudgetExhausted(format!("transfer: insufficient transfer cleanup budget (remaining {} ms; cleanup {} ms; command cap {} ms; bounded by operation deadline)", remaining.as_millis(), CLEANUP_MARGIN.as_millis(), target.timeout.as_millis())))?);
+    if duration<Duration::from_millis(1) { return Err(BudgetExhausted("transfer: insufficient transfer execution budget after reserving 5 s cleanup".into()).into()); }
     // Floor to milliseconds, never extend the caller's absolute budget.
     let millis=duration.as_millis();let seconds=format!("{}.{:03}s",millis/1000,millis%1000);
     let mut args=["--user","--map-root-user","--pid","--fork","--mount-proc","--kill-child=KILL","--",

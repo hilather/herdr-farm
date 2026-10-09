@@ -154,6 +154,7 @@ impl SqliteStore {
             return Err(StoreError::Conflict);
         }
         tx.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES('runtime.worktrees_ready',?1,?2,1,?3)",params![intent.operation.as_str(),integer(expected_revision)?,payload])?;
+        tx.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES('runtime.worktree_progress',?1,?2,1,?3)",params![intent.operation.as_str(),integer(expected_revision)?,serde_json::json!({"phase":"worktrees_ready","observed_unix_ms":now}).to_string()])?;
         if let Some(budget) = budget { budget.check()?; }
         tx.commit()?;
         Ok(())

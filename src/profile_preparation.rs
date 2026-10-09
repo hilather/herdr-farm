@@ -39,10 +39,10 @@ pub struct ProfilePreparation {
 }
 
 fn check(deadline: Instant, cancellation: &Cancellation) -> Result<()> {
-    ensure!(
-        !cancellation.is_cancelled() && Instant::now() < deadline,
-        "profile preparation cancelled or expired"
-    );
+    ensure!(!cancellation.is_cancelled(), "profile preparation cancelled");
+    if Instant::now() >= deadline {
+        return Err(crate::supervision::BudgetExhausted("profile preparation budget exhausted".into()).into());
+    }
     Ok(())
 }
 fn digest(value: &[u8]) -> String {

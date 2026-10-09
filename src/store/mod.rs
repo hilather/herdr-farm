@@ -518,6 +518,7 @@ mod scheduler;
 
 pub(crate) mod reservations;
 mod launch;
+mod launch_failure;
 mod collector_binding;
 pub use collector_binding::CollectorBinding;
 mod worktrees;

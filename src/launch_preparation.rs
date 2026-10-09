@@ -38,6 +38,15 @@ fn pending_approval() -> VersionedReference {
 
 fn git(proof: &RevalidatedProfile, path: &Path, args: &[&str]) -> Result<crate::runner::Output> {
     let command = crate::runner::Cmd::repository_git_command(path, args)?;
+    // Reserve the complete observation and supervisor cleanup before spawning.
+    // Earlier observations must not turn a later transfer into a tiny command.
+    let remaining = proof.deadline().saturating_duration_since(Instant::now());
+    let required = command.timeout + Duration::from_secs(5);
+    if remaining < required {
+        return Err(crate::supervision::BudgetExhausted(format!(
+            "transfer: launch observation budget exhausted; remaining {} ms, required {} ms (command plus cleanup); retry with fresh step deadline",
+            remaining.as_millis(), required.as_millis())).into());
+    }
     let output = crate::supervision::run(command, proof.deadline(), proof.cancellation(), &proof.inherit()?)?;
     ensure!(!output.stdout_truncated && !output.stderr_truncated, "repository observation exceeded output bounds");
     Ok(output)

@@ -344,7 +344,7 @@ impl SqliteStore {
         let mut attempt = read_attempt_with_budget(&tx,&receipt.target.attempt,budget)?;
         if attempt.revision != expected_revision
             || attempt.termination_observed
-            || attempt.state != AttemptState::Reserved
+            || !matches!(attempt.state, AttemptState::Reserved | AttemptState::Failed)
         {
             return Err(StoreError::Conflict);
         }

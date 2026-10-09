@@ -202,6 +202,9 @@ enum LaunchCommand {
         #[arg(long)] herdr_socket: Option<PathBuf>,
         /// Stop before reserving. A new binding pauses the project until no attempt is unfinished, so prepare every task first, then run each again to reserve
         #[arg(long)] prepare_only: bool,
+        /// Admission deadline for this run, including profile refresh and retries
+        #[arg(long, default_value_t=600, value_parser=clap::value_parser!(u64).range(1..=3600))]
+        budget_seconds: u64,
     },
     /// Stop the dedicated Herdr server `launch run` started for a task and
     /// remove its socket directory. The ticker does this by itself once the
@@ -1420,8 +1423,8 @@ pub fn run(#[cfg(feature="state-store")] capture: &mut crate::cli_invocation::Ca
             let value=match command {
                 LaunchCommand::Draft { selection, expected_head, validity_seconds } =>
                     serde_json::to_value(herdr_farm::launch_preparation::draft(&project,&load(&selection)?,expected_head,std::time::Duration::from_secs(validity_seconds),deadline,Default::default())?)?,
-                LaunchCommand::Run { task, profile, repository, sign_with, validity_seconds, title, plan_output, review_of, fixes_review, work_item, role, supersedes, fixes, review_kind, review_scope, write, output, accept, no_default_accept, deliverable, prompt_file, contract_file, integration_ref, base, max_active_workers, herdr_socket, prepare_only } =>
-                    crate::launch_run::run(&ctx, &slug, crate::launch_run::Args { task, profile, repository, sign_with, validity_seconds, title, plan_output, review_of, fixes_review, work_item, role, supersedes, fixes, review_kind, review_scope, write, output, accept, no_default_accept, deliverable, prompt_file, contract_file, integration_ref, base, max_active_workers, herdr_socket, prepare_only })?,
+                LaunchCommand::Run { task, profile, repository, sign_with, validity_seconds, title, plan_output, review_of, fixes_review, work_item, role, supersedes, fixes, review_kind, review_scope, write, output, accept, no_default_accept, deliverable, prompt_file, contract_file, integration_ref, base, max_active_workers, herdr_socket, prepare_only, budget_seconds } =>
+                    crate::launch_run::run(&ctx, &slug, crate::launch_run::Args { task, profile, repository, sign_with, validity_seconds, title, plan_output, review_of, fixes_review, work_item, role, supersedes, fixes, review_kind, review_scope, write, output, accept, no_default_accept, deliverable, prompt_file, contract_file, integration_ref, base, max_active_workers, herdr_socket, prepare_only, budget_seconds })?,
                 LaunchCommand::View { task } => crate::launch_run::view(&ctx, &slug, &task)?,
                 LaunchCommand::Stop { task, force } => crate::launch_run::stop(&ctx, &slug, &task, force)?,
                 LaunchCommand::Reserve { selection, approval_digest, expected_head } => {

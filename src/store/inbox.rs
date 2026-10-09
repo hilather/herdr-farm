@@ -210,6 +210,9 @@ pub(super) fn result_notice(db: &Connection, kind: &str, event: &str, task: &str
 pub(super) fn ended_notice(db: &Connection, attempt: &Attempt) -> Result<()> {
     let schema: u32 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if schema < 26 { return Ok(()); }
+    // A launch failure already filed the terminal outcome and recovery notice.
+    let launch_noticed: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM events WHERE kind='attempt.launch_failed' AND entity=?1)",[attempt.id.as_str()],|r|r.get(0))?;
+    if launch_noticed { return Ok(()); }
     let submitted: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM result_submissions WHERE attempt_id=?1)", [attempt.id.as_str()], |r| r.get(0))?;
     if !submitted {
         let receipt: Option<(String,String)> = if schema >= 62 {

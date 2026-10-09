@@ -25,6 +25,25 @@ impl ReadControl {
 /// Deref escape permits callers to replace hooks or renew an expired deadline.
 pub struct ControlledStore {store:SqliteStore,control:ReadControl,interrupted:Arc<AtomicU8>,work_budget:read_budget::ReadBudget,sql_work:Option<SqlWork>}
 impl ControlledStore {
+    pub(crate) fn current_delivery_revision(&self, operation: &OperationId) -> Result<u64> {
+        self.control.check()?;
+        super::delivery::delivery_with_budget(&self.store.connection,operation,Some(&self.work_budget)).map(|d|d.revision).map_err(|e|self.error(e))
+    }
+    pub(crate) fn current_attempt_revision(&self, attempt: &AttemptId) -> Result<u64> {
+        self.control.check()?;
+        read_attempt_with_budget(&self.store.connection,attempt,Some(&self.work_budget)).map(|a|a.revision).map_err(|e|self.error(e))
+    }
+    pub(crate) fn attempt_launch_operation(&self, attempt: &AttemptId) -> Result<OperationId> {
+        self.control.check()?;
+        super::reservations::read_attempt_input(&self.store.connection,attempt.as_str(),Some(&self.work_budget)).map(|r|r.operation).map_err(|e|self.error(e))
+    }
+    pub(crate) fn brief_attempt(&self, operation: &OperationId) -> Result<AttemptId> {
+        self.control.check()?;
+        let op=read_operation_with_budget(&self.store.connection,operation,Some(&self.work_budget)).map_err(|e|self.error(e))?;
+        if op.kind!="runtime.worker_brief" {return Err(StoreError::Invalid("brief operation kind mismatch".into()));}
+        let intent:WorkerBriefIntent=serde_json::from_value(op.payload).map_err(|e|StoreError::Corrupt(e.to_string()))?;
+        Ok(intent.attempt)
+    }
     pub(crate) fn queue_report(&mut self,now:i64)->Result<QueueReport> {
         self.control.check()?;
         self.store.queue_report_with_budget(now,&self.work_budget).map_err(|e|self.error(e))
