@@ -84,6 +84,17 @@ pub(super) fn dedicated_server_gone(record: &AttemptInputRecord, socket: &str) -
         Ok(entries) => entries,
         Err(_) => return Ok(false),
     };
+    // A server spawned with env_clear and no privilege change is dumpable and
+    // cannot gain permitted capabilities. A setcap Herdr is non-dumpable and
+    // consequently excluded by the environ ownership check as well.
+    let capabilities = |path: &Path| -> Option<u64> {
+        std::fs::read_to_string(path).ok()?.lines()
+            .find_map(|line| line.strip_prefix("CapPrm:")
+                .and_then(|value| u64::from_str_radix(value.trim(), 16).ok()))
+    };
+    let Some(own_capabilities) = capabilities(Path::new("/proc/self/status")) else {
+        return Ok(false);
+    };
     for entry in entries {
         let entry = match entry {
             Ok(entry) => entry,
@@ -92,14 +103,27 @@ pub(super) fn dedicated_server_gone(record: &AttemptInputRecord, socket: &str) -
         if entry.file_name().to_string_lossy().parse::<u32>().is_err() {
             continue;
         }
-        let env = match std::fs::read(entry.path().join("environ")) {
+        let environ = entry.path().join("environ");
+        let env = match std::fs::read(&environ) {
             Ok(env) => env,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(_) => match std::fs::metadata(entry.path()) {
-                Ok(m) if m.uid() != uid => continue,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                _ => return Ok(false),
-            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound
+                || e.raw_os_error() == Some(libc::ESRCH) => continue,
+            Err(error) => {
+                match std::fs::metadata(&environ) {
+                    Ok(m) if m.uid() != uid => continue,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound
+                        || e.raw_os_error() == Some(libc::ESRCH) => continue,
+                    Err(_) => return Ok(false),
+                    _ => {}
+                }
+                if error.kind() == std::io::ErrorKind::PermissionDenied
+                    && capabilities(&entry.path().join("status"))
+                        .is_some_and(|target| target & !own_capabilities != 0)
+                {
+                    continue;
+                }
+                return Ok(false);
+            }
         };
         if env.split(|b| *b == 0).any(|e| e == wanted.as_bytes()) {
             return Ok(false);

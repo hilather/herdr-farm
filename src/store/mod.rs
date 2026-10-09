@@ -39,11 +39,6 @@ impl fmt::Display for StoreError {
 impl std::error::Error for StoreError {}
 impl From<rusqlite::Error> for StoreError {
     fn from(error: rusqlite::Error) -> Self {
-        // A trigger's explicit ABORT is a failed commit, not a revision race.
-        // Retrying it as Conflict can incorrectly publish launch-failure events.
-        if error.sqlite_error().is_some_and(|e| e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_TRIGGER) {
-            return Self::Io(error.to_string());
-        }
         match error.sqlite_error_code() {
             Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => Self::Busy,
             Some(rusqlite::ErrorCode::DiskFull) => Self::DiskFull,

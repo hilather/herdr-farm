@@ -398,3 +398,142 @@ The binary launch suite was repeated after the final dedicated-record writer edi
 library tests remained ignored. The standalone new public-store E2E also passed.
 No additional non-socket failures remained. Socket workflows, including the
 orphan loss proof and umask/viewer assertions, require the steward's outside run.
+
+## LAUNCH-CONFLICT-ORPHAN-1d hotfix
+
+The disappearance proof now reads our own `/proc/self/status` CapPrm once.
+Unreadable process environments are excluded only for vanished tasks (ENOENT or
+ESRCH), an `environ` file owned by another uid, or permission denial with target
+permitted capabilities outside our own. The ownership check deliberately stats
+the file: a non-dumpable task's process directory still carries its euid.
+The dedicated server is spawned with `env_clear` and no privilege change, so
+these excluded processes cannot be that dumpable, zero-capability server.
+A setcap Herdr is non-dumpable too and is consistently excluded by this model.
+Unknown failures, unreadable/malformed capability status, and permission denial
+without extra capabilities still fail closed (including Yama/Landlock cases).
+This sandbox exposed no same-uid unreadable environments, so the desktop-session
+reproduction remains an outside-sandbox validation requirement.
+
+Socket NotFound contributes a permanent recovery strike only when its containing
+directory is also absent. A present directory retains capacity without strikes.
+The new CLI-lab E2E observes three missing-socket reconciliations and checks the
+persisted attempt and launch delivery remain unchanged, the attempt never becomes Failed,
+and capacity remains held. The existing permanent-recovery fixture now replaces
+the route with a regular file, preserving every assertion about bounded
+escalation. The ambiguous dedicated-server regression is unchanged.
+
+SQLite trigger ABORT once again uses the original global ConstraintViolation to
+Conflict mapping. Brief preparation and delivery reread their relevant revision
+before retrying or notifying: an unchanged revision returns the failed commit
+without publishing launch-failure events. No schema, migrations, crates, or
+process spawns were added.
+
+Validation uses checkout-local `TMPDIR`, `nice -n 19 ionice -c 3`,
+`--locked --offline -j 3 --features state-store`. The full integration run
+compiled before the final CLI-based regression edit; that final regression was
+then compiled and selected separately. No socket workaround was used.
+
+| Check | Initial result |
+| --- | --- |
+| `canonical_worker` integration | 8 passed, 57 failed: 52 socket-only, 4 read-deadline failures, 1 obsolete Io assertion |
+| `operator_launch` integration | 30 passed, 7 socket-only failures |
+| Both requested barrier regressions | 1 passed each |
+| Both requested library brief/stop regressions | Socket bind denied before assertions |
+| Final CLI transient regression | Socket bind denied before assertions |
+| Clippy all targets | Passed; existing warnings, none on changed lines |
+
+The commit-abort public-store E2E's exact error assertion now expects the
+restored `Conflict` mapping instead of the reverted global `Io` mapping. Its
+full persisted-state equality and no-launch-failure-notice assertions remain.
+
+Exact socket-only failure inventory from the initial full suites:
+
+`canonical_worker`:
+
+```text
+a_brief_swallowed_by_the_agent_is_redelivered_and_confirmed_only_once_accepted
+a_brief_the_agent_never_accepts_is_left_ambiguous_not_confirmed
+a_hidden_path_covering_the_execution_home_refuses_the_launch_before_creation
+a_launch_outlasts_an_operator_holding_the_root_after_its_workspace_creation
+a_launch_reaches_running_while_another_holder_takes_the_shared_root_intermittently
+a_legacy_thread_holding_the_planned_worktree_blocks_its_creation
+a_proven_worker_end_keeps_the_project_admitted_but_an_unexplained_pane_loss_pauses_it
+a_subdirectory_binding_runs_in_the_same_subdirectory_of_the_new_worktree
+a_worker_that_dies_without_submitting_is_noticed_and_preserved_while_another_attempts_check_runs
+a_worker_that_exits_after_submitting_is_recorded_terminated_while_another_attempts_check_runs
+a_worker_that_exits_during_its_own_verification_ends_after_the_verdict_without_contention
+a_sandboxed_reviewer_uses_its_worker_channel_through_the_spool
+accepted_editing_worker_completes_automatically_after_integration
+accepted_verify_only_editing_worker_completes_without_integration_automation
+ambiguous_creation_with_removed_dedicated_server_releases_capacity_once
+an_automatic_pause_names_its_blockers_and_lifts_itself_once_they_clear
+an_isolated_codex_worker_commits_through_codex_workspace_write_sandbox
+an_isolated_worker_cannot_read_owner_secrets_or_lift_the_hiding_but_still_commits_and_submits
+an_operator_finishes_a_worker_that_never_submitted_and_the_result_lands_automatically
+an_isolated_worker_submits_only_through_its_own_spool
+an_untracked_working_directory_is_refused_before_the_approval_is_used
+attention_mid_run_failure_remains_incomplete_at_termination
+barrier_stop_gets_a_fair_turn_and_maintenance_keeps_advancing
+canonical_attempt_sidebar_clears_after_termination_in_an_active_project
+canonical_attempt_sidebar_does_not_publish_to_a_replaced_terminal
+canonical_attempt_sidebar_refreshes_and_clears_on_pause_and_termination
+canonical_attempt_sidebar_restart_offers_no_historical_cleanup_or_native_request
+canonical_attempt_sidebar_uses_collected_usage_and_observed_waiting
+dedicated_worker_refuses_remote_manifest_before_its_brief
+concurrent_attempt_tokens_publish_and_missing_retired_server_stays_quiet
+editing_worker_requires_operator_completion_when_automation_is_off
+idle_worker_notice_restarts_stretch_and_deduplicates_within_a_ticker
+launch_revision_conflict_reselects_without_duplicate_resources_or_brief
+launch_run_reviews_use_the_claude_spool_and_record_skeptical_yield
+launch_run_reviews_use_the_codex_spool_and_record_skeptical_yield
+launch_sets_the_intended_permission_mode_over_a_stale_one_in_the_home
+persistent_launch_conflict_closes_attempt_and_notifies_once
+rejected_editing_worker_stays_running_and_can_resubmit
+repeated_nontransient_recovery_stops_and_escalates_with_capacity_retained
+review_assignment_launches_with_blind_brief_and_records_session
+submit_captured_retains_remember_from_the_attempt_report_and_replays_once
+ticker_does_not_dispatch_a_launch_cancelled_before_creation
+ticker_launches_nothing_on_a_server_without_the_launch_contract_or_while_paused
+ticker_launches_and_briefs_once_then_stops_a_cancelled_worker_while_paused_and_revoked
+ticker_recovers_a_lost_creation_reply_without_creating_again
+ticker_retires_a_cancelled_gated_worker_without_starting_it
+ticker_stops_the_dedicated_herdr_server_of_a_finished_task
+wall_budget_termination_retries_contention_and_notifies_once
+wall_budget_termination_with_changed_frozen_definition_keeps_process_exit
+wall_budget_termination_without_contention
+worker_uid_default_root_and_verification_stay_frozen
+worker_uid_owner_and_verification_stay_frozen_with_mounts_enforced
+```
+
+`operator_launch`:
+
+```text
+canonical_worker_viewers_create_reopen_focus_and_close_only_the_recorded_tab
+code_launch_passes_only_selected_toolchain_environment_to_the_worker
+launch_run_retries_after_termination_but_refuses_an_unobserved_live_worker
+launch_run_with_a_dedicated_server_after_verify_interaction_reserves_both_kinds
+stale_profile_evidence_is_refreshed_by_launch_run
+verify_interaction_produces_launchable_evidence_for_codex_and_claude_from_the_cli
+verify_interaction_tolerates_agents_writing_into_their_execution_home
+```
+
+Additional selected socket-only library failures:
+
+- `canonical_worker::tests::stop_before_brief_atomically_retires_send_and_commit_failure_keeps_capacity`
+- `canonical_worker::tests::brief_preparation_expiry_and_failed_commit_leave_no_delivery_obligation`
+
+Both fail at `src/canonical_worker/tests.rs:122` with EPERM binding the fixture
+socket. The final CLI transient E2E fails at `Lab::serve` with the same Python
+AF_UNIX bind denial. The three documented checkout-TMPDIR `copy_jobs`
+environmental cases were not selected and were not changed.
+
+Serial reruns after the final assertion correction resolved all non-socket
+failures: `launch_store_commit_abort_and_stale_claim_leave_state_unchanged`,
+`a_worker_wall_deadline_outside_one_second_to_seven_days_is_refused`, and
+`the_server_sweep_spares_a_queued_task_without_an_attempt` each passed.
+`a_worker_branch_reaching_a_corrupt_quarantined_object_is_refused` and
+`three_transient_missing_socket_observations_retain_capacity` reached only the
+expected socket bind denial. These last two names supplement the initial
+socket-only inventory above. The initial deadline failures occurred while
+low-priority compilation and suites overlapped; none remained on serial rerun.
+The final Clippy check was repeated after all code/test edits.

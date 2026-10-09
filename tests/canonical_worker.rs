@@ -3630,7 +3630,7 @@ fn launch_store_commit_abort_and_stale_claim_leave_state_unchanged() {
     let raw = rusqlite::Connection::open(lab.project.join(".state/state.db")).unwrap();
     raw.execute_batch("CREATE TRIGGER refuse_claim BEFORE UPDATE ON operation_delivery BEGIN SELECT RAISE(ABORT,'fixture commit failure'); END;").unwrap();
     let error = db.claim_operation(&operation, revision, "fixture", jiff::Timestamp::now().as_millisecond(), 30_000).unwrap_err();
-    assert!(matches!(&error, herdr_farm::store::StoreError::Io(message) if message.contains("fixture commit failure")), "{error}");
+    assert!(matches!(&error, herdr_farm::store::StoreError::Conflict), "{error}");
     assert_eq!(lab.state(), before);
     assert!(lab.state().inbox.iter().all(|i| i.content.kind != "attempt.launch_failure"));
 }
@@ -3806,6 +3806,37 @@ fn ambiguous_creation_with_removed_dedicated_server_releases_capacity_once() {
 }
 
 #[test]
+fn three_transient_missing_socket_observations_retain_capacity() {
+    let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+    let (_, attempt) = lab.reserve("Transient route disappearance retains launch capacity.");
+    fs::write(lab.path("lab/lose-create"), "").unwrap();
+    lab.serve();
+    let operation = lab.state().attempt_inputs.iter().find(|i| i.attempt == attempt).unwrap().operation.clone();
+    let mut ticker = lab.spawn();
+    lab.wait(&mut ticker, 120, &|| lab.state().deliveries.iter()
+        .any(|d| d.operation == operation && d.state == DeliveryState::Ambiguous));
+    lab.stop(ticker);
+    fs::rename(lab.socket(), lab.path("lab/unreachable.sock")).unwrap();
+    let before = lab.state();
+    let log = lab.path("root/.ticker.log");
+    for _ in 0..3 {
+        let offset = fs::read_to_string(&log).unwrap().len();
+        lab.ok(&["ticker", "run", "--passes", "10"]);
+        let observations = fs::read_to_string(&log).unwrap();
+        let fresh = &observations[offset..];
+        assert!(fresh.contains("recorded launch socket observation failed"), "{fresh}");
+        assert!(fresh.contains("No such file or directory"), "{fresh}");
+        assert!(lab.attempt(&attempt).retains_capacity());
+        assert_ne!(lab.attempt(&attempt).state, AttemptState::Failed);
+        assert_eq!(lab.attempt(&attempt), before.attempts.iter().find(|a| a.id == attempt).unwrap().clone());
+        assert_eq!(lab.state().deliveries.iter().find(|d| d.operation == operation),
+            before.deliveries.iter().find(|d| d.operation == operation));
+        assert!(lab.events("runtime.launch_recovery_error").is_empty());
+    }
+    assert_eq!(lab.count("workspace.create_command"), 1);
+}
+
+#[test]
 fn repeated_nontransient_recovery_stops_and_escalates_with_capacity_retained() {
     let mut lab = Lab::new("unknown_usage='allow_with_warning'");
     let (_, attempt) = lab.reserve("A broken external route must not retry forever.");
@@ -3815,6 +3846,7 @@ fn repeated_nontransient_recovery_stops_and_escalates_with_capacity_retained() {
     assert!(herdr_farm::canonical_worker::create_resource(&lab.project, &operation, 1,
         Instant::now() + Duration::from_secs(45), Default::default()).is_err());
     fs::rename(lab.socket(), lab.path("lab/unreachable.sock")).unwrap();
+    fs::write(lab.socket(), "not a socket").unwrap();
     for pass in 0..3 {
         let result = herdr_farm::canonical_worker::reconcile_launch(&lab.project, &operation, 2,
             Instant::now() + Duration::from_secs(45), Default::default());

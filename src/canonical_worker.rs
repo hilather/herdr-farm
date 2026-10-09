@@ -746,10 +746,14 @@ pub fn prepare_brief(project: &Path, attempt: &AttemptId, mut revision: u64, dea
             Ok(value) => return Ok(value),
             Err(error) if brief_conflict(&error) => {
                 check(deadline, &cancellation)?;
-                if pass == 2 { notify_brief_conflict(project, attempt, "brief preparation", &error)?; return Err(error); }
-                check(deadline, &cancellation)?;
                 let db=crate::migration::open_active_scoped(project,crate::store::controlled::ReadControl::new(deadline,cancellation.clone()))?;
-                revision=db.current_attempt_revision(attempt)?;
+                // Constraint-trigger aborts also map to Conflict. Only a moved
+                // revision proves a retryable race; failed commits stay event-free.
+                let current = db.current_attempt_revision(attempt)?;
+                if current == revision { return Err(error); }
+                drop(db);
+                if pass == 2 { notify_brief_conflict(project, attempt, "brief preparation", &error)?; return Err(error); }
+                revision = current;
             }
             Err(error) => return Err(error),
         }
@@ -763,6 +767,10 @@ pub fn deliver_brief(project: &Path, operation: &OperationId, mut revision: u64,
             Err(error) if brief_conflict(&error) => {
                 let db=crate::migration::open_active_scoped(project,crate::store::controlled::ReadControl::new(Instant::now()+Duration::from_secs(5),Default::default()))?;
                 check(deadline, &cancellation)?;
+                // Preserve the store-wide Conflict mapping without treating a
+                // rolled-back commit as evidence of a launch failure.
+                let current = db.current_delivery_revision(operation)?;
+                if current == revision { return Err(error); }
                 if pass == 2 {
                     let attempt=db.brief_attempt(operation)?;
                     drop(db);
@@ -770,7 +778,7 @@ pub fn deliver_brief(project: &Path, operation: &OperationId, mut revision: u64,
                     return Err(error);
                 }
                 check(deadline, &cancellation)?;
-                revision=db.current_delivery_revision(operation)?;
+                revision = current;
             }
             Err(error) => return Err(error),
         }

@@ -157,7 +157,7 @@ impl PaneIdentity {
 /// Marks failures observing the socket pinned by a validated creation intent.
 /// Store selection/commit and native start confirmation errors are not resources.
 #[derive(Debug)]
-pub(super) struct LaunchSocketFailure;
+pub(super) struct LaunchSocketFailure { pub socket: String }
 impl std::fmt::Display for LaunchSocketFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("recorded launch socket observation failed")
@@ -179,7 +179,7 @@ impl Api<'_> {
             ensure!(session_identity(Path::new(self.socket))? == *self.session,
                 "worker session replaced during resource observation");
             Ok(())
-        })().context(LaunchSocketFailure)
+        })().context(LaunchSocketFailure { socket: self.socket.to_owned() })
     }
 
     /// Patched servers advertise `workspace.create_command`; stock servers omit
