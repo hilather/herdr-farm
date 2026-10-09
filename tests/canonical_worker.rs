@@ -3812,20 +3812,20 @@ fn three_transient_missing_socket_observations_retain_capacity() {
     fs::write(lab.path("lab/lose-create"), "").unwrap();
     lab.serve();
     let operation = lab.state().attempt_inputs.iter().find(|i| i.attempt == attempt).unwrap().operation.clone();
-    let mut ticker = lab.spawn();
-    lab.wait(&mut ticker, 120, &|| lab.state().deliveries.iter()
-        .any(|d| d.operation == operation && d.state == DeliveryState::Ambiguous));
-    lab.stop(ticker);
+    // A lost creation reply leaves recovery to reconcile_launch, as in the
+    // sibling dedicated-server tests.
+    assert!(herdr_farm::canonical_worker::create_resource(&lab.project, &operation, 1,
+        Instant::now() + Duration::from_secs(45), Default::default()).is_err());
+    assert_eq!(lab.events("runtime.launch_creation").len(), 1);
+    // The socket file is missing but its directory remains: transient.
     fs::rename(lab.socket(), lab.path("lab/unreachable.sock")).unwrap();
     let before = lab.state();
-    let log = lab.path("root/.ticker.log");
     for _ in 0..3 {
-        let offset = fs::read_to_string(&log).unwrap().len();
-        lab.ok(&["ticker", "run", "--passes", "10"]);
-        let observations = fs::read_to_string(&log).unwrap();
-        let fresh = &observations[offset..];
-        assert!(fresh.contains("recorded launch socket observation failed"), "{fresh}");
-        assert!(fresh.contains("No such file or directory"), "{fresh}");
+        let error = herdr_farm::canonical_worker::reconcile_launch(&lab.project, &operation, 2,
+            Instant::now() + Duration::from_secs(45), Default::default()).unwrap_err();
+        let text = format!("{error:#}");
+        assert!(text.contains("recorded launch socket observation failed"), "{text}");
+        assert!(text.contains("No such file or directory"), "{text}");
         assert!(lab.attempt(&attempt).retains_capacity());
         assert_ne!(lab.attempt(&attempt).state, AttemptState::Failed);
         assert_eq!(lab.attempt(&attempt), before.attempts.iter().find(|a| a.id == attempt).unwrap().clone());
