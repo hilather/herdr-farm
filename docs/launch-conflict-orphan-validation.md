@@ -251,3 +251,60 @@ by reaching the socket-denied fixture on isolated rerun.
 ### Health: `--test telemetry_health`
 
 - `recommendations_and_notices_change_no_canonical_state_and_no_dispatch`
+
+
+## LAUNCH-CONFLICT-ORPHAN-1b
+
+The missing-record proof now accepts an owner-owned run directory (or an absent
+run directory) when `server.json` is missing. The socket still comes exclusively
+from this operation's identity-checked `runtime.launch_creation` route, its parent
+must be absent, and `/proc` must contain no readable environment naming that
+socket. Unreadable evidence for this UID fails closed. The scan covers all
+processes, without relying on their command-line name. Present records retain
+ownership, permissions, project/task/socket/PID and operator-management checks;
+unreadable or invalid records cannot establish loss.
+
+Recovery uses the existing `Lost` / `termination_observed=true` path, retaining
+worktrees and releasing capacity and write claims with one notice. Cancellation
+already shared this proof in `61c60a6`; no separate cancellation change or schema
+migration is needed.
+
+The existing public-entry-point E2E
+`ambiguous_creation_with_removed_dedicated_server_releases_capacity_once` now
+covers recovery and cancellation after record removal, signed inputs retained
+in the run directory, absent socket parent, ambiguous creation with no target or
+start, a live route holder whose command does not end in `server`, operator and
+invalid records, released persisted write claims, and replay notice deduplication.
+The fixture continues to cover a present dedicated record and forced stop.
+
+
+### 1b validation results
+
+All commands used checkout-local `TMPDIR=$PWD/target/tmp`, offline locked Cargo,
+`nice -n 19 ionice -c 3`, and `-j 3`. No socket workaround was attempted.
+
+| Suite | Result |
+| --- | --- |
+| Library `canonical_worker` | 2 passed, 67 socket-only failures, 10 ignored |
+| Library `launch` | 15 passed, 24 socket-only failures, 2 ignored |
+| Binary `launch` | 15 passed, 5 socket-only failures |
+| CLI `canonical_worker launch` filter | 1 passed, 12 socket-only failures |
+| Full CLI `canonical_worker` (final test edits) | 10 passed, 53 socket-only failures |
+| Operator `operator_launch` | 30 passed, 7 socket-only failures |
+| Health `telemetry_health` | 14 passed, 1 socket-only failure, 1 transient ticker timeout |
+| Isolated health ticker rerun | 1 passed |
+| Clippy `--all-targets` after final code/test edits | Passed; existing warnings, none in changed lines |
+
+The socket-only failure names are listed in the existing suite inventories above:
+all 67 library worker names, all 24 library launch names, all 5 binary launch
+names, all 53 CLI worker names, all 7 operator socket names, and the one health
+socket name (`recommendations_and_notices_change_no_canonical_state_and_no_dispatch`).
+The requested worker/launch suites had no additional failure names or non-socket
+failures. The additional health suite's
+`ticker_health_evaluates_by_default_obeys_interval_and_never_notifies` timed out
+waiting for ticker accounting in the full run, then passed its isolated rerun. CLI fixture timeouts occurred
+at `Lab::serve` after Python logged `PermissionError: Operation not permitted`.
+The expanded orphan regression failed at that same socket fixture boundary;
+its recovery/cancellation assertions must be exercised by the steward outside
+the sandbox. The three checkout-TMPDIR `copy_jobs` environmental cases remain
+unchanged and were not selected by these suites.

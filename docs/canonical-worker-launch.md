@@ -1175,11 +1175,15 @@ One stable `attempt.launch_failure` inbox item names the attempt, phase, error
 and recovery (`relaunch` after release, or `task cancel-attempt` with fresh
 revisions). No canonical or sidecar schema change is required.
 
-Resource recovery proves a dedicated server lost only when its owner-controlled
-`.herdr-run/<project>-<task>/herdr/server.json` matches the launch creation's
-recorded socket and project/task, the socket directory is absent, and a `/proc`
-scan finds no server process naming that socket. Inaccessible process evidence
-fails closed. A missing socket alone remains retryable. Proven disappearance
+Resource recovery proves a dedicated server lost when the socket directory is
+absent and a `/proc` scan finds no process naming that socket in
+`HERDR_SOCKET_PATH`. The route must come from this launch's farm-recorded
+`runtime.launch_creation`. The `.herdr-run/<project>-<task>` directory must be
+owned by the current UID or itself absent. When its `herdr/server.json` is
+present, the owner-controlled record must match the recorded socket and
+project/task and contain a valid PID; a missing record permits the same proof.
+A present unreadable, invalid, mismatched or operator-managed record fails closed.
+Unreadable process evidence owned by the current UID also fails closed. A missing socket alone remains retryable. Proven disappearance
 ends the attempt `lost`, releases capacity and retains worktree receipts and
 checkouts. `task cancel-attempt` can use the same proof, including after an earlier
 cancellation request that retained capacity.

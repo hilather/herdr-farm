@@ -19,8 +19,9 @@ impl LaunchFailureReason {
 }
 
 /// A missing endpoint alone is transient. Only an owner-controlled dedicated
-/// server record, matching the sealed route, and an absent directory and server
-/// process can prove that this launch has lost its terminal resources.
+/// run directory (or its absence), a matching record when present, and an absent
+/// socket directory and process can prove this launch lost its terminal resources.
+/// Callers must obtain the socket from this operation's recorded creation intent.
 pub(super) fn dedicated_server_gone(record: &AttemptInputRecord, socket: &str) -> Result<bool> {
     use std::os::unix::fs::MetadataExt;
     let project = Path::new(&record.inputs.project_store)
@@ -35,33 +36,41 @@ pub(super) fn dedicated_server_gone(record: &AttemptInputRecord, socket: &str) -
         .parent()
         .ok_or_else(|| StoreError::Invalid("launch root missing".into()))?
         .join(".herdr-run")
-        .join(format!("{slug}-{}", record.inputs.task.as_str()))
-        .join("herdr/server.json");
+        .join(format!("{slug}-{}", record.inputs.task.as_str()));
+    let uid = unsafe { libc::geteuid() };
+    match std::fs::symlink_metadata(&path) {
+        Ok(m) if m.is_dir() && m.uid() == uid => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        _ => return Ok(false),
+    }
+    let path = path.join("herdr/server.json");
     let metadata = match std::fs::symlink_metadata(&path) {
-        Ok(m) => m,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Ok(m) => Some(m),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(_) => return Ok(false),
     };
-    if !metadata.is_file()
-        || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.mode() & 0o022 != 0
-    {
-        return Ok(false);
-    }
-    let value: serde_json::Value = match std::fs::read(&path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-    {
-        Some(value) => value,
-        None => return Ok(false),
-    };
-    if value["managed_by"] == "operator"
-        || value["socket"].as_str() != Some(socket)
-        || value["project"].as_str() != Some(slug)
-        || value["task"].as_str() != Some(record.inputs.task.as_str())
-        || value["pid"].as_i64().is_none_or(|p| p <= 1)
-    {
-        return Ok(false);
+    if let Some(metadata) = metadata {
+        if !metadata.is_file()
+            || metadata.uid() != uid
+            || metadata.mode() & 0o022 != 0
+        {
+            return Ok(false);
+        }
+        let value: serde_json::Value = match std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        {
+            Some(value) => value,
+            None => return Ok(false),
+        };
+        if value["managed_by"] == "operator"
+            || value["socket"].as_str() != Some(socket)
+            || value["project"].as_str() != Some(slug)
+            || value["task"].as_str() != Some(record.inputs.task.as_str())
+            || value["pid"].as_i64().is_none_or(|p| p <= 1)
+        {
+            return Ok(false);
+        }
     }
     let Some(directory) = Path::new(socket).parent() else {
         return Ok(false);
@@ -83,18 +92,14 @@ pub(super) fn dedicated_server_gone(record: &AttemptInputRecord, socket: &str) -
         if entry.file_name().to_string_lossy().parse::<u32>().is_err() {
             continue;
         }
-        let cmd = match std::fs::read(entry.path().join("cmdline")) {
-            Ok(cmd) => cmd,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(_) => return Ok(false),
-        };
-        if cmd.split(|b| *b == 0).rfind(|a| !a.is_empty()) != Some(b"server".as_slice()) {
-            continue;
-        }
         let env = match std::fs::read(entry.path().join("environ")) {
             Ok(env) => env,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(_) => return Ok(false),
+            Err(_) => match std::fs::metadata(entry.path()) {
+                Ok(m) if m.uid() != uid => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                _ => return Ok(false),
+            },
         };
         if env.split(|b| *b == 0).any(|e| e == wanted.as_bytes()) {
             return Ok(false);

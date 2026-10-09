@@ -3676,8 +3676,9 @@ fn persistent_launch_conflict_closes_attempt_and_notifies_once() {
 
 #[test]
 fn ambiguous_creation_with_removed_dedicated_server_releases_capacity_once() {
-    for mode in ["recover", "cancel", "force_stop"] {
+    for (mode, remove_record) in [("recover", false), ("cancel", false), ("force_stop", false), ("recover", true), ("cancel", true)] {
         let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+        lab.install_work_contract("verify_only");
         let (_, attempt) = lab.reserve("Preserve the worktree if the dedicated server disappears.");
         fs::write(lab.path("lab/lose-create"), "").unwrap();
         lab.serve();
@@ -3689,6 +3690,14 @@ fn ambiguous_creation_with_removed_dedicated_server_releases_capacity_once() {
             Instant::now() + Duration::from_secs(45), Default::default()).is_err());
         assert_eq!(lab.count("workspace.create_command"), 1);
         assert!(lab.attempt(&attempt).retains_capacity());
+        let held_write_claims = || {
+            let db = rusqlite::Connection::open(lab.project.join(".state/state.db")).unwrap();
+            db.query_row("SELECT count(*) FROM resource_claims c JOIN attempts a ON a.task_id=c.task_id WHERE a.id=?1 AND a.termination_observed=0 AND c.access='write'", [attempt.as_str()], |row| row.get::<_, i64>(0)).unwrap()
+        };
+        assert_eq!(held_write_claims(), 1);
+        assert_eq!(lab.events("runtime.launch_creation").len(), 1);
+        assert!(lab.events("runtime.launch_target").is_empty());
+        assert!(lab.events("runtime.launch_started").is_empty());
         // A missing socket with its directory still present remains transient.
         fs::rename(lab.socket(), lab.path("lab/temporarily-unreachable.sock")).unwrap();
         assert!(herdr_farm::canonical_worker::reconcile_launch(&lab.project, &operation, 2,
@@ -3698,9 +3707,18 @@ fn ambiguous_creation_with_removed_dedicated_server_releases_capacity_once() {
         let server = lab.server.as_mut().unwrap();
         server.kill().unwrap(); server.wait().unwrap();
         fs::remove_dir_all(lab.path("lab")).unwrap();
+        let record_path = record_dir.join("server.json");
+        if remove_record {
+            fs::remove_file(&record_path).unwrap();
+            // The motivating run directory retains only signed launch inputs.
+            for (source, file) in [("approval.json", "approval.json"), ("approval.json.sig", "approval.json.sig"), ("work-contract.json", "contract.json"), ("work-contract.json.sig", "contract.json.sig")] {
+                fs::copy(lab.path(source), record_dir.parent().unwrap().join(file)).unwrap();
+            }
+            fs::remove_dir(&record_dir).unwrap();
+        }
         // Even with the directory absent, a server process naming this route
         // prevents decisive disappearance proof.
-        let mut holder = Command::new("/usr/bin/python3").args(["-c", "import time; time.sleep(60)", "server"])
+        let mut holder = Command::new("/usr/bin/python3").args(["-c", "import time; time.sleep(60)"])
             .env("HERDR_SOCKET_PATH", lab.socket())
             .env("HERDR_FARM_TEST_TIME_SCALE", include_str!("support/time-scale.txt").trim()).spawn().unwrap();
         let blocked = herdr_farm::canonical_worker::reconcile_launch(&lab.project, &operation, 2,
@@ -3709,6 +3727,15 @@ fn ambiguous_creation_with_removed_dedicated_server_releases_capacity_once() {
         holder.kill().unwrap(); holder.wait().unwrap();
         assert!(blocked.is_err());
         assert!(held);
+        if remove_record {
+            fs::create_dir_all(&record_dir).unwrap();
+            fs::write(&record_path, serde_json::to_vec(&json!({"managed_by":"operator","project":"demo","task":"work","socket":lab.socket(),"pid":12345})).unwrap()).unwrap();
+            assert!(!migration::open_active(&lab.project).unwrap().reconcile_missing_launch_server(&operation, jiff::Timestamp::now().as_millisecond()).unwrap());
+            assert!(lab.attempt(&attempt).retains_capacity());
+            fs::write(&record_path, "invalid record").unwrap();
+            assert!(!migration::open_active(&lab.project).unwrap().reconcile_missing_launch_server(&operation, jiff::Timestamp::now().as_millisecond()).unwrap());
+            fs::remove_dir_all(&record_dir).unwrap();
+        }
         if mode == "force_stop" {
             lab.ok(&["launch", "demo", "stop", "--task", "work", "--force"]);
             assert_eq!(lab.attempt(&attempt).state, AttemptState::Lost);
@@ -3724,7 +3751,12 @@ fn ambiguous_creation_with_removed_dedicated_server_releases_capacity_once() {
                 Instant::now() + Duration::from_secs(45), Default::default()).unwrap());
             assert_eq!(lab.attempt(&attempt).state, AttemptState::Lost);
         }
+        assert_eq!(held_write_claims(), 0);
+        assert!(lab.attempt(&attempt).termination_observed);
         assert!(!lab.attempt(&attempt).retains_capacity());
+        assert!(lab.state().tasks.iter().find(|t| t.id.as_str() == "work").unwrap().active_attempt.is_none());
+        // Replay observation must neither re-open capacity nor duplicate the notice.
+        assert!(migration::open_active(&lab.project).unwrap().reconcile_missing_launch_server(&operation, jiff::Timestamp::now().as_millisecond()).unwrap());
         assert_eq!(lab.state().inbox.iter().filter(|i| i.content.kind == "attempt.launch_failure").count(), 1);
         assert_eq!(lab.events("runtime.worktrees_ready").len(), 1);
         for plan in herdr_farm::domain::worktree_plans(&lab.state().attempt_inputs.iter().find(|i| i.attempt == attempt).unwrap().inputs, &attempt).unwrap() {
