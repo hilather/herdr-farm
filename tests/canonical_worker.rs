@@ -3615,3 +3615,147 @@ fn owner_uid_policy_is_retained_in_approved_launch_inputs_without_a_server() {
         assert_eq!(after, retained, "owner config edited a retained attempt");
     }
 }
+
+#[test]
+fn launch_revision_conflict_reselects_without_duplicate_resources_or_brief() {
+    let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+    let (_, attempt) = lab.reserve("Retry a stale revision through durable boundaries.");
+    lab.serve();
+    let operation = lab.state().attempt_inputs.iter().find(|i| i.attempt == attempt).unwrap().operation.clone();
+    // Creation commits a new delivery revision after the caller selected 1.
+    // Advancing that stale selection must preserve the already-created pane.
+    herdr_farm::canonical_worker::create_resource(&lab.project, &operation, 1,
+        Instant::now() + Duration::from_secs(45), Default::default()).unwrap();
+    herdr_farm::canonical_worker::advance_launch(&lab.project, &operation, 1,
+        Instant::now() + Duration::from_secs(45), Default::default()).unwrap();
+    let mut ticker = lab.spawn();
+    lab.wait(&mut ticker, 120, &|| lab.count("agent.prompt") == 1);
+    lab.stop(ticker);
+    assert_eq!(lab.count("workspace.create_command"), 1);
+    assert_eq!(lab.count("agent.prompt"), 1);
+    assert_eq!(lab.attempt(&attempt).state, AttemptState::Running);
+}
+
+#[test]
+fn persistent_launch_conflict_closes_attempt_and_notifies_once() {
+    for worktrees_ready in [false, true] {
+        let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+        let (_, attempt) = lab.reserve("Persistent identity mismatch must close the reservation.");
+        lab.serve();
+        let operation = lab.state().attempt_inputs.iter().find(|i| i.attempt == attempt).unwrap().operation.clone();
+        if worktrees_ready {
+            herdr_farm::worktree_preparation::prepare(&lab.project,&operation,1,
+                Instant::now()+Duration::from_secs(45),Default::default()).unwrap();
+        }
+        let state = lab.state();
+        // Inject a persistent revision mismatch into the retained binding using
+        // the lab database, without changing production code or reading sources.
+        let raw = rusqlite::Connection::open(lab.project.join(".state/state.db")).unwrap();
+        let mut binding = state.runtime_bindings.iter().find(|b| b.id == lab.binding).unwrap().clone();
+        binding.revision += 1;
+        let payload = serde_json::to_string(&binding).unwrap();
+        raw.execute("UPDATE runtime_bindings SET revision=?2,payload=?3,payload_hash=?4 WHERE id=?1", rusqlite::params![binding.id,binding.revision,payload,format!("{:x}",Sha256::digest(payload.as_bytes()))]).unwrap();
+        drop(raw);
+        let revision = state.deliveries.iter().find(|d| d.operation == operation).unwrap().revision;
+        let error = herdr_farm::canonical_worker::advance_launch(&lab.project, &operation, revision,
+            Instant::now() + Duration::from_secs(45), Default::default()).unwrap_err();
+        assert!(format!("{error:#}").contains("launch_conflict"));
+        assert!(!lab.attempt(&attempt).retains_capacity());
+        assert_eq!(lab.attempt(&attempt).state, AttemptState::Failed);
+        assert_eq!(lab.count("workspace.create_command"), 0);
+        let notices = lab.state().inbox.into_iter().filter(|i| i.content.kind == "attempt.launch_failure").collect::<Vec<_>>();
+        assert_eq!(notices.len(), 1);
+        assert!(notices[0].content.body.contains("cancel-attempt"));
+        assert!(notices[0].content.body.contains("launch_conflict"));
+        if worktrees_ready {
+            assert_eq!(lab.events("runtime.worktrees_ready").len(),1);
+            assert!(lab.planned_worktree(&attempt).is_dir());
+        }
+    }
+}
+
+#[test]
+fn ambiguous_creation_with_removed_dedicated_server_releases_capacity_once() {
+    for mode in ["recover", "cancel", "force_stop"] {
+        let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+        let (_, attempt) = lab.reserve("Preserve the worktree if the dedicated server disappears.");
+        fs::write(lab.path("lab/lose-create"), "").unwrap();
+        lab.serve();
+        let operation = lab.state().attempt_inputs.iter().find(|i| i.attempt == attempt).unwrap().operation.clone();
+        let record_dir = lab.path("root/.herdr-run/demo-work/herdr");
+        fs::create_dir_all(&record_dir).unwrap();
+        fs::write(record_dir.join("server.json"), serde_json::to_vec(&json!({"project":"demo","task":"work","socket":lab.socket(),"pid":lab.server.as_ref().unwrap().id()})).unwrap()).unwrap();
+        assert!(herdr_farm::canonical_worker::create_resource(&lab.project, &operation, 1,
+            Instant::now() + Duration::from_secs(45), Default::default()).is_err());
+        assert_eq!(lab.count("workspace.create_command"), 1);
+        assert!(lab.attempt(&attempt).retains_capacity());
+        // A missing socket with its directory still present remains transient.
+        fs::rename(lab.socket(), lab.path("lab/temporarily-unreachable.sock")).unwrap();
+        assert!(herdr_farm::canonical_worker::reconcile_launch(&lab.project, &operation, 2,
+            Instant::now() + Duration::from_secs(45), Default::default()).is_err());
+        assert!(lab.attempt(&attempt).retains_capacity());
+        fs::rename(lab.path("lab/temporarily-unreachable.sock"), lab.socket()).unwrap();
+        let server = lab.server.as_mut().unwrap();
+        server.kill().unwrap(); server.wait().unwrap();
+        fs::remove_dir_all(lab.path("lab")).unwrap();
+        // Even with the directory absent, a server process naming this route
+        // prevents decisive disappearance proof.
+        let mut holder = Command::new("/usr/bin/python3").args(["-c", "import time; time.sleep(60)", "server"])
+            .env("HERDR_SOCKET_PATH", lab.socket())
+            .env("HERDR_FARM_TEST_TIME_SCALE", include_str!("support/time-scale.txt").trim()).spawn().unwrap();
+        let blocked = herdr_farm::canonical_worker::reconcile_launch(&lab.project, &operation, 2,
+            Instant::now() + Duration::from_secs(45), Default::default());
+        let held = lab.attempt(&attempt).retains_capacity();
+        holder.kill().unwrap(); holder.wait().unwrap();
+        assert!(blocked.is_err());
+        assert!(held);
+        if mode == "force_stop" {
+            lab.ok(&["launch", "demo", "stop", "--task", "work", "--force"]);
+            assert_eq!(lab.attempt(&attempt).state, AttemptState::Lost);
+            let current = lab.attempt(&attempt);
+            assert!(runtime::cancel_attempt(&lab.project,&attempt,current.revision,lab.head(),"server already stopped").unwrap().released);
+        } else if mode == "cancel" {
+            let state = lab.state();
+            let current = lab.attempt(&attempt);
+            let result = runtime::cancel_attempt(&lab.project, &attempt, current.revision, state.head, "dedicated server lost").unwrap();
+            assert!(result.released);
+        } else {
+            assert!(herdr_farm::canonical_worker::reconcile_launch(&lab.project, &operation, 2,
+                Instant::now() + Duration::from_secs(45), Default::default()).unwrap());
+            assert_eq!(lab.attempt(&attempt).state, AttemptState::Lost);
+        }
+        assert!(!lab.attempt(&attempt).retains_capacity());
+        assert_eq!(lab.state().inbox.iter().filter(|i| i.content.kind == "attempt.launch_failure").count(), 1);
+        assert_eq!(lab.events("runtime.worktrees_ready").len(), 1);
+        for plan in herdr_farm::domain::worktree_plans(&lab.state().attempt_inputs.iter().find(|i| i.attempt == attempt).unwrap().inputs, &attempt).unwrap() {
+            assert!(std::path::Path::new(&plan.path).is_dir());
+        }
+    }
+}
+
+#[test]
+fn repeated_nontransient_recovery_stops_and_escalates_with_capacity_retained() {
+    let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+    let (_, attempt) = lab.reserve("A broken external route must not retry forever.");
+    fs::write(lab.path("lab/lose-create"), "").unwrap();
+    lab.serve();
+    let operation = lab.state().attempt_inputs.iter().find(|i| i.attempt == attempt).unwrap().operation.clone();
+    assert!(herdr_farm::canonical_worker::create_resource(&lab.project, &operation, 1,
+        Instant::now() + Duration::from_secs(45), Default::default()).is_err());
+    fs::rename(lab.socket(), lab.path("lab/unreachable.sock")).unwrap();
+    for pass in 0..3 {
+        let result = herdr_farm::canonical_worker::reconcile_launch(&lab.project, &operation, 2,
+            Instant::now() + Duration::from_secs(45), Default::default());
+        if pass < 2 { assert!(result.is_err()); } else { assert!(result.unwrap()); }
+    }
+    let state = lab.state();
+    assert!(lab.attempt(&attempt).retains_capacity());
+    assert_eq!(lab.attempt(&attempt).state, AttemptState::Failed);
+    assert_eq!(state.deliveries.iter().find(|d| d.operation == operation).unwrap().state, DeliveryState::PermanentFailure);
+    assert_eq!(state.inbox.iter().filter(|i| i.content.kind == "attempt.launch_failure").count(), 1);
+    let health = lab.ok(&["telemetry", "demo", "health", "--json"]);
+    let stalled = health["states"].as_array().unwrap().iter().find(|s| s["rule"] == "launch_stalled").unwrap();
+    assert_eq!(stalled["state"], "critical");
+    assert!(stalled["evidence"]["attempts"].as_array().unwrap().iter().any(|a| a["attempt"] == attempt.as_str() && a["recovery_stopped"] == true));
+    assert_eq!(lab.count("workspace.create_command"), 1);
+}

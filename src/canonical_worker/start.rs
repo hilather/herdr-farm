@@ -427,7 +427,7 @@ fn target_agent(result: &Value, pane: &str, name: &str) -> Result<Value> {
 
 /// Continue observation across target discovery and start confirmation. Each
 /// service reacquires execution ownership and checks its original revision.
-pub fn reconcile_launch(
+fn reconcile_launch_once(
     project: &Path,
     operation: &OperationId,
     expected_revision: u64,
@@ -473,4 +473,36 @@ pub fn reconcile_launch(
         )?;
     }
     Ok(true)
+}
+
+/// Recovery stops after three identical non-transient errors. A dedicated
+/// server disappearance is decisive immediately; unproven resources stay held.
+pub fn reconcile_launch(project: &Path, operation: &OperationId, mut expected_revision: u64, deadline: Instant, cancellation: Cancellation) -> Result<bool> {
+    {
+        let _guard = crate::execution_guard::RootGuard::exclusive_by(project.parent().context("project root missing")?, deadline, &cancellation)?;
+        if crate::migration::open_active(project)?.reconcile_missing_launch_server(operation, now())? { return Ok(true); }
+    }
+    for pass in 0..3 {
+        match reconcile_launch_once(project, operation, expected_revision, deadline, cancellation.clone()) {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                let conflict = error.chain().any(|e| matches!(e.downcast_ref::<crate::store::StoreError>(), Some(crate::store::StoreError::Conflict)));
+                if conflict && pass < 2 && check(deadline,&cancellation).is_ok() {
+                    let db=crate::migration::open_active_scoped(project,crate::store::controlled::ReadControl::new(deadline,cancellation.clone()))?;
+                    expected_revision=db.current_delivery_revision(operation)?;
+                    continue;
+                }
+                let permanent = error.chain().any(|e| e.downcast_ref::<std::io::Error>().is_some_and(|e| matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::InvalidInput))
+                    || e.is::<serde_json::Error>()
+                    || matches!(e.downcast_ref::<crate::store::StoreError>(),Some(crate::store::StoreError::Invalid(_) | crate::store::StoreError::Corrupt(_))))
+                    || ["route","not a socket","requires a canonical absolute socket","session replaced","session changed"].iter().any(|text|error.to_string().contains(text));
+                if permanent || conflict {
+                    let _guard = crate::execution_guard::RootGuard::exclusive_by(project.parent().context("project root missing")?, Instant::now()+Duration::from_secs(5), &Default::default())?;
+                    if crate::migration::open_active(project)?.record_launch_failure(operation, "resource recovery", &format!("{error:#}"), conflict, now())? { return Ok(true); }
+                }
+                return Err(error);
+            }
+        }
+    }
+    unreachable!()
 }

@@ -1161,3 +1161,42 @@ commands are capped at 20 seconds. Copy jobs use their executor's absolute
 `Control` deadline, capped again at execution entry by the command timeout.
 Neither later operation inherits the operator draft/approval deadline. Native
 profile refresh uses a separate 120-second deadline capped by the launch window.
+
+### Launch conflicts and vanished dedicated servers
+
+Launch advancement reselects the current delivery revision on a store conflict,
+with at most three passes through the durable one-use phase boundaries. Worktree,
+workspace, gate and naming intents remain the replay fences. Brief preparation
+and delivery also reselect on conflicts; an uncertain prompt is never resent.
+Exhausted conflicts are recorded as `launch_conflict` in the existing event
+journal and delivery diagnostic. A reservation with no Herdr creation intent releases
+capacity, retaining any worktree receipts and checkouts. An uncertain effect retains its evidence and capacity for recovery.
+One stable `attempt.launch_failure` inbox item names the attempt, phase, error
+and recovery (`relaunch` after release, or `task cancel-attempt` with fresh
+revisions). No canonical or sidecar schema change is required.
+
+Resource recovery proves a dedicated server lost only when its owner-controlled
+`.herdr-run/<project>-<task>/herdr/server.json` matches the launch creation's
+recorded socket and project/task, the socket directory is absent, and a `/proc`
+scan finds no server process naming that socket. Inaccessible process evidence
+fails closed. A missing socket alone remains retryable. Proven disappearance
+ends the attempt `lost`, releases capacity and retains worktree receipts and
+checkouts. `task cancel-attempt` can use the same proof, including after an earlier
+cancellation request that retained capacity.
+
+Three identical ENOENT, permission or invalid-route recovery errors stop automatic
+recovery with a permanent delivery diagnostic and one coordinator notice. Without
+proof of resource absence capacity stays held. The `launch_stalled` health rule
+warns after five minutes without launch progress and is critical after fifteen
+minutes or when recovery stops with capacity retained. Operators should inspect
+the recorded effects and cancel the attempt rather than create another worker.
+
+`insufficient transfer cleanup budget` remains the typed `BudgetExhausted` path
+from LAUNCH-BUDGET-1: draft and reserve have three fresh bounded step budgets and
+never retry an uncertain external creation.
+
+Dedicated server retirement records the disappearance proof before removing its
+server record. A subsequent `cancel-attempt` on that proven lost attempt is an
+idempotent success. Failed attempts with uncertain terminal effects keep their
+task pointer and capacity so the existing cancellation and termination observer
+can still retire an acknowledged gated worker.

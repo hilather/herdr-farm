@@ -263,7 +263,7 @@ pub fn create_resource(
         // connection across an unlocked interval where the store could change.
         drop(db);
         drop(guard);
-        crate::worktree_preparation::prepare(project,operation,expected_revision,deadline,cancellation.clone())?;
+        crate::worktree_preparation::prepare(project,operation,expected_revision,deadline,cancellation.clone()).context("launch phase: worktree creation")?;
         let revision = if initial.attempts==0 {expected_revision.checked_add(1).context("launch revision overflow")?}else{expected_revision};
         (revision, None)
     } else { (expected_revision, Some((db, guard))) };
@@ -276,7 +276,7 @@ pub fn create_resource(
         false,
         false,
         selected_store,
-    )
+    ).context("launch phase: launch creation")
 }
 
 /// Continue only an acknowledged workspace whose gated layout was never attempted.

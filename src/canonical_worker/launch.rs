@@ -6,7 +6,7 @@ use super::*;
 /// committed boundary intact; a subsequent call observes it instead of replaying
 /// an uncertain request. Callers must fetch the current delivery revision again.
 /// This service does not admit tasks, fabricate profiles or enable scheduling.
-pub fn advance_launch(
+fn advance_launch_once(
     project: &Path,
     operation: &OperationId,
     expected_revision: u64,
@@ -22,7 +22,7 @@ pub fn advance_launch(
         let mut db = crate::migration::open_active_scoped(&project, control)?;
         Ok(db.launch_advancement_selection(operation, revision)?)
     };
-    let state = select(expected_revision)?;
+    let state = select(expected_revision).context("launch phase: selection")?;
     let delivery = &state.delivery;
     if delivery.state == DeliveryState::Confirmed {
         return super::reconcile_start(
@@ -43,7 +43,7 @@ pub fn advance_launch(
             expected_revision,
             deadline,
             cancellation.clone(),
-        )?;
+        ).context("launch phase: worktree and resource creation")?;
         // Creation takes exactly one claim. Never adopt an unrelated new revision.
         expected_revision
             .checked_add(1)
@@ -88,7 +88,7 @@ pub fn advance_launch(
         expected_revision
     };
     check(deadline, &cancellation)?;
-    let state = select(revision)?;
+    let state = select(revision).context("launch phase: release selection")?;
     let delivery = &state.delivery;
     let has = |kind: &str| state.kinds.contains(kind);
     if !has("runtime.launch_release") {
@@ -98,7 +98,7 @@ pub fn advance_launch(
             revision,
             deadline,
             cancellation.clone(),
-        )?;
+        ).context("launch phase: gate release / brief preparation")?;
     }
     check(deadline, &cancellation)?;
     // The naming service performs an effect only for an unnamed exact worker
@@ -108,8 +108,31 @@ pub fn advance_launch(
         || delivery.state != DeliveryState::Claimed
         || delivery.lease_until_ms.is_none_or(|until| until <= now())
     {
-        super::reconcile_start(&project, operation, revision, deadline, cancellation).map(Some)
+        super::reconcile_start(&project, operation, revision, deadline, cancellation).context("launch phase: start observation").map(Some)
     } else {
-        super::name_started_agent(&project, operation, revision, deadline, cancellation).map(Some)
+        super::name_started_agent(&project, operation, revision, deadline, cancellation).context("launch phase: naming and start observation").map(Some)
     }
+}
+
+/// Retry revision races only by reselecting the durable one-use boundaries.
+pub fn advance_launch(project: &Path, operation: &OperationId, mut revision: u64, deadline: Instant, cancellation: Cancellation) -> Result<Option<LaunchStartedReceipt>> {
+    for pass in 0..3 {
+        match advance_launch_once(project, operation, revision, deadline, cancellation.clone()) {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                let conflict = error.chain().any(|e| matches!(e.downcast_ref::<crate::store::StoreError>(), Some(crate::store::StoreError::Conflict)));
+                if !conflict { return Err(error); }
+                if pass < 2 && check(deadline, &cancellation).is_ok() {
+                    let db=crate::migration::open_active_scoped(project,crate::store::controlled::ReadControl::new(deadline,cancellation.clone()))?;
+                    revision=db.current_delivery_revision(operation)?;
+                    continue;
+                }
+                let _guard = crate::execution_guard::RootGuard::exclusive_by(project.parent().context("project root missing")?, Instant::now() + Duration::from_secs(5), &Default::default())?;
+                let phase = error.chain().filter_map(|e| e.to_string().strip_prefix("launch phase: ").map(str::to_owned)).last().unwrap_or_else(||"launch advancement".into());
+                crate::migration::open_active(project)?.record_launch_failure(operation, &phase, &format!("{error:#}"), true, now())?;
+                return Err(error.context("launch_conflict: bounded retries exhausted; coordinator notified"));
+            }
+        }
+    }
+    unreachable!()
 }

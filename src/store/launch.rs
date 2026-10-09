@@ -92,6 +92,8 @@ pub(super) fn record_creation(tx: &Connection, claim: &Claim, prepared: &Prepare
         claim.revision,
         intent,
     )?;
+    event(tx,"runtime.launch_progress",intent.operation.as_str(),claim.revision,
+        &serde_json::json!({"phase":"launch_creation","observed_unix_ms":now}))?;
     head(tx)
 }
 

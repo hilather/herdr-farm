@@ -386,7 +386,7 @@ pub fn validate_visible_readiness(kind: &str, explain: &Value) -> Result<()> {
 /// Dispatch an already prepared initial brief once. A claimed operation is
 /// retained on any failure; expiry records ambiguity and never retries it.
 /// Queue workers pass their original deadline and cancellation identity here.
-pub fn deliver_brief(
+fn deliver_brief_once(
     project: &Path,
     operation: &OperationId,
     expected_revision: u64,
@@ -565,7 +565,7 @@ pub fn reconcile_termination(
         let delivery=&state.delivery;
         let binding=&state.binding;
         ensure!(
-            current.state == AttemptState::Reserved
+            matches!(current.state, AttemptState::Reserved | AttemptState::Failed)
                 && current.retains_capacity()
                 && delivery.attempts == 1
                 && delivery.state != crate::operations::DeliveryState::Confirmed
@@ -714,7 +714,7 @@ fn preserve_terminated_repositories(project:&Path,events:&[Event],record:&Attemp
 
 /// Recover the durable start-to-brief handoff without sending any terminal input.
 /// The head check fences changes between observation and retained-memory rendering.
-pub fn prepare_brief(
+fn prepare_brief_once(
     project: &Path,
     attempt: &AttemptId,
     expected_revision: u64,
@@ -726,4 +726,52 @@ pub fn prepare_brief(
     let control=crate::store::controlled::ReadControl::new(deadline,cancellation);
     let mut db=crate::migration::open_active_scoped(project,control)?;
     db.prepare_supervised_worker_brief(project,attempt,expected_revision)
+}
+
+fn brief_conflict(error: &anyhow::Error) -> bool {
+    error.chain().any(|e| matches!(e.downcast_ref::<crate::store::StoreError>(), Some(crate::store::StoreError::Conflict)))
+}
+fn notify_brief_conflict(project: &Path, attempt: &AttemptId, phase: &str, error: &anyhow::Error) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let _guard = crate::execution_guard::RootGuard::exclusive_by(project.parent().context("project root missing")?,deadline,&Default::default())?;
+    let db=crate::migration::open_active_scoped(project,crate::store::controlled::ReadControl::new(deadline,Default::default()))?;
+    let operation=db.attempt_launch_operation(attempt)?;
+    drop(db);
+    crate::migration::open_active(project)?.record_launch_failure(&operation, phase, &format!("{error:#}"), true, now())?;
+    Ok(())
+}
+pub fn prepare_brief(project: &Path, attempt: &AttemptId, mut revision: u64, deadline: Instant, cancellation: Cancellation) -> Result<Operation> {
+    for pass in 0..3 {
+        match prepare_brief_once(project, attempt, revision, deadline, cancellation.clone()) {
+            Ok(value) => return Ok(value),
+            Err(error) if brief_conflict(&error) => {
+                if pass == 2 || check(deadline, &cancellation).is_err() { notify_brief_conflict(project, attempt, "brief preparation", &error)?; return Err(error); }
+                check(deadline, &cancellation)?;
+                let db=crate::migration::open_active_scoped(project,crate::store::controlled::ReadControl::new(deadline,cancellation.clone()))?;
+                revision=db.current_attempt_revision(attempt)?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!()
+}
+pub fn deliver_brief(project: &Path, operation: &OperationId, mut revision: u64, deadline: Instant, cancellation: Cancellation) -> Result<crate::operations::Delivery> {
+    for pass in 0..3 {
+        match deliver_brief_once(project, operation, revision, deadline, cancellation.clone()) {
+            Ok(value) => return Ok(value),
+            Err(error) if brief_conflict(&error) => {
+                let db=crate::migration::open_active_scoped(project,crate::store::controlled::ReadControl::new(Instant::now()+Duration::from_secs(5),Default::default()))?;
+                if pass == 2 || check(deadline, &cancellation).is_err() {
+                    let attempt=db.brief_attempt(operation)?;
+                    drop(db);
+                    notify_brief_conflict(project, &attempt, "brief delivery", &error)?;
+                    return Err(error);
+                }
+                check(deadline, &cancellation)?;
+                revision=db.current_delivery_revision(operation)?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!()
 }

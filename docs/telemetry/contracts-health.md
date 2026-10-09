@@ -41,7 +41,7 @@ warn, critical, unknown}, states[], alerts {open[], last_evaluated_unix_ms}
 | `evidence` | the numbers the state rests on (numerator/denominator, age, remaining, longest wait, counts by reason); unavailable values stay `{status: unavailable, reason}` |
 | `thresholds` | `{direction, warn, critical, unit, window_ms, cooldown_ms}` from the rule table |
 
-## 2. Rule table (`health-rules.v4`, `rules.rs` `RULES`)
+## 2. Rule table (`health-rules.v5`, `rules.rs` `RULES`)
 
 A change of a rule, threshold or read path is a new rules version. v4 adds
 `test_weakening` (MET-NOW-A; fixture evidence `tests/telemetry_stored_metrics.rs`).
@@ -270,3 +270,14 @@ Missing collection is unknown; an observed empty window is ok. The rule
 uses ordinary deduplication/cooldown and never reruns checks, suppresses
 failures or changes acceptance. Exclusions and privacy bounds are in
 [contracts-quality.md §6](contracts-quality.md#6-dg6-passive-verification-flakes).
+
+`launch_stalled` reads canonical launch operations and retained attempts. Reserved, launching or failed retained
+attempts without progress warn at 5 minutes and become critical at
+15 minutes. A bounded recovery failure with retained capacity is immediately
+critical. Recovery-error observations do not count as progress. Evidence names
+the attempt and supports relaunch after release or `task cancel-attempt`. This
+rule uses the existing health alert stream and adds no tables or migrations.
+
+Worktree readiness and the launch creation boundary append progress timestamps
+in the existing canonical event journal; older attempts without these timestamps
+fall back to their reservation time. Error observations never refresh progress.

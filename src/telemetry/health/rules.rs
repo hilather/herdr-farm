@@ -1,4 +1,4 @@
-//! The declared health-rule table `health-rules.v4`
+//! The declared health-rule table `health-rules.v5`
 //! (docs/telemetry/contracts-health.md §2). Each rule reads only through the
 //! TM4.1 query service (`analytics::query`) or a lane's own read path
 //! (`accounting quota|attention|entries|budget-shadow`, TM4.4 `compare`), and
@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-pub const VERSION: &str = "health-rules.v4";
+pub const VERSION: &str = "health-rules.v5";
 const MINUTE: i64 = 60_000;
 const HOUR: i64 = 60 * MINUTE;
 const DAY: i64 = 24 * HOUR;
@@ -38,6 +38,7 @@ impl State {
 /// How a rule reads its source.
 #[derive(Clone, Copy, Debug)]
 pub enum Eval {
+    LaunchStalled,
     /// Passive verification flips with canonical run evidence.
     VerificationFlaky,
     /// Test removal flags observed in the last day.
@@ -91,6 +92,9 @@ pub struct Rule {
 }
 
 pub const RULES: &[Rule] = &[
+    Rule { name: "launch_stalled", family: "runtime", service: None, source: "canonical:launch progress", eval: Eval::LaunchStalled,
+        direction: Direction::Above, warn: 5 * MINUTE, critical: 15 * MINUTE, unit: "ms", window_ms: None, cooldown_ms: HOUR,
+        detail: "open reserved or launching attempt without progress for five minutes, or stopped recovery with retained capacity" },
     Rule { name: "test_weakening", family: "proxy", service: None, source: "lane:quality tests-net-removal.v1", eval: Eval::TestWeakening,
         direction: Direction::Above, warn: 1, critical: i64::MAX, unit: "flagged_submissions", window_ms: Some(DAY), cooldown_ms: HOUR,
         detail: "any first submission flagged by tests-net-removal.v1 in the last 24 hours warns" },
@@ -294,6 +298,19 @@ pub fn evaluate(project: &Path, now: i64) -> Vec<Outcome> {
 fn evaluate_rule(ctx: &mut Ctx, rule: &'static Rule) -> Result<Vec<Outcome>> {
     let now = ctx.now;
     Ok(vec![match rule.eval {
+        Eval::LaunchStalled => {
+            let launches=crate::migration::open_active_read_only(ctx.project)?.launch_progress_health()?;
+            let mut evidence = Vec::new();
+            let mut age = 0;
+            let mut escalated = false;
+            for (attempt,last,stopped) in launches {
+                age = age.max(now.saturating_sub(last));
+                escalated |= stopped;
+                evidence.push(json!({"attempt":attempt,"last_progress_unix_ms":last,"recovery_stopped":stopped,"recovery":"relaunch / cancel-attempt"}));
+            }
+            let state = if escalated { State::Critical } else { grade(rule, |t| age >= t, |_| false) };
+            outcome(rule, state, vec![json!({"code":"launch_progress","age_ms":age})], lane_metric(rule.source), unbounded(now), json!({"attempts":evidence}))
+        }
         Eval::TestWeakening => {
             let from = now - rule.window_ms.unwrap_or(DAY);
             let evidence = crate::telemetry::quality::weakening_window(ctx.project, from, now)?;

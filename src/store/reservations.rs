@@ -263,12 +263,18 @@ pub(super) fn cancel_attempt_in_transaction(tx:&Connection,id:&AttemptId,expecte
         let mut attempt=read_attempt(tx,id)?;
         if attempt.revision!=expected_revision{return Err(StoreError::Conflict);}
         let mut task=read_task(tx,attempt.task.as_str())?;
+        let input:Option<String>=tx.query_row("SELECT operation_id FROM attempt_inputs WHERE attempt_id=?1",[id.as_str()],|r|r.get(0)).optional()?;
+        let gone=if let Some(operation)=input {let record=read_input(tx,&OperationId::new(operation).map_err(StoreError::Corrupt)?,budget)?;super::launch_failure::creation_socket(tx,&record)?.as_deref().map(|socket|super::launch_failure::dedicated_server_gone(&record,socket)).transpose()?.unwrap_or(false)}else{false};
         let old_reason:Option<String>=tx.query_row("SELECT reason FROM attempt_cancellations WHERE attempt_id=?1",[id.as_str()],|r|r.get(0)).optional()?;
         if let Some(old_reason)=old_reason {
-            if old_reason!=reason{return Err(StoreError::Conflict);}
-            return Ok(CancellationChange{head:expected_head,attempt:id.clone(),released:!attempt.retains_capacity(),attempt_revision:attempt.revision,task_revision:task.revision});
+            if old_reason!=reason&&!gone{return Err(StoreError::Conflict);}
+            if !gone || !attempt.retains_capacity() {return Ok(CancellationChange{head:expected_head,attempt:id.clone(),released:!attempt.retains_capacity(),attempt_revision:attempt.revision,task_revision:task.revision});}
         }
-        if !attempt.retains_capacity(){return Err(invalid("attempt already has termination evidence"));}
+        if !attempt.retains_capacity(){
+            let lost_launch:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM events WHERE kind='attempt.launch_failed' AND entity=?1 AND json_extract(payload,'$.reason')='dedicated_server_lost')",[id.as_str()],|r|r.get(0))?;
+            if lost_launch {return Ok(CancellationChange{head:expected_head,attempt:id.clone(),released:true,attempt_revision:attempt.revision,task_revision:task.revision});}
+            return Err(invalid("attempt already has termination evidence"));
+        }
         let operation:Option<String>=tx.query_row("SELECT operation_id FROM attempt_inputs WHERE attempt_id=?1",[id.as_str()],|r|r.get(0)).optional()?;
         let record=operation.map(|operation|read_input(tx,&OperationId::new(operation).map_err(StoreError::Corrupt)?,budget)).transpose()?;
         let mut released=false;
@@ -283,16 +289,23 @@ pub(super) fn cancel_attempt_in_transaction(tx:&Connection,id:&AttemptId,expecte
             let other_retained:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM attempts WHERE task_id=?1 AND id<>?2 AND termination_observed=0)",params![attempt.task.as_str(),attempt.id.as_str()],|r|r.get(0))?;
             let prior_claim:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM events WHERE kind='operation.claimed' AND entity=?1)",[record.operation.as_str()],|r|r.get(0))?;
             let another_launch:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM operations o JOIN operation_delivery d ON d.operation_id=o.id WHERE o.task_id=?1 AND o.kind='runtime.launch' AND o.id<>?2 AND d.state NOT IN ('confirmed','permanent_failure'))",params![attempt.task.as_str(),record.operation.as_str()],|r|r.get(0))?;
+            let server_gone=gone;
             let never_claimed=!prior_claim&&!another_launch&&delivery.state==DeliveryState::Pending&&delivery.attempts==0&&delivery.epoch==0&&delivery.owner.is_none()&&delivery.lease_until_ms.is_none()&&delivery.last_outcome.is_none();
-            if attempt.state==AttemptState::Reserved&&task.state==TaskState::Running&&task.active_attempt.as_ref()==Some(id)&&Some(task.revision)==record.inputs.task_revision.checked_add(1)&&never_claimed&&matching_binding&&no_external_worker&&!other_retained {
-                super::delivery::update_outcome(tx,&delivery,&Outcome::PermanentFailure{diagnostic:format!("cancelled before any launch claim: {reason}")},now,"operator.cancellation")?;released=true;attempt.state=AttemptState::Cancelled;attempt.termination_observed=true;task.state=TaskState::Cancelled;task.active_attempt=None;
+            if server_gone || (attempt.state==AttemptState::Reserved&&task.state==TaskState::Running&&task.active_attempt.as_ref()==Some(id)&&Some(task.revision)==record.inputs.task_revision.checked_add(1)&&never_claimed&&matching_binding&&no_external_worker&&!other_retained) {
+                if !matches!(delivery.state,DeliveryState::Confirmed|DeliveryState::PermanentFailure) {super::delivery::update_outcome(tx,&delivery,&Outcome::PermanentFailure{diagnostic:format!("{}: {reason}",if gone {"dedicated_server_lost: launch_creation recovery; recorded socket directory and server absent"}else{"cancelled before any launch claim"})},now,"operator.cancellation")?;}released=true;attempt.state=AttemptState::Cancelled;attempt.termination_observed=true;if task.active_attempt.as_ref()==Some(id){task.state=TaskState::Cancelled;task.active_attempt=None;}
             }
         }
         attempt.revision=attempt.revision.checked_add(1).ok_or_else(||invalid("attempt revision exhausted"))?;
         tx.execute("UPDATE attempts SET revision=?2,state=?3,termination_observed=?4 WHERE id=?1",params![id.as_str(),integer(attempt.revision)?,attempt.state.as_str(),attempt.termination_observed])?;
-        if released {super::inbox::ended_notice(tx, &attempt)?;super::dispatch_log::mark(tx,&attempt,now,"cancel_attempt_in_transaction")?;}
-        if task.active_attempt.as_ref()==Some(id)||released {task.revision=task.revision.checked_add(1).ok_or_else(||invalid("task revision exhausted"))?;tx.execute("UPDATE tasks SET revision=?2,state=?3,active_attempt=?4 WHERE id=?1",params![task.id.as_str(),integer(task.revision)?,task.state.as_str(),task.active_attempt.as_ref().map(AttemptId::as_str)])?;event(tx,"task.changed",task.id.as_str(),task.revision,&task)?;}
-        let request=CancellationRequest{attempt:id.clone(),requested_unix_ms:now,reason:reason.into()};tx.execute("INSERT INTO attempt_cancellations VALUES(?1,?2,?3)",params![id.as_str(),now,reason])?;
+        if released {
+            if gone {
+                let input=record.as_ref().ok_or_else(||invalid("sealed lost launch missing"))?;
+                super::inbox::result_notice(tx,"attempt.launch_failure",input.operation.as_str(),attempt.task.as_str(),id.as_str(),"launch_creation recovery","dedicated_server_lost: recorded socket directory and server absent; worktrees retained; recovery: relaunch / cancel-attempt")?;
+            } else {super::inbox::ended_notice(tx, &attempt)?;}
+            super::dispatch_log::mark(tx,&attempt,now,"cancel_attempt_in_transaction")?;
+        }
+        if task.active_attempt.as_ref()==Some(id)||(released&&task.active_attempt.is_none()) {task.revision=task.revision.checked_add(1).ok_or_else(||invalid("task revision exhausted"))?;tx.execute("UPDATE tasks SET revision=?2,state=?3,active_attempt=?4 WHERE id=?1",params![task.id.as_str(),integer(task.revision)?,task.state.as_str(),task.active_attempt.as_ref().map(AttemptId::as_str)])?;event(tx,"task.changed",task.id.as_str(),task.revision,&task)?;}
+        let request=CancellationRequest{attempt:id.clone(),requested_unix_ms:now,reason:reason.into()};tx.execute("INSERT OR IGNORE INTO attempt_cancellations VALUES(?1,?2,?3)",params![id.as_str(),now,reason])?;
         event(tx,"attempt.cancellation_requested",id.as_str(),attempt.revision,&serde_json::json!({"request":request,"released":released,"attempt":attempt}))?;
         super::consumer_bindings::reconcile_task(tx,attempt.task.as_str(),budget)?;
         if let Some(budget)=budget {budget.check()?;}

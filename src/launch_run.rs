@@ -788,6 +788,14 @@ pub fn run(ctx: &Ctx, slug: &str, mut args: Args) -> Result<Value> {
     match steps(&mut run, &args, plan.context("profile evidence preflight failed")?) {
         Ok(report) => Ok(report),
         Err(error) => {
+            if error.chain().any(|e| matches!(e.downcast_ref::<herdr_farm::store::StoreError>(), Some(herdr_farm::store::StoreError::Conflict))) {
+                let snapshot = runtime::snapshot(&project)?;
+                if let Some(record) = snapshot.attempt_inputs.iter().find(|r| r.inputs.task.as_str() == args.task && snapshot.attempts.iter().any(|a| a.id == r.attempt && a.retains_capacity())) {
+                    migration::open_active(&project)?.record_launch_failure(&record.operation, run.active_step, &format!("{error:#}"), true, jiff::Timestamp::now().as_millisecond())?;
+                } else {
+                    migration::open_active(&project)?.notify_unreserved_launch_conflict(&TaskId::new(args.task.clone()).map_err(anyhow::Error::msg)?,run.active_step,&format!("{error:#}"),jiff::Timestamp::now().as_millisecond())?;
+                }
+            }
             let failed = run.steps.len() + 1;
             let done: Vec<String> = run.steps.iter().map(|s| format!("{} ({}; {} ms)", s.name, s.outcome, s.elapsed_ms)).collect();
             let reason = format!("{}: elapsed {} ms; {error:#}", run.active_step, run.step_started.elapsed().as_millis()).split_whitespace().collect::<Vec<_>>().join(" ");
@@ -1170,6 +1178,13 @@ pub fn stop(ctx: &Ctx, slug: &str, task: &str, force: bool) -> Result<Value> {
     if let Some(dir) = socket.parent().filter(|d| d.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with('r')) && socket.file_name().is_some_and(|n| n == "s")) {
         let _ = fs::remove_file(&socket);
         let _ = fs::remove_dir(dir);
+    }
+    // Preserve decisive disappearance while the dedicated-server identity
+    // record still exists. Removing it first would strand an ambiguous launch.
+    for input in snapshot.attempt_inputs.iter().filter(|i| i.inputs.task == task_id) {
+        if snapshot.attempts.iter().any(|a| a.id == input.attempt && a.retains_capacity()) {
+            migration::open_active(&project)?.reconcile_missing_launch_server(&input.operation,jiff::Timestamp::now().as_millisecond())?;
+        }
     }
     fs::remove_file(&record)?;
     Ok(json!({"task":task,"stopped":stopped,"socket":socket,"socket_directory_removed":!socket.exists()}))
