@@ -89,7 +89,7 @@ fn stop_snapshot_finalizes_without_source_in_foreground_and_queued_paths() {
         raw.execute("INSERT INTO attempt_inputs VALUES(?1,?2,?3,?4)",rusqlite::params![attempt.as_str(),launch.as_str(),body,digest(body.as_bytes())]).unwrap();raw.execute_batch(&trigger).unwrap();
         let payload=serde_json::to_string(binding).unwrap();raw.execute("UPDATE runtime_bindings SET payload=?2,payload_hash=?3 WHERE id=?1",rusqlite::params![binding.id,payload,digest(payload.as_bytes())]).unwrap();
         let report=digest(b"preserved report");let artifact=digest(&[0,255,3]);
-        let manifest=herdr_farm::worktree_preservation::OutputManifest{version:1,attempt:attempt.clone(),source:source.clone(),entries:vec![
+        let manifest=herdr_farm::worktree_preservation::OutputManifest{omissions:vec![],version:1,attempt:attempt.clone(),source:source.clone(),entries:vec![
             herdr_farm::worktree_preservation::Entry{symlink:false,path:"library".into(),directory:true,executable:false,bytes:0,sha256:String::new()},
             herdr_farm::worktree_preservation::Entry{symlink:false,path:"library/binary".into(),directory:false,executable:true,bytes:3,sha256:artifact.clone()},
             herdr_farm::worktree_preservation::Entry{symlink:false,path:"report.md".into(),directory:false,executable:false,bytes:16,sha256:report.clone()},
@@ -99,7 +99,7 @@ fn stop_snapshot_finalizes_without_source_in_foreground_and_queued_paths() {
         let process=herdr_farm::worker_supervision::ProcessIncarnation{pid:1,device:1,inode:1};
         let stop=WorkerTerminationReceipt{version:1,attempt:attempt.clone(),launch,binding:binding.id.clone(),binding_revision:binding.revision,ownership_revision:1,
             supervisor:herdr_farm::worker_supervision::SupervisorIdentity{version:1,boot_id:"00000000-0000-0000-0000-000000000001".into(),host_id:None,observer_namespace:(1,1),worker_namespace:(1,2),outer:process.clone(),init:process},
-            host_reboot:None,repository_snapshots:vec![],output_snapshot:Some(AttemptOutputReference{source:source.clone(),digest:if mode=="absent"{None}else{Some(manifest_hash)}}),retained_resources:binding.identity.clone(),cause:WorkerTerminationCause::Cancellation,observed_unix_ms:0};
+            host_reboot:None,repository_snapshots:vec![],output_snapshot:Some(AttemptOutputReference{omitted_entries:0,source:source.clone(),digest:if mode=="absent"{None}else{Some(manifest_hash)}}),retained_resources:binding.identity.clone(),cause:WorkerTerminationCause::Cancellation,observed_unix_ms:0};
         raw.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES('runtime.worker_terminated',?1,1,1,?2)",rusqlite::params![attempt.as_str(),serde_json::to_string(&stop).unwrap()]).unwrap();
         if mode=="queued" {raw.execute("UPDATE tasks SET state='cancelled' WHERE id=?1",[old.task.as_ref().unwrap().as_str()]).unwrap();}
         let state=runtime::snapshot(&path).unwrap();assert!(!Path::new(&source).exists());

@@ -240,10 +240,10 @@ fn preserved_outputs_publish_artifacts_without_original_source_and_recheck_autho
         entries.push(OutputEntry{symlink:false,path:name.into(),directory:bytes.is_none(),executable:false,bytes:bytes.map_or(0,|b|b.len() as u64),sha256:digest.clone()});
         if let Some(bytes)=bytes{blobs.push((digest,bytes));}
     }
-    let manifest=OutputManifest{version:1,attempt:attempt.clone(),source:record.thread_dir.clone(),entries};let bytes=serde_json::to_vec(&manifest).unwrap();let digest=crate::thread::sha256_hex(&bytes);
+    let manifest=OutputManifest{omissions:vec![],version:1,attempt:attempt.clone(),source:record.thread_dir.clone(),entries};let bytes=serde_json::to_vec(&manifest).unwrap();let digest=crate::thread::sha256_hex(&bytes);
     let root=project.state_dir().join("worker-output-snapshots").join(attempt.as_str()).join(&digest);fs::create_dir_all(&root).unwrap();fs::write(root.join("manifest.json"),bytes).unwrap();for (id,bytes) in blobs{fs::write(root.join(id),bytes).unwrap();}
     fs::remove_dir_all(&record.thread_dir).unwrap();
-    let outputs=load_outputs(&project.dir(),&attempt,&AttemptOutputReference{source:record.thread_dir.clone(),digest:Some(digest)},&herdr_farm::source_tree::Control::default()).unwrap();
+    let outputs=load_outputs(&project.dir(),&attempt,&AttemptOutputReference{omitted_entries:0,source:record.thread_dir.clone(),digest:Some(digest)},&herdr_farm::source_tree::Control::default()).unwrap();
     let loaded=capture_preserved_outputs(&project,&record,&outputs,&Control::default(),||Ok(())).unwrap();assert_eq!(loaded.id,original.id);assert_eq!(loaded.manifest,original.manifest);
     assert!(!Path::new(&record.thread_dir).exists());
     let target=project.state_dir().join("canonical-artifacts").join(&record.id).join(&loaded.id);

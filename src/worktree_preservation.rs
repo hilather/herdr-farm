@@ -10,6 +10,7 @@ mod outputs;
 mod output_reader;
 pub use output_reader::{load_outputs,load_binding_outputs,load_binding_output_rows,VerifiedOutputs};
 pub use outputs::OutputManifest;
+pub use crate::domain::{OutputOmission,OutputOmissionReason};
 pub(crate) use outputs::capture_outputs_held;
 pub use git::Archive as GitArchive;
 
@@ -35,14 +36,16 @@ pub struct Snapshot {pub digest:String,pub directory:PathBuf,pub manifest:Manife
 fn hash(bytes:&[u8])->String {format!("{:x}",Sha256::digest(bytes))}
 
 // Some exclusions select worktree semantics (including skipping the .git pointer);
-// output-directory snapshots pass None and preserve every entry as before.
-fn scan(directory:&Directory,relative:&Path,budget:&mut Budget,entries:&mut Vec<Entry>,blobs:&mut BTreeMap<String,Vec<u8>>,depth:usize,ignored:Option<&[PathBuf]>)->Result<()> {
+// Output exclusions are independent and never select Git/link semantics.
+fn scan(directory:&Directory,relative:&Path,budget:&mut Budget,entries:&mut Vec<Entry>,blobs:&mut BTreeMap<String,Vec<u8>>,ignored:Option<&[PathBuf]>,exclusions:&[PathBuf])->Result<()> {
+    let depth=relative.components().count();
     let skip_git=ignored.is_some();
     let before=directory.metadata()?;
-    for name in directory.names(budget)? {
+    for name in if exclusions.is_empty(){directory.names(budget)?}else{directory.names_bounded(budget,30_000)?} {
         if skip_git && relative.as_os_str().is_empty() && name==".git" {continue;}
         let path=relative.join(&name);
         if ignored.is_some_and(|paths|paths.iter().any(|excluded|path.starts_with(excluded))) {continue;}
+        if exclusions.iter().any(|excluded|path.starts_with(excluded)) {continue;}
         budget.entry(depth)?;
         let text=path.to_str().context("checkout snapshot paths must be UTF-8")?.to_owned();
         ensure!(text.len()<=4096,"checkout snapshot path exceeds bounds");
@@ -55,7 +58,7 @@ fn scan(directory:&Directory,relative:&Path,budget:&mut Budget,entries:&mut Vec<
         let metadata=file.metadata()?;
         if metadata.is_dir() {
             entries.push(Entry{symlink:false,path:text,directory:true,executable:false,bytes:0,sha256:String::new()});
-            scan(&Directory::from_file(file)?,&path,budget,entries,blobs,depth+1,ignored)?;
+            scan(&Directory::from_file(file)?,&path,budget,entries,blobs,ignored,exclusions)?;
         } else {
             budget.size(&file)?;
             let mut file=file;let mut bytes=Vec::new();let mut buffer=[0u8;65536];
@@ -152,7 +155,7 @@ fn capture_receipts(project:&Path,record:&AttemptInputRecord,proof:crate::worktr
         let source=Directory::open(Path::new(&receipt.plan.path))?;
         let ignored=ignored_paths(&git,Path::new(&receipt.plan.path))?;
         let mut entries=Vec::new();let mut blobs=BTreeMap::new();
-        scan(&source,Path::new(""),&mut budget,&mut entries,&mut blobs,0,Some(&ignored))?;
+        scan(&source,Path::new(""),&mut budget,&mut entries,&mut blobs,Some(&ignored),&[])?;
         source.matches_path(Path::new(&receipt.plan.path))?;
         let archive=if include_git {Some(git::capture(&git,&receipt,&control,&mut remaining,&mut blobs)?)}else{None};
         captured.push((source,Manifest{version:if !ignored.is_empty(){4}else if entries.iter().any(|e|e.symlink){3}else if include_git{2}else{1},scope:if include_git{"repository_state"}else{"working_files"}.into(),attempt:attempt.clone(),worktree:receipt,entries,git:archive,excluded_ignored_paths:ignored.iter().map(|p|p.to_str().expect("validated UTF-8 ignored path").to_owned()).collect()},blobs,ignored));
@@ -161,7 +164,7 @@ fn capture_receipts(project:&Path,record:&AttemptInputRecord,proof:crate::worktr
     let mut budget=control.budget();
     for (source,manifest,_,ignored) in &captured {
         let mut entries=Vec::new();let mut blobs=BTreeMap::new();
-        scan(source,Path::new(""),&mut budget,&mut entries,&mut blobs,0,Some(ignored))?;
+        scan(source,Path::new(""),&mut budget,&mut entries,&mut blobs,Some(ignored),&[])?;
         ensure!(entries==manifest.entries,"checkout changed during capture");
         source.matches_path(Path::new(&manifest.worktree.plan.path))?;
         if let Some(archive)=&manifest.git {git::verify(&git,&manifest.worktree,&control,archive)?;}
@@ -205,7 +208,7 @@ mod tests {
     use std::fs;
     fn entries(path:&Path,control:&Control)->Result<Vec<Entry>> {
         let mut result=Vec::new();let mut blobs=BTreeMap::new();
-        scan(&Directory::open(path)?,Path::new(""),&mut control.budget(),&mut result,&mut blobs,0,Some(&[]))?;
+        scan(&Directory::open(path)?,Path::new(""),&mut control.budget(),&mut result,&mut blobs,Some(&[]),&[])?;
         Ok(result)
     }
     #[test]

@@ -3096,6 +3096,12 @@ fn launch_advancement_recovers_each_boundary_then_delivers_brief_and_stops() {
         fs::create_dir(Path::new(&output).join("library")).unwrap();
         fs::write(Path::new(&output).join("library/partial.bin"),[0,255,17]).unwrap();
         fs::write(Path::new(&output).join(".git"),b"ordinary output data").unwrap();
+        // Public launch/cancel/termination workflow: oversize logs cannot wedge a stop.
+        fs::File::create(Path::new(&output).join("library/FullRun1.log")).unwrap().set_len(28*1024*1024).unwrap();
+        fs::File::create(Path::new(&output).join("library/FullRun2.log")).unwrap().set_len(28*1024*1024).unwrap();
+        if lost=="creation" {
+            for index in 0..10_000 {fs::create_dir(Path::new(&output).join(format!("zz-empty-{index:05}"))).unwrap();}
+        }
         let mut db = migration::open_active(&f.project).unwrap();
         let state = db.read_snapshot(None).unwrap();
         if lost.starts_with("repository") {
@@ -3184,9 +3190,16 @@ fn launch_advancement_recovers_each_boundary_then_delivers_brief_and_stops() {
         assert_eq!(fs::read_to_string(artifact).unwrap(), "keep this result");
         let preserved=runtime::snapshot(&f.project).unwrap();
         let stop:WorkerTerminationReceipt=serde_json::from_value(preserved.events.iter().find(|e|e.kind=="runtime.worker_terminated").unwrap().payload.clone()).unwrap();
-        let outputs=stop.output_snapshot.unwrap();assert_eq!(outputs.source,output);
-        let directory=f.project.join(".state/worker-output-snapshots").join(attempt.as_str()).join(outputs.digest.unwrap());
+        let outputs=stop.output_snapshot.as_ref().unwrap();assert_eq!(outputs.source,output);
+        let directory=f.project.join(".state/worker-output-snapshots").join(attempt.as_str()).join(outputs.digest.as_ref().unwrap());
         let manifest:crate::worktree_preservation::OutputManifest=serde_json::from_slice(&fs::read(directory.join("manifest.json")).unwrap()).unwrap();
+        assert_eq!(manifest.version,2);assert_eq!(manifest.omissions.len(),if lost=="creation"{6}else{1});
+        assert_eq!(manifest.omissions[0].path,"library/FullRun2.log");assert_eq!(manifest.omissions[0].bytes,28*1024*1024);
+        assert!(Path::new(&output).join("library/FullRun2.log").exists());
+        assert_eq!(preserved.inbox.iter().filter(|i|i.content.kind=="attempt.output_omitted").count(),1);
+        assert_eq!(stop.output_snapshot.as_ref().unwrap().omitted_entries,manifest.omissions.len());
+        assert_eq!(manifest.omissions.iter().filter(|o|matches!(o.reason,crate::domain::OutputOmissionReason::EntryLimit)).count(),if lost=="creation"{5}else{0});
+        assert_ne!(preserved.control.as_ref().unwrap().state,ProjectState::Paused);
         for (name,bytes) in [("report.md",b"keep this result".as_slice()),("library/partial.bin",&[0,255,17]),(".git",b"ordinary output data".as_slice())] {
             let entry=manifest.entries.iter().find(|e|e.path==name).unwrap();
             assert_eq!(fs::read(directory.join(&entry.sha256)).unwrap(),bytes);
@@ -3321,7 +3334,7 @@ fn staged_stop_requires_output_evidence_and_records_an_empty_directory_as_absent
     let source=worker_output_path(&state.attempt_inputs[0].inputs,&target.attempt).unwrap();fs::create_dir_all(&source).unwrap();
     db.cancel_attempt(&target.attempt,state.attempts[0].revision,state.head,"stop empty outputs",now()).unwrap();
     let before=db.read_snapshot(None).unwrap();
-    for output in [None,Some(AttemptOutputReference{source:"/unrelated".into(),digest:None}),Some(AttemptOutputReference{source:source.clone(),digest:Some("invalid".into())})] {
+    for output in [None,Some(AttemptOutputReference{omitted_entries:0,source:"/unrelated".into(),digest:None}),Some(AttemptOutputReference{omitted_entries:0,source:source.clone(),digest:Some("invalid".into())})] {
         let incomplete=PreparedLaunchStopped{receipt:LaunchStoppedReceipt{version:1,target:target.clone(),host_reboot:None,repository_snapshots:vec![],output_snapshot:output,observed_unix_ms:now()}};
         let error=db.record_launch_stopped(&incomplete,before.attempts[0].revision,before.head,now()).unwrap_err();
         assert!(error.to_string().contains("output preservation"));assert_eq!(db.read_snapshot(None).unwrap(),before);

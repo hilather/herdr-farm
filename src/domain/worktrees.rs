@@ -48,6 +48,8 @@ pub struct WorktreeSnapshotReference {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AttemptOutputReference {
+    #[serde(default,skip_serializing_if="is_zero")]
+    pub omitted_entries:usize,
     pub source: String,
     /// None records an observed absent output directory, not a missing receipt.
     pub digest: Option<String>,
@@ -187,3 +189,12 @@ pub fn worker_output_path(inputs: &LaunchInputs, attempt: &AttemptId) -> Result<
     if path.len()>4096 || path.chars().any(char::is_control) {return Err("worker output path exceeds filesystem bounds".into());}
     Ok(path.into())
 }
+
+#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
+#[serde(rename_all="kebab-case")]
+pub enum OutputOmissionReason { ByteLimit, EntryLimit }
+#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutputOmission {pub path:String,pub bytes:u64,pub reason:OutputOmissionReason}
+
+fn is_zero(value:&usize)->bool {*value==0}

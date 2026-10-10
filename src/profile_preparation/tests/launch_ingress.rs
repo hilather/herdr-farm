@@ -424,7 +424,7 @@ fn worktree_only_stop_fences_late_launch_and_preserves_uncertain_resources() {
         assert_eq!(hint.operation.target,reservation.record.attempt.as_str());
         if mode=="ready" {
             let guard=crate::execution_guard::RootGuard::exclusive(f.f.project.parent().unwrap()).unwrap();
-            assert!(db.stop_worktree_preparation(&reservation.record.attempt,before.attempts[0].revision,before.head,&guard,|_,_|Ok((vec![],AttemptOutputReference{source:output.clone(),digest:None})),crate::canonical_worker::now()).is_err());
+            assert!(db.stop_worktree_preparation(&reservation.record.attempt,before.attempts[0].revision,before.head,&guard,|_,_|Ok((vec![],AttemptOutputReference{omitted_entries:0,source:output.clone(),digest:None})),crate::canonical_worker::now()).is_err());
             assert_eq!(f.state(),before);
         }
         if mode=="rollback" {
