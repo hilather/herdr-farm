@@ -300,6 +300,10 @@ pub(super) fn cancel_attempt_in_transaction(tx:&Connection,id:&AttemptId,expecte
         if released {
             if gone {
                 let input=record.as_ref().ok_or_else(||invalid("sealed lost launch missing"))?;
+                let proof=serde_json::json!({"attempt":id,"phase":"launch_creation recovery","reason":"dedicated_server_lost","terminal":true,"observed_unix_ms":now,"cancellation":reason});
+                for owned in super::ownership::read_all_with_budget(tx,budget)?.into_iter().filter(|o|o.attempt.as_ref()==Some(id)) {
+                    super::ownership::relinquish_ended(tx,&owned,"dedicated_server_lost",proof.clone())?;
+                }
                 super::inbox::result_notice(tx,"attempt.launch_failure",input.operation.as_str(),attempt.task.as_str(),id.as_str(),"launch_creation recovery","dedicated_server_lost: recorded socket directory and server absent; worktrees retained; recovery: relaunch / cancel-attempt")?;
             } else {super::inbox::ended_notice(tx, &attempt)?;}
             super::dispatch_log::mark(tx,&attempt,now,"cancel_attempt_in_transaction")?;

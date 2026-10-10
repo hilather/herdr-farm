@@ -71,13 +71,19 @@ pub(super) fn context_with_budget(db: &Connection, intent: &WorkerBriefIntent, b
     }
     Ok((record, ownership, attempt, task))
 }
+pub(super) fn sealed_authority_with_budget(db: &Connection, record: &AttemptInputRecord, budget: Option<&read_budget::ReadBudget>) -> Result<()> {
+    let control = super::control::read_with_budget(db, budget)?;
+    if control.epoch != record.inputs.control_epoch || control.config_digest != record.inputs.config.digest {
+        return Err(StoreError::BriefAuthorityStale);
+    }
+    Ok(())
+}
 fn authority_with_budget(db: &Connection, record: &AttemptInputRecord, now: i64, budget: Option<&read_budget::ReadBudget>) -> Result<()> {
     let inputs = &record.inputs;
     let control = super::control::read_with_budget(db, budget)?;
+    sealed_authority_with_budget(db, record, budget)?;
     if control.state != ProjectState::Active
         || control.reconciliation_required
-        || control.epoch != inputs.control_epoch
-        || control.config_digest != inputs.config.digest
         || db.query_row("SELECT EXISTS(SELECT 1 FROM attempt_cancellations WHERE attempt_id=?1)
             OR EXISTS(SELECT 1 FROM events WHERE kind='attempt.completion_requested' AND entity=?1)", [record.attempt.as_str()], |row| row.get::<_,bool>(0))?
     {

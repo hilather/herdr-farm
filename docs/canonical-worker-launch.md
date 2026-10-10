@@ -1214,3 +1214,33 @@ server record. A subsequent `cancel-attempt` on that proven lost attempt is an
 idempotent success. Failed attempts with uncertain terminal effects keep their
 task pointer and capacity so the existing cancellation and termination observer
 can still retire an acknowledged gated worker.
+
+Proven launch-server disappearance also retires every runtime ownership claim for
+that attempt and its observations in the launch-failure transaction. The existing
+`runtime.relinquished` audit retains the ownership identity and disappearance
+proof; runtime bindings, worktrees and external resource references remain intact.
+This uses the same retirement code as the normal proven-termination observation
+path, so terminal launch history cannot repeatedly invalidate project control.
+
+A sealed brief control epoch or configuration digest mismatch is permanent for
+that attempt (`brief_authority_stale`). Preparation checks this fence before
+rendering retained knowledge, and delivery checks it before submission. The
+attempt fails once with one coordinator launch-failure notice, rather than
+retrying unchanged sealed inputs. An already-started worker still retains capacity
+until cancellation or observation proves its termination; this failure alone
+never claims that the worker stopped. No store schema migration is required.
+
+For stores already affected by #52, observation also recognizes the retained
+terminal `attempt.launch_failed` proof with reason `dedicated_server_lost`, a lost
+attempt with observed termination, and matching sealed attempt/binding identity.
+It retires the leftover claim through the same audited relinquishment without
+invalidating control again. No access to a live worker or owner data is needed
+for this repair.
+
+Cancellation after proven dedicated-server loss retires the attempt's ownership
+and observations in the same transaction and emits `runtime.relinquished` with
+terminal disappearance and cancellation evidence. Observation repairs pre-fix
+cancelled leftovers only with observed termination, matching sealed attempt/binding
+identity, a released cancellation journal entry, and the exact dedicated-server-loss
+outcome recorded by that sealed operation's cancellation path. Ordinary cancellation
+or endpoint absence alone does not authorize this repair. No schema change is needed.

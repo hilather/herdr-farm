@@ -19,6 +19,7 @@ pub enum StoreError {
     Deadline,
     Limit(String),
     Conflict,
+    BriefAuthorityStale,
     /// Expected plan parent is not the current revision. The value is that revision.
     StalePlanParent(u64),
     Busy,
