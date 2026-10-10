@@ -295,6 +295,7 @@ impl SqliteStore {
         ] {
             tx.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES(?1,?2,?3,1,?4)",params![kind,entity,integer(revision)?,value.map_err(|_|StoreError::Invalid("termination event encoding failed".into()))?])?;
         }
+        output_omission_notice(&tx,receipt.output_snapshot.as_ref(),&attempt)?;
         super::inbox::ended_notice(&tx, &attempt)?;
         super::consumer_bindings::reconcile_task(&tx,attempt.task.as_str(),budget)?;
         if let Some(budget)=budget {budget.check()?;}
@@ -455,6 +456,7 @@ impl SqliteStore {
         ] {
             tx.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES(?1,?2,?3,1,?4)",params![kind,entity,integer(revision)?,payload.map_err(|_|StoreError::Invalid("staged stop encoding failed".into()))?])?;
         }
+        output_omission_notice(&tx,receipt.output_snapshot.as_ref(),&attempt)?;
         super::inbox::ended_notice(&tx, &attempt)?;
         super::consumer_bindings::reconcile_task(&tx,attempt.task.as_str(),budget)?;
         if let Some(budget)=budget {budget.check()?;}
@@ -657,4 +659,12 @@ fn wall_expired(db: &Connection, record: &AttemptInputRecord, observed_ms: i64) 
         WHERE e.entity=?1 AND e.kind='runtime.launch_creation'
         AND t.recorded_unix_ms + ?2 * 1000 <= ?3)",
         params![record.operation.as_str(), integer(wall)?, observed_ms], |row| row.get(0))?)
+}
+
+// Digest-bound partial-output evidence and its notice commit with termination.
+fn output_omission_notice(db:&Connection,reference:Option<&AttemptOutputReference>,attempt:&Attempt)->Result<()> {
+    let Some(reference)=reference.filter(|r|r.digest.is_some()) else{return Ok(());};
+    if reference.omitted_entries==0{return Ok(());}
+    super::inbox::result_notice(db,"attempt.output_omitted",attempt.id.as_str(),attempt.task.as_str(),attempt.id.as_str(),reference.digest.as_deref().unwrap(),
+        &format!("{} output entries omitted from retained snapshot; original files remain at {}. Inspect the receipt-bound output manifest for paths, bytes and reasons.",reference.omitted_entries,reference.source))
 }

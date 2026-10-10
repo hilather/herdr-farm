@@ -30,7 +30,8 @@ pub fn load_outputs(project:&Path,attempt:&AttemptId,reference:&AttemptOutputRef
     let bytes=read(&directory,"manifest.json",4*1024*1024,&mut control.budget())?;
     ensure!(hash(&bytes)==digest,"retained output manifest digest mismatch");
     let manifest:OutputManifest=serde_json::from_slice(&bytes)?;
-    ensure!(manifest.version==1&&&manifest.attempt==attempt&&manifest.source==reference.source,"retained output identity mismatch");
+    ensure!(matches!(manifest.version,1|2)&&(manifest.version!=1||manifest.omissions.is_empty())&&&manifest.attempt==attempt&&manifest.source==reference.source,"retained output identity mismatch");
+    ensure!(manifest.omissions.len()==reference.omitted_entries,"retained output omissions mismatch");
     let mut budget=control.budget();let mut paths=BTreeMap::new();let mut blobs=BTreeMap::new();
     for entry in &manifest.entries {
         ensure!(!entry.symlink,"output snapshot contains an unsupported link");
@@ -50,6 +51,15 @@ pub fn load_outputs(project:&Path,attempt:&AttemptId,reference:&AttemptOutputRef
             ensure!(bytes.len() as u64==entry.bytes&&hash(&bytes)==entry.sha256,"retained output blob mismatch");
             blobs.insert(entry.sha256.clone(),bytes);
         }
+    }
+    let mut omitted=std::collections::BTreeSet::new();
+    ensure!(manifest.omissions.len()<=30_000,"output omission inventory exceeds bounds");
+    for omission in &manifest.omissions {
+        let relative=Path::new(&omission.path);
+        ensure!(!omission.path.is_empty()&&omission.path.len()<=4096&&relative.components().count()<=65
+            &&relative.components().all(|p|matches!(p,Component::Normal(_)))
+            &&relative.components().collect::<PathBuf>().as_os_str()==OsStr::new(&omission.path)
+            &&!paths.contains_key(&omission.path)&&omitted.insert(&omission.path),"invalid retained output omission");
     }
     directory.matches_path(&path)?;control.check()?;
     Ok(VerifiedOutputs{manifest,blobs})
@@ -94,12 +104,12 @@ mod tests {
     fn fixture()->(tempfile::TempDir,AttemptId,AttemptOutputReference,OutputManifest) {
         let root=tempfile::tempdir().unwrap();let attempt=AttemptId::new(format!("attempt-{}","a".repeat(64))).unwrap();
         let source=root.path().join(".state/worker-output").join(attempt.as_str()).to_str().unwrap().to_owned();
-        let manifest=OutputManifest{version:1,attempt:attempt.clone(),source:source.clone(),entries:vec![
+        let manifest=OutputManifest{omissions:vec![],version:1,attempt:attempt.clone(),source:source.clone(),entries:vec![
             Entry{symlink:false,path:"report.md".into(),directory:false,executable:false,bytes:6,sha256:hash(b"report")},
             Entry{symlink:false,path:"library".into(),directory:true,executable:false,bytes:0,sha256:String::new()},
             Entry{symlink:false,path:"library/binary".into(),directory:false,executable:true,bytes:3,sha256:hash(&[0,255,1])},
         ]};
-        (root,attempt,AttemptOutputReference{source,digest:None},manifest)
+        (root,attempt,AttemptOutputReference{omitted_entries:0,source,digest:None},manifest)
     }
     fn publish(root:&Path,attempt:&AttemptId,reference:&mut AttemptOutputReference,manifest:&OutputManifest)->PathBuf {
         let bytes=serde_json::to_vec(manifest).unwrap();let digest=hash(&bytes);reference.digest=Some(digest.clone());
@@ -138,7 +148,7 @@ mod tests {
                 "depth"=>{manifest.entries.clear();for n in 1..=66{manifest.entries.push(Entry{symlink:false,path:vec!["a";n].join("/"),directory:true,executable:false,bytes:0,sha256:String::new()});}},
                 "entries"=>{manifest.entries=(0..=source_tree::ENTRY_LIMIT).map(|n|Entry{symlink:false,path:format!("dir-{n}"),directory:true,executable:false,bytes:0,sha256:String::new()}).collect();},
                 "symlink"=>manifest.entries[0].symlink=true,
-                "version"=>manifest.version=2,"attempt"=>manifest.attempt=AttemptId::new(format!("attempt-{}","b".repeat(64))).unwrap(),_=>unreachable!(),
+                "version"=>manifest.version=3,"attempt"=>manifest.attempt=AttemptId::new(format!("attempt-{}","b".repeat(64))).unwrap(),_=>unreachable!(),
             }
             publish(root.path(),&attempt,&mut reference,&manifest);
             assert!(load_outputs(root.path(),&attempt,&reference,&Control::default()).is_err(),"{change}");

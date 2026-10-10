@@ -522,6 +522,7 @@ fn reserve_and_termination_refresh_bindings_without_generic_commit() {
                 host_reboot: None,
                 repository_snapshots: vec![],
                 output_snapshot: Some(AttemptOutputReference {
+                    omitted_entries:0,
                     source: crate::domain::worker_output_path(
                         &reservation.record.inputs,
                         &reservation.record.attempt,

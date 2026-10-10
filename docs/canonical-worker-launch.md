@@ -612,7 +612,34 @@ directory, an existing empty directory is recorded as absent too; a directory
 with any entry (an empty subdirectory included) has a manifest. Partial reports, binary library files,
 ordinary `.git` output data, executable bits and empty directories are retained.
 
-Output capture uses bounded descriptor-based traversal, two byte scans, durable
+Output manifest v2 records byte/entry budget omissions as `{path, bytes, reason}`.
+Capture inventories metadata first, then prioritizes `report.md`, small files by
+size and path, and directories. Retained entries stay within 50 MiB / 10,000
+entries; excluded files remain in the source directory. Exclusions are separate
+from Git-ignore rules. Worktree preservation still fails hard at its limits.
+Termination receipts carry the omission count and manifest digest and commit one `attempt.output_omitted`
+coordinator inbox notice. Inspection can read paths, sizes and reasons from the
+receipt-bound output manifest. Readers accept digest-bound v1 and v2 manifests. Previously
+wedged output captures recover on the next termination or cancellation retry;
+no operator reset or schema migration is required. Metadata remains bounded to
+30,000 entries, 64 nesting levels and a 4 MiB manifest; unsafe paths, unsupported
+entries and concurrent source changes still fail closed.
+
+WORKER-OUTPUT-BUDGET-1 sandbox validation: all six `worktree_preservation`
+checks passed; clippy completed with no diagnostics on changed lines. The
+`canonical_worker` library run had 2 passed, 67 Unix-socket bind failures and
+10 ignored. The CLI suite had 10 passed, 51 Unix-socket startup failures,
+3 local TCP bind failures and one fixture-setup store deadline; that deadline
+case (`acceptance_decision_replays_in_the_ledger_as_of`) passed in isolation.
+The extended completion workflow writes 56 MiB of logs before submitting and
+asserts a retained report, omission evidence/notice, intact omitted source files,
+and active control after termination. The launch/cancel recovery workflow also
+covers the 10,000-entry budget. Both those workflows and the unchanged
+fail-hard worktree workflow require the steward's run outside this socket-denying
+sandbox; their behavior assertions were not reached here. No schema migration
+or live-project action was performed.
+
+Output capture uses bounded descriptor-based traversal, two retained-byte scans, durable
 content-addressed writes and readback, with the manifest published last. Unsafe
 source/destination paths and publication failures keep capacity reserved for
 retry. Foreground and queued finalization verify the receipt-bound manifest and every

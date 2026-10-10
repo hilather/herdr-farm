@@ -741,7 +741,12 @@ fn editing_submission_lab_with(route: &str, policy: &str, verify: bool, integrat
 
 #[test]
 fn accepted_editing_worker_completes_automatically_after_integration() {
-    let (mut lab, attempt, _) = editing_submission_lab("verify_then_integrate", WORK_POLICY, true, true);
+    let oversized=SUBMITTING_EDITING_AGENT.replace("    for index in 0..2 {", r#"    fs::create_dir(output.join("library")).unwrap();
+    for name in ["FullRun1.log", "FullRun2.log"] {
+        fs::File::create(output.join("library").join(name)).unwrap().set_len(28*1024*1024).unwrap();
+    }
+    for index in 0..2 {"#);
+    let (mut lab, attempt, _) = editing_submission_lab_with("verify_then_integrate", WORK_POLICY, true, true,&oversized);
     let mut waiter = Command::new(BIN).env_clear()
         .env("HERDR_FARM_TEST_TIME_SCALE", include_str!("support/time-scale.txt").trim())
         .env("HOME", lab.home.path()).env("PATH", "/usr/bin:/bin")
@@ -757,6 +762,17 @@ fn accepted_editing_worker_completes_automatically_after_integration() {
     assert_eq!(lab.state().tasks.iter().find(|t| t.id.as_str() == "work").unwrap().state, TaskState::Succeeded);
     assert!(lab.git_ok(&["rev-parse", "--verify", "integration^2"]));
     assert_eq!(lab.events("runtime.worker_terminated").len(), 1);
+    let event=lab.events("runtime.worker_terminated").remove(0);
+    let receipt:herdr_farm::domain::WorkerTerminationReceipt=serde_json::from_value(event.payload).unwrap();
+    let reference=receipt.output_snapshot.unwrap();
+    let outputs=herdr_farm::worktree_preservation::load_outputs(&lab.project,&attempt,&reference,&Default::default()).unwrap();
+    assert_eq!(outputs.manifest().version,2);assert!(outputs.report_hash().is_some());
+    assert_eq!(outputs.manifest().omissions.len(),1);
+    assert_eq!(outputs.manifest().omissions[0].path,"library/FullRun2.log");
+    assert_eq!(outputs.manifest().omissions[0].bytes,28*1024*1024);
+    assert!(PathBuf::from(&reference.source).join("library/FullRun2.log").exists());
+    assert_ne!(lab.state().control.unwrap().state,herdr_farm::domain::ProjectState::Paused);
+    assert_eq!(lab.state().inbox.iter().filter(|i|i.content.kind=="attempt.output_omitted").count(),1);
     assert_eq!(lab.events("attempt.completion_requested").len(), 1);
     let report = lab.ok_live(&|| ["telemetry", "demo", "attempts", "--json"].map(String::from).to_vec());
     let outcome = report["attempts"].as_array().unwrap().iter().find(|a| a["attempt_id"] == attempt.as_str()).unwrap();

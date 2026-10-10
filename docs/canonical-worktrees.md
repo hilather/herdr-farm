@@ -202,3 +202,10 @@ shares draft's preparation deadline with reserve. Worktree creation remains a
 later leased operation with its own 45-second cap; copy jobs keep their existing
 executor deadlines. A pre-spawn transfer budget refusal never constitutes a
 worktree or copy receipt.
+
+Dedicated worker-output capture is fail-soft only for its byte and retained-entry
+budgets. Output manifest v2 prioritizes reports and small files, records omitted
+paths/sizes/reasons, and leaves source files intact. The termination receipt and
+one coordinator notice expose omissions. Working-file and repository-state
+capture keep their fail-hard limits; output omissions grant no worktree cleanup
+authority. See [attempt output preservation](canonical-worker-launch.md#attempt-output-and-preservation-contract).

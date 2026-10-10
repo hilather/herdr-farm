@@ -212,6 +212,9 @@ impl Directory {
         after_unlink();Ok(())
     }
     pub fn names(&self,budget:&Budget)->Result<Vec<OsString>> {
+        self.names_bounded(budget,budget.entries)
+    }
+    pub(crate) fn names_bounded(&self,budget:&Budget,limit:usize)->Result<Vec<OsString>> {
         budget.check()?;
         // Opening '.' obtains an independent directory offset; dup would share
         // the original offset and make repeated enumeration silently incomplete.
@@ -233,7 +236,7 @@ impl Directory {
             if entry.is_null(){let code=unsafe{*errno()};if code!=0{return Err(io::Error::from_raw_os_error(code).into());}break;}
             let name=unsafe{CStr::from_ptr((*entry).d_name.as_ptr())}.to_bytes();
             if name==b"."||name==b".."{continue;}
-            if names.len()>=budget.entries {return Err(Limit::Entries.into());}
+            if names.len()>=limit {return Err(Limit::Entries.into());}
             names.push(OsString::from_vec(name.to_vec()));
         }
         names.sort();Ok(names)
