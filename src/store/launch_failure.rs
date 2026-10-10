@@ -5,17 +5,32 @@ use crate::operations::Outcome;
 #[derive(Clone, Copy)]
 enum LaunchFailureReason {
     LaunchConflict,
+    BriefAuthorityStale,
     DedicatedServerLost,
     LaunchRecoveryFailed,
 }
 impl LaunchFailureReason {
     fn as_str(self) -> &'static str {
         match self {
+            Self::BriefAuthorityStale => "brief_authority_stale",
             Self::LaunchConflict => "launch_conflict",
             Self::DedicatedServerLost => "dedicated_server_lost",
             Self::LaunchRecoveryFailed => "launch_recovery_failed",
         }
     }
+}
+
+/// Repair ownership left by the pre-hotfix proven-server-loss transaction.
+pub(super) fn proven_lost_launch(db: &Connection, owned: &RuntimeOwnership, budget: Option<&read_budget::ReadBudget>) -> Result<Option<serde_json::Value>> {
+    let Some(id) = owned.attempt.as_ref().filter(|_| owned.origin == "launched") else { return Ok(None); };
+    let attempt = read_attempt_with_budget(db, id, budget)?;
+    if attempt.state != AttemptState::Lost || !attempt.termination_observed || attempt.retains_capacity() { return Ok(None); }
+    let payload = read_budget::optional(db, "SELECT payload FROM events WHERE kind='attempt.launch_failed' AND entity=?1 AND json_extract(payload,'$.reason')='dedicated_server_lost' AND json_extract(payload,'$.terminal')=1 ORDER BY sequence DESC LIMIT 1", [id.as_str()], budget, &[(0,1)], |row| row.get::<_,String>(0))?;
+    let Some(payload) = payload else { return Ok(None); };
+    let proof: serde_json::Value = serde_json::from_str(&payload).map_err(|e| StoreError::Corrupt(e.to_string()))?;
+    let input = super::reservations::read_attempt_input(db, id.as_str(), budget)?;
+    if input.inputs.binding != owned.binding || proof["attempt"] != id.as_str() { return Ok(None); }
+    Ok(Some(proof))
 }
 
 /// A missing endpoint alone is transient. Only an owner-controlled dedicated
@@ -250,6 +265,8 @@ impl SqliteStore {
         let terminal = gone || conflict || count >= 2;
         let reason = if gone {
             LaunchFailureReason::DedicatedServerLost
+        } else if phase == "brief_authority_stale" {
+            LaunchFailureReason::BriefAuthorityStale
         } else if conflict {
             LaunchFailureReason::LaunchConflict
         } else {
@@ -319,6 +336,9 @@ impl SqliteStore {
                 ],
             )?;
             if attempt.termination_observed {
+                for owned in super::ownership::read_all(&tx)?.into_iter().filter(|o| o.attempt.as_ref() == Some(&attempt.id)) {
+                    super::ownership::relinquish_ended(&tx, &owned, reason, payload.clone())?;
+                }
                 tx.execute("UPDATE tasks SET revision=revision+1,state='failed',active_attempt=NULL WHERE id=?1 AND active_attempt=?2",params![attempt.task.as_str(),attempt.id.as_str()])?;
             }
             tx.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES('attempt.launch_failed',?1,?2,1,?3)", params![attempt.id.as_str(),integer(attempt.revision)?,payload.to_string()])?;

@@ -3863,3 +3863,93 @@ fn repeated_nontransient_recovery_stops_and_escalates_with_capacity_retained() {
     assert!(stalled["evidence"]["attempts"].as_array().unwrap().iter().any(|a| a["attempt"] == attempt.as_str() && a["recovery_stopped"] == true));
     assert_eq!(lab.count("workspace.create_command"), 1);
 }
+
+#[test]
+fn proven_launch_server_loss_retires_owned_runtime_and_next_brief_succeeds() {
+    for cancel in [false, true] {
+        let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+        let (_, attempt) = lab.reserve("Close owned runtime after proven server loss.");
+        lab.serve();
+        let operation = lab.state().attempt_inputs.iter().find(|i| i.attempt == attempt).unwrap().operation.clone();
+        herdr_farm::canonical_worker::advance_launch(&lab.project, &operation, 1,
+            Instant::now() + Duration::from_secs(45), Default::default()).unwrap();
+        let owned = lab.state().ownership.into_iter().find(|o| o.attempt.as_ref() == Some(&attempt)).unwrap();
+        let server = lab.server.as_mut().unwrap();
+        server.kill().unwrap(); server.wait().unwrap();
+        fs::rename(lab.path("lab"), lab.path("ended-server")).unwrap();
+        // The dedicated run directory is absent, as is every process holding
+        // its server route. The worker's retained worktree remains untouched.
+        if cancel {
+            let current = lab.attempt(&attempt);
+            lab.ok(&["task", "demo", "cancel-attempt", attempt.as_str(),
+                "--expected-revision", &current.revision.to_string(), "--expected-head", &lab.head().to_string(),
+                "--reason", "dedicated server lost"]);
+        } else {
+            assert!(migration::open_active(&lab.project).unwrap().reconcile_missing_launch_server(
+                &operation, jiff::Timestamp::now().as_millisecond()).unwrap());
+        }
+        let state = lab.state();
+        assert!(lab.attempt(&attempt).termination_observed);
+        assert!(state.ownership.iter().all(|o| o.attempt.as_ref() != Some(&attempt)));
+        assert!(state.observations.iter().all(|o| o.binding != lab.binding));
+        assert_eq!(lab.events("runtime.relinquished").iter().filter(|e| e.payload["ownership"]["attempt"] == attempt.as_str()).count(), 1);
+        fs::create_dir(lab.path("lab")).unwrap();
+        lab.serve();
+        let epoch = state.control.unwrap().epoch;
+        if !cancel {
+            // Reproduce a pre-hotfix store: terminal disappearance proof exists,
+            // but its launched ownership row survived. Public observation must
+            // repair that history without another control invalidation.
+            let payload = serde_json::to_string(&owned).unwrap();
+            let raw = rusqlite::Connection::open(lab.project.join(".state/state.db")).unwrap();
+            raw.execute("INSERT INTO runtime_ownership VALUES(?1,?2,?3,?4,?5,?6)", rusqlite::params![owned.binding,owned.revision,owned.binding_revision,attempt.as_str(),payload,format!("{:x}",Sha256::digest(payload.as_bytes()))]).unwrap();
+        }
+        lab.run_passes(4);
+        assert!(lab.state().ownership.iter().all(|o| o.attempt.as_ref() != Some(&attempt)));
+        assert_eq!(lab.state().control.unwrap().epoch, epoch);
+        let task = lab.state().tasks.into_iter().find(|t| t.id.as_str() == "work").unwrap();
+        runtime::queue_task(&lab.project, &task.id, task.revision, lab.head(),
+            &herdr_farm::domain::QueueRequest { priority: 0, dependencies: vec![] }).unwrap();
+        let (_, next) = lab.reserve("Deliver the subsequent worker brief.");
+        lab.run_until(120, &|| lab.attempt(&next).state == AttemptState::Running);
+        assert_eq!(lab.count("agent.prompt"), 1);
+        assert_eq!(lab.state().control.unwrap().epoch, epoch);
+    }
+}
+
+#[test]
+fn stale_sealed_brief_authority_fails_once_without_prompt_or_retry() {
+    for change_digest in [false, true] {
+        let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+        let (_, attempt) = lab.reserve("Never brief under stale sealed authority.");
+        lab.serve();
+        let operation = lab.state().attempt_inputs.iter().find(|i| i.attempt == attempt).unwrap().operation.clone();
+        herdr_farm::canonical_worker::advance_launch(&lab.project, &operation, 1,
+            Instant::now() + Duration::from_secs(45), Default::default()).unwrap();
+        let state = lab.state();
+        let control = state.control.unwrap();
+        if change_digest {
+            // Inject a digest-only fence change into this isolated store to
+            // exercise the second sealed authority field independently.
+            let raw = rusqlite::Connection::open(lab.project.join(".state/state.db")).unwrap();
+            raw.execute("UPDATE project_control SET config_digest=?1 WHERE singleton=1", ["a".repeat(64)]).unwrap();
+        } else {
+            let mut db = migration::open_active(&lab.project).unwrap();
+            db.set_project_state(state.head, control.revision, herdr_farm::domain::ProjectState::Paused,
+                jiff::Timestamp::now().as_millisecond(), control.config_digest.as_deref()).unwrap();
+        }
+        // Exercise the actual CLI ticker handoff, including its retries and
+        // coordinator notice, rather than calling the brief adapter directly.
+        lab.run_until(120, &|| lab.attempt(&attempt).state == AttemptState::Failed);
+        assert_eq!(lab.events("attempt.launch_failed")[0].payload["reason"], "brief_authority_stale");
+        assert_eq!(lab.attempt(&attempt).state, AttemptState::Failed);
+        assert!(lab.attempt(&attempt).retains_capacity());
+        let notices = lab.state().inbox.into_iter().filter(|i| i.content.kind == "attempt.launch_failure").collect::<Vec<_>>();
+        assert_eq!(notices.len(), 1);
+        assert!(notices[0].content.body.contains("brief_authority_stale"));
+        lab.run_passes(4);
+        assert_eq!(lab.events("attempt.launch_failed").len(), 1);
+        assert_eq!(lab.state().inbox.iter().filter(|i| i.content.kind == "attempt.launch_failure").count(), 1);
+        assert_eq!(lab.count("agent.prompt"), 0);
+    }
+}

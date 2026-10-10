@@ -124,6 +124,10 @@ impl SqliteStore {
             let mut changed=false;
             let mut ended=Vec::new();
             for owned in super::ownership::read_all_with_budget(&tx,budget)? {
+                if let Some(proof) = super::launch_failure::proven_lost_launch(&tx, &owned, budget)? {
+                    super::ownership::relinquish_ended(&tx, &owned, "dedicated_server_lost", proof)?;
+                    continue;
+                }
                 if schema>=41 && !bindings.contains_key(owned.binding.as_str()) {changed=true;continue;}
                 if let Some(binding)=bindings.get(owned.binding.as_str()).filter(|binding|binding.revision==owned.binding_revision) {
                     let valid=match by_binding.get(binding.id.as_str()) {Some(o)=>super::ownership::observed(binding,binding.task.as_ref().and_then(|id|tasks.get(id).copied()),o,o.observed_unix_ms,o.config_digest.as_deref())&&super::ownership::matches(&owned,binding,o)?,None=>false};
@@ -142,11 +146,7 @@ impl SqliteStore {
             // Retire each ended claim as audited relinquishment would, retaining
             // the binding and its resource references; nothing external changes.
             for (owned,receipt) in ended {
-                tx.execute("DELETE FROM runtime_ownership WHERE binding_id=?1",[&owned.binding])?;
-                tx.execute("DELETE FROM runtime_observations WHERE binding_id=?1",[&owned.binding])?;
-                super::active_work::invalidate(&tx)?;
-                let payload=serde_json::json!({"ownership":owned,"reason":"worker termination proven; its pane and agent are absent","resources_removed":false,"termination":receipt});
-                tx.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES('runtime.relinquished',?1,?2,1,?3)",params![owned.binding,integer(owned.revision)?,payload.to_string()])?;
+                super::ownership::relinquish_ended(&tx, &owned, "worker termination proven; its pane and agent are absent", serde_json::to_value(receipt).map_err(|e| StoreError::Invalid(e.to_string()))?)?;
             }
             if changed {super::control::invalidate_for_worker_resources(&tx)?;}
         }

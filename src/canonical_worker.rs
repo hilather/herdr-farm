@@ -744,6 +744,11 @@ pub fn prepare_brief(project: &Path, attempt: &AttemptId, mut revision: u64, dea
     for pass in 0..3 {
         match prepare_brief_once(project, attempt, revision, deadline, cancellation.clone()) {
             Ok(value) => return Ok(value),
+            Err(error) if error.chain().any(|e| matches!(e.downcast_ref::<crate::store::StoreError>(), Some(crate::store::StoreError::BriefAuthorityStale))) => {
+                check(deadline, &cancellation)?;
+                notify_brief_conflict(project, attempt, "brief_authority_stale", &error)?;
+                return Err(error);
+            }
             Err(error) if brief_conflict(&error) => {
                 check(deadline, &cancellation)?;
                 let db=crate::migration::open_active_scoped(project,crate::store::controlled::ReadControl::new(deadline,cancellation.clone()))?;
@@ -764,6 +769,14 @@ pub fn deliver_brief(project: &Path, operation: &OperationId, mut revision: u64,
     for pass in 0..3 {
         match deliver_brief_once(project, operation, revision, deadline, cancellation.clone()) {
             Ok(value) => return Ok(value),
+            Err(error) if error.chain().any(|e| matches!(e.downcast_ref::<crate::store::StoreError>(), Some(crate::store::StoreError::BriefAuthorityStale))) => {
+                check(deadline, &cancellation)?;
+                let db=crate::migration::open_active_scoped(project,crate::store::controlled::ReadControl::new(deadline,cancellation.clone()))?;
+                let attempt=db.brief_attempt(operation)?;
+                drop(db);
+                notify_brief_conflict(project, &attempt, "brief_authority_stale", &error)?;
+                return Err(error);
+            }
             Err(error) if brief_conflict(&error) => {
                 let db=crate::migration::open_active_scoped(project,crate::store::controlled::ReadControl::new(Instant::now()+Duration::from_secs(5),Default::default()))?;
                 check(deadline, &cancellation)?;
