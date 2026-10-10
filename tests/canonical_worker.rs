@@ -3907,11 +3907,17 @@ fn proven_launch_server_loss_retires_owned_runtime_and_next_brief_succeeds() {
         lab.run_passes(4);
         assert!(lab.state().ownership.iter().all(|o| o.attempt.as_ref() != Some(&attempt)));
         assert_eq!(lab.state().control.unwrap().epoch, epoch);
-        let task = lab.state().tasks.into_iter().find(|t| t.id.as_str() == "work").unwrap();
-        runtime::queue_task(&lab.project, &task.id, task.revision, lab.head(),
-            &herdr_farm::domain::QueueRequest { priority: 0, dependencies: vec![] }).unwrap();
+        // Coordinator retries use a new task and its own unused local binding.
+        lab.ok(&["task", "demo", "add", "next", "--title", "next", "--expected-head", &lab.head().to_string()]);
+        lab.ok(&["task", "demo", "queue", "next", "--input-file", lab.path("queue.json").to_str().unwrap(),
+            "--expected-revision", "1", "--expected-head", &lab.head().to_string()]);
+        let id = TaskId::new("next").unwrap();
+        let revision = lab.state().tasks.into_iter().find(|t| t.id == id).unwrap().revision;
+        let route = RuntimeRoute { socket: lab.socket().display().to_string(),
+            cwd: lab.repo.canonicalize().unwrap().display().to_string(), ..Default::default() };
+        let binding = runtime::create_binding(&lab.project, Some(&id), Some(revision), lab.head(), &route).unwrap().binding.id;
         // Reuse the retained profile evidence, as the other multi-launch labs do.
-        let selection = lab.selection("Deliver the subsequent worker brief.");
+        let selection = lab.selection_for("next", &binding, "Deliver the subsequent worker brief.");
         let (_, next) = lab.reserve_selection(&selection);
         lab.run_until(120, &|| lab.attempt(&next).state == AttemptState::Running);
         assert_eq!(lab.count("agent.prompt"), 1);

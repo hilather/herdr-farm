@@ -1,5 +1,44 @@
 # LOST-OWNERSHIP-1 validation
 
+## LOST-OWNERSHIP-1c fixture correction
+
+The steward's outside-sandbox run on `24c3a14` passed 45 of 46 related tests.
+The remaining subsequent-launch workflow drafted against the lost launch's
+retained binding, which correctly refused a new launch with `new launch requires
+an unused local binding`.
+
+The second launch now adds and queues a new `next` task through the CLI, creates
+its resource-free local binding through the public runtime API, and uses
+`selection_for` with the retained profile evidence, as existing multi-task labs
+do. This matches coordinator relaunches under a new task ID. Every existing
+assertion remains: lost ownership and observations disappear, historical
+ownership is repaired without control flapping, and the next worker receives
+its brief while the control epoch stays unchanged. Product behavior, canonical
+schema and dependencies are unchanged. This fixture does not establish a need
+to allow reuse of the lost launch's binding.
+
+Validation on 2026-10-10 used `TMPDIR=$PWD/target/tmp` and
+`nice -n 19 ionice -c 3 cargo ... --locked --offline -j 3 --features state-store`.
+
+| Selection | Passed | Failed | Ignored | Result |
+| --- | ---: | ---: | ---: | --- |
+| `test --lib runtime` | 11 | 1 | 0 | existing deadline test failed under load; isolated rerun passed |
+| `test --bin herdr-farm runtime_ownership::` | 1 | 8 | 0 | Unix socket bind denied |
+| `test --lib canonical_worker::` | 2 | 67 | 10 | Unix socket bind denied |
+| `test --test canonical_worker` | 11 | 56 | 0 | 53 Unix and 3 TCP socket fixtures denied |
+| `test --test operator_launch` | 30 | 7 | 0 | 2 direct Unix bind denials; 5 native socket-probe exits |
+
+Socket-only failure names match the lists below. The repaired workflow stopped
+in `Lab::serve` with Unix bind `Operation not permitted`, before reaching the
+second launch, so the steward must verify that path outside the sandbox.
+`runtime::controlled_tests::expiry_sql_is_interrupted_without_undoing_published_observations`
+failed with `state store: Deadline`; its exact isolated rerun passed (1/1).
+The copy-jobs suite was not run in this fixture-only round. No sandbox restriction
+was bypassed.
+
+All-target clippy passed with existing warnings and none on changed lines.
+`git diff --check` passed.
+
 ## LOST-OWNERSHIP-1b fixture correction
 
 The steward's outside-sandbox run on `7961977` passed 44 of 46 related tests.
