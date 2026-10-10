@@ -3894,6 +3894,10 @@ fn proven_launch_server_loss_retires_owned_runtime_and_next_brief_succeeds() {
         assert!(state.observations.iter().all(|o| o.binding != lab.binding));
         assert_eq!(lab.events("runtime.relinquished").iter().filter(|e| e.payload["ownership"]["attempt"] == attempt.as_str()).count(), 1);
         fs::create_dir(lab.path("lab")).unwrap();
+        // Retained bindings still reference w1:p1. Give the next launch a
+        // fresh pane, using the same reset as the other multi-launch labs;
+        // production provides a distinct dedicated server route instead.
+        fs::write(lab.path("lab/reset-workspace"), "").unwrap();
         lab.serve();
         let epoch = state.control.unwrap().epoch;
         if !cancel {
