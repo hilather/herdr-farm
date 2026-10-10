@@ -31,6 +31,15 @@ pub(crate) fn observed(binding:&RuntimeBinding,task_revision:Option<u64>,observa
 pub(crate) fn matches(owned:&RuntimeOwnership,binding:&RuntimeBinding,observation:&RuntimeObservation)->Result<bool> {
     Ok(owned.binding==binding.id&&owned.binding_revision==binding.revision&&owned.identity_digest==identity_digest(binding)?&&owned.session==observation.session_identity&&owned.worktree==observation.worktree_identity&&owned.agent==observation.agent_identity&&owned.config_digest==observation.config_digest)
 }
+/// Retire proven-ended authority while retaining all external resource references.
+pub(super) fn relinquish_ended(db: &Connection, owned: &RuntimeOwnership, reason: &str, termination: serde_json::Value) -> Result<()> {
+    db.execute("DELETE FROM runtime_ownership WHERE binding_id=?1", [&owned.binding])?;
+    db.execute("DELETE FROM runtime_observations WHERE binding_id=?1", [&owned.binding])?;
+    super::active_work::invalidate(db)?;
+    let payload = serde_json::json!({"ownership":owned,"reason":reason,"resources_removed":false,"termination":termination});
+    db.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES('runtime.relinquished',?1,?2,1,?3)", params![owned.binding,integer(owned.revision)?,payload.to_string()])?;
+    Ok(())
+}
 #[derive(Debug,serde::Serialize)]
 pub struct OwnershipChange {pub head:u64,pub ownership:RuntimeOwnership,pub task_revision:Option<u64>}
 impl SqliteStore {

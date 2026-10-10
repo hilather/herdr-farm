@@ -216,6 +216,8 @@ impl ControlledStore {
     pub(crate) fn prepare_worker_brief(&mut self,project:&Path,attempt:&str,expected_head:u64)->anyhow::Result<Operation> {
         self.control.check()?;
         anyhow::ensure!(self.current_head()?==expected_head,"worker brief preparation head changed");
+        let sealed=self.store.sealed_attempt_input(attempt,Some(&self.work_budget))?;
+        super::worker_brief::sealed_authority_with_budget(&self.store.connection,&sealed,Some(&self.work_budget))?;
         let brief=self.render_attempt_brief(project,attempt)?;
         let record=self.store.sealed_attempt_input(attempt,Some(&self.work_budget))?;
         let binding=super::runtime::read_binding(&self.store.connection,&record.inputs.binding,Some(&self.work_budget))?.ok_or(StoreError::Conflict)?;

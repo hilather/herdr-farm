@@ -264,7 +264,10 @@ pub(super) fn cancel_attempt_in_transaction(tx:&Connection,id:&AttemptId,expecte
         if attempt.revision!=expected_revision{return Err(StoreError::Conflict);}
         let mut task=read_task(tx,attempt.task.as_str())?;
         let input:Option<String>=tx.query_row("SELECT operation_id FROM attempt_inputs WHERE attempt_id=?1",[id.as_str()],|r|r.get(0)).optional()?;
-        let gone=if let Some(operation)=input {let record=read_input(tx,&OperationId::new(operation).map_err(StoreError::Corrupt)?,budget)?;super::launch_failure::creation_socket(tx,&record)?.as_deref().map(|socket|super::launch_failure::dedicated_server_gone(&record,socket)).transpose()?.unwrap_or(false)}else{false};
+        // Disappearance recovery closes unfinished launches, never an operator
+        // cancellation of a running or normally terminated worker.
+        let recovering_launch=attempt.retains_capacity()&&matches!(attempt.state,AttemptState::Reserved|AttemptState::Launching|AttemptState::Failed);
+        let gone=if let Some(operation)=input.filter(|_|recovering_launch) {let record=read_input(tx,&OperationId::new(operation).map_err(StoreError::Corrupt)?,budget)?;super::launch_failure::creation_socket(tx,&record)?.as_deref().map(|socket|super::launch_failure::dedicated_server_gone(&record,socket)).transpose()?.unwrap_or(false)}else{false};
         let old_reason:Option<String>=tx.query_row("SELECT reason FROM attempt_cancellations WHERE attempt_id=?1",[id.as_str()],|r|r.get(0)).optional()?;
         if let Some(old_reason)=old_reason {
             if old_reason!=reason&&!gone{return Err(StoreError::Conflict);}
@@ -300,6 +303,10 @@ pub(super) fn cancel_attempt_in_transaction(tx:&Connection,id:&AttemptId,expecte
         if released {
             if gone {
                 let input=record.as_ref().ok_or_else(||invalid("sealed lost launch missing"))?;
+                let proof=serde_json::json!({"attempt":id,"phase":"launch_creation recovery","reason":"dedicated_server_lost","terminal":true,"observed_unix_ms":now,"cancellation":reason});
+                for owned in super::ownership::read_all_with_budget(tx,budget)?.into_iter().filter(|o|o.attempt.as_ref()==Some(id)) {
+                    super::ownership::relinquish_ended(tx,&owned,"dedicated_server_lost",proof.clone())?;
+                }
                 super::inbox::result_notice(tx,"attempt.launch_failure",input.operation.as_str(),attempt.task.as_str(),id.as_str(),"launch_creation recovery","dedicated_server_lost: recorded socket directory and server absent; worktrees retained; recovery: relaunch / cancel-attempt")?;
             } else {super::inbox::ended_notice(tx, &attempt)?;}
             super::dispatch_log::mark(tx,&attempt,now,"cancel_attempt_in_transaction")?;

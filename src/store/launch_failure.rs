@@ -5,17 +5,48 @@ use crate::operations::Outcome;
 #[derive(Clone, Copy)]
 enum LaunchFailureReason {
     LaunchConflict,
+    BriefAuthorityStale,
     DedicatedServerLost,
     LaunchRecoveryFailed,
 }
 impl LaunchFailureReason {
     fn as_str(self) -> &'static str {
         match self {
+            Self::BriefAuthorityStale => "brief_authority_stale",
             Self::LaunchConflict => "launch_conflict",
             Self::DedicatedServerLost => "dedicated_server_lost",
             Self::LaunchRecoveryFailed => "launch_recovery_failed",
         }
     }
+}
+
+/// Repair ownership left by the pre-hotfix proven-server-loss transaction.
+pub(super) fn proven_lost_launch(db: &Connection, owned: &RuntimeOwnership, budget: Option<&read_budget::ReadBudget>) -> Result<Option<serde_json::Value>> {
+    let Some(id) = owned.attempt.as_ref().filter(|_| owned.origin == "launched") else { return Ok(None); };
+    // Most claims belong to live workers. Do not decode their attempt or sealed
+    // launch input on every observation pass. Ordinary cancelled workers also
+    // stop here: their completed launch delivery is confirmed, not failed.
+    let state = read_budget::optional(db, "SELECT state FROM attempts a WHERE id=?1 AND termination_observed=1 AND (state='lost' OR (state='cancelled' AND EXISTS(SELECT 1 FROM attempt_inputs i JOIN operation_delivery d ON d.operation_id=i.operation_id WHERE i.attempt_id=a.id AND d.state='permanent_failure')))", [id.as_str()], budget, &[], |row| row.get::<_, String>(0))?;
+    let Some(state) = state else { return Ok(None); };
+    let proof = if state == "lost" {
+        let payload = read_budget::optional(db, "SELECT payload FROM events WHERE kind='attempt.launch_failed' AND entity=?1 AND json_extract(payload,'$.reason')='dedicated_server_lost' AND json_extract(payload,'$.terminal')=1 ORDER BY sequence DESC LIMIT 1", [id.as_str()], budget, &[(0,1)], |row| row.get::<_,String>(0))?;
+        let Some(payload) = payload else { return Ok(None); };
+        let proof: serde_json::Value = serde_json::from_str(&payload).map_err(|e| StoreError::Corrupt(e.to_string()))?;
+        if proof["attempt"] != id.as_str() { return Ok(None); }
+        proof
+    } else {
+        // Pre-fix cancellation persisted its proof under the sealed operation,
+        // rather than emitting attempt.launch_failed. Require both journal entries.
+        let payload = read_budget::optional(db, "SELECT c.payload FROM events c WHERE c.kind='attempt.cancellation_requested' AND c.entity=?1 AND json_extract(c.payload,'$.released')=1 AND json_extract(c.payload,'$.request.attempt')=?1 AND json_extract(c.payload,'$.attempt.id')=?1 AND json_extract(c.payload,'$.attempt.state')='cancelled' AND json_extract(c.payload,'$.attempt.termination_observed')=1 AND EXISTS(SELECT 1 FROM events o WHERE o.kind='operation.outcome' AND o.entity=(SELECT operation_id FROM attempt_inputs WHERE attempt_id=?1) AND o.sequence<c.sequence AND json_extract(o.payload,'$.actor')='operator.cancellation' AND json_extract(o.payload,'$.outcome.kind')='permanent_failure' AND json_extract(o.payload,'$.outcome.diagnostic')='dedicated_server_lost: launch_creation recovery; recorded socket directory and server absent: ' || json_extract(c.payload,'$.request.reason')) ORDER BY c.sequence DESC LIMIT 1", [id.as_str()], budget, &[(0,1)], |row| row.get::<_,String>(0))?;
+        let Some(payload) = payload else { return Ok(None); };
+        let cancellation: serde_json::Value = serde_json::from_str(&payload).map_err(|e| StoreError::Corrupt(e.to_string()))?;
+        serde_json::json!({"attempt":id,"phase":"launch_creation recovery","reason":"dedicated_server_lost","terminal":true,"observed_unix_ms":cancellation["request"]["requested_unix_ms"],"cancellation":cancellation["request"]["reason"]})
+    };
+    // Only proven loss candidates pay for the retained input decode. The proof
+    // and claim must refer to the same sealed attempt and binding.
+    let input = super::reservations::read_attempt_input(db, id.as_str(), budget)?;
+    if input.inputs.binding != owned.binding { return Ok(None); }
+    Ok(Some(proof))
 }
 
 /// A missing endpoint alone is transient. Only an owner-controlled dedicated
@@ -250,6 +281,8 @@ impl SqliteStore {
         let terminal = gone || conflict || count >= 2;
         let reason = if gone {
             LaunchFailureReason::DedicatedServerLost
+        } else if phase == "brief_authority_stale" {
+            LaunchFailureReason::BriefAuthorityStale
         } else if conflict {
             LaunchFailureReason::LaunchConflict
         } else {
@@ -319,6 +352,9 @@ impl SqliteStore {
                 ],
             )?;
             if attempt.termination_observed {
+                for owned in super::ownership::read_all(&tx)?.into_iter().filter(|o| o.attempt.as_ref() == Some(&attempt.id)) {
+                    super::ownership::relinquish_ended(&tx, &owned, reason, payload.clone())?;
+                }
                 tx.execute("UPDATE tasks SET revision=revision+1,state='failed',active_attempt=NULL WHERE id=?1 AND active_attempt=?2",params![attempt.task.as_str(),attempt.id.as_str()])?;
             }
             tx.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES('attempt.launch_failed',?1,?2,1,?3)", params![attempt.id.as_str(),integer(attempt.revision)?,payload.to_string()])?;
