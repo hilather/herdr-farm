@@ -1244,3 +1244,14 @@ cancelled leftovers only with observed termination, matching sealed attempt/bind
 identity, a released cancellation journal entry, and the exact dedicated-server-loss
 outcome recorded by that sealed operation's cancellation path. Ordinary cancellation
 or endpoint absence alone does not authorize this repair. No schema change is needed.
+
+The LOST-OWNERSHIP-1f observation repair first uses an indexed attempt-ID lookup
+for state and termination. Cancelled candidates additionally require a permanently
+failed launch delivery. Live attempts and normally terminated operator-cancelled
+workers do not decode sealed launch inputs or scan journal JSON on this path.
+Only candidates with the exact recorded dedicated-server-loss proof read the
+sealed input to match the ownership binding before audited retirement.
+Cancellation's disappearance recovery is restricted to capacity-retaining
+reserved, launching or failed attempts; a running worker follows normal
+cancellation and termination observation even if its server later disappears.
+This hotfix adds no schema or dependency changes.
