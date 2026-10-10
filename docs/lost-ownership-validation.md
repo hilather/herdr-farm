@@ -1,5 +1,48 @@
 # LOST-OWNERSHIP-1 validation
 
+## LOST-OWNERSHIP-1b fixture correction
+
+The steward's outside-sandbox run on `7961977` passed 44 of 46 related tests.
+The two new E2E workflows failed during setup, before their assertions: the
+second reservation planted an already-retained native profile digest, and a
+direct store pause left the control marker unpublished.
+
+The subsequent-launch workflow now uses `selection` and `reserve_selection`,
+as existing multi-launch labs do, reusing the original profile evidence. The
+stale-epoch workflow pauses through `runtime demo state paused`, which publishes
+the control marker with the epoch change. The independent digest-only fixture
+and every assertion remain unchanged. This round changes only the E2E fixture
+and this validation document; no product bug, schema change or new crate was
+needed.
+
+Validation on 2026-10-10 used the same low-priority, offline cargo flags and
+checkout-local `TMPDIR` documented below. Commands were `cargo test` with
+`--features state-store` and the following target/filter selections:
+
+| Selection | Passed | Failed | Ignored | Result |
+| --- | ---: | ---: | ---: | --- |
+| `--lib runtime::` | 4 | 0 | 0 | passed |
+| `--lib runtime` | 11 | 1 | 0 | existing deadline test failed under load; isolated rerun passed |
+| `--bin herdr-farm runtime_ownership::` | 1 | 8 | 0 | Unix socket bind denied |
+| `--lib canonical_worker::` | 2 | 67 | 10 | Unix socket bind denied |
+| `--test canonical_worker` | 11 | 56 | 0 | 53 Unix and 3 TCP socket fixtures denied |
+| `--test operator_launch` | 30 | 7 | 0 | 2 direct Unix bind denials; 5 native socket-probe exits |
+
+The deadline-only failure was
+`runtime::controlled_tests::expiry_sql_is_interrupted_without_undoing_published_observations`
+(`state store: Deadline`); its exact isolated rerun passed (1/1).
+The worker, ownership and operator socket-only failure names are the lists below.
+Both repaired workflows timed out in `Lab::serve` after the fixture server's
+Unix bind reported `Operation not permitted`, before the changed setup paths
+could run. The steward must verify these paths outside the sandbox.
+
+All-target clippy (`cargo clippy --locked --offline -j 3 --features state-store
+--all-targets`) passed with existing warnings, none on changed lines.
+`git diff --check` passed. No socket restriction was bypassed; the copy-jobs
+suite was not run in this fixture-only round.
+
+## Original hotfix validation
+
 Validated in the hard sandbox on 2026-10-10, on `factory/lost-ownership`
 from `6a21837`. All cargo commands used `TMPDIR=$PWD/target/tmp`,
 `nice -n 19 ionice -c 3`, `--locked --offline -j 3`, and `--features state-store`.

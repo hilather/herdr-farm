@@ -3910,7 +3910,9 @@ fn proven_launch_server_loss_retires_owned_runtime_and_next_brief_succeeds() {
         let task = lab.state().tasks.into_iter().find(|t| t.id.as_str() == "work").unwrap();
         runtime::queue_task(&lab.project, &task.id, task.revision, lab.head(),
             &herdr_farm::domain::QueueRequest { priority: 0, dependencies: vec![] }).unwrap();
-        let (_, next) = lab.reserve("Deliver the subsequent worker brief.");
+        // Reuse the retained profile evidence, as the other multi-launch labs do.
+        let selection = lab.selection("Deliver the subsequent worker brief.");
+        let (_, next) = lab.reserve_selection(&selection);
         lab.run_until(120, &|| lab.attempt(&next).state == AttemptState::Running);
         assert_eq!(lab.count("agent.prompt"), 1);
         assert_eq!(lab.state().control.unwrap().epoch, epoch);
@@ -3934,9 +3936,9 @@ fn stale_sealed_brief_authority_fails_once_without_prompt_or_retry() {
             let raw = rusqlite::Connection::open(lab.project.join(".state/state.db")).unwrap();
             raw.execute("UPDATE project_control SET config_digest=?1 WHERE singleton=1", ["a".repeat(64)]).unwrap();
         } else {
-            let mut db = migration::open_active(&lab.project).unwrap();
-            db.set_project_state(state.head, control.revision, herdr_farm::domain::ProjectState::Paused,
-                jiff::Timestamp::now().as_millisecond(), control.config_digest.as_deref()).unwrap();
+            // Publish the control marker along with the epoch change.
+            lab.ok(&["runtime", "demo", "state", "paused",
+                "--expected-revision", &control.revision.to_string(), "--expected-head", &state.head.to_string()]);
         }
         // Exercise the actual CLI ticker handoff, including its retries and
         // coordinator notice, rather than calling the brief adapter directly.
