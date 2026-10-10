@@ -24,12 +24,23 @@ impl LaunchFailureReason {
 pub(super) fn proven_lost_launch(db: &Connection, owned: &RuntimeOwnership, budget: Option<&read_budget::ReadBudget>) -> Result<Option<serde_json::Value>> {
     let Some(id) = owned.attempt.as_ref().filter(|_| owned.origin == "launched") else { return Ok(None); };
     let attempt = read_attempt_with_budget(db, id, budget)?;
-    if attempt.state != AttemptState::Lost || !attempt.termination_observed || attempt.retains_capacity() { return Ok(None); }
-    let payload = read_budget::optional(db, "SELECT payload FROM events WHERE kind='attempt.launch_failed' AND entity=?1 AND json_extract(payload,'$.reason')='dedicated_server_lost' AND json_extract(payload,'$.terminal')=1 ORDER BY sequence DESC LIMIT 1", [id.as_str()], budget, &[(0,1)], |row| row.get::<_,String>(0))?;
-    let Some(payload) = payload else { return Ok(None); };
-    let proof: serde_json::Value = serde_json::from_str(&payload).map_err(|e| StoreError::Corrupt(e.to_string()))?;
+    if !matches!(attempt.state, AttemptState::Lost | AttemptState::Cancelled) || !attempt.termination_observed || attempt.retains_capacity() { return Ok(None); }
     let input = super::reservations::read_attempt_input(db, id.as_str(), budget)?;
-    if input.inputs.binding != owned.binding || proof["attempt"] != id.as_str() { return Ok(None); }
+    if input.inputs.binding != owned.binding { return Ok(None); }
+    let proof = if attempt.state == AttemptState::Lost {
+        let payload = read_budget::optional(db, "SELECT payload FROM events WHERE kind='attempt.launch_failed' AND entity=?1 AND json_extract(payload,'$.reason')='dedicated_server_lost' AND json_extract(payload,'$.terminal')=1 ORDER BY sequence DESC LIMIT 1", [id.as_str()], budget, &[(0,1)], |row| row.get::<_,String>(0))?;
+        let Some(payload) = payload else { return Ok(None); };
+        let proof: serde_json::Value = serde_json::from_str(&payload).map_err(|e| StoreError::Corrupt(e.to_string()))?;
+        if proof["attempt"] != id.as_str() { return Ok(None); }
+        proof
+    } else {
+        // Pre-fix cancellation persisted its proof under the sealed operation,
+        // rather than emitting attempt.launch_failed. Require both journal entries.
+        let payload = read_budget::optional(db, "SELECT c.payload FROM events c WHERE c.kind='attempt.cancellation_requested' AND c.entity=?1 AND json_extract(c.payload,'$.released')=1 AND json_extract(c.payload,'$.request.attempt')=?1 AND json_extract(c.payload,'$.attempt.id')=?1 AND json_extract(c.payload,'$.attempt.state')='cancelled' AND json_extract(c.payload,'$.attempt.termination_observed')=1 AND EXISTS(SELECT 1 FROM events o WHERE o.kind='operation.outcome' AND o.entity=?2 AND o.sequence<c.sequence AND json_extract(o.payload,'$.actor')='operator.cancellation' AND json_extract(o.payload,'$.outcome.kind')='permanent_failure' AND json_extract(o.payload,'$.outcome.diagnostic')='dedicated_server_lost: launch_creation recovery; recorded socket directory and server absent: ' || json_extract(c.payload,'$.request.reason')) ORDER BY c.sequence DESC LIMIT 1", params![id.as_str(),input.operation.as_str()], budget, &[(0,1)], |row| row.get::<_,String>(0))?;
+        let Some(payload) = payload else { return Ok(None); };
+        let cancellation: serde_json::Value = serde_json::from_str(&payload).map_err(|e| StoreError::Corrupt(e.to_string()))?;
+        serde_json::json!({"attempt":id,"phase":"launch_creation recovery","reason":"dedicated_server_lost","terminal":true,"observed_unix_ms":cancellation["request"]["requested_unix_ms"],"cancellation":cancellation["request"]["reason"]})
+    };
     Ok(Some(proof))
 }
 

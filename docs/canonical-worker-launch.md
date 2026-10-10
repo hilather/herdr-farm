@@ -1236,3 +1236,11 @@ attempt with observed termination, and matching sealed attempt/binding identity.
 It retires the leftover claim through the same audited relinquishment without
 invalidating control again. No access to a live worker or owner data is needed
 for this repair.
+
+Cancellation after proven dedicated-server loss retires the attempt's ownership
+and observations in the same transaction and emits `runtime.relinquished` with
+terminal disappearance and cancellation evidence. Observation repairs pre-fix
+cancelled leftovers only with observed termination, matching sealed attempt/binding
+identity, a released cancellation journal entry, and the exact dedicated-server-loss
+outcome recorded by that sealed operation's cancellation path. Ordinary cancellation
+or endpoint absence alone does not authorize this repair. No schema change is needed.
