@@ -815,7 +815,7 @@ fn canonical_toast_backoff_and_live_nudge_policy_survive_context_reads() {
     assert_eq!(wake_history(&l)["wake"]["attempts"].as_array().unwrap().len(),before);
     let md=l.project.join("PROJECT.md");
     fs::write(&md,fs::read_to_string(&md).unwrap().replace("nudge = false","nudge = true")).unwrap();
-    fs::write(l.home.path().join("coordinator-status"),"idle").unwrap();
+    fs::write(l.home.path().join("coordinator-status"),"done").unwrap();
     wake_passes(&l,"8");
     assert_eq!(l.state()["prompts"].as_array().unwrap().len(),initial+1,"enabling nudge prompts an already toasted unfinished result");
     l.ok(&["inbox","done","demo",&id]);
@@ -837,8 +837,11 @@ fn canonical_wake_lost_reply_fences_replay_until_done_and_releases_new_results()
     assert_eq!(wake_history(&l)["wake"]["claim"]["phase"],"uncertain");
     l.ok(&["context","demo"]);wake_passes(&l,"8");
     assert_eq!(l.state()["prompts"].as_array().unwrap().len(),initial+1);
-    l.ok(&["inbox","done","demo",&id]);
     lose_worker(&l,"new-result");wake_passes(&l,"8");
+    assert_eq!(l.state()["prompts"].as_array().unwrap().len(),initial+1,"new results cannot bypass the uncertain item's fence");
+    l.ok(&["inbox","done","demo",&id]);
+    fs::write(l.home.path().join("coordinator-status"),"done").unwrap();
+    wake_passes(&l,"8");
     assert_eq!(l.state()["prompts"].as_array().unwrap().len(),initial+2);
     assert_eq!(wake_history(&l)["wake"]["claim"]["phase"],"confirmed");
 }

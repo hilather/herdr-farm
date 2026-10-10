@@ -236,7 +236,11 @@ nudge = false # Herdr toast; true prompts the idle/done coordinator
 The default for new projects remains `false`; this change does not edit existing
 projects. With `true`, the canonical controller queues a supervised wake when
 unfinished worker-result notices exist, checks owned routing and fresh native
-readiness, and never prompts a working coordinator. On a healthy, uncontended
+readiness, and never prompts a working coordinator. Native agent statuses
+`idle` and `done` are eligible; a matching `done` readiness
+rule is treated as idle while visible readiness and manifest checks still apply.
+The supervised Herdr calls inherit the held root execution barrier, retaining
+ownership until their descendants exit. On a healthy, uncontended
 ticker the normal 15-second pass plus the bounded 45-second wake job targets a
 wake within 60 seconds after idle is observable. Busy coordinators defer until
 idle; contention, unavailable native readiness and failed preflight probes defer

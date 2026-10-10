@@ -10,7 +10,7 @@ if a==['remote-api-bridge']:
  r=json.loads(sys.stdin.readline());m=r['method'];p=r.get('params') or {};res=None
  if m=='pane.list':res={'panes':[pane()] if s['live'] else []}
  elif m=='agent.list':res={'type':'agent_list','agents':[agent()] if s['live'] and s['agent'] else []}
- elif m=='agent.explain':res={'explain':{'agent':'claude','state':s.get('status','working' if s['accepted'] else 'idle'),'manifest_source':s.get('manifest_source','bundled'),'manifest_version':'fixture-1','matched_rule':{'id':'prompt','state':'idle'},'visible_idle':s.get('status','working' if s['accepted'] else 'idle') in ['idle','done'],'visible_working':s.get('status','working' if s['accepted'] else 'idle')=='working','visible_blocker':False,'screen_detection_skipped':False,'skip_state_update':False,'local_override_shadowing_remote':s.get('shadow',False),'fallback_reason':None,'warning':None}}
+ elif m=='agent.explain':res={'explain':{'agent':'claude','state':s.get('status','working' if s['accepted'] else 'idle'),'manifest_source':s.get('manifest_source','bundled'),'manifest_version':'fixture-1','matched_rule':{'id':'prompt','state':'done' if s.get('status')=='done' else 'idle'},'visible_idle':s.get('status','working' if s['accepted'] else 'idle') in ['idle','done'],'visible_working':s.get('status','working' if s['accepted'] else 'idle')=='working','visible_blocker':False,'screen_detection_skipped':False,'skip_state_update':False,'local_override_shadowing_remote':s.get('shadow',False),'fallback_reason':None,'warning':None}}
  elif m=='notification.show':res={'type':'notification_show','shown':not s.get('toast_busy',False),'reason':'busy' if s.get('toast_busy',False) else 'shown'}
  elif m=='agent.prompt':
   s['prompts'].append(p['text'])

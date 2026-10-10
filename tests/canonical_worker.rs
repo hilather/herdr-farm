@@ -71,6 +71,7 @@ while True:
 "#;
 
 struct Lab { home: tempfile::TempDir, project: PathBuf, key: PathBuf, repo: PathBuf, herdr: PathBuf, profile: VersionedReference, binding: String, server: Option<Child>,
+    coordinator_listener: Option<std::os::unix::net::UnixListener>,
     /// The `worker` profile's kind and its agent `bin/<kind>`.
     kind: &'static str }
 
@@ -108,7 +109,7 @@ impl Lab {
         fs::write(&config, format!("[authority]\nversion=1\nrevision=1\napproval_public_key={public:?}\n[profiles.worker]\nkind='{kind}'\npermission_policy='interactive'\n[profiles.worker.budget]\nmax_wall_seconds=600\n{budget}\n")).unwrap();
         for dir in ["repo", "bin", "agent-home", "lab"] { fs::create_dir(home.path().join(dir)).unwrap(); }
         let mut lab = Lab { project: home.path().join("root/demo"), key, repo: home.path().join("repo"), herdr: home.path().join("bin/herdr"),
-            profile: VersionedReference { id: String::new(), revision: 1, digest: String::new() }, binding: String::new(), server: None, home, kind };
+            profile: VersionedReference { id: String::new(), revision: 1, digest: String::new() }, binding: String::new(), server: None, coordinator_listener: None, home, kind };
         fs::write(lab.path("lab/agent-kind"), kind).unwrap();
         lab.ok(&["new", "--legacy", "demo"]);
         lab.ok(&["pause", "demo"]);
@@ -309,7 +310,9 @@ sys.stdout.buffer.write(json.dumps({'result':json.loads(reply)['result']}).encod
         let deadline = Instant::now() + Duration::from_secs(seconds.max(15));
         let mut pause = Duration::from_millis(20);
         while !predicate() {
-            assert!(ticker.0.try_wait().unwrap().is_none(), "ticker exited while waiting for: {stage}");
+            let exited = ticker.0.try_wait().unwrap();
+            assert!(exited.is_none(), "ticker exited ({exited:?}) while waiting for: {stage}\nticker log:\n{}",
+                fs::read_to_string(self.path("root/.ticker.log")).unwrap_or_default());
             if Instant::now() >= deadline {
                 let jobs = self.cli(&["result", "demo", "jobs"]);
                 panic!("timed out after {seconds}s waiting for: {stage}\nattempt: {:?}\njobs: {}{}\nticker log:\n{}", self.attempt(attempt).state,
@@ -737,6 +740,19 @@ fn editing_submission_lab_with_wake(route: &str, policy: &str, verify: bool, int
     // through a fixture file instead of rebuilding the worker afterward.
     let template_path = lab.path("submission-template.json");
     lab.write_agent(agent, &[("ROOT", lab.path("root").canonicalize().unwrap().display().to_string()), ("TEMPLATE_PATH", template_path.display().to_string())]);
+    if wake {
+        // Open starts a ticker. Establish the coordinator before reserving the
+        // worker so stopping that ticker cannot cancel a dispatched launch.
+        fs::write(lab.project.join("PROJECT.md"), "+++\nname = \"demo\"\nnudge = true\n+++\nRetained instructions").unwrap();
+        lab.coordinator_listener=Some(std::os::unix::net::UnixListener::bind(lab.path("coordinator.sock")).expect("socket fixture: sandbox may deny Unix sockets"));
+        lab.serve();
+        let open=Command::new(BIN).env_clear().env("HOME",lab.home.path()).env("PATH","/usr/bin:/bin")
+            .env("HERDR_BIN_PATH",&lab.herdr).env("HERDR_SOCKET_PATH",lab.path("coordinator.sock"))
+            .env("HERDR_FARM_TEST_TIME_SCALE",include_str!("support/time-scale.txt").trim())
+            .args(["--root",lab.path("root").to_str().unwrap(),"open","demo"]).output().unwrap();
+        assert!(open.status.success(),"{}",String::from_utf8_lossy(&open.stderr));
+        lab.ok(&["ticker","stop"]);
+    }
     let (_, attempt) = lab.reserve(if wake {"+++\nname = \"demo\"\nnudge = true\n+++\nRetained instructions"} else {"Retained instructions"});
     let worktree = lab.planned_worktree(&attempt);
     let repository = lab.repo.canonicalize().unwrap().display().to_string();
@@ -3999,18 +4015,8 @@ fn stale_sealed_brief_authority_fails_once_without_prompt_or_retry() {
 /// scripted context reads, and ticker delivery through their public entry points.
 #[test]
 fn verified_worker_results_wake_idle_coordinator_once_and_defer_while_busy() {
-    use std::os::unix::net::UnixListener;
     for busy in [false,true] {
-        let (mut lab,attempt,_)=editing_submission_lab_with_wake("verify_only",WORK_POLICY,true,false,SUBMITTING_EDITING_AGENT,true);
-        let _listener=UnixListener::bind(lab.path("coordinator.sock")).expect("socket fixture: sandbox may deny Unix sockets");
-        lab.serve();
-        let open=Command::new(BIN).env_clear().env("HOME",lab.home.path()).env("PATH","/usr/bin:/bin")
-            .env("HERDR_BIN_PATH",&lab.herdr).env("HERDR_SOCKET_PATH",lab.path("coordinator.sock"))
-            .env("HERDR_FARM_TEST_TIME_SCALE",include_str!("support/time-scale.txt").trim())
-            .args(["--root",lab.path("root").to_str().unwrap(),"open","demo"]).output().unwrap();
-        assert!(open.status.success(),"{}",String::from_utf8_lossy(&open.stderr));
-        // Open starts a ticker; stop it before setting the test's readiness state.
-        lab.ok(&["ticker","stop"]);
+        let (lab,attempt,_)=editing_submission_lab_with_wake("verify_only",WORK_POLICY,true,false,SUBMITTING_EDITING_AGENT,true);
         let state=||->Value {serde_json::from_slice(&fs::read(lab.path("herdr-state.json")).unwrap()).unwrap()};
         let initial=state()["prompts"].as_array().unwrap().len();
         fs::write(lab.path("coordinator-status"),"working").unwrap();
@@ -4027,7 +4033,7 @@ fn verified_worker_results_wake_idle_coordinator_once_and_defer_while_busy() {
             lab.run_quiet(6);
             assert_eq!(state()["prompts"].as_array().unwrap().len(),initial);
         }
-        fs::write(lab.path("coordinator-status"),"idle").unwrap();
+        fs::write(lab.path("coordinator-status"),if busy {"done"} else {"idle"}).unwrap();
         let became_idle=std::time::Instant::now();
         ticker=lab.spawn();
         lab.wait_for(&mut ticker,"exactly one coordinator wake",&attempt,60,&||state()["prompts"].as_array().unwrap().len()>initial);

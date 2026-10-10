@@ -385,7 +385,12 @@ impl Runner for JobRunner {
                 .context("wake cancellation missing")?,
         };
         control.check()?;
-        let _lease = crate::cleanup::lease(input.project.parent().context("wake root missing")?)?;
+        let guard = herdr_farm::execution_guard::RootGuard::exclusive_by(
+            input.project.parent().context("wake root missing")?,
+            control.deadline,
+            &control.cancellation,
+        )?;
+        let locks = guard.inherit()?;
         use std::os::unix::fs::MetadataExt;
         let metadata = std::fs::metadata(&input.project)?;
         ensure!(
@@ -394,7 +399,7 @@ impl Runner for JobRunner {
             "wake project incarnation changed"
         );
         let env = paths::Env::for_observation(&input.home, &input.bin);
-        let runner = WakeRunner { control: &control };
+        let runner = WakeRunner { control: &control, locks: &locks };
         let ctx = Ctx {
             env: &env,
             root: input.project.parent().unwrap().into(),
@@ -415,6 +420,7 @@ impl Runner for JobRunner {
 }
 struct WakeRunner<'a> {
     control: &'a crate::source_tree::Control,
+    locks: &'a [crate::runner::InheritedLock],
 }
 impl Runner for WakeRunner<'_> {
     fn run(&self, command: &Cmd) -> Result<Output> {
@@ -422,7 +428,7 @@ impl Runner for WakeRunner<'_> {
             command.clone(),
             self.control.deadline,
             self.control.cancellation.clone(),
-            &[],
+            self.locks,
         )
     }
     fn socket_request(&self, path: &Path, line: &str, timeout: Duration) -> Result<String> {

@@ -180,7 +180,12 @@ fn readiness(env: &paths::Env, config_dir: &Path, kind: &str, explain: &Value) -
     // The worker validator retains all positive visible-idle requirements.
     // Only the coordinator's independently checked manifest policy differs.
     let mut checked = explain.clone();
-    if checked["state"] == "done" { checked["state"] = json!("idle"); }
+    if checked["state"] == "done" {
+        checked["state"] = json!("idle");
+        if checked["matched_rule"]["state"] == "done" {
+            checked["matched_rule"]["state"] = json!("idle");
+        }
+    }
     checked["manifest_source"] = json!("bundled");
     checked["local_override_shadowing_remote"] = json!(false);
     herdr_farm::canonical_worker::validate_visible_readiness(kind, &checked)
