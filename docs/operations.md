@@ -239,11 +239,14 @@ unfinished worker-result notices exist, checks owned routing and fresh native
 readiness, and never prompts a working coordinator. Native agent statuses
 `idle` and `done` are eligible; a matching `done` readiness
 rule is treated as idle while visible readiness and manifest checks still apply.
-The supervised Herdr calls inherit the held root execution barrier, retaining
-ownership until their descendants exit. On a healthy, uncontended
+The foreground and background wake paths use project effect ownership with a
+shared root barrier. Supervised Herdr calls inherit those locks, retaining
+ownership until their descendants exit. Other projects and root reads can
+continue while the wake runs. On a healthy, uncontended
 ticker the normal 15-second pass plus the bounded 45-second wake job targets a
 wake within 60 seconds after idle is observable. Busy coordinators defer until
-idle; contention, unavailable native readiness and failed preflight probes defer
+idle, persisting a retry one normal tick later without recording a send attempt;
+contention, unavailable native readiness and failed preflight probes defer
 with backoff and can exceed that target.
 
 Canonical wakes use **DONE**, independent of SEEN: scripted `context` calls
@@ -251,7 +254,9 @@ cannot consume either the ticker wake or `inbox <slug> wait`. Ordinary wait
 notices still require unseen and unfinished state. Handle returned results and
 mark them DONE before rearming a background wait. Confirmed result batches are
 not sent again on a context read, removal of part of a batch, or ticker restart;
-new result IDs allow another wake. Switching toast to prompt policy rearms an
+new result IDs allow another wake. Replay the same retained submission with
+`result <slug> submit --input-file <submission.json>`; recapturing can create a
+new result ID. Switching toast to prompt policy rearms an
 unfinished confirmed batch. Native toast rejection retries with backoff; a lost
 or contradictory reply fences overlapping items against automatic replay. Inspect
 the coordinator, handle those items, then mark the claimed items DONE to release

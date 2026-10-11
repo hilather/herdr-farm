@@ -23,7 +23,7 @@ pub struct Queue {executor:Arc<crate::executor::Executor>,entries:BTreeMap<Key,E
     verifier:Option<crate::canonical_verification_jobs::VerifierLane>}
 #[cfg(feature="state-store")]
 pub(crate) fn exclusive_root(identity:&Identity)->bool {
-    identity.operation.starts_with("canonical-launch:")||identity.operation.starts_with("canonical-worker:")||identity.operation.starts_with("canonical-wake:")
+    identity.operation.starts_with("canonical-launch:")||identity.operation.starts_with("canonical-worker:")
 }
 fn is_exclusive(identity:&Identity)->bool {
     #[cfg(feature="state-store")]

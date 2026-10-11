@@ -92,8 +92,21 @@ pub fn needed(dir: &Path) -> Result<bool> {
     Ok(state.retry.retry.due(jiff::Timestamp::now()))
 }
 pub fn run(ctx: &Ctx, dir: &Path) -> Result<()> {
-    let _lease = crate::cleanup::lease(dir.parent().context("wake root missing")?)?;
-    run_held(ctx, dir)
+    let guard = herdr_farm::execution_guard::ProjectGuard::acquire(dir)?;
+    let locks = guard.inherit_transfer()?;
+    let control = crate::source_tree::Control {
+        deadline: Instant::now() + BUDGET,
+        cancellation: Default::default(),
+    };
+    let runner = WakeRunner { control: &control, locks: &locks };
+    let held_ctx = Ctx {
+        env: ctx.env,
+        root: ctx.root.clone(),
+        config_dir: ctx.config_dir.clone(),
+        runner: &runner,
+        detached_ticker: ctx.detached_ticker,
+    };
+    run_held(&held_ctx, dir)
 }
 fn run_held(ctx: &Ctx, dir: &Path) -> Result<()> {
     if let Err(error) = run_inner(ctx, dir) {
@@ -188,6 +201,11 @@ fn run_inner(ctx: &Ctx, dir: &Path) -> Result<()> {
     if mode == Mode::Nudge {
         let live = agent(&h, &journal, false)?;
         if !matches!(live["agent_status"].as_str(), Some("idle" | "done")) {
+            let batch = Batch::new(items(dir)?)?;
+            state.retry.hash = batch.hash;
+            state.retry.retry.next_attempt = (jiff::Timestamp::now()
+                + jiff::SignedDuration::from_millis(crate::timing::tick().as_millis() as i64)).to_string();
+            persist(dir, &state)?;
             return Ok(());
         }
         ready(ctx, &h, &journal)?;
@@ -385,12 +403,8 @@ impl Runner for JobRunner {
                 .context("wake cancellation missing")?,
         };
         control.check()?;
-        let guard = herdr_farm::execution_guard::RootGuard::exclusive_by(
-            input.project.parent().context("wake root missing")?,
-            control.deadline,
-            &control.cancellation,
-        )?;
-        let locks = guard.inherit()?;
+        let guard = herdr_farm::execution_guard::ProjectGuard::acquire(&input.project)?;
+        let locks = guard.inherit_transfer()?;
         use std::os::unix::fs::MetadataExt;
         let metadata = std::fs::metadata(&input.project)?;
         ensure!(

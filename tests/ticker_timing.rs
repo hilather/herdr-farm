@@ -331,3 +331,25 @@ fn durable_retry_store_child() {
         );
     }
 }
+
+
+#[test]
+fn detached_start_publishes_ownership_and_immediate_stop_releases_it() {
+    let lab = Lab::new();
+    for _ in 0..3 {
+        let started = lab.command(Some(SCALE.trim())).args(["ticker", "start"]).output().unwrap();
+        assert!(started.status.success(), "{}", String::from_utf8_lossy(&started.stderr));
+        let status = lab.command(Some(SCALE.trim())).args(["ticker", "status"]).output().unwrap();
+        assert!(status.status.success());
+        assert!(String::from_utf8_lossy(&status.stdout).contains("pid:"));
+        let blocked = lab.command(Some(SCALE.trim())).args(["ticker", "run", "--passes", "1"]).output().unwrap();
+        assert!(!blocked.status.success());
+        assert!(String::from_utf8_lossy(&blocked.stderr).contains("another ticker holds the lock"));
+        let stopped = lab.command(Some(SCALE.trim())).args(["ticker", "stop"]).output().unwrap();
+        assert!(stopped.status.success(), "{}", String::from_utf8_lossy(&stopped.stderr));
+        let bounded = lab.command(Some(SCALE.trim())).args(["ticker", "run", "--passes", "1"]).output().unwrap();
+        assert!(bounded.status.success(), "{}", String::from_utf8_lossy(&bounded.stderr));
+        let log = fs::read_to_string(lab.0.path().join("root/.ticker.log")).unwrap();
+        assert!(log.contains("completed 1 passes; draining shared executor"));
+    }
+}

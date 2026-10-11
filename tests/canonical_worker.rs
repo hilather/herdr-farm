@@ -4016,7 +4016,7 @@ fn stale_sealed_brief_authority_fails_once_without_prompt_or_retry() {
 #[test]
 fn verified_worker_results_wake_idle_coordinator_once_and_defer_while_busy() {
     for busy in [false,true] {
-        let (lab,attempt,_)=editing_submission_lab_with_wake("verify_only",WORK_POLICY,true,false,SUBMITTING_EDITING_AGENT,true);
+        let (lab,attempt,worktree)=editing_submission_lab_with_wake("verify_only",WORK_POLICY,true,false,SUBMITTING_EDITING_AGENT,true);
         let state=||->Value {serde_json::from_slice(&fs::read(lab.path("herdr-state.json")).unwrap()).unwrap()};
         let initial=state()["prompts"].as_array().unwrap().len();
         fs::write(lab.path("coordinator-status"),"working").unwrap();
@@ -4043,7 +4043,7 @@ fn verified_worker_results_wake_idle_coordinator_once_and_defer_while_busy() {
         assert_eq!(prompts.len(),initial+1);
         assert!(prompts.last().unwrap().as_str().unwrap().starts_with("[herdr-farm ticker: automated, not the user, approves nothing]"));
         // Replays and a restart while still idle cannot repeat the wake.
-        lab.ok(&["result","demo","submit-captured",attempt.as_str()]);
+        lab.ok(&["result","demo","submit","--input-file",worktree.join("submission.json").to_str().unwrap()]);
         lab.run_quiet(8);
         assert_eq!(state()["prompts"].as_array().unwrap().len(),initial+1);
         let health=lab.ok(&["telemetry","demo","health","--json"]);
