@@ -15,6 +15,9 @@ struct State {
     claim: Option<Claim>,
     delivered: BTreeSet<String>,
     retry: NotificationRetry,
+    busy_hash: String,
+    busy_probes: u32,
+    busy_until: Option<i64>,
     // Last 1024 attempts, including the durable pending intent before any send.
     attempts: Vec<Value>,
 }
@@ -42,9 +45,24 @@ fn persist(dir: &Path, state: &State) -> Result<()> {
         bytes.len() <= 4 * 1024 * 1024,
         "canonical wake state exceeds bounds"
     );
-    project::write_atomic(&dir.join(".state/canonical-wake.json"), &bytes)?;
+    let path = dir.join(".state/canonical-wake.json");
+    if paths::read_control_text(&path, 4 * 1024 * 1024)?.is_some_and(|old| old.as_bytes() == bytes) {
+        return Ok(());
+    }
+    project::write_atomic(&path, &bytes)?;
     std::fs::File::open(dir.join(".state"))?.sync_all()?;
     Ok(())
+}
+fn defer_busy(state: &mut State, hash: String) {
+    if state.busy_hash != hash {
+        state.busy_probes = 0;
+        state.busy_hash = hash;
+    }
+    state.busy_probes = state.busy_probes.saturating_add(1);
+    // 5, 10, then 15 seconds: bounded below the idle observation target.
+    let seconds = (5_u64 << state.busy_probes.min(3).saturating_sub(1)).min(15);
+    state.busy_until = Some(jiff::Timestamp::now().as_millisecond()
+        + crate::timing::retry(Duration::from_secs(seconds)).as_millis() as i64);
 }
 fn items(dir: &Path) -> Result<Vec<String>> {
     Ok(runtime::worker_result_inbox(dir)?
@@ -87,6 +105,10 @@ pub fn needed(dir: &Path) -> Result<bool> {
                 .as_ref()
                 .is_some_and(|b| b.ids.iter().any(|id| ids.contains(id)))
     }) {
+        return Ok(false);
+    }
+    let batch = Batch::new(ids)?;
+    if state.busy_hash == batch.hash && state.busy_until.is_some_and(|until| jiff::Timestamp::now().as_millisecond() < until) {
         return Ok(false);
     }
     Ok(state.retry.retry.due(jiff::Timestamp::now()))
@@ -202,12 +224,14 @@ fn run_inner(ctx: &Ctx, dir: &Path) -> Result<()> {
         let live = agent(&h, &journal, false)?;
         if !matches!(live["agent_status"].as_str(), Some("idle" | "done")) {
             let batch = Batch::new(items(dir)?)?;
-            state.retry.hash = batch.hash;
-            state.retry.retry.next_attempt = (jiff::Timestamp::now()
-                + jiff::SignedDuration::from_millis(crate::timing::tick().as_millis() as i64)).to_string();
+            defer_busy(&mut state, batch.hash);
             persist(dir, &state)?;
             return Ok(());
         }
+        state.busy_hash.clear();
+        state.busy_probes = 0;
+        state.busy_until = None;
+        persist(dir, &state)?;
         ready(ctx, &h, &journal)?;
     }
     fence_live(dir, ctx, &journal)?;
@@ -266,6 +290,7 @@ fn run_inner(ctx: &Ctx, dir: &Path) -> Result<()> {
         ensure!(items(dir)? == batch.ids, "wake inbox changed before send");
         Ok(true)
     })();
+    let became_busy = matches!(&delivered, Ok(false));
     let outcome = match delivered {
         Ok(true) => {
             // Any failure after starting this call is ambiguous, never auto-replayed.
@@ -340,6 +365,12 @@ fn run_inner(ctx: &Ctx, dir: &Path) -> Result<()> {
             claim.phase = Phase::Uncertain;
             claim.error="Wake outcome uncertain; inspect coordinator, then mark claimed inbox items DONE to release the fence".into();
         }
+    }
+    if became_busy {
+        // A proven busy transition sent nothing. Use the same short probe
+        // policy rather than the delivery-failure retry reserved above.
+        state.retry = Default::default();
+        defer_busy(&mut state, batch.hash);
     }
     state.attempts.last_mut().unwrap()["outcome"] = json!(outcome);
     state.attempts.last_mut().unwrap()["completed_unix_ms"] =

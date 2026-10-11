@@ -159,6 +159,15 @@ pub fn update_inbox(project:&Path,expected_head:u64,ids:&[String],done:bool)->Re
     Ok(migration::open_active(project)?.update_inbox(expected_head,ids,done)?)
 }
 
+/// Mark only notices rendered by context, preserving concurrent arrivals and DONE.
+/// Retry the head fence under project ownership, without repeating context output.
+pub fn mark_context_seen(project:&Path,expected_head:u64,ids:&[String],deadline:std::time::Instant)->Result<usize> {
+    let _maintenance=migration::runtime_mutation(project)?;
+    let control=crate::store::controlled::ReadControl::new(deadline,Default::default());
+    let mut db=migration::open_active_scoped(project,control)?;
+    Ok(db.mark_context_seen(expected_head,ids)?)
+}
+
 /// Expiry records ambiguity only, so it is safe during the dispatch freeze.
 pub fn expire_operations(project:&Path)->Result<usize> {
     let _maintenance=migration::runtime_mutation(project)?;

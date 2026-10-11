@@ -845,3 +845,35 @@ fn canonical_wake_lost_reply_fences_replay_until_done_and_releases_new_results()
     assert_eq!(l.state()["prompts"].as_array().unwrap().len(),initial+2);
     assert_eq!(wake_history(&l)["wake"]["claim"]["phase"],"confirmed");
 }
+
+/// Concurrent arrivals and a competing reader cannot consume unread notices.
+#[test]
+fn context_seen_retries_a_stale_head_without_consuming_concurrent_arrivals() {
+    use herdr_farm::domain::InboxContent;
+    let lab=Lab::new();
+    let mut db=migration::open_active(&lab.project).unwrap();
+    let notice=|id:&str|InboxContent {id:format!("memory-review-{id}"),kind:"memory-review".into(),subject:id.into(),created:String::new(),summary:format!("Review {id}"),body:String::new()};
+    let first=notice("first");
+    db.deliver_memory_review_reminder(db.current_head().unwrap(),&first,jiff::Timestamp::now().as_millisecond()).unwrap();
+    let rendered=db.read_snapshot(None).unwrap();
+    let second=notice("second");
+    db.deliver_memory_review_reminder(db.current_head().unwrap(),&second,jiff::Timestamp::now().as_millisecond()).unwrap();
+    let deadline=std::time::Instant::now()+std::time::Duration::from_secs(30);
+    assert_eq!(db.mark_context_seen(rendered.head,&[first.id.clone(),first.id.clone()],deadline).unwrap(),1);
+    assert_eq!(db.mark_context_seen(rendered.head,std::slice::from_ref(&first.id),deadline).unwrap(),0);
+    let rows=db.read_snapshot(None).unwrap();
+    assert_eq!(rows.inbox.len(),2);
+    assert!(rows.inbox.iter().find(|i|i.content.id==first.id).unwrap().seen);
+    assert!(!rows.inbox.iter().find(|i|i.content.id==second.id).unwrap().seen);
+    assert_eq!(rows.events.iter().filter(|e|e.kind=="inbox.seen"&&e.entity==first.id).count(),1);
+    // The public per-turn command renders and marks the remaining arrival.
+    lab.ok(&["context","demo"]);
+    let head=db.current_head().unwrap();
+    for _ in 0..6 {lab.ok(&["context","demo"]);assert_eq!(db.current_head().unwrap(),head);}
+    assert!(db.read_snapshot(None).unwrap().inbox.iter().all(|i|i.seen&&!i.done));
+    db.update_inbox(head,std::slice::from_ref(&first.id),true).unwrap();
+    assert_eq!(db.mark_context_seen(head,std::slice::from_ref(&first.id),deadline).unwrap(),0);
+    let final_rows=db.read_snapshot(None).unwrap().inbox;
+    assert!(final_rows.iter().find(|i|i.content.id==first.id).unwrap().done);
+    assert!(!final_rows.iter().find(|i|i.content.id==second.id).unwrap().done);
+}

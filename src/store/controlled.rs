@@ -447,6 +447,10 @@ impl ControlledStore {
     pub fn project_control(&self)->Result<Option<ProjectControl>> {self.read(SqliteStore::project_control)}
     pub fn import_operation_count(&self)->Result<u64> {self.read(SqliteStore::import_operation_count)}
     pub fn import_receipt(&self)->Result<(String,u64,u64)> {self.read(SqliteStore::import_receipt)}
+    pub fn mark_context_seen(&mut self,head:u64,ids:&[String])->Result<usize> {
+        self.control.check()?;
+        self.store.mark_context_seen(head,ids,self.control.deadline()).map_err(|e|self.error(e))
+    }
     pub fn current_head(&self)->Result<u64> {self.read(SqliteStore::current_head)}
     pub fn read_targeted_hot_path(&self,now:i64,include_launches:bool)->Result<u32> {
         self.read(|store|store.read_targeted_hot_path(now,include_launches))

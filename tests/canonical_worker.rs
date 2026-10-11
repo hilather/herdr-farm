@@ -4032,6 +4032,19 @@ fn verified_worker_results_wake_idle_coordinator_once_and_defer_while_busy() {
         if busy {
             lab.run_quiet(6);
             assert_eq!(state()["prompts"].as_array().unwrap().len(),initial);
+            // With the worker's effects drained, busy wake deferrals and
+            // repeated per-turn context reads must leave the head unchanged.
+            lab.ok(&["context","demo"]);
+            ticker=lab.spawn();
+            let before=lab.state();
+            for _ in 0..6 {
+                lab.ok(&["context","demo"]);
+                let after=lab.state();
+                let changes=after.events.iter().filter(|e|e.sequence>before.head).collect::<Vec<_>>();
+                assert_eq!(after.head,before.head,"busy deferral appended events: {changes:?}");
+                assert!(after.inbox.iter().any(|i|i.content.id.starts_with("worker-result-")&&!i.done));
+            }
+            lab.stop(ticker);
         }
         fs::write(lab.path("coordinator-status"),if busy {"done"} else {"idle"}).unwrap();
         let became_idle=std::time::Instant::now();

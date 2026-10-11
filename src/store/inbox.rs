@@ -193,6 +193,18 @@ impl SqliteStore {
         tx.commit()?;
         Ok(ReminderOutcome::Delivered)
     }
+    /// Bounded SEEN retry for the immutable notice IDs actually rendered by context.
+    pub fn mark_context_seen(&mut self,mut expected_head:u64,ids:&[String],deadline:std::time::Instant)->Result<usize> {
+        for attempt in 0..8 {
+            if std::time::Instant::now()>=deadline {return Err(StoreError::Deadline);}
+            match self.update_inbox(expected_head,ids,false) {
+                Ok(count)=>return Ok(count),
+                Err(StoreError::Conflict) if attempt<7=>expected_head=self.current_head()?,
+                Err(error)=>return Err(error),
+            }
+        }
+        unreachable!()
+    }
     /// Update only items actually shown to the caller at this event head.
     pub fn update_inbox(&mut self,expected_head:u64,ids:&[String],done:bool)->Result<usize> {
         let tx=self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;check_schema(&tx)?;
