@@ -51,11 +51,12 @@ pub fn cadence(duration: Duration) -> Duration {
     }
 }
 
-/// The claim lease of one canonical launch, across all its durable stages.
+/// The minimum lease of one canonical launch between its durable stages.
 /// Each stage retakes the exclusive root with a short wait; an operator
 /// command that holds the root for its whole preparation (profile evidence,
 /// minutes) must not outlast the lease, or the naming intent is never
-/// recorded (`start_unnamed`). A dead launch is still recovered at expiry.
+/// recorded (`start_unnamed`). Live advancement extends this same claim to
+/// cover its phase budget. A dead launch is still recovered at expiry.
 /// Labs keep the historical 30 s; `HERDR_FARM_LAUNCH_LEASE_SECS` overrides
 /// explicitly (1..=300 s).
 pub fn launch_lease() -> Duration {
@@ -63,6 +64,11 @@ pub fn launch_lease() -> Duration {
         return Duration::from_secs(seconds);
     }
     scaled(Duration::from_secs(180), Duration::from_secs(30))
+}
+/// An external launch phase uses an unscaled deadline. Leave five seconds for
+/// persisting its receipt; the configured lease remains the inter-phase floor.
+pub fn launch_phase_lease(deadline: std::time::Instant) -> Duration {
+    launch_lease().max(deadline.saturating_duration_since(std::time::Instant::now()) + Duration::from_secs(5))
 }
 /// Second-resolution historical timestamps use the shared cadence quantum.
 pub fn seconds(seconds: i64) -> i64 {

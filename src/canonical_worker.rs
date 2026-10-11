@@ -530,11 +530,31 @@ pub fn reconcile_termination(
     )?;
     let control=crate::store::controlled::ReadControl::new(deadline,cancellation.clone());
     let mut db=crate::migration::open_active_scoped(&project,control)?;
-    let selected=db.termination_selection(attempt,expected_revision)?;
+    let mut selected=db.termination_selection(attempt,expected_revision)?;
     let current=&selected.attempt;
     if current.termination_observed {return Ok(Some(current.clone()));}
     let state=selected.worker.as_ref().context("canonical attempt inputs missing")?;
     let record=&state.record;
+    if state.delivery.state == crate::operations::DeliveryState::Ambiguous
+        && !state.events.iter().any(|event| event.entity == record.operation.as_str()
+            && event.kind == "runtime.launch_release")
+        && state.events.iter().any(|event| event.entity == record.operation.as_str()
+            && event.kind == "runtime.launch_target")
+    {
+        check(deadline, &cancellation)?;
+        crate::migration::open_active(&project)?.record_launch_failure(&record.operation, "launch_lease_expired",
+            "launch_lease_expired: original launch authority expired before gate release; the observed gated worker will be stopped through supervised termination; coordinator/operator may relaunch after capacity is released", false, now())?;
+        // The terminal outcome advances attempt and delivery revisions. Refresh
+        // the committed selection so this call can stop the observed worker and
+        // record termination against the new fences.
+        let revision = db.current_attempt_revision(attempt)?;
+        selected = db.termination_selection(attempt, revision)?;
+    }
+    let current = &selected.attempt;
+    if current.termination_observed {return Ok(Some(current.clone()));}
+    let expected_revision = current.revision;
+    let state = selected.worker.as_ref().context("canonical attempt inputs missing")?;
+    let record = &state.record;
     if state.events.iter().any(|e|e.kind=="runtime.worktrees_creation" && e.entity==record.operation.as_str())
         && !state.events.iter().any(|e|e.kind.starts_with("runtime.launch_") && e.entity==record.operation.as_str()) {
         let mut budget=crate::store::identity_inventory::Budget::new(50*1024*1024,1024,deadline,cancellation.clone())?;
@@ -581,7 +601,12 @@ pub fn reconcile_termination(
             .as_ref()
             .context("staged worker supervisor missing")?;
         if !SupervisorObservation::recover_exited(identity)? {
-            if !state.cancelled {
+            let expired_launch = state.events.iter().any(|event|
+                event.entity == record.operation.as_str()
+                    && event.kind == "runtime.launch_recovery_error"
+                    && event.payload["terminal"] == true
+                    && event.payload["reason"] == "launch_lease_expired");
+            if !state.cancelled && !expired_launch {
                 return Ok(None);
             }
             SupervisorObservation::stop_recorded(identity, stop_deadline, &cancellation)?;

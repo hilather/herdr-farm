@@ -241,13 +241,14 @@ impl SqliteStore {
     }
 
     /// Advance only the existing worktree claim; never consume approval twice.
-    pub(crate) fn continue_worktree_launch_creation_with_budget(&mut self,claim:&Claim,prepared:&PreparedLaunchCreation,now:i64,budget:Option<&read_budget::ReadBudget>)->Result<()> {
+    pub(crate) fn continue_worktree_launch_creation_with_budget(&mut self,claim:&Claim,prepared:&PreparedLaunchCreation,now:i64,budget:Option<&read_budget::ReadBudget>,lease_ms:i64)->Result<()> {
         self.validate_claim_with_budget(claim,now,budget)?;
         let tx=self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;check_schema(&tx)?;
         if claim.owner!="canonical-worktree-adapter" {return Err(StoreError::Conflict);}
         let ready:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM events WHERE kind='runtime.worktrees_ready' AND entity=?1)",[claim.operation.as_str()],|r|r.get(0))?;
         if !ready {return Err(invalid("worktree launch has no complete receipt"));}
         record_creation(&tx,claim,prepared,now,budget)?;
+        super::delivery::renew_launch_claim(&tx,claim,now,lease_ms)?;
         if let Some(budget)=budget {budget.check()?;}
         tx.commit()?;Ok(())
     }
@@ -692,11 +693,11 @@ impl SqliteStore {
         prepared: &PreparedLaunchRelease,
         now: i64,
     ) -> Result<u64> {
-        self.record_launch_boundary(claim, &prepared.intent, now, false, None)
+        self.record_launch_boundary(claim, &prepared.intent, now, (false, None), None)
     }
 
-    pub(crate) fn record_launch_name_with_budget(&mut self, claim: &Claim, prepared: &PreparedLaunchName, now: i64, budget: Option<&read_budget::ReadBudget>) -> Result<u64> {
-        self.record_launch_boundary(claim, &prepared.intent, now, true, budget)
+    pub(crate) fn record_launch_name_with_budget(&mut self, claim: &Claim, prepared: &PreparedLaunchName, now: i64, budget: Option<&read_budget::ReadBudget>, lease_ms: i64) -> Result<u64> {
+        self.record_launch_boundary(claim, &prepared.intent, now, (true, Some(lease_ms)), budget)
     }
 
     pub fn record_launch_name(
@@ -705,11 +706,11 @@ impl SqliteStore {
         prepared: &PreparedLaunchName,
         now: i64,
     ) -> Result<u64> {
-        self.record_launch_boundary(claim, &prepared.intent, now, true, None)
+        self.record_launch_boundary(claim, &prepared.intent, now, (true, None), None)
     }
 
-    pub(crate) fn record_launch_release_with_budget(&mut self, claim: &Claim, prepared: &PreparedLaunchRelease, now: i64, budget: Option<&read_budget::ReadBudget>) -> Result<u64> {
-        self.record_launch_boundary(claim, &prepared.intent, now, false, budget)
+    pub(crate) fn record_launch_release_with_budget(&mut self, claim: &Claim, prepared: &PreparedLaunchRelease, now: i64, budget: Option<&read_budget::ReadBudget>, lease_ms: i64) -> Result<u64> {
+        self.record_launch_boundary(claim, &prepared.intent, now, (false, Some(lease_ms)), budget)
     }
 
     fn record_launch_boundary(
@@ -717,9 +718,10 @@ impl SqliteStore {
         claim: &Claim,
         intent: &LaunchReleaseIntent,
         now: i64,
-        naming: bool,
+        boundary: (bool, Option<i64>),
         budget: Option<&read_budget::ReadBudget>,
     ) -> Result<u64> {
+        let (naming, lease_ms) = boundary;
         self.validate_claim_with_budget(claim, now, budget)?;
         if intent.version != 1
             || intent.target.version != 2
@@ -818,6 +820,10 @@ impl SqliteStore {
             return Err(invalid(
                 "launch boundary already attempted; observation required",
             ));
+        }
+        // Renewal and the one-use intent roll back together on any refusal.
+        if let Some(lease_ms) = lease_ms {
+            super::delivery::renew_launch_claim(&tx, claim, now, lease_ms)?;
         }
         event(&tx, kind, claim.operation.as_str(), claim.revision, intent)?;
         let result = head(&tx)?;

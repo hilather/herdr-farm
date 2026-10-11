@@ -92,17 +92,25 @@ pub(crate) fn read_with_launches(path:&Path,publication:&Publication,budget:&mut
             }
         }
         if version>=11 {
-            let mut stmt=tx.prepare("SELECT o.id,d.revision FROM operations o JOIN operation_delivery d ON d.operation_id=o.id
+            let mut stmt=tx.prepare("SELECT o.id,d.revision,a.id,
+                    (EXISTS(SELECT 1 FROM attempt_cancellations c WHERE c.attempt_id=a.id)
+                     OR (d.state='ambiguous' AND NOT EXISTS(SELECT 1 FROM events e WHERE e.kind='runtime.launch_release' AND e.entity=o.id)))
+                FROM operations o JOIN operation_delivery d ON d.operation_id=o.id
                 JOIN attempt_inputs i ON i.operation_id=o.id JOIN attempts a ON a.id=i.attempt_id
                 WHERE o.kind='runtime.launch' AND d.attempts=1 AND d.state IN ('claimed','ambiguous') AND a.state='reserved' AND a.termination_observed=0
                 AND NOT EXISTS(SELECT 1 FROM events e WHERE e.kind='runtime.launch_recovery_error' AND e.entity=o.id AND json_extract(e.payload,'$.terminal')=1)
                 AND EXISTS(SELECT 1 FROM events e WHERE e.kind='runtime.launch_creation' AND e.entity=o.id)
-                AND (NOT EXISTS(SELECT 1 FROM events e WHERE e.kind='runtime.launch_target' AND e.entity=o.id)
+                AND (d.state='ambiguous' OR NOT EXISTS(SELECT 1 FROM events e WHERE e.kind='runtime.launch_target' AND e.entity=o.id)
                     OR (EXISTS(SELECT 1 FROM events e WHERE e.kind='runtime.launch_release' AND e.entity=o.id)
                         AND NOT EXISTS(SELECT 1 FROM events e WHERE e.kind='runtime.launch_started' AND e.entity=o.id)))")?;
             let mut rows=stmt.query([])?;
             while let Some(row)=rows.next()? {
-                budget.record()?;measure(row,&[0],512,budget)?;budget.charge(16)?;
+                budget.record()?;measure(row,&[0,2],512,budget)?;budget.charge(16)?;
+                let attempt=AttemptId::new(row.get::<_,String>(2)?).map_err(anyhow::Error::msg)?;
+                // Termination owns cancelled and expired gated workers. Released
+                // launches still need start observation to recover their receipt.
+                if row.get::<_,bool>(3)? && candidates.iter().any(|(_,kind,_,_,selected)|
+                    kind=="runtime.worker_termination" && selected.as_ref()==Some(&attempt)) {continue;}
                 let id=OperationId::new(row.get::<_,String>(0)?).map_err(anyhow::Error::msg)?;
                 let revision:u64=row.get(1)?;ensure!(revision>0,"invalid resource recovery revision");
                 candidates.push((id,"runtime.launch".into(),revision,EffectMode::Observe,None));

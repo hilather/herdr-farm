@@ -21,7 +21,7 @@ const BIN: &str = env!("CARGO_BIN_EXE_herdr-farm");
 /// `swallow-prompts` is a count of prompts the agent ignores (it stays idle);
 /// `reset-workspace` (consumed) forgets the ended worker so a lab can launch another.
 const SERVER: &str = r#"
-import json,os,sys,socket,subprocess
+import json,os,sys,socket,subprocess,time
 path=sys.argv[1];root=os.path.dirname(path);s={};gen=1
 server=socket.socket(socket.AF_UNIX);server.bind(path);server.listen()
 while True:
@@ -43,6 +43,7 @@ while True:
   override=os.path.join(root,'ping.json')
   res=json.load(open(override)) if os.path.exists(override) else {'type':'pong','version':'0.9.1','capabilities':{'workspace_create_command':True}}
  elif m=='workspace.create_command' and 'pid' not in s:
+  if os.path.exists(os.path.join(root,'slow-create')):time.sleep(2)
   fifo=os.path.join(root,'input');os.mkfifo(fifo);fd=os.open(fifo,os.O_RDWR)
   child=subprocess.Popen(p['command'],cwd=p['cwd'],stdin=fd,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True,env={'PATH':'/usr/bin:/bin'})
   s.update(pid=child.pid,argv=p['command'],cwd=p['cwd'],label=p['label'],fifo=fifo)
@@ -955,6 +956,85 @@ fn ticker_recovers_a_lost_creation_reply_without_creating_again() {
     assert!(lab.count("workspace.list") >= 1);
     assert_eq!((lab.events("runtime.launch_target").len(), lab.events("runtime.launch_started").len()), (1, 1));
     assert_eq!(lab.attempt(&attempt).state, AttemptState::Running);
+}
+
+#[test]
+fn ticker_ends_an_expired_unreleased_launch_and_allows_a_new_attempt() {
+    let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+    let (_, attempt) = lab.reserve("Retained instructions");
+    fs::write(lab.path("lab/lose-create"), "").unwrap();
+    lab.serve();
+    // The creation reply is lost. The claim is kept and the exact workspace is
+    // recovered from observation; nothing is created twice, across a restart.
+    let mut ticker = lab.spawn();
+    lab.wait(&mut ticker, 60, &|| lab.count("workspace.create_command") == 1);
+    // Kill the launcher during its unanswered native request, without draining.
+    ticker.0.kill().unwrap();
+    ticker.0.wait().unwrap();
+    let launch = lab.state().deliveries.into_iter().find(|d| d.operation.as_str().starts_with("launch-")).unwrap();
+    assert_eq!((launch.attempts, launch.state == DeliveryState::Pending), (1, false));
+    assert!(lab.attempt(&attempt).retains_capacity());
+    // Public store expiry models the dead launcher's lease elapsing. Extension
+    // must not revive it; the restarted ticker observes the exact existing effect.
+    let mut db = migration::open_active(&lab.project).unwrap();
+    let time = jiff::Timestamp::now().as_millisecond();
+    db.extend_launch_lease(&launch.operation, launch.revision, time, 300_000).unwrap();
+    let renewed = db.read_snapshot(None).unwrap().deliveries.into_iter().find(|d| d.operation == launch.operation).unwrap();
+    assert!(renewed.lease_until_ms > launch.lease_until_ms);
+    assert_eq!((renewed.revision, renewed.epoch, renewed.attempts, &renewed.owner),
+        (launch.revision, launch.epoch, 1, &launch.owner));
+    assert_eq!(db.expire_claims(launch.lease_until_ms.unwrap()).unwrap(), 0);
+    let until = renewed.lease_until_ms.unwrap();
+    db.extend_launch_lease(&launch.operation, launch.revision, until, 60_000).unwrap();
+    assert_eq!(db.expire_claims(until).unwrap(), 1);
+    drop(db);
+    assert_eq!(lab.state().deliveries.iter().find(|d| d.operation == launch.operation).unwrap().state, DeliveryState::Ambiguous);
+
+    let mut ticker = lab.spawn();
+    lab.wait(&mut ticker, 120, &|| lab.attempt(&attempt).termination_observed);
+    lab.stop(ticker);
+    assert_eq!((lab.count("workspace.create_command"), lab.count("agent.prompt")), (1, 0));
+    let ended = lab.attempt(&attempt);
+    assert_eq!(ended.state, AttemptState::Failed);
+    assert!(!ended.retains_capacity());
+    let closed = lab.state().deliveries.into_iter().find(|delivery| delivery.operation == launch.operation).unwrap();
+    assert_eq!(closed.state, DeliveryState::PermanentFailure);
+    assert!(matches!(closed.last_outcome, Some(herdr_farm::operations::Outcome::PermanentFailure { diagnostic })
+        if diagnostic.contains("launch_lease_expired") && diagnostic.contains("supervised termination")));
+    assert!(lab.state().ownership.is_empty());
+    assert_eq!(serde_json::to_value(lab.state().control.unwrap().state).unwrap(), "active");
+    let failures = lab.events("attempt.launch_failed");
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].payload["reason"], "launch_lease_expired");
+    assert_eq!(failures[0].payload["phase"], "launch_lease_expired");
+    assert!(failures[0].payload["error"].as_str().unwrap().contains("supervised termination"));
+    let inbox = lab.ok(&["inbox", "list", "demo"]);
+    let notices: Vec<_> = inbox.as_array().unwrap().iter()
+        .filter(|item| item["content"]["kind"] == "attempt.launch_failure").collect();
+    assert_eq!(notices.len(), 1);
+    assert!(notices[0]["content"]["summary"].as_str().unwrap().contains("launch_lease_expired"));
+    fs::remove_file(lab.path("lab/lose-create")).unwrap();
+    // The local native fixture allocates the replacement workspace generation
+    // after the previous supervised worker has been proven stopped.
+    fs::write(lab.path("lab/reset-workspace"), "").unwrap();
+    let task = lab.state().tasks.into_iter().find(|task| task.id.as_str() == "work").unwrap();
+    lab.ok(&["task", "demo", "queue", "work", "--input-file", lab.path("queue.json").to_str().unwrap(),
+        "--expected-revision", &task.revision.to_string(), "--expected-head", &lab.head().to_string()]);
+    let selection = lab.selection("Replacement instructions");
+    let (_, replacement) = lab.reserve_selection(&selection);
+    let mut ticker = lab.spawn();
+    lab.wait(&mut ticker, 120, &|| {
+        let state = lab.state();
+        state.operations.iter().any(|operation| operation.kind == "runtime.worker_brief"
+            && operation.payload["attempt"] == replacement.as_str()
+            && state.deliveries.iter().any(|delivery| delivery.operation == operation.id
+                && delivery.state == DeliveryState::Confirmed))
+    });
+    lab.stop(ticker);
+    assert_ne!(replacement, attempt);
+    assert_eq!(lab.attempt(&replacement).state, AttemptState::Running);
+    assert_eq!((lab.count("workspace.create_command"), lab.count("agent.prompt")), (2, 1));
+    assert_eq!(lab.events("attempt.launch_failed").len(), 1);
 }
 
 /// Replaces `unsupported_connected_server_refuses_creation_before_approval_or_worktrees`
@@ -4086,4 +4166,49 @@ fn verified_worker_results_wake_idle_coordinator_once_and_defer_while_busy() {
         assert_eq!(lab.ok(&["inbox","demo","wait","--timeout","1"]),json!({"items":0,"timed_out":true}));
         assert_eq!(state()["prompts"].as_array().unwrap().len(),initial+1);
     }
+}
+
+/// A native phase may exceed the configured inter-phase lease while still
+/// within its real execution budget. It must retain its one-use generation.
+#[test]
+fn slow_creation_outlives_short_lease_without_ambiguous_delivery() {
+    let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+    let (_, attempt) = lab.reserve("Slow native creation still starts exactly once.");
+    fs::write(lab.path("lab/slow-create"), "").unwrap();
+    lab.serve();
+    let mut ticker = lab.spawn_with_env("300", &[("HERDR_FARM_LAUNCH_LEASE_SECS", "1")]);
+    lab.wait_for(&mut ticker, "Running after slow creation", &attempt, 120,
+        &|| lab.attempt(&attempt).state == AttemptState::Running);
+    lab.stop(ticker);
+    let launch = lab.state().deliveries.into_iter().find(|d| d.operation.as_str().starts_with("launch-")).unwrap();
+    assert_eq!((launch.state, launch.attempts), (DeliveryState::Confirmed, 1));
+    assert_eq!(lab.count("workspace.create_command"), 1);
+    assert!(lab.events("operation.outcome").iter().all(|e| e.payload["outcome"]["kind"] != "ambiguous"));
+    assert!(!fs::read_to_string(lab.path("root/.ticker.log")).unwrap_or_default().contains("lease expired"));
+}
+
+/// Exercise signed reservation, claiming, live renewal and dead-claim fencing
+/// through CLI and the public store API without an external server.
+#[test]
+fn signed_launch_renewal_preserves_generation_and_expiry_is_not_revived() {
+    let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+    let (_, attempt) = lab.reserve("Renew the admitted launch while its bounded phase progresses.");
+    let operation = lab.state().attempt_inputs.into_iter().find(|i| i.attempt == attempt).unwrap().operation;
+    let time = jiff::Timestamp::now().as_millisecond();
+    let mut db = migration::open_active(&lab.project).unwrap();
+    let claim = db.claim_operation(&operation, 1, "e2e-launcher", time, 1_000).unwrap();
+    db.extend_launch_lease(&operation, claim.revision, time + 500, 50_000).unwrap();
+    assert_eq!(db.expire_claims(claim.lease_until_ms).unwrap(), 0);
+    let renewed = db.read_snapshot(None).unwrap().deliveries.into_iter().find(|d| d.operation == operation).unwrap();
+    assert_eq!((renewed.state, renewed.revision, renewed.epoch, renewed.attempts, renewed.owner.as_deref()),
+        (DeliveryState::Claimed, claim.revision, claim.epoch, 1, Some(claim.owner.as_str())));
+    assert!(db.validate_claim(&claim, time + 500).is_err(), "old lease token remained usable");
+    let until = renewed.lease_until_ms.unwrap();
+    db.extend_launch_lease(&operation, claim.revision, until, 50_000).unwrap();
+    assert_eq!(db.expire_claims(until).unwrap(), 1);
+    let expired = db.read_snapshot(None).unwrap().deliveries.into_iter().find(|d| d.operation == operation).unwrap();
+    assert_eq!(expired.state, DeliveryState::Ambiguous);
+    db.extend_launch_lease(&operation, expired.revision, until + 1, 50_000).unwrap();
+    assert!(db.claim_operation(&operation, expired.revision, "replacement", until + 1, 50_000).is_err());
+    assert_eq!(db.read_snapshot(None).unwrap().deliveries.into_iter().find(|d| d.operation == operation).unwrap(), expired);
 }

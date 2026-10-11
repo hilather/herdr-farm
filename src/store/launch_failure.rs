@@ -8,6 +8,7 @@ enum LaunchFailureReason {
     BriefAuthorityStale,
     DedicatedServerLost,
     LaunchRecoveryFailed,
+    LaunchLeaseExpired,
 }
 impl LaunchFailureReason {
     fn as_str(self) -> &'static str {
@@ -15,6 +16,7 @@ impl LaunchFailureReason {
             Self::BriefAuthorityStale => "brief_authority_stale",
             Self::LaunchConflict => "launch_conflict",
             Self::DedicatedServerLost => "dedicated_server_lost",
+            Self::LaunchLeaseExpired => "launch_lease_expired",
             Self::LaunchRecoveryFailed => "launch_recovery_failed",
         }
     }
@@ -278,9 +280,11 @@ impl SqliteStore {
             return Ok(true);
         }
         let count: u64 = tx.query_row("SELECT count(*) FROM events WHERE entity=?1 AND kind='runtime.launch_recovery_error' AND json_extract(payload,'$.error')=?2", params![operation.as_str(), diagnostic], |r| r.get(0))?;
-        let terminal = gone || conflict || count >= 2;
+        let terminal = gone || conflict || phase == "launch_lease_expired" || count >= 2;
         let reason = if gone {
             LaunchFailureReason::DedicatedServerLost
+        } else if phase == "launch_lease_expired" {
+            LaunchFailureReason::LaunchLeaseExpired
         } else if phase == "brief_authority_stale" {
             LaunchFailureReason::BriefAuthorityStale
         } else if conflict {

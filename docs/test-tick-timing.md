@@ -174,3 +174,16 @@ All lab CLI and ticker processes use `tests/support/time-scale.txt`; no owner
 process timing or project configuration is changed. Socket fixtures still need
 the steward's unsandboxed run. Context marks results SEEN but only DONE consumes
 the worker-result wake; the socket-free lost-attempt CLI workflow verifies this.
+
+Canonical launch phases additionally preserve their real execution budget:
+initial claims and live advancement use at least the remaining unscaled phase
+deadline plus five seconds for receipt persistence. The configured launch lease
+(180 s production; 30 s accelerated floor; explicit override 1–300 s) remains
+the minimum between phases. Renewal never revives an expired claim. This prevents
+a short lab lease from truncating a valid native phase; crashed launchers still
+enter observation at expiry. See `docs/canonical-worker-launch.md` for evidence
+and E2E coverage of slow creation and killed-launcher recovery.
+
+Expired unreleased targets select termination observation alone. It records the
+typed expiry outcome, then stops the gated worker in the same reconciliation;
+it never renews or reclaims the expired launch.

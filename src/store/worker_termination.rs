@@ -456,6 +456,12 @@ impl SqliteStore {
         ] {
             tx.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES(?1,?2,?3,1,?4)",params![kind,entity,integer(revision)?,payload.map_err(|_|StoreError::Invalid("staged stop encoding failed".into()))?])?;
         }
+        for owned in super::ownership::read_all_with_budget(&tx, budget)?.into_iter()
+            .filter(|owned| owned.attempt.as_ref() == Some(&attempt.id))
+        {
+            super::ownership::relinquish_ended(&tx, &owned, "staged worker termination proven",
+                serde_json::to_value(receipt).map_err(|error| StoreError::Invalid(error.to_string()))?)?;
+        }
         output_omission_notice(&tx,receipt.output_snapshot.as_ref(),&attempt)?;
         super::inbox::ended_notice(&tx, &attempt)?;
         super::consumer_bindings::reconcile_task(&tx,attempt.task.as_str(),budget)?;

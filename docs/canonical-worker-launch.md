@@ -1282,3 +1282,54 @@ Cancellation's disappearance recovery is restricted to capacity-retaining
 reserved, launching or failed attempts; a running worker follows normal
 cancellation and termination observation even if its server later disappears.
 This hotfix adds no schema or dependency changes.
+
+LAUNCH-LEASE-EXPIRED-1: the operation claim is shared by worktree preparation,
+workspace creation, readiness, release and naming. Previously its fixed expiry
+was set once at worktree creation (or native creation without repositories).
+Repeated bounded advancement could spend the remaining lease before creating an
+agent. New claims cover the remaining unscaled phase deadline plus five seconds
+for receipt persistence, with the configured launch lease as a minimum. Each
+live creation continuation, release or naming stage extends that same generation
+under its existing root guard only after selection and preflight establish that
+external work is needed, immediately before committing its effect intent, recording
+`operation.lease_extended` with reason `launch_phase_budget`. It preserves owner,
+epoch, revision and attempt count and checks current binding and approval.
+Confirmed starts, retained-worktree observation, repeated one-use calls, refusals
+and no-op naming do not renew or append lease events. Read-only replays preserve
+the delivery row and event head, including the existing stage rotation order.
+Renewal for worktree-to-workspace creation, gate release and naming commits in
+the same transaction as the effect intent; a refused or failed commit rolls both
+back. A selected legacy workspace continuation renews immediately before its
+layout effect.
+Expired claims are never renewed or replayed: observation recovers an existing
+exact resource. An observed target without a release intent ends promptly with
+typed `launch_lease_expired` failure and a coordinator/operator diagnostic. The
+existing supervised termination path stops the gated worker, proves quiescence
+and retires capacity and ownership. The finished-task sweep then stops a recorded
+dedicated server. Before a target exists, ambiguous creation remains in launch
+observation. Once an unreleased target exists, termination observation takes
+priority and records the typed expiry failure exactly once; its next pass stops
+the worker using the updated attempt revision. Cancelled staged launches also
+select termination alone. Released launches continue start observation.
+A claim always commits a worktree or native creation intent atomically; there
+is no claimed launch with neither boundary. Naming requires a release intent,
+and a committed start moves the attempt out of Reserved into worker maintenance.
+Worktree-only ambiguity stays in termination hints, and missing-server recovery
+retains the typed `dedicated_server_lost` proof. No schema or dependency changes.
+
+The permitted unreal-t4c ledger records W4-06a5 reserved around 22:2xZ, ambiguity
+within roughly five minutes, and server-loss recovery at 22:35:59Z. Its healthy
+replacement W4-06a6 reached Running in about 40 seconds. W6-03fixf expired at
+16:30:12Z during launch_creation. These are ledger observations, not measured
+phase durations; the live ticker/telemetry logs are outside this checkout and
+were unavailable under the owner's data-access restrictions. E2E coverage holds
+native creation for two seconds with a one-second configured lease and checks
+one confirmed launch, no ambiguous outcome, and Running. The existing lost-reply
+workflow stops gracefully and restarts while Claimed. A separate killed-launcher
+workflow expires through the public store API and checks one creation, no prompt,
+one typed failure notice, supervised cleanup, active control and a new attempt
+reaching Running for the same task without an identity block.
+A socket-free signed-reservation workflow also exercises renewal through the
+public store API: the old lease token is fenced, the original expiry does not
+expire the renewed generation, and neither elapsed nor ambiguous claims can be
+revived or reclaimed.

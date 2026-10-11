@@ -482,14 +482,22 @@ fn create_resource_inner(
                 .context("launch claim lease missing")?,
         };
         db.validate_launch_claim(&claim, now())?;
-        if worktree_continuation {db.continue_worktree_launch_creation(&claim,&PreparedLaunchCreation{intent:creation.clone()},now())?;}
+        if worktree_continuation {
+            db.continue_worktree_launch_creation(&claim, &PreparedLaunchCreation { intent: creation.clone() }, now())?;
+        } else {
+            db.extend_launch_lease(operation, expected_revision, now(),
+                i64::try_from(crate::timing::launch_phase_lease(deadline).as_millis())?)?;
+        }
+        let selected = db.resource_creation_selection(operation, expected_revision)?;
+        let mut claim = claim;
+        claim.lease_until_ms = selected.delivery.lease_until_ms.context("launch claim lease missing")?;
         claim
     } else {
         db.claim_launch_creation(
             expected_revision,
             &PreparedLaunchCreation { intent: creation.clone() },
             now(),
-            i64::try_from(crate::timing::launch_lease().as_millis()).unwrap_or(30_000),
+            i64::try_from(crate::timing::launch_phase_lease(deadline).as_millis()).unwrap_or(30_000),
         )?
     };
     if !continuing { crate::telemetry::operations::sample_launch(&project, record.attempt.as_str()); }
@@ -1097,7 +1105,7 @@ pub fn release_gate(
     deadline: Instant,
     cancellation: Cancellation,
 ) -> Result<()> {
-    let mut deadline = deadline.min(Instant::now() + Duration::from_secs(45));
+    let deadline = deadline.min(Instant::now() + Duration::from_secs(45));
     check(deadline, &cancellation)?;
     let project = project.canonicalize()?;
     let guard = crate::execution_guard::RootGuard::exclusive_by(
@@ -1131,10 +1139,6 @@ pub fn release_gate(
         lease_until_ms: delivery.lease_until_ms.context("claim lease missing")?,
     };
     db.validate_launch_claim(&claim, now())?;
-    deadline = deadline.min(
-        Instant::now()
-            + Duration::from_millis(claim.lease_until_ms.saturating_sub(now()).max(0) as u64),
-    );
     let record = &state.record;
     let profile = record
         .inputs
