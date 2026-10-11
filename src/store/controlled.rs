@@ -66,7 +66,7 @@ impl ControlledStore {
     }
     pub(crate) fn record_launch_name(&mut self, claim: &crate::operations::Claim, prepared: &PreparedLaunchName, now: i64) -> Result<u64> {
         self.control.check()?;
-        self.store.record_launch_name_with_budget(claim, prepared, now, Some(&self.work_budget)).map_err(|e| self.error(e))
+        self.store.record_launch_name_with_budget(claim, prepared, now, Some(&self.work_budget), crate::timing::launch_phase_lease(self.control.deadline()).as_millis() as i64).map_err(|e| self.error(e))
     }
     pub(crate) fn observe_launch_started(&mut self, prepared: &PreparedLaunchStarted, revision: u64, head: u64, now: i64) -> Result<crate::operations::Delivery> {
         self.control.check()?;
@@ -118,7 +118,7 @@ impl ControlledStore {
     }
     pub(crate) fn continue_worktree_launch_creation(&mut self, claim: &crate::operations::Claim, prepared: &PreparedLaunchCreation, now: i64) -> Result<()> {
         self.control.check()?;
-        self.store.continue_worktree_launch_creation_with_budget(claim, prepared, now, Some(&self.work_budget)).map_err(|e| self.error(e))
+        self.store.continue_worktree_launch_creation_with_budget(claim, prepared, now, Some(&self.work_budget), crate::timing::launch_phase_lease(self.control.deadline()).as_millis() as i64).map_err(|e| self.error(e))
     }
     pub(crate) fn record_launch_workspace(&mut self, claim: &crate::operations::Claim, prepared: &PreparedLaunchWorkspace, now: i64) -> Result<u64> {
         self.control.check()?;
@@ -128,13 +128,17 @@ impl ControlledStore {
         self.control.check()?;
         self.store.record_launch_layout_with_budget(claim, prepared, now, Some(&self.work_budget)).map_err(|e| self.error(e))
     }
+    pub(crate) fn extend_launch_lease(&mut self, operation: &OperationId, expected: u64, now: i64, lease_ms: i64) -> Result<()> {
+        self.control.check()?;
+        self.store.extend_launch_lease(operation, expected, now, lease_ms).map_err(|e| self.error(e))
+    }
     pub(crate) fn validate_launch_claim(&mut self, claim: &crate::operations::Claim, now: i64) -> Result<()> {
         self.control.check()?;
         self.store.validate_claim_with_budget(claim, now, Some(&self.work_budget)).map_err(|e| self.error(e))
     }
     pub(crate) fn record_launch_release(&mut self, claim: &crate::operations::Claim, prepared: &PreparedLaunchRelease, now: i64) -> Result<u64> {
         self.control.check()?;
-        self.store.record_launch_release_with_budget(claim, prepared, now, Some(&self.work_budget)).map_err(|e| self.error(e))
+        self.store.record_launch_release_with_budget(claim, prepared, now, Some(&self.work_budget), crate::timing::launch_phase_lease(self.control.deadline()).as_millis() as i64).map_err(|e| self.error(e))
     }
     pub(crate) fn resource_recovery_selection(&mut self, operation: &OperationId, expected: u64) -> Result<super::launch::ResourceRecoverySelection> {
         self.control.check()?;

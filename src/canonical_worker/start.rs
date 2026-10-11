@@ -232,18 +232,11 @@ fn finish_start(
             deadline,
             cancellation.clone(),
         )?;
-        let mut rename_deadline = deadline;
         if let Some(claim) = &claim {
             db.validate_launch_claim(claim, now())?;
-            rename_deadline = deadline.min(
-                Instant::now()
-                    + Duration::from_millis(
-                        claim.lease_until_ms.saturating_sub(now()).max(0) as u64
-                    ),
-            );
         }
         let rename_native = Native {
-            deadline: rename_deadline,
+            deadline,
             locks: guard.inherit()?,
             cancellation: cancellation.clone(),
             ..native
@@ -463,6 +456,17 @@ fn reconcile_launch_once(
     }
     check(deadline, &cancellation)?;
     let state = select()?;
+    if state.delivery.state == crate::operations::DeliveryState::Ambiguous
+        && !state.kinds.contains("runtime.launch_release")
+    {
+        let _guard = crate::execution_guard::RootGuard::exclusive_by(
+            project.parent().context("project root missing")?, deadline, &cancellation)?;
+        crate::migration::open_active_scoped(project, crate::store::controlled::ReadControl::new(deadline, cancellation.clone()))?
+            .launch_advancement_selection(operation, expected_revision)?;
+        let mut db = crate::migration::open_active(project)?;
+        return Ok(db.record_launch_failure(operation, "launch_lease_expired",
+            "launch_lease_expired: original launch authority expired before gate release; the observed gated worker will be stopped through supervised termination; coordinator/operator may relaunch after capacity is released", false, now())?);
+    }
     if state.kinds.contains("runtime.launch_release") {
         reconcile_start(
             project,

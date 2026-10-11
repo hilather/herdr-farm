@@ -192,6 +192,31 @@ impl SqliteStore {
         if let Some(budget)=budget {budget.check()?;}
         tx.commit()?;Ok(())
     }
+    /// Extend a live launch's existing generation before bounded advancement.
+    /// Never resurrect an expired or observed claim, or create a second attempt.
+    pub fn extend_launch_lease(&mut self, id: &OperationId, expected: u64, now: i64, lease_ms: i64) -> Result<()> {
+        now_check(now)?;
+        if !(1..=300_000).contains(&lease_ms) { return Err(StoreError::Invalid("launch lease exceeds operation budget".into())); }
+        let old = delivery(&self.connection, id)?;
+        if old.revision != expected { return Err(StoreError::Conflict); }
+        if old.state != DeliveryState::Claimed { return Ok(()); }
+        let kind: String = self.connection.query_row("SELECT kind FROM operations WHERE id=?1", [id.as_str()], |r| r.get(0))?;
+        if kind != "runtime.launch" { return Err(StoreError::Invalid("launch lease requires runtime.launch".into())); }
+        let claim = Claim { operation: id.clone(), revision: old.revision, epoch: old.epoch,
+            owner: old.owner.ok_or(StoreError::Conflict)?, lease_until_ms: old.lease_until_ms.ok_or(StoreError::Conflict)? };
+        // Expired claims remain observation-only, including before expire_claims runs.
+        if now >= claim.lease_until_ms { return Ok(()); }
+        self.validate_claim(&claim, now)?;
+        let until = now.checked_add(lease_ms).ok_or(StoreError::Conflict)?.max(claim.lease_until_ms);
+        if until == claim.lease_until_ms { return Ok(()); }
+        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        check_schema(&tx)?;
+        if !binding_current(&tx, id, true)? { return Err(StoreError::Conflict); }
+        super::approvals::validate_use_with_budget(&tx, &claim, now, None)?;
+        renew_launch_claim(&tx, &claim, now, lease_ms)?;
+        tx.commit()?;
+        Ok(())
+    }
     /// Rechecks owner, epoch, revision and lease in the outcome transaction.
     pub fn finish_operation(&mut self,claim:&Claim,outcome:Outcome,now:i64)->Result<Delivery> {
         now_check(now)?;text(outcome.evidence())?;
@@ -240,4 +265,17 @@ impl SqliteStore {
         let outcome=Outcome::PermanentFailure{diagnostic:format!("Operator retired intent; any prior effect remains possible. Reason: {reason}")};
         let result=update_outcome(&tx,&old,&outcome,now,"operator-retirement")?;tx.commit()?;Ok(result)
     }
+}
+
+// Caller validates the live claim and authority under this transaction first.
+pub(super) fn renew_launch_claim(tx: &rusqlite::Transaction<'_>, claim: &Claim, now: i64, lease_ms: i64) -> Result<()> {
+    if !(1..=300_000).contains(&lease_ms) { return Err(StoreError::Invalid("launch lease exceeds operation budget".into())); }
+    if now >= claim.lease_until_ms { return Err(StoreError::Conflict); }
+    let until = now.checked_add(lease_ms).ok_or(StoreError::Conflict)?.max(claim.lease_until_ms);
+    if until == claim.lease_until_ms { return Ok(()); }
+    let changed = tx.execute("UPDATE operation_delivery SET lease_until_ms=?2 WHERE operation_id=?1 AND state='claimed' AND revision=?3 AND epoch=?4 AND owner=?5 AND lease_until_ms=?6",
+        params![claim.operation.as_str(), until, integer(claim.revision)?, integer(claim.epoch)?, claim.owner, claim.lease_until_ms])?;
+    if changed != 1 { return Err(StoreError::Conflict); }
+    log(tx, &claim.operation, claim.revision, "operation.lease_extended", serde_json::json!({"epoch":claim.epoch,"lease_until_ms":until,"reason":"launch_phase_budget"}))?;
+    Ok(())
 }
