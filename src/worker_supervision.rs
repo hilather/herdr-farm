@@ -461,6 +461,24 @@ fn forms(path: &str) -> Vec<std::path::PathBuf> {
 /// so the default library directories need nothing. Only 64-bit
 /// little-endian ELF is read; anything unreadable yields nothing.
 pub(crate) fn executable_dependencies(executable: &Path) -> Vec<std::path::PathBuf> {
+    raw_executable_dependencies(executable).into_iter().map(|path| {
+        // Resolve parent traversal using the filesystem, not lexical popping:
+        // a directory symlink before `..` changes which directory is reached.
+        // Preserve the final component so its symlink identity is still pinned
+        // and worker isolation checks both the named and canonical forms.
+        if path.is_absolute() && path.components().any(|c| c == std::path::Component::ParentDir)
+            && let Some(parent) = path.parent()
+            && let Some(name) = path.file_name()
+            && let Ok(parent) = parent.canonicalize()
+        {
+            parent.join(name)
+        } else {
+            path
+        }
+    }).collect()
+}
+
+fn raw_executable_dependencies(executable: &Path) -> Vec<std::path::PathBuf> {
     use std::os::unix::fs::FileExt;
     let Ok(file) = std::fs::File::open(executable) else { return Vec::new() };
     let read = |offset: u64, length: usize| {

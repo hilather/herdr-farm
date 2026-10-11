@@ -115,3 +115,56 @@ restriction was bypassed. These workflows need the steward's outside-sandbox run
 - `stale_profile_evidence_is_refreshed_by_launch_run` — native probe server exited.
 - `verify_interaction_produces_launchable_evidence_for_codex_and_claude_from_the_cli` — native probe server exited.
 - `verify_interaction_tolerates_agents_writing_into_their_execution_home` — native probe server exited.
+
+## TOOLCHAIN-ORIGIN-PATHS-1
+
+The shared executable dependency resolver normalizes absolute dependency paths
+containing `..` by canonicalizing their parent directory. This follows filesystem
+semantics when directory symlinks precede parent traversal, while preserving the
+final symlink for identity recording and target collection. Both acceptance
+policy collection and worker isolation mounts consume these normalized paths.
+Declared paths still require absolute, normal components and cannot be `/`;
+hidden owner locations remain subject to the existing named/canonical mount
+checks. No schema changes or new crates are needed.
+
+Path diagnostics include the offending path, including unavailable symlink
+targets. Toolchain bounds distinguish empty paths, more than 32 declared paths,
+and a timeout outside 1–3600 seconds.
+
+The existing public-store acceptance workflow now compiles a tiny ELF binary
+with `$ORIGIN/../lib`, discovers a symlinked shared library before the existing directory scan,
+runs the check through verification and integration, and asserts persisted
+library hashes and symlink evidence. A changed library after signing rejects the
+check. A CLI workflow covers missing/invalid paths and path/timeout bounds.
+No unit tests or source-text assertions were added.
+
+Final validation used the requested low priority, checkout-local temporary
+storage, locked offline dependencies, and three jobs:
+
+```sh
+TMPDIR=$PWD/target/tmp nice -n 19 ionice -c 3 cargo nextest run \
+  --locked --offline -j 3 --features state-store \
+  --test factory_harness --test operator_launch --lib \
+  -E 'test(/toolchain/) | test(/^verification::tests::/) | test(/^worker_supervision::tests::/)'
+TMPDIR=$PWD/target/tmp nice -n 19 ionice -c 3 cargo clippy \
+  --locked --offline -j 3 --features state-store --all-targets
+```
+
+Results: **20 passed, 2 environmental failures**. All 12 existing verification
+and five worker supervision tests passed, along with three toolchain CLI tests.
+Clippy completed successfully with existing warnings outside changed lines;
+no diagnostics touch changed lines. `git diff --check` passed.
+
+- Socket-only failure: `code_launch_passes_only_selected_toolchain_environment_to_the_worker`
+  reports `native probe server exited`, the fixture's known Unix socket bind
+  restriction in this sandbox.
+- Additional sandbox failure: `owner_toolchain_acceptance_runs_tests_and_preserves_the_boundary`
+  reaches policy signing and rejects a changed dependency, but its passing case
+  records `isolation_setup_failed`. A diagnostic rerun confirmed
+  `hp-verify setup-error=loopback errno=1` before toolchain mounts or acceptance
+  execution. The temporary diagnostic was removed and the final source rerun.
+  Full acceptance execution, persisted success evidence, and integration need
+  the steward's outside-sandbox run. Existing assertions were kept intact;
+  neither sandbox restriction was bypassed.
+
+The unrelated `copy_jobs::tests` were not selected.
