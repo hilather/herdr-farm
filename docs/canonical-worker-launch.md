@@ -1253,9 +1253,35 @@ A sealed brief control epoch or configuration digest mismatch is permanent for
 that attempt (`brief_authority_stale`). Preparation checks this fence before
 rendering retained knowledge, and delivery checks it before submission. The
 attempt fails once with one coordinator launch-failure notice, rather than
-retrying unchanged sealed inputs. An already-started worker still retains capacity
-until cancellation or observation proves its termination; this failure alone
-never claims that the worker stopped. No store schema migration is required.
+retrying unchanged sealed inputs. Expired or changed consumed approvals fail as
+`brief_approval_expired`; other permanent authority `Invalid` errors fail as
+`brief_authority_invalid`. The supervisor stops a failed started worker, preserves
+its outputs, and records proven termination before releasing capacity, runtime
+ownership and the task pointer. The task can then be relaunched with fresh signed
+approval, without pausing project control. No prompt is sent under invalid
+authority. No store schema migration is required.
+
+Previously both the project inventory and root queue rotated launches and briefs
+with equal priority, allowing neighbouring exclusive launch stages to displace
+ready briefs. Brief preparation and delivery now take priority over new launch
+advancement in the project hint inventory and across the root's background queue. An already admitted
+root-exclusive operation finishes first; priority applies at the next admission,
+with rotation retained among briefs. Approval expiry remains a hard authority
+boundary, including while queued. The default signed validity is 900 seconds
+from draft issuance, not reservation or worker start. Root jobs retry launch
+failures after 1 second and brief lock failures after 2 seconds; persisted delivery
+backoff grows from 1 second to 256 seconds. Readiness rejection occurs before
+claiming a brief, so its zero-attempt delivery does not accumulate that persisted
+backoff; the volatile queue delay and project/root rotation govern those retries.
+In the reported 2026-10-11 incident,
+launch confirmation around 09:40Z preceded the first observed expiry at 09:59:37Z
+by about 19 minutes; the 09:42:34Z preparation contention preceded expiry by
+17 minutes 3 seconds. The intervening readiness rejection also shows that contention alone cannot
+explain the entire gap. These log bounds do not reveal the draft issuance time or
+the duration of each neighbouring exclusive stage. The isolated E2E contention
+lab holds the root exclusively for 3 seconds and reports elapsed time to Running;
+the expiry lab waits past its actual 120-second signed grant and verifies supervised
+retirement and a successful relaunch of the same task.
 
 For stores already affected by #52, observation also recognizes the retained
 terminal `attempt.launch_failed` proof with reason `dedicated_server_lost`, a lost

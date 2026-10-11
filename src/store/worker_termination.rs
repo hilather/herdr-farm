@@ -295,6 +295,17 @@ impl SqliteStore {
         ] {
             tx.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES(?1,?2,?3,1,?4)",params![kind,entity,integer(revision)?,value.map_err(|_|StoreError::Invalid("termination event encoding failed".into()))?])?;
         }
+        // A permanently rejected brief never authorized a prompt. Exact
+        // supervisor termination is enough to retire its launch ownership;
+        // waiting for a later terminal inventory can spuriously pause control.
+        let brief_failure: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM events WHERE kind='attempt.launch_failed' AND entity=?1
+             AND json_extract(payload,'$.reason') IN ('brief_authority_stale','brief_approval_expired','brief_authority_invalid'))",
+            [attempt.id.as_str()], |row| row.get(0))?;
+        if brief_failure {
+            super::ownership::relinquish_ended(&tx, &owner, "failed brief worker termination proven",
+                serde_json::to_value(receipt).map_err(|_| StoreError::Invalid("termination evidence encoding failed".into()))?)?;
+        }
         output_omission_notice(&tx,receipt.output_snapshot.as_ref(),&attempt)?;
         super::inbox::ended_notice(&tx, &attempt)?;
         super::consumer_bindings::reconcile_task(&tx,attempt.task.as_str(),budget)?;
