@@ -52,6 +52,24 @@ fn close_transferred(file:File) {let _gate=SPAWN_GATE.write().unwrap_or_else(Poi
 /// One copy of a transferred lock's description, closed through the gate.
 #[derive(Debug)]
 pub(crate) struct TransferredFile { file: ManuallyDrop<File>, _ownership: std::sync::Arc<()> }
+impl TransferredFile {
+    /// Trusted descriptor-relative input, kept open through the same fork/close
+    /// gate as execution locks. This handle does not establish lock ownership.
+    pub(crate) fn input(file:&File)->Result<Self> {
+        use std::os::fd::FromRawFd;
+        let metadata=file.metadata()?;
+        ensure!(metadata.is_file() && metadata.nlink()==1,"inherited input must be a regular file with one link");
+        // SAFETY: this live File owns the descriptor; F_GETFL does not mutate it.
+        let flags=unsafe{libc::fcntl(file.as_raw_fd(),libc::F_GETFL)};
+        ensure!(flags>=0 && flags&libc::O_ACCMODE==libc::O_RDONLY,"inherited input must be read-only");
+        // SAFETY: duplicate this owned descriptor above stdio with CLOEXEC.
+        let copied=unsafe{libc::fcntl(file.as_raw_fd(),libc::F_DUPFD_CLOEXEC,3)};
+        if copied<0 {return Err(std::io::Error::last_os_error().into());}
+        // SAFETY: copied is a newly owned descriptor.
+        let file=unsafe{File::from_raw_fd(copied)};
+        Ok(Self{file:ManuallyDrop::new(file),_ownership:std::sync::Arc::new(())})
+    }
+}
 impl AsRawFd for TransferredFile {fn as_raw_fd(&self)->RawFd {self.file.as_raw_fd()}}
 impl Drop for TransferredFile {
     // SAFETY: the file is taken once, here, and never used again.
