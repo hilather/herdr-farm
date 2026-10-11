@@ -856,7 +856,30 @@ claim expiry and final liveness reads. No phase renews that deadline. A cancelle
 or expired later phase does not erase an earlier committed observation: errors
 identify whether observation commit or marker publication already completed.
 If cancellation interrupts DB-first marker publication, normal opens refuse the
-mismatch until explicit migration recovery republishes the authoritative control.
+mismatch while the ticker repairs the derived marker on its next pass. The ticker
+retains project and record ownership, validates import identity and a matching
+durable control transition before changing the published marker, and republishes
+the authoritative DB state. It emits
+`project.control_publication_repair` with the previous marker flag, current
+control and a typed action (`republish` or `discard_pending`). This idempotent
+decision is committed before the filesystem action, so cancellation after
+rename/unlink cannot erase its audit. `discard_pending` applies when the DB
+already agrees with the published marker and an obsolete staging file remains. A staging file alone does not
+trip the runtime refusal gate; the gate compares the published marker and DB.
+No ticker restart or operator recovery is needed. Unexplained control or
+ownership/provenance mismatches still refuse recovery. With no ticker running,
+explicit migration recovery remains available.
+SQLite `SQLITE_INTERRUPT` formerly surfaced as `Io("interrupted")` through the
+generic SQLite error conversion. In particular, bounded identity readers install
+a progress handler that interrupts SQL on cancellation or deadline, but previously
+propagated the generic conversion without retaining that reason. This diagnostic
+does not establish that a signal or telemetry pass caused an EINTR. Controlled
+reads now retry that transient result only while
+the original cancellation/deadline remains live, and check that control when
+classifying failures. Bounded filesystem operations retry actual EINTR as well.
+The SQLite transaction has already committed before marker publication. A
+cancellation check after writing `control-format.next` deliberately stops before
+rename; filesystem staging is outside that transaction and cannot roll it back.
 Before rename, publication checks cancellation; after rename it completes directory
 fsync rather than claiming the marker was never published. Filesystem durability
 remains cooperative. Aggregate decoded allocations and other effect workers still

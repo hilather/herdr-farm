@@ -29,13 +29,19 @@ pub enum StoreError {
     Invalid(String),
     Corrupt(String),
     Io(String),
+    ControlPublicationPending,
 }
 pub mod controlled;
 pub mod attempt_tokens;
 pub mod integrity;
 pub(crate) mod read_budget;
 impl fmt::Display for StoreError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "state store: {self:?}") }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if matches!(self,Self::ControlPublicationPending) {
+            return f.write_str("control/format publication interrupted; the ticker will repair a pending publication; run migration recover if no ticker is running");
+        }
+        write!(f, "state store: {self:?}")
+    }
 }
 impl std::error::Error for StoreError {}
 impl From<rusqlite::Error> for StoreError {

@@ -17,3 +17,16 @@ pub struct ProjectControl {
 pub struct AdmissionReport { pub head:u64,pub blockers:Vec<String> }
 #[derive(Debug,Serialize)]
 pub struct ControlChange { pub head:u64,pub control:ProjectControl }
+
+/// Durable ticker decision for repairing the derived format marker.
+#[derive(Debug,Clone,Copy,Serialize,Deserialize)]
+#[serde(rename_all="snake_case")]
+pub enum ControlPublicationRepairAction {Republish,DiscardPending}
+
+/// Audit of a ticker repair of the derived format marker from committed control.
+#[derive(Debug,Clone,Serialize,Deserialize)]
+pub struct ControlPublicationRepair {
+    pub previous_reconciliation_required:bool,
+    pub action:ControlPublicationRepairAction,
+    pub control:ProjectControl,
+}
