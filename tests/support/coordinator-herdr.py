@@ -29,7 +29,8 @@ elif a==['agent','list']:
  if s.get('fail_inventory'):sys.exit(1)
  reply={'result':{'agents':[agent()] if s['agent'] else []}}
 else:reply={'result':{'type':'ok'}}
-json.dump(s,open(path,'w'))
+with open(path+'.tmp','w') as out:json.dump(s,out)
+os.replace(path+'.tmp',path)
 if a==['remote-api-bridge'] and m=='agent.prompt' and os.path.exists(root+'/lose-prompt-reply'):
  os.unlink(root+'/lose-prompt-reply');sys.exit(1)
 print(json.dumps(reply))

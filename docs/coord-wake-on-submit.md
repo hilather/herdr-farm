@@ -44,7 +44,15 @@ not rewritten. Controller observation freshness can refresh the observation
 row without a `runtime.observed` event; only changed observation state advances
 the canonical head.
 
+Cancelled, expired, or contended wake jobs record no attempt and reserve no
+backoff. Transient store busy/conflict/cancellation/deadline errors and lock
+contention are retried on a later pass; an in-memory counter logs the first and
+every 16th transient failure to expose persistent contention without store writes.
+Recorded not-sent preflight attempts include the full error text.
+
 The busy-deferral end-to-end check waits for verified worker termination before
-measuring the canonical head across repeated context reads. Verification can
-precede legitimate worker shutdown events; those events are independent of wake
-deferral and must settle before this measurement.
+repeated context reads. Delayed `runtime.observed` events for non-coordinator
+bindings may still arrive; no other events may be appended, and retained wake
+attempts must stay empty. The exactly-one-wake wait also requires the retained
+claim to be confirmed within the same 60-second bound, because the fixture
+records the prompt before the product reads its reply.

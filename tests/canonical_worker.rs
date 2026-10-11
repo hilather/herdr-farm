@@ -326,7 +326,10 @@ sys.stdout.buffer.write(json.dumps({'result':json.loads(reply)['result']}).encod
         let stop = self.path("root/.ticker.stop");
         fs::write(&stop, b"").unwrap();
         let deadline = Instant::now() + Duration::from_secs(8);
-        while ticker.0.try_wait().unwrap().is_none() { assert!(Instant::now() < deadline); std::thread::sleep(Duration::from_millis(10)); }
+        while ticker.0.try_wait().unwrap().is_none() {
+            assert!(Instant::now() < deadline, "ticker did not stop within 8 s; ticker log:\n{}", fs::read_to_string(self.path("root/.ticker.log")).unwrap_or_default());
+            std::thread::sleep(Duration::from_millis(10));
+        }
         fs::remove_file(&stop).unwrap();
     }
     /// Run a fresh ticker for `passes` completed passes (each pass republishes
@@ -4039,16 +4042,18 @@ fn verified_worker_results_wake_idle_coordinator_once_and_defer_while_busy() {
         if busy {
             lab.run_quiet(6);
             assert_eq!(state()["prompts"].as_array().unwrap().len(),initial);
-            // With the worker's effects drained, busy wake deferrals and
-            // repeated per-turn context reads must leave the head unchanged.
+            // Delayed controller observations of the ended worker may still
+            // arrive, but busy deferrals must append no other events.
             lab.ok(&["context","demo"]);
             ticker=lab.spawn();
             let before=lab.state();
             for _ in 0..6 {
                 lab.ok(&["context","demo"]);
                 let after=lab.state();
-                let changes=after.events.iter().filter(|e|e.sequence>before.head).collect::<Vec<_>>();
-                assert_eq!(after.head,before.head,"busy deferral appended events: {changes:?}");
+                let changes=after.events.iter().filter(|e|e.sequence>before.head&&!(e.kind=="runtime.observed"&&e.entity!="coordinator")).collect::<Vec<_>>();
+                assert!(changes.is_empty(),"busy deferral appended events: {changes:?}");
+                let wake:Value=serde_json::from_slice(&fs::read(lab.project.join(".state/canonical-wake.json")).unwrap()).unwrap();
+                assert_eq!(wake["attempts"].as_array().unwrap().len(),0,"busy deferral recorded a wake attempt: {wake}");
                 assert!(after.inbox.iter().any(|i|i.content.id.starts_with("worker-result-")&&!i.done));
             }
             lab.stop(ticker);
@@ -4056,7 +4061,11 @@ fn verified_worker_results_wake_idle_coordinator_once_and_defer_while_busy() {
         fs::write(lab.path("coordinator-status"),if busy {"done"} else {"idle"}).unwrap();
         let became_idle=std::time::Instant::now();
         ticker=lab.spawn();
-        lab.wait_for(&mut ticker,"exactly one coordinator wake",&attempt,60,&||state()["prompts"].as_array().unwrap().len()>initial);
+        // The fixture records the prompt before the product reads its reply.
+        // Wait for durable confirmation before stopping the ticker.
+        let confirmed=||fs::read(lab.project.join(".state/canonical-wake.json")).ok()
+            .and_then(|b|serde_json::from_slice::<Value>(&b).ok()).is_some_and(|w|w["claim"]["phase"]=="confirmed");
+        lab.wait_for(&mut ticker,"exactly one coordinator wake",&attempt,60,&||state()["prompts"].as_array().unwrap().len()>initial&&confirmed());
         assert!(became_idle.elapsed()<std::time::Duration::from_secs(60));
         lab.stop(ticker);
         let prompts=state()["prompts"].as_array().unwrap().clone();

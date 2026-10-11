@@ -128,10 +128,37 @@ pub fn run(ctx: &Ctx, dir: &Path) -> Result<()> {
         runner: &runner,
         detached_ticker: ctx.detached_ticker,
     };
-    run_held(&held_ctx, dir)
+    run_held(&held_ctx, dir, &control)
 }
-fn run_held(ctx: &Ctx, dir: &Path) -> Result<()> {
+/// Contention and interrupted jobs prove nothing about coordinator delivery.
+fn transient(error: &anyhow::Error) -> bool {
+    use herdr_farm::store::StoreError;
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<StoreError>(),
+            Some(StoreError::Busy | StoreError::Conflict | StoreError::Cancelled | StoreError::Deadline)
+        ) || matches!(
+            cause.downcast_ref::<std::fs::TryLockError>(),
+            Some(std::fs::TryLockError::WouldBlock)
+        )
+    })
+}
+fn run_held(ctx: &Ctx, dir: &Path, control: &crate::source_tree::Control) -> Result<()> {
     if let Err(error) = run_inner(ctx, dir) {
+        if control.cancellation.is_cancelled() || Instant::now() >= control.deadline {
+            return Err(error);
+        }
+        if transient(&error) {
+            // Bounded in-memory accounting avoids another contended store write.
+            // Log the first and every 16th transient failure across wake jobs.
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static TRANSIENT_FAILURES: AtomicU64 = AtomicU64::new(0);
+            let count = TRANSIENT_FAILURES.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+            if count % 16 == 1 {
+                eprintln!("canonical wake transient failure #{count} for {}: {error:#}", dir.display());
+            }
+            return Err(error);
+        }
         let mut state = load(dir)?;
         // Before a native call, failure proves no effect and can back off safely.
         if !state
@@ -150,7 +177,7 @@ fn run_held(ctx: &Ctx, dir: &Path) -> Result<()> {
             if state.attempts.len() == 1024 {
                 state.attempts.remove(0);
             }
-            state.attempts.push(json!({"at_unix_ms":jiff::Timestamp::now().as_millisecond(),"hash":batch.hash,"items":batch.ids.len(),"outcome":"not-sent","reason":"preflight_failed"}));
+            state.attempts.push(json!({"at_unix_ms":jiff::Timestamp::now().as_millisecond(),"hash":batch.hash,"items":batch.ids.len(),"outcome":"not-sent","reason":"preflight_failed","error":format!("{error:#}")}));
             persist(dir, &state)?;
         }
         return Err(error);
@@ -452,7 +479,7 @@ impl Runner for JobRunner {
             runner: &runner,
             detached_ticker: false,
         };
-        run_held(&ctx, &input.project)?;
+        run_held(&ctx, &input.project, &control)?;
         Ok(Output {
             code: Some(0),
             elapsed: entered.elapsed(),
