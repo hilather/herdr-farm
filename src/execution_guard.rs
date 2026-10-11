@@ -194,7 +194,8 @@ fn check_file(root:&Path)->Result<File> {lock_file(&root.join(CHECK_LOCK))}
 pub struct RootGuard {_file:LockFile,_check:Option<LockFile>}
 impl RootGuard {
     #[cfg(feature="state-store")]
-    pub(crate) fn inherit(&self)->Result<Vec<crate::runner::InheritedLock>> {
+    /// Keep the root barrier held by a supervised descendant until it exits.
+    pub fn inherit(&self)->Result<Vec<crate::runner::InheritedLock>> {
         Ok(vec![crate::runner::InheritedLock::new(self._file.transfer()?)])
     }
     pub fn exclusive(root:&Path)->Result<Self> {

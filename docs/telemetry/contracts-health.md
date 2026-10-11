@@ -43,11 +43,13 @@ warn, critical, unknown}, states[], alerts {open[], last_evaluated_unix_ms}
 
 ## 2. Rule table (`health-rules.v5`, `rules.rs` `RULES`)
 
-A change of a rule, threshold or read path is a new rules version. v4 adds
+A change of a rule, threshold or read path is a new rules version. v5 adds
+`result_waiting_on_coordinator`; v4 added
 `test_weakening` (MET-NOW-A; fixture evidence `tests/telemetry_stored_metrics.rs`).
 
 | rule | family / service | read path | warn | critical | cooldown |
 |---|---|---|---|---|---|
+| `result_waiting_on_coordinator` | attention | canonical unfinished worker-result inbox rows, independent of SEEN | age ≥ 1 min | ≥ 10 min | 1 h |
 | `test_weakening` | proxy | quality `tests-net-removal.v1` observation counts, last 24 hours | ≥ 1 flagged submission | — | 1 h |
 | `verification_flaky` | proxy | `quality flaky`, last 30 days | ≥ 1 flipped tree/policy pair | — | 1 h |
 | `collector_stale` | collection / codex | query `source_watermarks.sidecar.last_collect_unix_ms` | age ≥ 15 min | ≥ 60 min | 1 h |
@@ -64,6 +66,16 @@ A change of a rule, threshold or read path is a new rules version. v4 adds
 | `quota_headroom` | services / codex | `accounting quota` (current trusted windows) | < 20 % remaining | < 5 % (0 = `window_exhausted`) | 1 h |
 | `waiting_on_you` | attention | `accounting attention` (open waits of open attempts) | ≥ 5 min | ≥ 30 min | 15 min |
 | `recommendation_stale` | recommendation, per role | TM4.4 `compare` M02 + M50 (§5) | M50 < 1/2 | — | 6 h |
+
+`result_waiting_on_coordinator` reports "result waiting on coordinator for N min"
+from the oldest unfinished worker-result notice. Its evidence includes waiting
+count, age, and the retained `.state/canonical-wake.json` claim/retry and latest
+1024 wake attempts (pending, confirmed, not-shown, deferred, not-sent, uncertain).
+Readiness failures are recorded as not-sent with retry backoff; busy checks do not
+claim or send. DONE resolves the wait; context/SEEN does not. A missing wake
+journal means no recorded attempts; unreadable source evidence is unknown.
+The journal is project-backup state, classified as `canonical.coordinator_wake`
+in maintenance; no canonical or sidecar schema change is involved.
 
 `test_weakening` windows by signal observation, so a newly collected flag on
 an older submission warns too. It resolves on observed zero, stays unknown

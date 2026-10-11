@@ -159,6 +159,15 @@ pub fn update_inbox(project:&Path,expected_head:u64,ids:&[String],done:bool)->Re
     Ok(migration::open_active(project)?.update_inbox(expected_head,ids,done)?)
 }
 
+/// Mark only notices rendered by context, preserving concurrent arrivals and DONE.
+/// Retry the head fence under project ownership, without repeating context output.
+pub fn mark_context_seen(project:&Path,expected_head:u64,ids:&[String],deadline:std::time::Instant)->Result<usize> {
+    let _maintenance=migration::runtime_mutation(project)?;
+    let control=crate::store::controlled::ReadControl::new(deadline,Default::default());
+    let mut db=migration::open_active_scoped(project,control)?;
+    Ok(db.mark_context_seen(expected_head,ids)?)
+}
+
 /// Expiry records ambiguity only, so it is safe during the dispatch freeze.
 pub fn expire_operations(project:&Path)->Result<usize> {
     let _maintenance=migration::runtime_mutation(project)?;
@@ -391,4 +400,14 @@ pub fn cancel_attempt(project:&Path,id:&crate::domain::AttemptId,revision:u64,he
 /// Read only unseen, unfinished inbox rows for waiting clients.
 pub fn unseen_inbox(project: &Path) -> Result<Vec<crate::domain::InboxItem>> {
     Ok(migration::open_active_read_only(project)?.unseen_inbox()?)
+}
+
+/// Unseen ordinary notices plus unfinished worker-result notices, even after context.
+pub fn wake_inbox(project: &Path) -> Result<Vec<crate::domain::InboxItem>> {
+    Ok(migration::open_active_read_only(project)?.wake_inbox()?)
+}
+
+/// Unfinished worker-result rows through the inbox primary-key prefix index.
+pub fn worker_result_inbox(project: &Path) -> Result<Vec<crate::domain::InboxItem>> {
+    Ok(migration::open_active_read_only(project)?.worker_result_inbox()?)
 }

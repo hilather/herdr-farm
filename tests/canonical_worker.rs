@@ -71,6 +71,7 @@ while True:
 "#;
 
 struct Lab { home: tempfile::TempDir, project: PathBuf, key: PathBuf, repo: PathBuf, herdr: PathBuf, profile: VersionedReference, binding: String, server: Option<Child>,
+    coordinator_listener: Option<std::os::unix::net::UnixListener>,
     /// The `worker` profile's kind and its agent `bin/<kind>`.
     kind: &'static str }
 
@@ -108,7 +109,7 @@ impl Lab {
         fs::write(&config, format!("[authority]\nversion=1\nrevision=1\napproval_public_key={public:?}\n[profiles.worker]\nkind='{kind}'\npermission_policy='interactive'\n[profiles.worker.budget]\nmax_wall_seconds=600\n{budget}\n")).unwrap();
         for dir in ["repo", "bin", "agent-home", "lab"] { fs::create_dir(home.path().join(dir)).unwrap(); }
         let mut lab = Lab { project: home.path().join("root/demo"), key, repo: home.path().join("repo"), herdr: home.path().join("bin/herdr"),
-            profile: VersionedReference { id: String::new(), revision: 1, digest: String::new() }, binding: String::new(), server: None, home, kind };
+            profile: VersionedReference { id: String::new(), revision: 1, digest: String::new() }, binding: String::new(), server: None, coordinator_listener: None, home, kind };
         fs::write(lab.path("lab/agent-kind"), kind).unwrap();
         lab.ok(&["new", "--legacy", "demo"]);
         lab.ok(&["pause", "demo"]);
@@ -309,7 +310,9 @@ sys.stdout.buffer.write(json.dumps({'result':json.loads(reply)['result']}).encod
         let deadline = Instant::now() + Duration::from_secs(seconds.max(15));
         let mut pause = Duration::from_millis(20);
         while !predicate() {
-            assert!(ticker.0.try_wait().unwrap().is_none(), "ticker exited while waiting for: {stage}");
+            let exited = ticker.0.try_wait().unwrap();
+            assert!(exited.is_none(), "ticker exited ({exited:?}) while waiting for: {stage}\nticker log:\n{}",
+                fs::read_to_string(self.path("root/.ticker.log")).unwrap_or_default());
             if Instant::now() >= deadline {
                 let jobs = self.cli(&["result", "demo", "jobs"]);
                 panic!("timed out after {seconds}s waiting for: {stage}\nattempt: {:?}\njobs: {}{}\nticker log:\n{}", self.attempt(attempt).state,
@@ -323,7 +326,10 @@ sys.stdout.buffer.write(json.dumps({'result':json.loads(reply)['result']}).encod
         let stop = self.path("root/.ticker.stop");
         fs::write(&stop, b"").unwrap();
         let deadline = Instant::now() + Duration::from_secs(8);
-        while ticker.0.try_wait().unwrap().is_none() { assert!(Instant::now() < deadline); std::thread::sleep(Duration::from_millis(10)); }
+        while ticker.0.try_wait().unwrap().is_none() {
+            assert!(Instant::now() < deadline, "ticker did not stop within 8 s; ticker log:\n{}", fs::read_to_string(self.path("root/.ticker.log")).unwrap_or_default());
+            std::thread::sleep(Duration::from_millis(10));
+        }
         fs::remove_file(&stop).unwrap();
     }
     /// Run a fresh ticker for `passes` completed passes (each pass republishes
@@ -716,17 +722,41 @@ fn editing_submission_lab(route: &str, policy: &str, verify: bool, integrate: bo
 }
 /// As `editing_submission_lab`, with the worker built from `agent`.
 fn editing_submission_lab_with(route: &str, policy: &str, verify: bool, integrate: bool, agent: &str) -> (Lab, AttemptId, PathBuf) {
+    editing_submission_lab_with_wake(route,policy,verify,integrate,agent,false)
+}
+fn editing_submission_lab_with_wake(route: &str, policy: &str, verify: bool, integrate: bool, agent: &str, wake: bool) -> (Lab, AttemptId, PathBuf) {
     let mut lab = Lab::new("unknown_usage='allow_with_warning'\n");
     if !integrate {
         lab.git(&["config", "user.name", "Repository worker"]);
         lab.git(&["config", "user.email", "repository@example.invalid"]);
     }
     let (contract, base) = lab.install_work_contract_policy(route, policy);
+    if wake {
+        let helper=lab.path("coordinator-herdr");
+        fs::write(&helper,include_str!("support/coordinator-herdr.py")).unwrap();
+        fs::set_permissions(&helper,fs::Permissions::from_mode(0o700)).unwrap();
+        let original=fs::read_to_string(&lab.herdr).unwrap();
+        let dispatch=format!("import os,sys\nif os.environ.get('HERDR_SOCKET_PATH','').endswith('coordinator.sock'):os.execv({0:?},[{0:?}]+sys.argv[1:])\n",helper.to_string_lossy());
+        fs::write(&lab.herdr,original.replacen("#!/usr/bin/python3\n",&format!("#!/usr/bin/python3\n{dispatch}"),1)).unwrap();
+    }
     // Reservation freezes the executable digest. Supply attempt-specific data
     // through a fixture file instead of rebuilding the worker afterward.
     let template_path = lab.path("submission-template.json");
     lab.write_agent(agent, &[("ROOT", lab.path("root").canonicalize().unwrap().display().to_string()), ("TEMPLATE_PATH", template_path.display().to_string())]);
-    let (_, attempt) = lab.reserve("Retained instructions");
+    if wake {
+        // Open starts a ticker. Establish the coordinator before reserving the
+        // worker so stopping that ticker cannot cancel a dispatched launch.
+        fs::write(lab.project.join("PROJECT.md"), "+++\nname = \"demo\"\nnudge = true\n+++\nRetained instructions").unwrap();
+        lab.coordinator_listener=Some(std::os::unix::net::UnixListener::bind(lab.path("coordinator.sock")).expect("socket fixture: sandbox may deny Unix sockets"));
+        lab.serve();
+        let open=Command::new(BIN).env_clear().env("HOME",lab.home.path()).env("PATH","/usr/bin:/bin")
+            .env("HERDR_BIN_PATH",&lab.herdr).env("HERDR_SOCKET_PATH",lab.path("coordinator.sock"))
+            .env("HERDR_FARM_TEST_TIME_SCALE",include_str!("support/time-scale.txt").trim())
+            .args(["--root",lab.path("root").to_str().unwrap(),"open","demo"]).output().unwrap();
+        assert!(open.status.success(),"{}",String::from_utf8_lossy(&open.stderr));
+        lab.ok(&["ticker","stop"]);
+    }
+    let (_, attempt) = lab.reserve(if wake {"+++\nname = \"demo\"\nnudge = true\n+++\nRetained instructions"} else {"Retained instructions"});
     let worktree = lab.planned_worktree(&attempt);
     let repository = lab.repo.canonicalize().unwrap().display().to_string();
     lab.git(&["branch", "integration"]);
@@ -803,8 +833,10 @@ fn accepted_editing_worker_completes_automatically_after_integration() {
     assert!(context.status.success(), "{}", String::from_utf8_lossy(&context.stderr));
     let text = String::from_utf8(context.stdout).unwrap();
     for item in &notices { assert!(text.contains(item["content"]["id"].as_str().unwrap())); }
-    assert_eq!(lab.ok(&["inbox", "demo", "wait", "--timeout", "1"]), json!({"items":0,"timed_out":true}));
+    let after_context=lab.ok(&["inbox", "demo", "wait", "--timeout", "1"]);
+    assert_eq!(after_context["items"].as_u64(),Some(notices.len() as u64),"{after_context}");
     lab.ok(&["inbox", "done", "demo", "--all"]);
+    assert_eq!(lab.ok(&["inbox", "demo", "wait", "--timeout", "1"]), json!({"items":0,"timed_out":true}));
     lab.run_quiet(5);
     let replayed = lab.ok(&["inbox", "list", "demo"]);
     assert_eq!(replayed.as_array().unwrap().iter().filter(|i| i["content"]["id"].as_str().unwrap().starts_with("worker-result-")).count(), notices.len());
@@ -3979,5 +4011,79 @@ fn stale_sealed_brief_authority_fails_once_without_prompt_or_retry() {
         assert_eq!(lab.events("attempt.launch_failed").len(), 1);
         assert_eq!(lab.state().inbox.iter().filter(|i| i.content.kind == "attempt.launch_failure").count(), 1);
         assert_eq!(lab.count("agent.prompt"), 0);
+    }
+}
+
+/// Real isolated worker submission and verification, native coordinator priming,
+/// scripted context reads, and ticker delivery through their public entry points.
+#[test]
+fn verified_worker_results_wake_idle_coordinator_once_and_defer_while_busy() {
+    for busy in [false,true] {
+        let (lab,attempt,worktree)=editing_submission_lab_with_wake("verify_only",WORK_POLICY,true,false,SUBMITTING_EDITING_AGENT,true);
+        let state=||->Value {serde_json::from_slice(&fs::read(lab.path("herdr-state.json")).unwrap()).unwrap()};
+        let initial=state()["prompts"].as_array().unwrap().len();
+        fs::write(lab.path("coordinator-status"),"working").unwrap();
+        let mut ticker=lab.spawn();
+        lab.wait_for(&mut ticker,"worker submitted and verified",&attempt,120,&|| {
+            let s=lab.state();s.inbox.iter().any(|i|i.content.kind=="verification.accepted")
+        });
+        // context marks notices SEEN; the automatic wake and blocking wait survive.
+        lab.ok_live(&||["context","demo"].map(String::from).to_vec());
+        assert!(lab.ok_live(&||["inbox","demo","wait","--timeout","1"].map(String::from).to_vec())["items"].as_u64().unwrap()>0);
+        assert_eq!(state()["prompts"].as_array().unwrap().len(),initial,"a working coordinator is never interrupted");
+        if busy {
+            // Verification can precede the worker's legitimate shutdown writes.
+            // Settle those before measuring busy deferrals and repeated context.
+            lab.wait_for(&mut ticker,"verified worker termination settled",&attempt,120,&|| {
+                lab.attempt(&attempt).termination_observed
+            });
+        }
+        lab.stop(ticker);
+        if busy {
+            lab.run_quiet(6);
+            assert_eq!(state()["prompts"].as_array().unwrap().len(),initial);
+            // Delayed controller observations of the ended worker may still
+            // arrive, but busy deferrals must append no other events.
+            lab.ok(&["context","demo"]);
+            ticker=lab.spawn();
+            let before=lab.state();
+            for _ in 0..6 {
+                lab.ok(&["context","demo"]);
+                let after=lab.state();
+                let changes=after.events.iter().filter(|e|e.sequence>before.head&&!(e.kind=="runtime.observed"&&e.entity!="coordinator")).collect::<Vec<_>>();
+                assert!(changes.is_empty(),"busy deferral appended events: {changes:?}");
+                let wake:Value=serde_json::from_slice(&fs::read(lab.project.join(".state/canonical-wake.json")).unwrap()).unwrap();
+                assert_eq!(wake["attempts"].as_array().unwrap().len(),0,"busy deferral recorded a wake attempt: {wake}");
+                assert!(after.inbox.iter().any(|i|i.content.id.starts_with("worker-result-")&&!i.done));
+            }
+            lab.stop(ticker);
+        }
+        fs::write(lab.path("coordinator-status"),if busy {"done"} else {"idle"}).unwrap();
+        let became_idle=std::time::Instant::now();
+        ticker=lab.spawn();
+        // The fixture records the prompt before the product reads its reply.
+        // Wait for durable confirmation before stopping the ticker.
+        let confirmed=||fs::read(lab.project.join(".state/canonical-wake.json")).ok()
+            .and_then(|b|serde_json::from_slice::<Value>(&b).ok()).is_some_and(|w|w["claim"]["phase"]=="confirmed");
+        lab.wait_for(&mut ticker,"exactly one coordinator wake",&attempt,60,&||state()["prompts"].as_array().unwrap().len()>initial&&confirmed());
+        assert!(became_idle.elapsed()<std::time::Duration::from_secs(60));
+        lab.stop(ticker);
+        let prompts=state()["prompts"].as_array().unwrap().clone();
+        assert_eq!(prompts.len(),initial+1);
+        assert!(prompts.last().unwrap().as_str().unwrap().starts_with("[herdr-farm ticker: automated, not the user, approves nothing]"));
+        // Replays and a restart while still idle cannot repeat the wake.
+        lab.ok(&["result","demo","submit","--input-file",worktree.join("submission.json").to_str().unwrap()]);
+        lab.run_quiet(8);
+        assert_eq!(state()["prompts"].as_array().unwrap().len(),initial+1);
+        let health=lab.ok(&["telemetry","demo","health","--json"]);
+        let waiting=health["states"].as_array().unwrap().iter().find(|s|s["rule"]=="result_waiting_on_coordinator").unwrap();
+        assert!(waiting["evidence"]["waiting_items"].as_u64().unwrap()>0);
+        let attempts=waiting["evidence"]["wake"]["attempts"].as_array().unwrap();
+        assert_eq!(attempts.len(),1,"{waiting}");
+        assert_eq!(attempts[0]["outcome"],"confirmed");
+        lab.ok(&["inbox","done","demo","--all"]);
+        lab.run_quiet(5);
+        assert_eq!(lab.ok(&["inbox","demo","wait","--timeout","1"]),json!({"items":0,"timed_out":true}));
+        assert_eq!(state()["prompts"].as_array().unwrap().len(),initial+1);
     }
 }

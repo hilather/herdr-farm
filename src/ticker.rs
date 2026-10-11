@@ -264,8 +264,19 @@ fn spawn(root: &Path) -> Result<()> {
             Ok(())
         });
     }
-    command.spawn_gated().context("could not start the ticker")?;
-    Ok(())
+    let mut child = command.spawn_gated().context("could not start the ticker")?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if matches!(lock_state(root), LockState::Held(info) if info.pid == child.id()) {
+            return Ok(());
+        }
+        if let Some(status) = child.try_wait()? {
+            anyhow::ensure!(status.success(), "ticker exited before acquiring its lock: {status}");
+            return Ok(());
+        }
+        anyhow::ensure!(Instant::now() < deadline, "ticker did not acquire its lock within 5 seconds (pid {})", child.id());
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// Asks the running ticker to exit and waits for the lock to be released.
@@ -377,6 +388,7 @@ pub fn run_passes(ctx: &Ctx, passes: Option<u64>) -> Result<()> {
         let line = format!("another ticker holds the lock (pid {}, version {}); exiting", holder.pid, holder.version);
         Log { path: log_path(root) }.line(&line);
         eprintln!("{line}");
+        anyhow::ensure!(passes.is_none(), "{line}; --passes completed zero passes");
         return Ok(());
     }
     let path_var = ctx.env.var("PATH").unwrap_or("").to_string();
@@ -416,6 +428,18 @@ pub fn run_passes(ctx: &Ctx, passes: Option<u64>) -> Result<()> {
         }
         completed += 1;
         if passes.is_some_and(|limit| completed >= limit) {
+            // Bounded labs must let admitted effects finish before executor stop
+            // cancels them. Explicit stop retains the normal cancellation path.
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while memory.copy_jobs.as_ref().is_some_and(|queue| queue.pending())
+                && !stop_path(root).exists()
+                && Instant::now() < deadline
+            {
+                if let Some(queue) = memory.copy_jobs.as_mut() {
+                    for line in queue.drain() { log.error(&line); }
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
             log.line(&format!("completed {completed} passes; draining shared executor"));
             return drain_executor(root, &log, &mut memory);
         }
@@ -465,6 +489,8 @@ pub(crate) fn background_memory(ctx:&Ctx)->Result<Memory> {
     let runner:std::sync::Arc<dyn crate::runner::Runner+Send+Sync>=std::sync::Arc::new(crate::canonical_controller::observations::ProbeRunner{inner:runner});
     #[cfg(feature="state-store")]
     let runner:std::sync::Arc<dyn crate::runner::Runner+Send+Sync>=std::sync::Arc::new(crate::canonical_notification_jobs::JobRunner{inner:runner});
+    #[cfg(feature="state-store")]
+    let runner:std::sync::Arc<dyn crate::runner::Runner+Send+Sync>=std::sync::Arc::new(crate::canonical_coordinator::wake::JobRunner{inner:runner});
     #[cfg(feature="state-store")]
     let runner:std::sync::Arc<dyn crate::runner::Runner+Send+Sync>=std::sync::Arc::new(crate::attempt_token_jobs::JobRunner{inner:runner,memory:memory.attempt_tokens.clone()});
     #[cfg(feature="state-store")]

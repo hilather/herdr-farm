@@ -39,6 +39,8 @@ impl State {
 #[derive(Clone, Copy, Debug)]
 pub enum Eval {
     LaunchStalled,
+    /// Unfinished worker results survive context reads.
+    CoordinatorResult,
     /// Passive verification flips with canonical run evidence.
     VerificationFlaky,
     /// Test removal flags observed in the last day.
@@ -95,6 +97,9 @@ pub const RULES: &[Rule] = &[
     Rule { name: "launch_stalled", family: "runtime", service: None, source: "canonical:launch progress", eval: Eval::LaunchStalled,
         direction: Direction::Above, warn: 5 * MINUTE, critical: 15 * MINUTE, unit: "ms", window_ms: None, cooldown_ms: HOUR,
         detail: "open reserved or launching attempt without progress for five minutes, or stopped recovery with retained capacity" },
+    Rule { name: "result_waiting_on_coordinator", family: "attention", service: None, source: "canonical:unfinished_worker_results", eval: Eval::CoordinatorResult,
+        direction: Direction::Above, warn: MINUTE, critical: 10 * MINUTE, unit: "ms", window_ms: None, cooldown_ms: HOUR,
+        detail: "result waiting on coordinator for N min; oldest worker-result inbox item not DONE, including SEEN items" },
     Rule { name: "test_weakening", family: "proxy", service: None, source: "lane:quality tests-net-removal.v1", eval: Eval::TestWeakening,
         direction: Direction::Above, warn: 1, critical: i64::MAX, unit: "flagged_submissions", window_ms: Some(DAY), cooldown_ms: HOUR,
         detail: "any first submission flagged by tests-net-removal.v1 in the last 24 hours warns" },
@@ -310,6 +315,21 @@ fn evaluate_rule(ctx: &mut Ctx, rule: &'static Rule) -> Result<Vec<Outcome>> {
             }
             let state = if escalated { State::Critical } else { grade(rule, |t| age >= t, |_| false) };
             outcome(rule, state, vec![json!({"code":"launch_progress","age_ms":age})], lane_metric(rule.source), unbounded(now), json!({"attempts":evidence}))
+        }
+        Eval::CoordinatorResult => {
+            use std::{io::Read,os::unix::fs::OpenOptionsExt};
+            let items=crate::runtime::worker_result_inbox(ctx.project)?.into_iter().collect::<Vec<_>>();
+            let oldest=items.iter().map(|i|i.content.created.parse::<jiff::Timestamp>().map(|t|t.as_millisecond())).collect::<std::result::Result<Vec<_>,_>>()?.into_iter().min();
+            let age=oldest.map_or(0,|at|now.saturating_sub(at).max(0));
+            let history_path=ctx.project.join(".state/canonical-wake.json");
+            let wake=match std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_NONBLOCK).open(history_path) {
+                Ok(file)=>{anyhow::ensure!(file.metadata()?.is_file(),"wake history must be regular");let mut bytes=Vec::new();file.take(4*1024*1024+1).read_to_end(&mut bytes)?;anyhow::ensure!(bytes.len()<=4*1024*1024,"wake history exceeds bounds");serde_json::from_slice::<Value>(&bytes)?},
+                Err(error) if error.kind()==std::io::ErrorKind::NotFound=>json!({"attempts":[],"claim":null}),
+                Err(error)=>return Err(error.into()),
+            };
+            let state=if age>=rule.critical {State::Critical} else if age>=rule.warn {State::Warn} else {State::Ok};
+            outcome(rule,state,vec![json!({"code":if items.is_empty(){"none_waiting"}else{"result_waiting_on_coordinator"},"detail":format!("result waiting on coordinator for {} min",age/60_000)})],lane_metric(rule.source),unbounded(now),
+                json!({"waiting_items":items.len(),"oldest_unix_ms":oldest,"age_ms":age,"waiting_minutes":age/60_000,"wake":wake}))
         }
         Eval::TestWeakening => {
             let from = now - rule.window_ms.unwrap_or(DAY);

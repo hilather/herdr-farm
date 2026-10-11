@@ -81,6 +81,20 @@ impl SqliteStore {
         read_unseen(&self.connection)
     }
 
+    /// Waiting clients retain worker-result evidence until an explicit DONE.
+    pub fn wake_inbox(&self) -> Result<Vec<InboxItem>> {
+        check_schema(&self.connection)?;
+        let mut items: std::collections::BTreeMap<_,_>=read_unseen(&self.connection)?.into_iter().map(|i|(i.content.id.clone(),i)).collect();
+        for item in self.worker_result_inbox()? {items.insert(item.content.id.clone(),item);}
+        Ok(items.into_values().collect())
+    }
+
+    /// Prefix-indexed unfinished result evidence, independent of SEEN.
+    pub fn worker_result_inbox(&self) -> Result<Vec<InboxItem>> {
+        check_schema(&self.connection)?;
+        read_matching(&self.connection,"WHERE done=0 AND id GLOB 'worker-result-*'",None)
+    }
+
     /// Safe internal adapter: inspect, insert/deduplicate, and receipt commit in
     /// one SQLite transaction. It never retries an external/terminal effect.
     pub fn drain_inbox(&mut self,expected_head:u64,now:i64)->Result<usize> {
@@ -178,6 +192,18 @@ impl SqliteStore {
         tx.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES('inbox.delivered',?1,1,1,?2)",params![content.id,serde_json::to_string(&content).map_err(|e|StoreError::Invalid(e.to_string()))?])?;
         tx.commit()?;
         Ok(ReminderOutcome::Delivered)
+    }
+    /// Bounded SEEN retry for the immutable notice IDs actually rendered by context.
+    pub fn mark_context_seen(&mut self,mut expected_head:u64,ids:&[String],deadline:std::time::Instant)->Result<usize> {
+        for attempt in 0..8 {
+            if std::time::Instant::now()>=deadline {return Err(StoreError::Deadline);}
+            match self.update_inbox(expected_head,ids,false) {
+                Ok(count)=>return Ok(count),
+                Err(StoreError::Conflict) if attempt<7=>expected_head=self.current_head()?,
+                Err(error)=>return Err(error),
+            }
+        }
+        unreachable!()
     }
     /// Update only items actually shown to the caller at this event head.
     pub fn update_inbox(&mut self,expected_head:u64,ids:&[String],done:bool)->Result<usize> {

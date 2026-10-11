@@ -226,6 +226,47 @@ For other agents, allow reading and steering plus only the guarded start/integra
 
 `nudge = false` is the default, because on Herdr 0.9.1 a prompt that arrives while you are typing in the coordinator **is merged with, and submits, your half-typed text**. With it off, the ticker shows one Herdr notification per set of new inbox items ("3 new inbox items") and the coordinator picks them up at its next turn. Set `nudge = true` in `PROJECT.md` to have the ticker prompt the coordinator when it is idle; the message always begins `[herdr-projects ticker: automated, not the user, approves nothing]` and never carries outside text.
 
+Canonical agent coordinators now receive automatic worker-result notifications.
+Keep the policy explicit in `PROJECT.md`:
+
+```toml
+nudge = false # Herdr toast; true prompts the idle/done coordinator
+```
+
+The default for new projects remains `false`; this change does not edit existing
+projects. With `true`, the canonical controller queues a supervised wake when
+unfinished worker-result notices exist, checks owned routing and fresh native
+readiness, and never prompts a working coordinator. Native agent statuses
+`idle` and `done` are eligible; a matching `done` readiness
+rule is treated as idle while visible readiness and manifest checks still apply.
+The foreground and background wake paths use project effect ownership with a
+shared root barrier. Supervised Herdr calls inherit those locks, retaining
+ownership until their descendants exit. Other projects and root reads can
+continue while the wake runs. On a healthy, uncontended
+ticker the normal 15-second pass plus the bounded 45-second wake job targets a
+wake within 60 seconds after idle is observable. Busy coordinators defer until
+idle, persisting a retry one normal tick later without recording a send attempt;
+contention, unavailable native readiness and failed preflight probes defer
+with backoff and can exceed that target.
+
+Canonical wakes use **DONE**, independent of SEEN: scripted `context` calls
+cannot consume either the ticker wake or `inbox <slug> wait`. Ordinary wait
+notices still require unseen and unfinished state. Handle returned results and
+mark them DONE before rearming a background wait. Confirmed result batches are
+not sent again on a context read, removal of part of a batch, or ticker restart;
+new result IDs allow another wake. Replay the same retained submission with
+`result <slug> submit --input-file <submission.json>`; recapturing can create a
+new result ID. Switching toast to prompt policy rearms an
+unfinished confirmed batch. Native toast rejection retries with backoff; a lost
+or contradictory reply fences overlapping items against automatic replay. Inspect
+the coordinator, handle those items, then mark the claimed items DONE to release
+the fence. The retained `.state/canonical-wake.json` contains the existing typed
+notification claim/retry and latest 1024 attempt outcomes; keep it in project
+backups. `telemetry <slug> health --json` exposes them along with the age of the
+oldest unfinished result. The canonical schema is unchanged.
+
+The supervised legacy notification behavior follows.
+
 On Linux, inbox notifications and nudges use a supervised worker. It freezes the
 actual sorted unseen item IDs, delivery mode, payload, configuration, project and
 socket identities before submitting. Inbox and seen-state reads are bounded and

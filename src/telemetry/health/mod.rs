@@ -92,7 +92,10 @@ fn alert_line(a: &Value) -> String {
 pub fn text(v: &Value) -> String {
     let mut out = format!("{} · health · {} · {}\n", word(&v["project"]), word(&v["rules_version"]), word(&v["mode"]));
     for s in v["states"].as_array().into_iter().flatten() {
-        out += &format!("  {} [{}]: {} {}\n", word(&s["rule"]), scope(&s["labels"]), word(&s["state"]), codes(&s["reasons"]));
+        let waiting=if s["rule"]=="result_waiting_on_coordinator" && s["evidence"]["waiting_items"].as_u64().is_some_and(|n|n>0) {
+            format!("; result waiting on coordinator for {} min",word(&s["evidence"]["waiting_minutes"]))
+        } else {String::new()};
+        out += &format!("  {} [{}]: {} {}{waiting}\n", word(&s["rule"]), scope(&s["labels"]), word(&s["state"]), codes(&s["reasons"]));
     }
     match v["alerts"]["open"].as_array() {
         Some(open) => { out += &format!("alerts open {}\n", open.len()); for a in open { out += &alert_line(a); } }

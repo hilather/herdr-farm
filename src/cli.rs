@@ -1967,6 +1967,8 @@ pub fn run(#[cfg(feature="state-store")] capture: &mut crate::cli_invocation::Ca
         ),
         Command::Context { slug, peek, profile, ack, session } => {
             #[cfg(feature="state-store")]
+            let seen_deadline=std::time::Instant::now()+std::time::Duration::from_secs(30);
+            #[cfg(feature="state-store")]
             {
                 project::validate_slug(&slug)?;
                 if project::ensure_legacy(&ctx.root.join(&slug)).is_err() {
@@ -1985,7 +1987,7 @@ pub fn run(#[cfg(feature="state-store")] capture: &mut crate::cli_invocation::Ca
                         let (text, head, unseen)=herdr_farm::runtime::context_snapshot_configured(&dir,Some(&config))?;
                         print!("{text}");
                         println!("{}", crate::canonical_coordinator::surface(&ctx, &slug)?);
-                        if !peek && !unseen.is_empty() { herdr_farm::runtime::update_inbox(&dir,head,&unseen,false)?; }
+                        if !peek && !unseen.is_empty() { herdr_farm::runtime::mark_context_seen(&dir,head,&unseen,seen_deadline)?; }
                         return Ok(());
                     }
                     let resolved=match profile.as_deref() {
@@ -2009,7 +2011,7 @@ pub fn run(#[cfg(feature="state-store")] capture: &mut crate::cli_invocation::Ca
                     println!("{}",crate::canonical_coordinator::surface(&ctx,&slug)?);
                     // TM4.8 (doc 15 §5): the bounded, advisory fleet section after the checkpointed context.
                     if let Some(section)=herdr_farm::telemetry::workspace::context_section(&dir,&slug,&ctx.config_dir) {print!("\n{section}");}
-                    if !peek&&!result.unseen.is_empty(){herdr_farm::runtime::update_inbox(&dir,result.head,&result.unseen,false)?;}
+                    if !peek&&!result.unseen.is_empty(){herdr_farm::runtime::mark_context_seen(&dir,result.head,&result.unseen,seen_deadline)?;}
                     return Ok(());
                 }
             }

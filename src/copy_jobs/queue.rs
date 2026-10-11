@@ -120,6 +120,10 @@ impl Queue {
         self.offer_request(crate::coordinator_jobs::request_notification(ctx,project,c)?)
     }
     #[cfg(feature="state-store")]
+    pub fn offer_canonical_wake(&mut self,ctx:&Ctx,path:&Path)->Result<()> {
+        self.offer_request(crate::canonical_coordinator::wake::request(ctx,path)?)
+    }
+    #[cfg(feature="state-store")]
     pub fn offer_canonical_notification(&mut self,ctx:&Ctx,path:&Path,operation:&herdr_farm::domain::Operation,revision:u64,socket:&str)->Result<()> {
         self.offer_request(crate::canonical_notification_jobs::request(ctx,path,operation,revision,socket)?)
     }

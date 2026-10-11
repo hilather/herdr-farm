@@ -131,7 +131,16 @@ task or report to the owner, mark handled items done, and start the wait again.
 Restart the wait on timeout too. The default timeout is 1800 seconds (maximum
 7200); `--timeout SECONDS` overrides it. It polls every two seconds without
 holding a lock or marking items seen, and returns JSON with `items` and `ids`,
-or `{"items":0,"timed_out":true}`. Only unseen, unfinished items wake it.
+or `{"items":0,"timed_out":true}`. Ordinary items wake it while unseen and unfinished. Worker-result items wake it until explicitly DONE, even if `context` has marked them SEEN. Finish handling each returned result and mark it done before rearming the wait.
+
+For canonical agent coordinators the ticker also handles worker-result wakes:
+`nudge = true` in `PROJECT.md` sends the automated context prompt only when the
+owned, primed coordinator is idle or done; `nudge = false` shows a Herdr toast.
+The existing default stays false. Background waits remain useful in either mode.
+Delivery is deduplicated across ticker restarts and context reads. An uncertain
+native reply is fenced against automatic replay; inspect the coordinator and
+handle the claimed items before marking them DONE. `telemetry <slug> health`
+reports unfinished-result age and JSON includes wake attempts and outcomes.
 
 Canonical submission, verification, integration, and termination without a
 submission produce stable, deduplicated inbox notices in the same transaction

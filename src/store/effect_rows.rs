@@ -12,6 +12,13 @@ pub struct FinalizationRows {
     pub bindings: Vec<RuntimeBinding>,
 }
 
+/// Minimal coordinator wake authority; no task or retained operation history.
+pub struct CoordinatorWakeRows {
+    pub control: ProjectControl,
+    pub binding: Option<RuntimeBinding>,
+    pub ownership: Option<RuntimeOwnership>,
+}
+
 /// Rows `Notification::validate_rows` reads: every unseen inbox item and every
 /// claimed or ambiguous delivery with its operation, which is exactly what the
 /// snapshot check filters to.
@@ -105,6 +112,16 @@ impl SqliteStore {
         let rows = rows_for(&tx, head, task.as_ref(), binding)?;
         tx.commit()?;
         Ok(rows)
+    }
+    /// One fenced authority read for automatic coordinator result wakes.
+    pub fn coordinator_wake_rows(&mut self) -> Result<CoordinatorWakeRows> {
+        let tx=self.connection.transaction()?;
+        fenced(&tx,None)?;
+        let control=control::read(&tx)?;
+        let binding=runtime::read_binding(&tx,"coordinator",None)?;
+        let ownership=super::ownership::read_binding(&tx,"coordinator",None)?;
+        tx.commit()?;
+        Ok(CoordinatorWakeRows{control,binding,ownership})
     }
     /// Control, the task, the coordinator route, unseen inbox items and unresolved deliveries.
     pub fn notification_rows(&mut self, task: Option<&TaskId>, at: Option<u64>) -> Result<NotificationRows> {
