@@ -4028,6 +4028,13 @@ fn verified_worker_results_wake_idle_coordinator_once_and_defer_while_busy() {
         lab.ok_live(&||["context","demo"].map(String::from).to_vec());
         assert!(lab.ok_live(&||["inbox","demo","wait","--timeout","1"].map(String::from).to_vec())["items"].as_u64().unwrap()>0);
         assert_eq!(state()["prompts"].as_array().unwrap().len(),initial,"a working coordinator is never interrupted");
+        if busy {
+            // Verification can precede the worker's legitimate shutdown writes.
+            // Settle those before measuring busy deferrals and repeated context.
+            lab.wait_for(&mut ticker,"verified worker termination settled",&attempt,120,&|| {
+                lab.attempt(&attempt).termination_observed
+            });
+        }
         lab.stop(ticker);
         if busy {
             lab.run_quiet(6);

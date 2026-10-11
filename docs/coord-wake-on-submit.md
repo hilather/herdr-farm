@@ -43,3 +43,8 @@ retained wake JSON, never a canonical event. Identical retained payloads are
 not rewritten. Controller observation freshness can refresh the observation
 row without a `runtime.observed` event; only changed observation state advances
 the canonical head.
+
+The busy-deferral end-to-end check waits for verified worker termination before
+measuring the canonical head across repeated context reads. Verification can
+precede legitimate worker shutdown events; those events are independent of wake
+deferral and must settle before this measurement.
