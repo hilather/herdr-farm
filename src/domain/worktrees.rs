@@ -37,12 +37,19 @@ pub struct PreparedWorktreeReceipts {
     pub(crate) receipts: Vec<WorktreeReceipt>,
 }
 
+/// Native termination is proven, but retained files exceeded capture bounds.
+#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
+#[serde(rename_all="snake_case")]
+pub enum CaptureIncomplete {ByteLimit,EntryLimit,DepthLimit,StructureLimit}
+
 /// Durable repository-state manifest retained before terminal disposition.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorktreeSnapshotReference {
     pub plan: WorktreePlan,
     pub digest: String,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub capture_incomplete:Option<CaptureIncomplete>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
