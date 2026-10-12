@@ -465,6 +465,25 @@ impl ControlledStore {
         self.control.check()?;
         Ok(value)
     }
+    /// Select only this attempt's retained capture provenance, never project history.
+    pub(crate) fn result_capture_inputs(&mut self,attempt:&AttemptId)->Result<(AttemptInputRecord,Vec<Event>)> {
+        self.control.check()?;
+        let tx=self.store.connection.transaction()?;
+        let exists:bool=read_budget::one(&tx,"SELECT EXISTS(SELECT 1 FROM attempts WHERE id=?1)",[attempt.as_str()],Some(&self.work_budget),&[],|row|row.get(0))?;
+        if !exists {return Err(StoreError::Invalid("attempt missing".into()));}
+        let retained:bool=read_budget::one(&tx,"SELECT EXISTS(SELECT 1 FROM attempt_inputs WHERE attempt_id=?1)",[attempt.as_str()],Some(&self.work_budget),&[],|row|row.get(0))?;
+        if !retained {return Err(StoreError::Invalid("capture requires the attempt's retained launch inputs".into()));}
+        let record=super::reservations::read_attempt_input(&tx,attempt.as_str(),Some(&self.work_budget))?;
+        let mut query=tx.prepare("SELECT sequence,kind,entity,revision,payload_version,payload FROM events WHERE entity=?1 AND kind IN ('runtime.worktrees_creation','runtime.worktrees_ready','runtime.launch_creation','runtime.launch_target','runtime.launch_workspace','runtime.launch_released','runtime.launch_started') ORDER BY sequence")?;
+        let mut rows=query.query([record.operation.as_str()])?;let mut events=Vec::new();
+        while let Some(row)=rows.next()? {
+            self.work_budget.row(row,&[(5,1)])?;
+            let payload:String=row.get(5)?;
+            events.push(Event{sequence:row.get(0)?,kind:row.get(1)?,entity:row.get(2)?,revision:row.get(3)?,payload_version:row.get(4)?,payload:serde_json::from_str(&payload).map_err(|e|StoreError::Corrupt(e.to_string()))?});
+        }
+        self.control.check()?;Ok((record,events))
+    }
+
     pub fn read_snapshot(&mut self,at:Option<u64>)->Result<Snapshot> {
         self.control.check()?;
         let budget=read_budget::ReadBudget::for_store(self.control.clone(), &self.store.connection);
