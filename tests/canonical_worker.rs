@@ -4063,6 +4063,16 @@ fn proven_launch_server_loss_retires_owned_runtime_and_next_brief_succeeds() {
 #[test]
 fn expired_started_brief_releases_ownership_once_and_superseding_task_relaunches() {
     let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+    // `launch run` checks login as well as the retained transport evidence
+    // used by `draft`/`reserve`. Configure both launches with the same private
+    // setup-token fixture before preparing and freezing the worker profile.
+    let token = lab.path("claude-setup-token");
+    fs::write(&token, "fixture-setup-token\n").unwrap();
+    fs::set_permissions(&token, fs::Permissions::from_mode(0o600)).unwrap();
+    let config = lab.path(".config/herdr-farm/config.toml");
+    let configured = fs::read_to_string(&config).unwrap();
+    fs::write(&config, format!("{configured}\n[worker_isolation.login]\nclaude_token_file={token:?}\n")).unwrap();
+    lab.resume();
     // Match a coordinator launch's lineage before the lower-level reservation.
     migration::open_active(&lab.project).unwrap()
         .prepare_task_lineage("work", "work", "plan", None).unwrap();
