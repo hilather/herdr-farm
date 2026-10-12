@@ -140,7 +140,7 @@ jobs:
             trap "rm -rf -- \"\$d\"" EXIT
             mkdir "$d/tmpfs" "$d/lower" "$d/upper" "$d/work" "$d/merged" "$d/ro"
             probe mount -t tmpfs -o nosuid,nodev,mode=1777 herdr-farm-private "$d/tmpfs"
-            probe mount -t overlay -o "lowerdir=$d/lower,upperdir=$d/upper,workdir=$d/work,userxattr,index=off,metacopy=off,redirect_dir=off" herdr-farm-git "$d/merged"
+            probe mount -t overlay -o "lowerdir=$d/lower,upperdir=$d/upper,workdir=$d/work,userxattr,index=off,metacopy=off,redirect_dir=nofollow" herdr-farm-git "$d/merged"
             probe mount --rbind -o ro=recursive "$d/ro" "$d/ro"
             probe unshare --user --map-root-user -- true
             umount "$d/ro" "$d/merged" "$d/tmpfs"

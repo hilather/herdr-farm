@@ -399,7 +399,7 @@ const SANDBOX: &str = concat!(
     r#"for a in "$@"; do case $a in --) break;; quarantine:*) q=${a#quarantine:};; overlay:*) c=${a#overlay:}; "#,
     r#"{ /usr/bin/mkdir -p -m 0700 -- "${q%/*}" && /usr/bin/mkdir -m 0700 -- "$q" "$q/upper" "$q/work"; } || fail "$q"; "#,
     r#"{ exec 3<"$c" 4<"$q"; } || fail "$c"; /usr/bin/mount -t overlay -o "#,
-    r#"lowerdir=/proc/self/fd/3,upperdir=/proc/self/fd/4/upper,workdir=/proc/self/fd/4/work,userxattr,index=off,metacopy=off,redirect_dir=off "#,
+    r#"lowerdir=/proc/self/fd/3,upperdir=/proc/self/fd/4/upper,workdir=/proc/self/fd/4/work,userxattr,index=off,metacopy=off,redirect_dir=nofollow "#,
     r#"herdr-farm-git "$c" || fail "$c"; exec 3<&- 4<&-;; esac; done; "#,
     r#"for a in "$@"; do case $a in --) break;; "#,
     r#"ro:*) p=${a#ro:}; if [ -e "$p" ]; then /usr/bin/mount --rbind -o ro=recursive "$p" "$p" || fail "$p"; fi;; "#,
