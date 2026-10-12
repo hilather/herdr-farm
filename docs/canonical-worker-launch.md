@@ -7,6 +7,39 @@ runtime work, not packaging or general release acceptance. See the current
 Later dated sections preserve the implementation history; earlier disabled-gate
 statements describe their original validation point.
 
+## CI launch diagnostics
+
+The native pane process PID identifies the host-side `unshare` supervisor,
+not the agent's PID inside the worker namespace. Initial resource observation
+opens that PID, then discovers the namespace init's host PID through the supervisor's
+`/proc/<pid>/task/<pid>/children`. Observation errors include the PID and whether
+opening the outer supervisor or namespace init failed. Naming/start observation
+reopens those retained PIDs after gate release; by then the filesystem sandbox
+and agent may already have exited. Reaching naming means the initial gated
+supervisor was previously observed, so post-release mounts, the nested user
+namespace and agent startup deserve particular attention. The exit log identifies
+the outer supervisor. ESRCH can mean a namespace/setup failure, an exited agent
+and supervisor, or a stale/invisible
+native process inventory; it alone does not identify a sandbox primitive.
+
+The canonical-worker, operator-launch and replay CLI labs retain sandbox/agent
+stderr in `agent.log` and append host supervisor PIDs and exit statuses to
+`agent-exits.jsonl` (negative statuses identify signals). Canonical/replay labs
+keep these beside the native socket; operator labs use their fixture home so
+evidence survives disposal of verification server socket directories.
+An independent waiter records exits even if no further native API requests
+arrive. Failed tests print these files before fixture cleanup, alongside retained
+ticker diagnostics. Multiple launches append evidence rather than overwriting it.
+
+Before the eight test partitions run, the workflow prints kernel, namespace
+limits, AppArmor settings and util-linux versions, then probes user/mount/PID
+namespaces, mount-proc, tmpfs, overlayfs, recursive read-only bind mounts and the
+nested user namespace. Each primitive reports its status and kernel messages are
+printed afterward. Probe failures leave the full test gate enabled. The existing
+runner-only AppArmor user-namespace setting remains in place; further setup
+changes require evidence identifying the failing primitive. Product isolation
+and canonical schema are unchanged.
+
 ## Implemented safeguards
 
 - Reservation checks the exact stored approval, its validity interval, permission

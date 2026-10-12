@@ -122,6 +122,32 @@ jobs:
           git config --global user.name ci
           git config --global user.email ci@invalid
           df -h / /dev/shm
+      - name: Worker sandbox diagnostics
+        run: |
+          # Diagnostic failures must leave the full test gate running.
+          set +e
+          uname -a
+          cat /proc/sys/kernel/unprivileged_userns_clone /proc/sys/user/max_user_namespaces 2>&1
+          sysctl -a 2>/dev/null | grep apparmor
+          unshare --version
+          mount --version
+          unshare --user --map-root-user --mount --pid --fork true
+          echo "user/mount/pid namespace status=$?"
+          # Match --mount-proc and the second user namespace used by workers.
+          unshare --user --map-root-user --pid --fork --mount-proc --kill-child=KILL -- sh -c '
+            probe() { "$@"; echo "primitive status=$?: $*"; }
+            d=$(mktemp -d "$TMPDIR/sandbox-probe-XXXXXX") || exit 1
+            trap "rm -rf -- \"\$d\"" EXIT
+            mkdir "$d/tmpfs" "$d/lower" "$d/upper" "$d/work" "$d/merged" "$d/ro"
+            probe mount -t tmpfs -o nosuid,nodev,mode=1777 herdr-farm-private "$d/tmpfs"
+            probe mount -t overlay -o "lowerdir=$d/lower,upperdir=$d/upper,workdir=$d/work,userxattr,index=off,metacopy=off,redirect_dir=off" herdr-farm-git "$d/merged"
+            probe mount --rbind -o ro=recursive "$d/ro" "$d/ro"
+            probe unshare --user --map-root-user -- true
+            umount "$d/ro" "$d/merged" "$d/tmpfs"
+          '
+          echo "product namespace/mount probe status=$?"
+          sudo dmesg | tail -80
+          exit 0
       - uses: actions/download-artifact@v4
         with:
           name: nextest-archive

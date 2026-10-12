@@ -21,8 +21,11 @@ const BIN: &str = env!("CARGO_BIN_EXE_herdr-farm");
 /// `swallow-prompts` is a count of prompts the agent ignores (it stays idle);
 /// `reset-workspace` (consumed) forgets the ended worker so a lab can launch another.
 const SERVER: &str = r#"
-import json,os,sys,socket,subprocess,time
+import json,os,sys,socket,subprocess,time,threading
 path=sys.argv[1];root=os.path.dirname(path);s={};gen=1
+def record_exit(child,root):
+ with open(os.path.join(root,'agent-exits.jsonl'),'a') as log:
+  log.write(json.dumps({'host_supervisor_pid':child.pid,'exit_status':child.wait()})+'\n');log.flush()
 server=socket.socket(socket.AF_UNIX);server.bind(path);server.listen()
 while True:
  c,_=server.accept();f=c.makefile('rw');r=json.loads(f.readline());m=r['method'];p=r.get('params') or {}
@@ -45,7 +48,8 @@ while True:
  elif m=='workspace.create_command' and 'pid' not in s:
   if os.path.exists(os.path.join(root,'slow-create')):time.sleep(2)
   fifo=os.path.join(root,'input');os.mkfifo(fifo);fd=os.open(fifo,os.O_RDWR)
-  child=subprocess.Popen(p['command'],cwd=p['cwd'],stdin=fd,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True,env={'PATH':'/usr/bin:/bin'})
+  child=subprocess.Popen(p['command'],cwd=p['cwd'],stdin=fd,stdout=subprocess.DEVNULL,stderr=open(os.path.join(root,'agent.log'),'a'),start_new_session=True,env={'PATH':'/usr/bin:/bin'})
+  threading.Thread(target=record_exit,args=(child,root),daemon=True).start()
   s.update(pid=child.pid,argv=p['command'],cwd=p['cwd'],label=p['label'],fifo=fifo)
   if not os.path.exists(os.path.join(root,'lose-create')):res={'type':'workspace_created','workspace':{'workspace_id':f'w{gen}'},'root_pane':{'pane_id':f'w{gen}:p1'}}
  elif m=='workspace.list':res={'type':'workspace_list','workspaces':[{'workspace_id':f'w{gen}','label':s['label'],'pane_count':1,'tab_count':1}] if live else []}
@@ -78,6 +82,13 @@ struct Lab { home: tempfile::TempDir, project: PathBuf, key: PathBuf, repo: Path
 
 impl Drop for Lab {
     fn drop(&mut self) {
+        if std::thread::panicking() {
+            for name in ["lab/agent-exits.jsonl", "lab/agent.log", "ticker.stderr", "root/.ticker.log"] {
+                if let Ok(evidence) = fs::read_to_string(self.home.path().join(name)) {
+                    eprintln!("{name}:\n{evidence}");
+                }
+            }
+        }
         let _ = Command::new("/usr/bin/pkill").args(["-KILL", "-f"]).arg(self.home.path().join("agent-home")).status();
         if let Some(server) = &mut self.server { let _ = server.kill(); let _ = server.wait(); }
     }

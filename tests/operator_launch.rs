@@ -29,9 +29,13 @@ const BIN: &str = env!("CARGO_BIN_EXE_herdr-farm");
 /// suites, plus `server`, which serves one native workspace backed by a real
 /// process (stdin is a FIFO the gate reads its release token from).
 const HERDR: &str = r#"#!/usr/bin/python3
-import json,os,socket,subprocess,sys
+import json,os,socket,subprocess,sys,threading
 args=sys.argv[1:]
+diagnostics=os.path.dirname(os.path.dirname(os.path.realpath(sys.argv[0])))
 if args==['--version']:print('herdr 0.9.1');sys.exit(0)
+def record_exit(child,root):
+ with open(os.path.join(root,'agent-exits.jsonl'),'a') as log:
+  log.write(json.dumps({'host_supervisor_pid':child.pid,'exit_status':child.wait()})+'\n');log.flush()
 def serve(path):
  root=os.path.dirname(path);s={};next_tab=0;tabs=[{'tab_id':'owner-tab','label':'Owner'}]
  server=socket.socket(socket.AF_UNIX);server.bind(path);server.listen()
@@ -49,7 +53,8 @@ def serve(path):
   if m=='ping':res={'type':'pong','version':'0.9.1','capabilities':{'workspace_create_command':True}}
   elif m=='workspace.create_command' and not live:
    fifo=os.path.join(root,'input');os.mkfifo(fifo);fd=os.open(fifo,os.O_RDWR)
-   child=subprocess.Popen(p['command'],cwd=p['cwd'],stdin=fd,stdout=subprocess.DEVNULL,stderr=open(os.path.join(root,'agent.log'),'w'),start_new_session=True,env={'PATH':'/usr/bin:/bin'})
+   child=subprocess.Popen(p['command'],cwd=p['cwd'],stdin=fd,stdout=subprocess.DEVNULL,stderr=open(os.path.join(diagnostics,'agent.log'),'a'),start_new_session=True,env={'PATH':'/usr/bin:/bin'})
+   threading.Thread(target=record_exit,args=(child,diagnostics),daemon=True).start()
    s.update(pid=child.pid,argv=p['command'],cwd=p['cwd'],label=p['label'],fifo=fifo,kind='codex' if any(a.endswith('/codex') for a in p['command']) else 'claude')
    res={'type':'workspace_created','workspace':{'workspace_id':'w1','pane_count':1},'root_pane':{'pane_id':'w1:p1'}}
   elif m=='workspace.list':res={'type':'workspace_list','workspaces':[{'workspace_id':'w1','label':s['label'],'pane_count':1,'tab_count':1}] if live else []}
@@ -181,6 +186,15 @@ struct Lab {
 impl Drop for Lab {
     /// Safety net: a failed test must not leave a stand-in Herdr server behind.
     fn drop(&mut self) {
+        if std::thread::panicking() {
+            // Retain evidence in the lab home, including disposable probe servers
+            // whose socket directories the CLI removes before returning an error.
+            for name in ["agent-exits.jsonl", "agent.log", "ticker.stderr", "root/.ticker.log"] {
+                if let Ok(evidence) = fs::read_to_string(self.home.join(name)) {
+                    eprintln!("{name}:\n{evidence}");
+                }
+            }
+        }
         let _ = Command::new("/usr/bin/pkill").args(["-KILL", "-f"]).arg(format!("{} server", self.home.join("bin/herdr").display())).status();
     }
 }
