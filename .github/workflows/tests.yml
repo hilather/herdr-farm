@@ -21,10 +21,12 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Prepare test scratch outside owner home
+      - name: Prepare test scratch outside checkout and private mounts
         run: |
-          # runner.temp is under /home/runner, protected read-only by workers.
-          scratch=$(mktemp -d /tmp/hf-ci-XXXXXX)
+          # Keep the owner-home anchor, but avoid work/_temp and the checkout.
+          # /tmp, /var/tmp and /dev/shm are replaced by private worker mounts.
+          mkdir -p "$HOME/.cache"
+          scratch=$(mktemp -d "$HOME/.cache/hf-ci-XXXXXX")
           echo "TMPDIR=$scratch" >> "$GITHUB_ENV"
           echo "CARGO_TARGET_TMPDIR=$scratch" >> "$GITHUB_ENV"
       # herdr-farm requires SQLite 3.53.4+ (Ubuntu 24.04 ships 3.45.1).
@@ -75,10 +77,12 @@ jobs:
         partition: [1, 2, 3, 4, 5, 6, 7, 8]
     steps:
       - uses: actions/checkout@v4
-      - name: Prepare test scratch outside owner home
+      - name: Prepare test scratch outside checkout and private mounts
         run: |
-          # runner.temp is under /home/runner, protected read-only by workers.
-          scratch=$(mktemp -d /tmp/hf-ci-XXXXXX)
+          # Keep the owner-home anchor, but avoid work/_temp and the checkout.
+          # /tmp, /var/tmp and /dev/shm are replaced by private worker mounts.
+          mkdir -p "$HOME/.cache"
+          scratch=$(mktemp -d "$HOME/.cache/hf-ci-XXXXXX")
           echo "TMPDIR=$scratch" >> "$GITHUB_ENV"
           echo "CARGO_TARGET_TMPDIR=$scratch" >> "$GITHUB_ENV"
       # herdr-farm requires SQLite 3.53.4+ (Ubuntu 24.04 ships 3.45.1).
@@ -138,6 +142,17 @@ jobs:
             probe() { "$@"; echo "primitive status=$?: $*"; }
             d=$(mktemp -d "$TMPDIR/sandbox-probe-XXXXXX") || exit 1
             trap "rm -rf -- \"\$d\"" EXIT
+            # Match the owner-home anchor and execution-home writable exposure.
+            # The rest of TMPDIR stays read-only; only this lab home is writable.
+            mkdir "$d/exec-home"
+            printf "%s\n" "printf scratch-write > \"\$1/exec-home/probe\" && test -s \"\$1/exec-home/probe\" && ! touch \"\$1/owner-write-must-fail\"" > "$d/scratch-probe.sh"
+            # A separate mount namespace drops these mounts before other probes.
+            probe unshare --mount -- sh -c "
+              mount --rbind -o ro=recursive \"\$1\" \"\$1\" &&
+              mount --rbind -o rw \"\$2/exec-home\" \"\$2/exec-home\" &&
+              mount -t tmpfs -o nosuid,nodev,mode=1777 herdr-farm-private /tmp &&
+              unshare --user --map-root-user -- sh \"\$2/scratch-probe.sh\" \"\$2\"
+            " sh "$HOME" "$d"
             mkdir "$d/tmpfs" "$d/lower" "$d/upper" "$d/work" "$d/merged" "$d/ro"
             probe mount -t tmpfs -o nosuid,nodev,mode=1777 herdr-farm-private "$d/tmpfs"
             probe mount -t overlay -o "lowerdir=$d/lower,upperdir=$d/upper,workdir=$d/work,userxattr,index=off,metacopy=off,redirect_dir=nofollow" herdr-farm-git "$d/merged"

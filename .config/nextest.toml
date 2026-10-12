@@ -36,7 +36,7 @@ test-threads = 4
 # Owner rule: a test that fails once and passes on retry counts as green and
 # is reported FLAKY; a test failing both tries blocks.
 retries = 1
-# All suites run on hosted Linux runners; scratch lives outside the owner home.
+# All suites run on hosted Linux runners; scratch lives in the owner cache, outside the checkout/private mounts.
 fail-fast = false
 slow-timeout = { period = "60s", terminate-after = 10 }
 

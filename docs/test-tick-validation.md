@@ -31,15 +31,27 @@ It uses four test threads per runner, eight count partitions, and one retry:
 a pass on retry is reported as flaky; two failures block the gate.
 The default profile remains available for full local validation.
 
-Both archive build and test jobs create a private `/tmp/hf-ci-XXXXXX`
-directory and export `TMPDIR` and `CARGO_TARGET_TMPDIR` through `GITHUB_ENV`.
-Do not use `runner.temp`: `/home/runner/work/_temp` and the checkout are
-inside the runner's owner home. Workers protect owner homes with recursive
-read-only mounts and hide owner secret directories. An execution home beneath
-that protected home can fail while creating the shared-login mount point
-(`worker isolation refused: .../exec-home/.codex/auth.json`).
-Moving temporary fixtures outside that home preserves these protections;
-it does not require relaxing the owner-home protections or changing the schema.
+Both archive build and test jobs create `$HOME/.cache/hf-ci-XXXXXX` and
+export `TMPDIR` and `CARGO_TARGET_TMPDIR` through `GITHUB_ENV`. This matches
+the steward's cache layout, outside the checkout and `runner.temp`, and outside
+`/tmp`, `/var/tmp`, and `/dev/shm`, which workers replace with private tmpfs.
+The real owner home supplies the recursive read-only anchor; the mount plan
+then restores the execution home and required Git paths as writable exposures.
+Without that enclosing anchor, plan coalescing can omit writable descendants
+before a repository is made read-only. A fake owner home under `/tmp` also
+loses the real-home boundary expected by the owner-toolchain acceptance probe.
+
+The original run 37153918655 reported a login destination under
+`/home/runner/work/_temp/.../exec-home/.codex/auth.json`. Its full logs could
+not be retrieved in the offline sandbox. Being under HOME alone does not
+explain the refusal: the execution home is explicitly restored writable, and
+the earlier manual reproduction below passed. We therefore do not claim that
+the checkout-parent relationship caused it. The cache layout avoids that
+unresolved runner layout while retaining the anchor needed by these fixtures.
+The diagnostics now probe a write in a writable execution home below TMPDIR,
+after recursively protecting HOME and replacing `/tmp`, inside nested user
+namespaces. Diagnostic failure still leaves the full test gate running.
+No sandbox protections or schema change is required.
 Sandbox fixtures that previously
 used compile-time `CARGO_TARGET_TMPDIR` now use runtime `TMPDIR`, so extracted
 archives do not retain their builder's scratch location.
@@ -89,6 +101,44 @@ Hosted runners still require the workflow's AppArmor user-namespace setup,
 OpenSSH, and pinned SQLite. Namespace/mount or native launch failures may need
 another iteration with runner logs; the steward pushes and runs Actions.
 The local hard sandbox cannot validate successful socket-backed workflows.
+
+### CI-PORTABILITY-2d local validation (2026-10-12)
+
+All cargo commands used `TMPDIR=$PWD/target/tmp`, `nice -n 19 ionice -c 3`,
+and `--locked --offline -j 3`. No new tests or Rust changes were added.
+
+- `cargo test --features state-store --lib`: 529 passed, 84 failed, 13 existing
+  ignored. All failures are Unix-socket operations denied by the hard sandbox.
+- Nextest for `canonical_worker`, `operator_launch`, `worker_login_share`,
+  `replay_suite`, `thread_sandbox`, and `factory_harness`: 141 run, 71 passed,
+  70 failed, no skips. Both thread-sandbox tests and login-sharing passed.
+  Confirmed restrictions account for 60 Unix-socket failures and three local
+  TCP-bind failures. Seven failures remain separately classified below.
+- Clippy with `--features state-store --all-targets` passed; warnings are on
+  unchanged Rust lines. YAML parsing, workflow shell syntax and diff checks passed.
+- The updated diagnostic ran successfully using the required local checkout
+  TMPDIR: execution-home write succeeded, adjacent owner-path write failed
+  read-only, and tmpfs, overlay, recursive read-only bind and nested namespace
+  probes returned zero. The HOME probe uses a separate mount namespace so its
+  recursive mounts disappear before subsequent diagnostics and cleanup.
+
+Unclassified E2E failures remain enabled: owner-toolchain acceptance returned
+`isolation_setup_failed`; five operator tests reported `native probe server
+exited` (`code_launch_passes_only_selected_toolchain_environment_to_the_worker`,
+`launch_run_with_a_dedicated_server_after_verify_interaction_reserves_both_kinds`,
+`stale_profile_evidence_is_refreshed_by_launch_run`,
+`verify_interaction_produces_launchable_evidence_for_codex_and_claude_from_the_cli`,
+and `verify_interaction_tolerates_agents_writing_into_their_execution_home`).
+`replay_work_has_the_budget_and_authority_of_ordinary_work` failed with
+`RequiredContentTooLarge` (3319 bytes against 3280), before launch. None is
+claimed as socket-only without direct evidence. The known checkout-TMPDIR
+copy-job tests live in the binary suite and were not exercised by these runs.
+
+CI should eliminate the 15 remaining `/tmp` fixture failures reported on
+f74a8d4, and the scratch-write diagnostic should return status zero. Hosted
+Actions confirmation and rereading the complete original run remain for the
+steward: GitHub access failed in this offline sandbox. No test exclusions,
+sandbox weakening, new crates or schema changes were made.
 
 ## Before and after
 
