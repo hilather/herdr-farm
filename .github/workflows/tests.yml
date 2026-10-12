@@ -156,17 +156,23 @@ jobs:
             " sh "$HOME" "$d"
             # Root cover + descriptor bind-back: the parent remount alone
             # does not protect the exposed file on util-linux 2.39.
-            mkdir "$d/projects"
+            mkdir -p "$d/projects/demo/repo" "$d/projects/demo/.git-quarantine/upper" "$d/projects/demo/.git-quarantine/work"
+            printf lower > "$d/projects/demo/repo/base"
             printf owner > "$d/projects/PROJECT.md"
-            printf "%s\n" "test \"\$(cat \"\$1/projects/PROJECT.md\")\" = owner && ! printf escaped > \"\$1/projects/PROJECT.md\"" > "$d/root-probe.sh"
+            printf "%s\n" "test \"\$(cat \"\$1/projects/PROJECT.md\")\" = owner && ! printf escaped > \"\$1/projects/PROJECT.md\" && test \"\$(cat \"\$1/projects/demo/repo/base\")\" = lower && printf overlay-write > \"\$1/projects/demo/repo/new\" && ! touch \"\$1/projects/demo/.git-quarantine/escape\" && ! touch \"\$1/projects/outside\"" > "$d/root-probe.sh"
             probe unshare --mount -- sh -c "
-              exec 3<\"\$1/projects/PROJECT.md\" &&
+              mount -t overlay -o \"lowerdir=\$1/projects/demo/repo,upperdir=\$1/projects/demo/.git-quarantine/upper,workdir=\$1/projects/demo/.git-quarantine/work,userxattr,index=off,metacopy=off,redirect_dir=nofollow\" herdr-farm-git \"\$1/projects/demo/repo\" &&
+              exec 3<\"\$1/projects/PROJECT.md\" 4<\"\$1/projects/demo\" &&
               mount -t tmpfs -o nosuid,nodev,noexec,mode=0755,size=1m herdr-farm-root \"\$1/projects\" &&
               touch \"\$1/projects/PROJECT.md\" &&
+              mkdir \"\$1/projects/demo\" &&
+              mount -c --rbind /proc/self/fd/4 \"\$1/projects/demo\" &&
+              mount -o remount,bind,ro,nosuid,nodev \"\$1/projects/demo\" &&
               mount -c --bind /proc/self/fd/3 \"\$1/projects/PROJECT.md\" &&
               mount -o remount,bind,ro,nosuid,nodev,noexec \"\$1/projects/PROJECT.md\" &&
               mount -o remount,bind,ro,nosuid,nodev,noexec \"\$1/projects\" &&
               findmnt --kernel --mountpoint \"\$1/projects/PROJECT.md\" -o TARGET,VFS-OPTIONS &&
+              findmnt --kernel --mountpoint \"\$1/projects/demo/repo\" -o TARGET,VFS-OPTIONS &&
               unshare --user --map-root-user -- sh \"\$1/root-probe.sh\" \"\$1\"
             " sh "$d"
             mkdir "$d/tmpfs" "$d/lower" "$d/upper" "$d/work" "$d/merged" "$d/ro"

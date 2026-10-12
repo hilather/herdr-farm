@@ -328,6 +328,7 @@ const OWNER_SECRETS: &[&str] = &[
 /// The sandbox's setup program, run by `/bin/sh` inside the supervisor's user
 /// and mount namespaces after gate release. As namespace root it:
 ///
+/// Before covering or protecting any parent, creates the Git overlays (step 3).
 /// 1. covers the projects root with an empty tmpfs and binds back only the
 ///    exposed paths (opened before the cover, so the bind reaches the real
 ///    inodes and shared locks stay shared);
@@ -380,15 +381,24 @@ const SANDBOX: &str = concat!(
     r#"set -u; fail() { printf 'herdr-farm: worker isolation refused: %s\n' "$1" >&2; exit 125; }; "#,
     // mount(8) 2.39 can accept ro=recursive without enforcing it. Enumerate
     // the kernel mount tree and use the classic per-mount bind remount instead.
+    // Quarantine overlays are declared writable before the plan runs. Exclude
+    // their entire mount subtrees, including later binds, from ancestor sweeps.
     // mountinfo escapes whitespace/backslashes; decode only after reading a line.
     // Search backwards: stacked mounts retain covered entries with the same
     // target. Check the last (visible) mount without opening owner secret data.
     r#"check_ro() { opts=$(/usr/bin/findmnt --kernel --direction backward --first-only --noheadings --output VFS-OPTIONS --mountpoint "$1") || fail "$1"; case ,$opts, in *,ro,*) ;; *) fail "writable mount: $1";; esac; }; "#,
-    r#"readonly_tree() { mounts=$(HF_RO_PATH=$1 /usr/bin/awk 'function decode(s) { gsub(/\\040/, " ", s); gsub(/\\011/, sprintf("%c", 9), s); gsub(/\\012/, sprintf("%c", 10), s); gsub(/\\134/, sprintf("%c", 92), s); return s } { p=decode($5); root=ENVIRON["HF_RO_PATH"]; if (p==root || index(p, root "/")==1) print $5 }' /proc/self/mountinfo) || fail "$1"; [ -n "$mounts" ] || fail "$1"; printf '%s\n' "$mounts" | "#,
+    r#"readonly_tree() { mounts=$(HF_RO_PATH=$1 HF_GIT_PATHS="$git_paths" /usr/bin/awk 'function decode(s) { gsub(/\\040/, " ", s); gsub(/\\011/, sprintf("%c", 9), s); gsub(/\\012/, sprintf("%c", 10), s); gsub(/\\134/, sprintf("%c", 92), s); return s } BEGIN { count=split(ENVIRON["HF_GIT_PATHS"], paths, "\n"); for (i=1; i<=count; i++) if (paths[i]!="") writable[paths[i]]=1 } { p=decode($5); root=ENVIRON["HF_RO_PATH"]; for (w in writable) if (index(w, root "/")==1 && (p==w || index(p, w "/")==1)) next; if (p==root || index(p, root "/")==1) print $5 }' /proc/self/mountinfo) || fail "$1"; [ -n "$mounts" ] || fail "$1"; printf '%s\n' "$mounts" | "#,
     r#"while IFS= read -r encoded; do m=$(printf '%b' "$encoded"); /usr/bin/mount -o remount,bind,ro,nosuid,nodev "$m" || fail "$m"; check_ro "$m"; done || fail "$1"; check_ro "$1"; }; "#,
     r#"root=$1; shift; cwd=$(pwd -P) || fail cwd; "#,
     r#"for a in "$@"; do case $a in --) break;; tokensrc:*) t=${a#tokensrc:}; "#,
     r#"{ [ -f "$t" ] && [ ! -L "$t" ] && eval "exec 9<\"\$t\""; } || fail "$t";; esac; done; "#,
+    // Create overlays before any read-only bind-back. Recursive bind-backs and
+    // private scratch keeps preserve them; ancestor sweeps exclude their mounts.
+    r#"git_paths=; for a in "$@"; do case $a in --) break;; quarantine:*) q=${a#quarantine:};; overlay:*) c=${a#overlay:}; "#,
+    r#"{ /usr/bin/mkdir -p -m 0700 -- "${q%/*}" && /usr/bin/mkdir -m 0700 -- "$q" "$q/upper" "$q/work"; } || fail "$q"; "#,
+    r#"{ exec 3<"$c" 4<"$q"; } || fail "$c"; /usr/bin/mount -t overlay -o "#,
+    r#"lowerdir=/proc/self/fd/3,upperdir=/proc/self/fd/4/upper,workdir=/proc/self/fd/4/work,userxattr,index=off,metacopy=off,redirect_dir=nofollow "#,
+    r#"herdr-farm-git "$c" || fail "$c"; exec 3<&- 4<&-; git_paths=$(printf '%s\n%s' "$git_paths" "$c");; esac; done; "#,
     r#"if [ -n "$root" ]; then n=3; "#,
     r#"for a in "$@"; do case $a in --) break;; expose:*) [ "$n" -le 9 ] || fail expose; p=${a#expose:}; "#,
     r#"eval "exec $n<\"\$p\"" || fail "$p"; n=$((n+1));; esac; done; "#,
@@ -396,7 +406,7 @@ const SANDBOX: &str = concat!(
     r#"for a in "$@"; do case $a in --) break;; expose:*) p=${a#expose:}; rel=${p#"$root"/}; "#,
     r#"case $rel in */*) /usr/bin/mkdir -p -- "$root/${rel%/*}" || fail "$p";; esac; "#,
     r#"if [ -d "/proc/self/fd/$n" ]; then /usr/bin/mkdir -- "$root/$rel" || fail "$p"; else : > "$root/$rel" || fail "$p"; fi; "#,
-    r#"/usr/bin/mount -c --bind "/proc/self/fd/$n" "$root/$rel" || fail "$p"; readonly_tree "$root/$rel"; eval "exec $n<&-"; n=$((n+1));; esac; done; "#,
+    r#"/usr/bin/mount -c --rbind "/proc/self/fd/$n" "$root/$rel" || fail "$p"; readonly_tree "$root/$rel"; eval "exec $n<&-"; n=$((n+1));; esac; done; "#,
     r#"/usr/bin/mount -o remount,bind,ro,nosuid,nodev,noexec "$root" || fail "$root"; check_ro "$root"; fi; "#,
     r#"for d in "$@"; do case $d in --) break;; private:*) d=${d#private:}; if [ -d "$d" ] && [ ! -L "$d" ]; then n=3; active=0; "#,
     r#"for a in "$@"; do case $a in --) break;; private:*) active=0; [ "${a#private:}" = "$d" ] && active=1;; keep:"$d"/*) [ "$active" = 1 ] || continue; [ "$n" -le 9 ] || fail keep; p=${a#keep:}; "#,
@@ -407,11 +417,6 @@ const SANDBOX: &str = concat!(
     r#"else { case ${p#"$d"/} in */*) /usr/bin/mkdir -p -- "${p%/*}";; esac && : > "$p" && "#,
     r#"/usr/bin/mount -c --bind "/proc/self/fd/$n" "$p"; } || fail "$p"; fi; "#,
     r#"eval "exec $n<&-"; n=$((n+1));; esac; done; fi;; esac; done; "#,
-    r#"for a in "$@"; do case $a in --) break;; quarantine:*) q=${a#quarantine:};; overlay:*) c=${a#overlay:}; "#,
-    r#"{ /usr/bin/mkdir -p -m 0700 -- "${q%/*}" && /usr/bin/mkdir -m 0700 -- "$q" "$q/upper" "$q/work"; } || fail "$q"; "#,
-    r#"{ exec 3<"$c" 4<"$q"; } || fail "$c"; /usr/bin/mount -t overlay -o "#,
-    r#"lowerdir=/proc/self/fd/3,upperdir=/proc/self/fd/4/upper,workdir=/proc/self/fd/4/work,userxattr,index=off,metacopy=off,redirect_dir=nofollow "#,
-    r#"herdr-farm-git "$c" || fail "$c"; exec 3<&- 4<&-;; esac; done; "#,
     r#"for a in "$@"; do case $a in --) break;; "#,
     r#"ro:*) p=${a#ro:}; if [ -e "$p" ]; then /usr/bin/mount --rbind "$p" "$p" || fail "$p"; readonly_tree "$p"; fi;; "#,
     r#"rw:*) p=${a#rw:}; if [ -e "$p" ]; then { /usr/bin/mount --rbind "$p" "$p" && /usr/bin/mount -o remount,bind,rw "$p"; } || fail "$p"; fi;; "#,

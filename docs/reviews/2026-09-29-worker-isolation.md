@@ -905,6 +905,15 @@ Status after the follow-up card in brackets.
    any local branch of the source repository (e.g. point `main` at its own
    commit). Now every ref write lands in its quarantine; only its own branch is
    imported, by fast-forward CAS, after verification.
+   Sandbox setup creates each fresh quarantine and overlay before covering the
+   projects root or protecting its bind-backs. Recursive bind-backs preserve
+   overlay submounts. Per-mount read-only sweeps exclude Git overlay mounts and
+   everything mounted beneath them when protecting an ancestor; explicit
+   read-only paths inside an overlay still receive protection. Writable plan
+   entries follow their read-only parents, and the final checks cover protected
+   anchors only. The quarantine backing path remains read-only to the worker;
+   the overlay retains its original writable upper mount. CI diagnoses the
+   root cover, read-only bind-back and writable descendant overlay together.
    (b) **[Closed by the Git quarantine card]** *loose objects*: `objects/xx/`
    had to be writable, so a worker could replace an existing loose object's
    file. Now the shared object store is the overlay's read-only lower layer;

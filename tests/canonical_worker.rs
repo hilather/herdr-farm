@@ -1989,7 +1989,12 @@ fn an_isolated_worker_cannot_read_owner_secrets_or_lift_the_hiding_but_still_com
         hidden.iter().map(|p| format!("'{}'", p.display())).collect::<Vec<_>>().join(" "), home.display(), home.join(".ssh/id_owner").display(), home.join("root/other/SECRET.txt").display());
     // Also the project's retained knowledge and the worktree's own `.git`
     // pointer (relative to the worker's working directory, its worktree).
-    let project_writes = [lab.project.canonicalize().unwrap().join("PROJECT.md"), PathBuf::from(".git")];
+    let project_writes = [
+        lab.project.canonicalize().unwrap().join("PROJECT.md"),
+        // Quarantine backing paths stay protected even though Git's overlay is writable.
+        lab.project.canonicalize().unwrap().join(".git-quarantine/escape"),
+        PathBuf::from(".git"),
+    ];
     lab.write_probe_agent(&reads, &[&writes[..], &project_writes[..]].concat(), &worker_tmp, &hidden, &nested);
     let (contract, base) = lab.install_work_contract("verify_then_integrate");
     let (_, attempt) = lab.reserve("Retained instructions");
