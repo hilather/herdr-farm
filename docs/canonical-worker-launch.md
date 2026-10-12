@@ -1256,9 +1256,12 @@ attempt fails once with one coordinator launch-failure notice, rather than
 retrying unchanged sealed inputs. Expired or changed consumed approvals fail as
 `brief_approval_expired`; other permanent authority `Invalid` errors fail as
 `brief_authority_invalid`. The supervisor stops a failed started worker, preserves
-its outputs, and records proven termination before releasing capacity, runtime
-ownership and the task pointer. A coordinator can then launch a replacement with
-fresh signed approval using a new task id, `--work-item WORK` and `--supersedes OLD`,
+its outputs, and records proven termination before releasing capacity and the task
+pointer. Only the typed `brief_approval_expired` failure also retires runtime
+ownership in that same termination transaction; a failed commit rolls back the
+retirement and its audit event. Revoked barriers and other authority failures
+retain ownership for preservation and review. A coordinator can then launch a
+replacement with fresh signed approval using a new task id, `--work-item WORK` and `--supersedes OLD`,
 without pausing project control. The superseded task must already have matching
 work-item lineage; lineage cannot be added after a task's first attempt.
 Same-task reruns require matching retained lineage and the installed contract.
