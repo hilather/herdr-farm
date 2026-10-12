@@ -452,11 +452,17 @@ fn reconcile_launch_once(
         cancellation.clone(),
     )?;
     if target.is_none() {
-        return Ok(false);
+        let db = crate::migration::open_active_scoped(project,
+            crate::store::controlled::ReadControl::new(deadline, cancellation.clone()))?;
+        let revision = db.current_delivery_revision(operation)?;
+        // Resource observation may have committed a typed no-workspace failure.
+        return Ok(revision != expected_revision);
     }
     check(deadline, &cancellation)?;
     let state = select()?;
-    if state.delivery.state == crate::operations::DeliveryState::Ambiguous
+    if (state.delivery.state == crate::operations::DeliveryState::Ambiguous
+        || (state.delivery.state == crate::operations::DeliveryState::Claimed
+            && state.delivery.lease_until_ms.is_some_and(|until| until <= now())))
         && !state.kinds.contains("runtime.launch_release")
     {
         let _guard = crate::execution_guard::RootGuard::exclusive_by(
@@ -494,6 +500,9 @@ pub fn reconcile_launch(project: &Path, operation: &OperationId, expected_revisi
     match reconcile_launch_once(project, operation, expected_revision, deadline, cancellation.clone()) {
         Ok(value) => Ok(value),
         Err(error) => {
+            if error.downcast_ref::<super::resources::NativeObservationTimeout>().is_some()
+                && super::resources::cancel_unresponsive_creation(project, operation, expected_revision,
+                    deadline, cancellation.clone())? {return Ok(true);}
             let socket_failure = error.downcast_ref::<super::resources::LaunchSocketFailure>();
             let missing_directory = socket_failure.and_then(|failure| Path::new(&failure.socket).parent())
                 .is_some_and(|directory| std::fs::symlink_metadata(directory)

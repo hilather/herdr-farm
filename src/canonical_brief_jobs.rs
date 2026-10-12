@@ -75,7 +75,9 @@ fn request_inner(project:&Path,operation:&Operation,revision:u64,launch_advance:
     command.deadline = Some(deadline);
     Ok(Request {
         identity: Identity {
-            operation: format!("{}:{}", if launch_advance {"canonical-launch"} else if input.resource_recovery {"canonical-worker:recover"} else {"canonical-worker"}, operation.id.as_str()),
+            operation: format!("{}:{}", if launch_advance {"canonical-launch"} else if input.resource_recovery {"canonical-worker:recover"}
+                else if input.termination.is_some() && operation.payload["stop_requested"].as_bool()==Some(false) {"canonical-worker:monitor"}
+                else {"canonical-worker"}, operation.id.as_str()),
             revision,
             project: project.display().to_string(),
             machine: "local-canonical-terminal".into(),
@@ -146,13 +148,16 @@ impl Runner for JobRunner {
         } else if input.resource_recovery {
             #[cfg(target_os = "linux")]
             {
-                herdr_farm::canonical_worker::reconcile_launch(
+                let complete = herdr_farm::canonical_worker::reconcile_launch(
                     &input.project,
                     &input.operation,
                     input.revision,
                     deadline,
                     cancellation,
                 )?;
+                return Ok(Output {code: Some(0), elapsed: entered.elapsed(),
+                    stdout: if complete {"recovery completed".into()} else {String::new()},
+                    ..Output::default()});
             }
             #[cfg(not(target_os = "linux"))]
             anyhow::bail!("canonical resource recovery requires Linux pidfs");

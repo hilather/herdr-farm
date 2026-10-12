@@ -203,3 +203,35 @@ no reachable session to refresh the accelerated ticker idle-exit deadline; a
 present route without adoption cannot authorize activation. Helper exceptions,
 ticker stderr and ticker logs remain in failed-wait diagnostics. Unix socket
 restrictions prevent exercising this fixture past socket creation in the sandbox.
+
+Root safety work (recovery, termination and briefs) precedes launch advancement
+across projects, including while safety work backs off. Queue fairness promotes
+jobs after three failed turns or one recovery observation interval of waiting.
+The root writer turn prevents fresh shared probes from overtaking acquisition.
+Cancellation and completion requests offer termination immediately, independently
+of passive launch-observation hints. Requested stops rotate among themselves
+before other project-local effects; their workers still validate retained launch
+and ownership evidence before stopping anything. The socket-free cancellation
+workflow covers a Running attempt whose passive monitor inventory is not yet
+populated, including admission beside another project's reserved launch and
+retention of capacity when exact worker evidence is missing. The shared-root
+workflow also checks stop hints before starting its
+ticker, then retains its refused-commit and cross-project launch assertions.
+Native creation requests retain their unscaled 15-second external budget. On
+timeout, observation and cancellation run within the remaining 45-second phase
+and five-second lease reserve; labs do not scale that execution budget. The
+supervisor preserves its public exit-200 failure contract and exposes timeout
+through the output's `timed_out` flag, including when its surviving helper
+finishes before the collector deadline. The
+shared-root recovery E2E uses 30 completed passes, and the hung-creation E2E
+uses observable terminal state with a generous 90-second wait deadline.
+
+Root fairness recovery preserves socket observation errors before considering
+remaining native observation time. A short lease alone does not count as a
+native timeout. Pending-termination labs keep the ticker alive through the persisted
+termination and next launch after removing journal deferral. Completed passes
+alone do not imply executor completion.
+The journal-deferral trigger raises a SQLite constraint violation, exposed by
+the store as `Conflict`; the lab waits for that queue failure tied to the exact
+attempt. It checks the post-cancellation hint revision and requires the same
+ticker to commit termination after trigger removal before the next launch.

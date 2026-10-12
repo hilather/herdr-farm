@@ -716,6 +716,17 @@ impl Isolation {
                     || homes.iter().any(|h| h == dir)
             };
             if let Some(parent) = parent.filter(|parent| !shared(parent)) {
+                // Short native routes put `r*/s` below the Herdr directory.
+                // Hide that directory too: hiding only the socket namespace
+                // leaves its owner's adjacent state and secrets readable.
+                if Path::new(&socket).file_name().is_some_and(|name| name == "s")
+                    && Path::new(&parent).file_name().and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with('r'))
+                    && let Some(directory) = Path::new(&parent).parent().map(normal).transpose()?
+                    && !shared(&directory)
+                {
+                    hide.push(directory);
+                }
                 hide.push(parent);
             }
             hide.push(socket);

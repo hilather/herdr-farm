@@ -11,6 +11,7 @@ enum LaunchFailureReason {
     DedicatedServerLost,
     LaunchRecoveryFailed,
     LaunchLeaseExpired,
+    LaunchCreationTimedOut,
 }
 impl LaunchFailureReason {
     fn as_str(self) -> &'static str {
@@ -21,6 +22,7 @@ impl LaunchFailureReason {
             Self::LaunchConflict => "launch_conflict",
             Self::DedicatedServerLost => "dedicated_server_lost",
             Self::LaunchLeaseExpired => "launch_lease_expired",
+            Self::LaunchCreationTimedOut => "launch_creation_timed_out",
             Self::LaunchRecoveryFailed => "launch_recovery_failed",
         }
     }
@@ -284,8 +286,10 @@ impl SqliteStore {
             return Ok(true);
         }
         let count: u64 = tx.query_row("SELECT count(*) FROM events WHERE entity=?1 AND kind='runtime.launch_recovery_error' AND json_extract(payload,'$.error')=?2", params![operation.as_str(), diagnostic], |r| r.get(0))?;
-        let terminal = gone || conflict || phase == "launch_lease_expired" || count >= 2;
-        let reason = if gone {
+        let terminal = gone || conflict || matches!(phase, "launch_lease_expired" | "launch_creation_timed_out") || count >= 2;
+        let reason = if phase == "launch_creation_timed_out" {
+            LaunchFailureReason::LaunchCreationTimedOut
+        } else if gone {
             LaunchFailureReason::DedicatedServerLost
         } else if phase == "launch_lease_expired" {
             LaunchFailureReason::LaunchLeaseExpired

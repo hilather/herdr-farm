@@ -35,6 +35,12 @@ impl ReadControl {
 /// Deref escape permits callers to replace hooks or renew an expired deadline.
 pub struct ControlledStore {store:SqliteStore,control:ReadControl,interrupted:Arc<AtomicU8>,work_budget:read_budget::ReadBudget,sql_work:Option<SqlWork>}
 impl ControlledStore {
+    pub(crate) fn record_launch_failure(&mut self, operation: &OperationId, phase: &str,
+        diagnostic: &str, conflict: bool, now: i64) -> Result<bool> {
+        self.control.check()?;
+        self.store.record_launch_failure(operation, phase, diagnostic, conflict, now)
+    }
+
     pub(crate) fn current_delivery_revision(&self, operation: &OperationId) -> Result<u64> {
         self.control.check()?;
         super::delivery::delivery_with_budget(&self.store.connection,operation,Some(&self.work_budget)).map(|d|d.revision).map_err(|e|self.error(e))
