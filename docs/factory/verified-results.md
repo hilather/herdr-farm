@@ -248,7 +248,10 @@ timeout_seconds = 600
 Paths must be absolute files or directories. The verifier resolves ELF loaders,
 shared libraries and declared script interpreters using the worker dependency
 resolver. File contents and path metadata, including recursively enumerated
-directory entries and dependency identities, are pinned. Files are exposed
+directory entries and dependency identities, are pinned. Dependency paths with
+parent traversal are normalized through the filesystem during declared
+toolchain collection, preserving the final symlink identity. Ordinary worker
+isolation preparation does not perform this toolchain normalization. Files are exposed
 read-only at the same paths; paths inside the contract repository are also
 exposed relative to the private checkout, so ignored `.tools/` executables work.
 Toolchain binds use `ro=recursive`, including repository-relative aliases, so
