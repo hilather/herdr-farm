@@ -1238,6 +1238,9 @@ fn canonical_notification_cli_delivers_once_to_recorded_socket() {
 fn ticker_canonical_notification_confirms_or_retains_ambiguity_after_owner_death() {
     use std::{fs,os::unix::{fs::PermissionsExt,net::UnixListener},process::Stdio,time::{Duration,Instant}};
     use herdr_farm::{migration,runtime,domain::{TaskId,RuntimeRoute,ProjectState},operations::DeliveryState,execution_guard::{ProjectGuard,RootGuard}};
+    // Marker/state waits include unscaled native probes and slow runner scheduling.
+    // Keep the owner-death lock and escaped-helper deadlines independent.
+    let wait_budget = Duration::from_secs(60);
     for mode in ["ok","lost","death"] {
         let home=tempfile::tempdir().unwrap();let root=home.path().join("root");let r=root.to_str().unwrap();for action in ["new","pause"]{assert!(hp(home.path(),&["--root",r,action,"demo"]).status.success());}
         let project=root.join("demo");fs::write(project.join("inbox/message.md"),"+++\nid='message'\nsummary='private text'\n+++\n").unwrap();let plan=migration::inspect(&project).unwrap();migration::apply(&project,&plan,true).unwrap();
@@ -1285,8 +1288,8 @@ print(json.dumps({{'id':request['id'],'result':{{'type':'notification_show','sho
         struct Child(std::process::Child);impl Drop for Child{fn drop(&mut self){let _=self.0.kill();let _=self.0.wait();}}
         let spawn=||Child(Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME",home.path()).env("PATH","/usr/bin:/bin").env("HERDR_BIN_PATH",&helper).args(["--root",r,"ticker","run"]).stdout(Stdio::null()).stderr(Stdio::from(fs::OpenOptions::new().create(true).append(true).open(home.path().join("ticker-stderr")).unwrap())).spawn().unwrap());
         let read=||runtime::snapshot(&project).unwrap().deliveries.into_iter().find(|d|d.operation==op.id).unwrap();
-        let wait=|child:&mut Child,predicate:&dyn Fn()->bool|{let end=Instant::now()+Duration::from_secs(8);while !predicate(){let diagnostic=||format!("mode={mode}\n{}\n{}\n{}\nwrong lock: {}",fs::read_to_string(root.join(".ticker.log")).unwrap_or_default(),fs::read_to_string(home.path().join("ticker-stderr")).unwrap_or_default(),fs::read_to_string(home.path().join("helper-errors")).unwrap_or_default(),fs::read_to_string(home.path().join("WRONG_LOCK")).unwrap_or_default());assert!(child.0.try_wait().unwrap().is_none(),"{}",diagnostic());assert!(Instant::now()<end,"{}",diagnostic());std::thread::sleep(Duration::from_millis(10));}};
-        let stop=|child:&mut Child|{fs::write(root.join(".ticker.stop"),b"").unwrap();let end=Instant::now()+Duration::from_secs(8);while child.0.try_wait().unwrap().is_none(){assert!(Instant::now()<end);std::thread::sleep(Duration::from_millis(10));}fs::remove_file(root.join(".ticker.stop")).unwrap();};
+        let wait=|child:&mut Child,predicate:&dyn Fn()->bool|{let end=Instant::now()+wait_budget;while !predicate(){let diagnostic=||format!("mode={mode}\n{}\n{}\n{}\nwrong lock: {}",fs::read_to_string(root.join(".ticker.log")).unwrap_or_default(),fs::read_to_string(home.path().join("ticker-stderr")).unwrap_or_default(),fs::read_to_string(home.path().join("helper-errors")).unwrap_or_default(),fs::read_to_string(home.path().join("WRONG_LOCK")).unwrap_or_default());assert!(child.0.try_wait().unwrap().is_none(),"{}",diagnostic());assert!(Instant::now()<end,"{}",diagnostic());std::thread::sleep(Duration::from_millis(10));}};
+        let stop=|child:&mut Child|{fs::write(root.join(".ticker.stop"),b"").unwrap();let end=Instant::now()+wait_budget;while child.0.try_wait().unwrap().is_none(){assert!(Instant::now()<end);std::thread::sleep(Duration::from_millis(10));}fs::remove_file(root.join(".ticker.stop")).unwrap();};
         let mut child=spawn();wait(&mut child,&||home.path().join("sent").exists());
         if mode=="death" {
             child.0.kill().unwrap();child.0.wait().unwrap();assert!(RootGuard::exclusive(&root).is_err());assert!(ProjectGuard::acquire(&project).is_err());
