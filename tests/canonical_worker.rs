@@ -871,7 +871,16 @@ fn editing_submission_lab_with_wake(route: &str, policy: &str, verify: bool, int
             .env("HERDR_FARM_TEST_TIME_SCALE",include_str!("support/time-scale.txt").trim())
             .args(["--root",lab.path("root").to_str().unwrap(),"open","demo"]).output().unwrap();
         assert!(open.status.success(),"{}",String::from_utf8_lossy(&open.stderr));
-        lab.ok(&["ticker","stop"]);
+        let args = ["ticker", "stop"];
+        let until = Instant::now() + Duration::from_secs(30);
+        loop {
+            let out = lab.cli(&args);
+            if out.status.success() { break; }
+            // A stop requested mid-pass can outlast the scaled CLI wait.
+            assert!(Instant::now() < until,
+                "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
     let (_, attempt) = lab.reserve(if wake {"+++\nname = \"demo\"\nnudge = true\n+++\nRetained instructions"} else {"Retained instructions"});
     let worktree = lab.planned_worktree(&attempt);
