@@ -46,7 +46,9 @@ remounts every descendant mount with `remount,bind,ro,nosuid,nodev`, and checks
 its kernel VFS options with `findmnt --direction backward --mountpoint`
 (covered mounts can share the same pathname; the last mount is visible).
 Root-cover bind-back entries receive this protection individually; remounting only the covering tmpfs leaves child
-mounts writable. Hidden tmpfs and file masks are also checked. A missing mount
+mounts writable. Hidden tmpfs and file masks are also checked. File masks bind `/dev/null`
+with `ro,nosuid,noexec`, omitting `nodev` so reads return empty bytes rather
+than EACCES; the read-only VFS check still applies. A missing mount
 or writable VFS result exits 125 before the worker starts. These checks happen
 before explicitly allowed writable exposures are mounted on top; protected
 anchors are checked again after setup.

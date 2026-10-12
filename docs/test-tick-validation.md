@@ -31,6 +31,20 @@ It uses four test threads per runner, eight count partitions, and one retry:
 a pass on retry is reported as flaky; two failures block the gate.
 The default profile remains available for full local validation.
 
+The CI-PORTABILITY-2h notification owner-death workflow now records a concrete
+pane and supplies matching `--version`, `pane list`, and `agent list` responses
+from its local Python stand-in. Previously its socket-only binding had neither
+a pane nor a worktree to classify as reachable, leaving the ticker subject to
+its six-second accelerated idle exit while the test waited up to eight seconds.
+That provides a plausible explanation for the reported 7.4-second runner exit;
+the hard sandbox cannot confirm it because Unix socket binding is denied.
+Early-exit and timeout assertions now include the mode, ticker log, and captured
+stderr, plus helper tracebacks with Python/SQLite versions and lock diagnostics.
+Initial reconciliation uses the same stand-in as the ticker. The test
+remains enabled in CI; no runner-specific skip or product idle-policy change was
+introduced. The chronic concurrent-attempt effect-lock flake is left for the
+separate sandbox concurrency change.
+
 Both archive build and test jobs create `$HOME/.cache/hf-ci-XXXXXX` and
 export `TMPDIR` and `CARGO_TARGET_TMPDIR` through `GITHUB_ENV`. This matches
 the steward's cache layout, outside the checkout and `runner.temp`, and outside

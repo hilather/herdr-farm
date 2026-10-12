@@ -426,7 +426,8 @@ const SANDBOX: &str = concat!(
     r#"/usr/bin/mount --bind "$s" "$d" && /usr/bin/mount -o remount,bind,rw,nosuid,nodev,noexec "$d"; } || fail "$d"; fi;; esac; done; "#,
     r#"for a in "$@"; do case $a in --) break;; hide:*) p=${a#hide:}; "#,
     r#"if [ -d "$p" ]; then /usr/bin/mount -t tmpfs -o ro,nosuid,nodev,noexec,size=4k,mode=0555 herdr-farm-hidden "$p" || fail "$p"; check_ro "$p"; "#,
-    r#"elif [ -e "$p" ]; then { /usr/bin/mount --bind /dev/null "$p" && /usr/bin/mount -o remount,bind,ro,nosuid,nodev,noexec "$p"; } || fail "$p"; check_ro "$p"; fi;; esac; done; "#,
+    // A /dev/null mask must remain readable as empty; nodev would deny opens.
+    r#"elif [ -e "$p" ]; then { /usr/bin/mount --bind /dev/null "$p" && /usr/bin/mount -o remount,bind,ro,nosuid,noexec "$p"; } || fail "$p"; check_ro "$p"; fi;; esac; done; "#,
     r#"for p in /tmp/ssh-* /tmp/tmux-*; do if [ -d "$p" ] && [ -O "$p" ]; then "#,
     r#"/usr/bin/mount -t tmpfs -o ro,nosuid,nodev,noexec,size=4k,mode=0555 herdr-farm-hidden "$p" || fail "$p"; check_ro "$p"; fi; done; "#,
     // Recheck protected anchors after all writable exposures and masks exist.
