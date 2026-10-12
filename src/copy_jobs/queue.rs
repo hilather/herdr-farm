@@ -16,7 +16,14 @@ fn failure_delay(identity:&Identity)->Duration {
     else if identity.operation.starts_with("canonical-worker:") {crate::timing::worker_retry()}
     else {crate::timing::job_retry()}
 }
-struct Entry {work:Option<Request>,resources:Vec<Resource>,not_before:Instant,touched:Instant,last:u64,needed:bool}
+fn safety_work(operation:&str)->bool {
+    ["canonical-worker:recover:", "canonical-worker:recover-", "canonical-worker:terminate-",
+        "canonical-worker:prepare-brief-", "canonical-worker:brief-"].iter().any(|prefix| operation.starts_with(prefix))
+}
+fn termination_job(operation:&str)->bool {
+    operation.starts_with("canonical-worker:terminate-") || operation.starts_with("canonical-worker:monitor:terminate-")
+}
+struct Entry {work:Option<Request>,resources:Vec<Resource>,not_before:Instant,touched:Instant,last:u64,needed:bool,waiting_since:Instant,losses:u32}
 struct Pending {key:Key,identity:Identity,work:Request,ticket:crate::executor::Ticket,resources:Vec<Resource>}
 pub struct Queue {executor:Arc<crate::executor::Executor>,entries:BTreeMap<Key,Entry>,pending:Option<Pending>,pending_sets:BTreeMap<Key,Pending>,sequence:u64,cursor:crate::fair_admission::Cursor,
     #[cfg(all(feature="state-store",target_os="linux"))]
@@ -73,7 +80,7 @@ impl Queue {
     pub fn pending_exclusive_root(&self)->bool {self.pending.as_ref().is_some_and(|p|exclusive_root(&p.identity))}
     #[cfg(feature="state-store")]
     pub fn canonical_work_pending(&self)->bool {
-        self.pending_exclusive_root()||self.entries.values().any(|e|e.work.as_ref().is_some_and(|r|r.deadline>Instant::now()&&exclusive_root(&r.identity)&&(Instant::now()>=e.not_before||r.identity.operation.starts_with("canonical-launch:"))))
+        self.pending_exclusive_root()||self.entries.values().any(|e|e.work.as_ref().is_some_and(|r|r.deadline>Instant::now()&&exclusive_root(&r.identity)&&(Instant::now()>=e.not_before||r.identity.operation.starts_with("canonical-launch:")||safety_work(&r.identity.operation))))
     }
     #[cfg(feature="state-store")]
     pub fn offered_exclusive_root(&self)->bool {self.entries.values().any(|e|Instant::now()>=e.not_before&&e.work.as_ref().is_some_and(|r|r.deadline>Instant::now()&&exclusive_root(&r.identity)))}
@@ -175,7 +182,8 @@ impl Queue {
             if !victim.1.starts_with("tokens:attempt:")&&priority(&victim)==(false,false)&&self.compare(&key,&victim)!=std::cmp::Ordering::Less {return Ok(());}
             self.entries.remove(&victim);
         }
-        let now=Instant::now();let entry=self.entries.entry(key).or_insert(Entry{work:None,resources:Vec::new(),not_before:now,touched:now,last:0,needed:true});
+        let now=Instant::now();let entry=self.entries.entry(key).or_insert(Entry{work:None,resources:Vec::new(),not_before:now,touched:now,last:0,needed:true,waiting_since:now,losses:0});
+        if entry.work.is_none() && !entry.needed {entry.waiting_since=now;entry.losses=0;}
         entry.work=Some(work);entry.resources=resources;entry.touched=now;entry.needed=true;Ok(())
     }
     pub fn drain(&mut self)->Vec<String> {
@@ -198,15 +206,23 @@ impl Queue {
     }
     fn settle(&mut self,pending:Pending,result:Result<String>)->Vec<String> {
         let now=Instant::now();
+        if let Some(entry)=self.entries.get_mut(&pending.key) {
+            if result.is_err() {entry.losses=entry.losses.saturating_add(1);} else {entry.losses=0;entry.waiting_since=now;}
+        }
         // Recovery/termination observations may find no new evidence. Poll them
         // at idle cadence instead of competing with every launch stage.
         // Attempt-token workers own suffix cadence; a change can publish on
         // the next tick instead of waiting for thread-token cooldown.
-        if let Some(entry)=self.entries.get_mut(&pending.key) {entry.not_before=now+if result.is_err()||pending.identity.operation=="notification"||(pending.identity.operation.starts_with("tokens:")&&!pending.identity.operation.starts_with("tokens:attempt:")){failure_delay(&pending.identity)}else if pending.identity.operation.starts_with("canonical-worker:terminate-")||pending.identity.operation.starts_with("canonical-worker:recover:"){crate::timing::worker_recovery_retry()}else{Duration::ZERO};entry.touched=now;entry.needed=result.is_err() || (pending.identity.operation.starts_with("canonical-worker:terminate-") && result.as_ref().is_ok_and(String::is_empty));}
+        if let Some(entry)=self.entries.get_mut(&pending.key) {entry.not_before=now+if result.is_err()||pending.identity.operation=="notification"||(pending.identity.operation.starts_with("tokens:")&&!pending.identity.operation.starts_with("tokens:attempt:")){failure_delay(&pending.identity)}else if termination_job(&pending.identity.operation)||pending.identity.operation.starts_with("canonical-worker:recover:"){crate::timing::worker_recovery_retry()}else{Duration::ZERO};entry.touched=now;entry.needed=result.is_err() || ((termination_job(&pending.identity.operation) || pending.identity.operation.starts_with("canonical-worker:recover:")) && result.as_ref().is_ok_and(String::is_empty));}
         // Keep the observation itself, not only a needed bit. Otherwise a failed
         // job has no executable retry until a later inventory happens to offer
         // this attempt again. These requests only observe retained authority.
-        if pending.identity.operation.starts_with("canonical-worker:terminate-")
+        #[cfg(feature="state-store")]
+        let stale=result.as_ref().is_err_and(|error| error.chain().any(|cause|
+            matches!(cause.downcast_ref::<herdr_farm::store::StoreError>(), Some(herdr_farm::store::StoreError::Conflict | herdr_farm::store::StoreError::Invalid(_)))));
+        #[cfg(not(feature="state-store"))]
+        let stale=false;
+        if !stale && (termination_job(&pending.identity.operation) || pending.identity.operation.starts_with("canonical-worker:recover:"))
             && (result.is_err() || result.as_ref().is_ok_and(String::is_empty))
             && let Some(entry) = self.entries.get_mut(&pending.key)
         {
@@ -216,7 +232,7 @@ impl Queue {
             entry.work = Some(work);
         }
         match result {
-            Ok(line) if pending.identity.operation.starts_with("canonical-worker:terminate-") && !line.is_empty() => vec![line],
+            Ok(line) if termination_job(&pending.identity.operation) && !line.is_empty() => vec![line],
             Ok(_) => Vec::new(),
             Err(error) => vec![format!("{} {}: background queue: {error:#}", pending.key.0, pending.key.1)],
         }
@@ -231,6 +247,7 @@ impl Queue {
     }
     pub fn admit_matching(&mut self,allowed:impl Fn(&Identity)->bool)->Vec<String> {
         self.prune();let mut errors=Vec::new();if self.single_pending(){return errors;}
+        if self.declared_pending() && self.entries.keys().any(|key| safety_work(&key.1) && self.entries[key].work.is_some()) {return errors;}
         if self.declared_pending() {self.admit_declared(&allowed,&mut errors);return errors;}
         let Some(key)=self.next_where(&allowed) else {return errors;};
         let declared=self.entries.get(&key).is_some_and(|entry|!entry.resources.is_empty()&&entry.work.as_ref().is_some_and(|work|!is_exclusive(&work.identity)));
@@ -255,7 +272,11 @@ impl Queue {
         };
         match self.executor.submit(work.clone()) {
             Ok(ticket)=>{
-                let entry=self.entries.get_mut(key).unwrap();entry.work=None;entry.last=next;self.sequence=next;self.cursor.accepted(key);
+                let entry=self.entries.get_mut(key).unwrap();
+                // A promoted job spends its contention credit on this turn;
+                // it cannot monopolize other safety work if this retry fails.
+                if entry.losses>=3 || entry.waiting_since.elapsed()>=crate::timing::worker_recovery_retry() {entry.losses=0;}
+                entry.waiting_since=Instant::now();entry.work=None;entry.last=next;self.sequence=next;self.cursor.accepted(key);
                 let pending=Pending{key:key.clone(),identity,work,ticket,resources};
                 if declared {self.pending_sets.insert(key.clone(),pending);} else {self.pending=Some(pending);}
                 true
@@ -276,10 +297,27 @@ impl Queue {
                 &&entry.resources.iter().all(|resource|!held.iter().any(|held| *held==resource))
         }).min_by(|(a,_),(b,_)|self.compare(a,b)).map(|(key,_)|key.clone())
     }
-    fn compare(&self,a:&Key,b:&Key)->std::cmp::Ordering {self.cursor.compare(a,b)}
+    fn compare(&self,a:&Key,b:&Key)->std::cmp::Ordering {
+        // Safety work precedes launch advancement across the entire root.
+        // Retain age and contention history across refreshed offers.
+        let urgent = |key: &Key| safety_work(&key.1);
+        let overdue = |key: &Key| self.entries.get(key).is_some_and(|entry|
+            entry.losses >= 3 || entry.waiting_since.elapsed() >= crate::timing::worker_recovery_retry());
+        urgent(b).cmp(&urgent(a))
+            .then_with(|| overdue(b).cmp(&overdue(a)))
+            .then_with(|| {
+                if overdue(a) && overdue(b) {
+                    self.entries.get(a).map(|e| e.waiting_since).cmp(&self.entries.get(b).map(|e| e.waiting_since))
+                } else {std::cmp::Ordering::Equal}
+            })
+            .then_with(|| self.cursor.compare(a,b))
+    }
+
     fn next_where(&self,allowed:&impl Fn(&Identity)->bool)->Option<Key> {
         let now=Instant::now();
-        self.entries.iter().filter(|(_,e)|e.work.as_ref().is_some_and(|r|allowed(&r.identity))&&now>=e.not_before)
+        let safety_pending=self.entries.iter().any(|(key,e)| safety_work(&key.1) && e.work.is_some());
+        self.entries.iter().filter(|(key,_)| !safety_pending || !key.1.starts_with("canonical-launch:"))
+            .filter(|(_,e)|e.work.as_ref().is_some_and(|r|allowed(&r.identity))&&now>=e.not_before)
             .min_by(|(a,_),(b,_)|self.compare(a,b)).map(|(key,_)|key.clone())
     }
 
@@ -350,39 +388,6 @@ mod tests {
         }
         assert!(queue.cursor.overflow());assert_eq!(seen.len(),(LIMIT+1)*2);assert!(pool.stop(Duration::from_secs(1)));
     }
-    #[cfg(feature="state-store")]
-    #[test]
-    fn termination_poll_cools_down_without_delaying_launch_service() {
-        let pool=Arc::new(crate::executor::Executor::new(crate::executor::Limits::default(),Arc::new(Immediate)).unwrap());let mut queue=Queue::new(pool.clone());
-        let key:Key=("a".into(),"canonical-worker:terminate-attempt".into());
-        queue.offer_request(work("a",&key.1)).unwrap();assert!(queue.canonical_work_pending());
-        queue.admit();assert!(queue.pending_exclusive_root());assert!(drain(&mut queue).is_empty());
-        assert_eq!(queue.entries[&key].not_before.duration_since(queue.entries[&key].touched),Duration::from_secs(15));
-        queue.offer_request(work("a",&key.1)).unwrap();
-        assert!(!queue.canonical_work_pending());assert!(!queue.offered_exclusive_root());
-        queue.offer_request(work("b","canonical-launch:operation")).unwrap();
-        assert!(queue.canonical_work_pending());assert!(queue.offered_exclusive_root());
-        queue.admit_matching(|identity|!exclusive_root(identity));assert!(!queue.pending());
-        queue.admit();assert_eq!(queue.pending.as_ref().unwrap().key.0,"b");assert!(drain(&mut queue).is_empty());
-        queue.entries.get_mut(&key).unwrap().not_before=Instant::now();
-        assert!(queue.canonical_work_pending());queue.admit();assert_eq!(queue.pending.as_ref().unwrap().key,key);assert!(drain(&mut queue).is_empty());
-        assert!(pool.stop(Duration::from_secs(1)));
-    }
-
-    #[cfg(feature="state-store")]
-    #[test]
-    fn recovery_observations_cool_down_but_original_claim_can_still_advance() {
-        let pool=Arc::new(crate::executor::Executor::new(crate::executor::Limits::default(),Arc::new(Immediate)).unwrap());let mut queue=Queue::new(pool.clone());
-        let key:Key=("a".into(),"canonical-worker:recover:launch-operation".into());
-        queue.offer_request(work("a",&key.1)).unwrap();queue.admit();assert!(queue.pending_exclusive_root());assert!(drain(&mut queue).is_empty());
-        assert_eq!(queue.entries[&key].not_before.duration_since(queue.entries[&key].touched),Duration::from_secs(15));
-        queue.offer_request(work("a",&key.1)).unwrap();assert!(!queue.canonical_work_pending());assert!(!queue.offered_exclusive_root());
-        queue.offer_request(work("a","canonical-launch:launch-operation")).unwrap();assert!(queue.canonical_work_pending());
-        queue.admit();assert_eq!(queue.pending.as_ref().unwrap().identity.operation,"canonical-launch:launch-operation");assert!(drain(&mut queue).is_empty());
-        queue.entries.get_mut(&key).unwrap().not_before=Instant::now();queue.admit();assert_eq!(queue.pending.as_ref().unwrap().key,key);assert!(drain(&mut queue).is_empty());
-        assert!(pool.stop(Duration::from_secs(1)));
-    }
-
     #[test]
     fn canonical_launch_failure_keeps_short_backoff_and_other_projects_rotate() {
         let pool=Arc::new(crate::executor::Executor::new(crate::executor::Limits::default(),Arc::new(Immediate)).unwrap());let mut queue=Queue::new(pool.clone());

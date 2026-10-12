@@ -48,6 +48,22 @@ fn notification_socket(db:&Connection,operation:&Operation,budget:&mut Budget)->
     RuntimeRoute::from_identity(&binding.identity).validate().map_err(anyhow::Error::msg)?;
     ensure!(binding.identity.machine.is_empty()&&Path::new(&binding.identity.socket).is_absolute(),"notification route hint must name a local socket");budget.check()?;Ok(binding.identity.socket)
 }
+// Passive liveness polls must not hold launch advancement throughout their
+// cooldown. Only a requested stop or expired unreleased launch is pending safety
+// work. This routing hint grants no authority; termination revalidates the store.
+fn termination_requested(db:&Connection,attempt:&AttemptId,now:i64,budget:&mut Budget)->Result<bool> {
+    budget.record()?;budget.charge(16)?;
+    let requested=db.query_row("SELECT EXISTS(SELECT 1 FROM attempts a JOIN attempt_inputs i ON i.attempt_id=a.id
+        JOIN operation_delivery d ON d.operation_id=i.operation_id WHERE a.id=?1 AND
+        (a.state IN ('cancelled','failed','lost')
+         OR EXISTS(SELECT 1 FROM attempt_cancellations c WHERE c.attempt_id=a.id)
+         OR EXISTS(SELECT 1 FROM events e WHERE e.entity=a.id AND e.kind='attempt.completion_requested')
+         OR ((d.state IN ('ambiguous','permanent_failure') OR d.lease_until_ms<=?2)
+             AND NOT EXISTS(SELECT 1 FROM events e WHERE e.entity=i.operation_id AND e.kind='runtime.launch_release'))))",
+        rusqlite::params![attempt.as_str(),now],|row|row.get(0))?;
+    budget.check()?;Ok(requested)
+}
+
 pub(crate) fn read(path:&Path,publication:&Publication,budget:&mut Budget,turn:u64,now:i64)->Result<Option<ControllerEffectHint>> {
     read_with_launches(path,publication,budget,turn,now,false)
 }
@@ -140,12 +156,23 @@ pub(crate) fn read_with_launches(path:&Path,publication:&Publication,budget:&mut
             }
         }
         if candidates.is_empty(){return Ok(None);}
+        let mut stops=std::collections::BTreeSet::new();
+        for (_,kind,_,_,attempt) in &candidates {
+            if kind=="runtime.worker_termination" && let Some(attempt)=attempt
+                && termination_requested(tx,attempt,now,budget)? {stops.insert(attempt.clone());}
+        }
+        if !stops.is_empty() {candidates.retain(|(_,kind,_,_,_)|kind!="runtime.launch");}
+        // Do not let project-local rotation hide a pending brief from the root queue.
+        if candidates.iter().any(|(_,kind,_,_,_)| matches!(kind.as_str(), "runtime.worker_brief" | "runtime.worker_brief_prepare")) {
+            candidates.retain(|(_,kind,_,_,_)| kind != "runtime.launch");
+        }
         candidates.sort_by(|a,b|a.0.cmp(&b.0));
         let(id,kind,revision,mode,attempt)=&candidates[(turn%candidates.len() as u64) as usize];
         // Preparation and termination are identity-bound maintenance hints, not
         // outbox entries or authority to send a prompt or signal a PID.
         let operation=if let Some(attempt)=attempt {Operation{id:id.clone(),task:None,kind:kind.clone(),target:attempt.as_str().into(),payload_version:1,
-            payload:serde_json::json!({"attempt":attempt}),expected_revision:*revision,due_unix_ms:now,idempotency_key:id.as_str().into()}}
+            payload:if kind=="runtime.worker_termination" {serde_json::json!({"attempt":attempt,"stop_requested":stops.contains(attempt)})}
+                else {serde_json::json!({"attempt":attempt})},expected_revision:*revision,due_unix_ms:now,idempotency_key:id.as_str().into()}}
             else {operation(tx,id,budget)?};ensure!(operation.kind==*kind,"controller operation kind changed");
         let socket=if kind=="runtime.notification"{Some(notification_socket(tx,&operation,budget)?)}else{None};
         budget.charge(8)?;Ok(Some(ControllerEffectHint{head:super::head(tx)?,operation,delivery_revision:*revision,mode:*mode,notification_socket:socket}))

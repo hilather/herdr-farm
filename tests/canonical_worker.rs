@@ -14,7 +14,7 @@ mod inventory_history { include!("support/inventory_history.rs"); }
 const BIN: &str = env!("CARGO_BIN_EXE_herdr-farm");
 
 /// A Herdr server on `argv[1]` that runs `workspace.create_command` for real
-/// and logs each request to `requests` beside the socket. `ping.json` there
+/// and logs each request to `requests` in the lab root. `ping.json` there
 /// replaces the ping reply; `lose-create` runs the command but drops the reply;
 /// `drop-release` drops gate-release input unsent and unanswered; `vanish`
 /// closes the worker's workspace, pane and agent without touching its process;
@@ -22,7 +22,7 @@ const BIN: &str = env!("CARGO_BIN_EXE_herdr-farm");
 /// `reset-workspace` (consumed) forgets the ended worker so a lab can launch another.
 const SERVER: &str = r#"
 import json,os,sys,socket,subprocess,time
-path=sys.argv[1];root=os.path.dirname(path);s={};gen=1
+path=sys.argv[1];root=os.environ.get('HERDR_FARM_LAB_ROOT',os.path.dirname(path));s={};gen=1
 server=socket.socket(socket.AF_UNIX);server.bind(path);server.listen()
 while True:
  c,_=server.accept();f=c.makefile('rw');r=json.loads(f.readline());m=r['method'];p=r.get('params') or {}
@@ -43,12 +43,17 @@ while True:
   override=os.path.join(root,'ping.json')
   res=json.load(open(override)) if os.path.exists(override) else {'type':'pong','version':'0.9.1','capabilities':{'workspace_create_command':True}}
  elif m=='workspace.create_command' and 'pid' not in s:
+  if os.path.exists(os.path.join(root,'hang-create')):time.sleep(300)
+  if os.path.exists(os.path.join(root,'refuse-create')):
+   f.write(json.dumps({'id':r['id'],'error':'fixture creation refused'})+'\n');f.flush();c.close();continue
   if os.path.exists(os.path.join(root,'slow-create')):time.sleep(2)
   fifo=os.path.join(root,'input');os.mkfifo(fifo);fd=os.open(fifo,os.O_RDWR)
   child=subprocess.Popen(p['command'],cwd=p['cwd'],stdin=fd,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True,env={'PATH':'/usr/bin:/bin'})
   s.update(pid=child.pid,argv=p['command'],cwd=p['cwd'],label=p['label'],fifo=fifo)
   if not os.path.exists(os.path.join(root,'lose-create')):res={'type':'workspace_created','workspace':{'workspace_id':f'w{gen}'},'root_pane':{'pane_id':f'w{gen}:p1'}}
- elif m=='workspace.list':res={'type':'workspace_list','workspaces':[{'workspace_id':f'w{gen}','label':s['label'],'pane_count':1,'tab_count':1}] if live else []}
+ elif m=='workspace.list' and os.path.exists(os.path.join(root,'refuse-list')):
+  f.write(json.dumps({'id':r['id'],'error':'fixture observation refused'})+'\n');f.flush();c.close();continue
+ elif m=='workspace.list':res={'type':'workspace_list','workspaces':[{'workspace_id':f'w{gen}','label':s['label'],'pane_count':1,'tab_count':1}] if live else ([{'workspace_id':'startup','label':'Shell','pane_count':1,'tab_count':1}] if os.path.exists(os.path.join(root,'startup-shell')) else [])}
  elif m=='pane.list':res={'panes':[pane] if live else []}
  elif m=='pane.get':res={'pane':pane}
  elif m=='pane.report_metadata':res={'type':'ok'}
@@ -71,7 +76,7 @@ while True:
  c.close()
 "#;
 
-struct Lab { home: tempfile::TempDir, project: PathBuf, key: PathBuf, repo: PathBuf, herdr: PathBuf, profile: VersionedReference, binding: String, server: Option<Child>,
+struct Lab { slug: &'static str, home: tempfile::TempDir, project: PathBuf, key: PathBuf, repo: PathBuf, herdr: PathBuf, profile: VersionedReference, binding: String, server: Option<Child>,
     coordinator_listener: Option<std::os::unix::net::UnixListener>,
     /// The `worker` profile's kind and its agent `bin/<kind>`.
     kind: &'static str }
@@ -98,31 +103,47 @@ impl Lab {
         Self::of_kind_in(kind, budget, cwd, None)
     }
     fn of_kind_in(kind: &'static str, budget: &str, cwd: impl Fn(&std::path::Path) -> PathBuf, temp: Option<&str>) -> Self {
+        Self::of_kind_at(kind, budget, cwd, temp, None, "demo")
+    }
+    fn of_kind_at(kind: &'static str, budget: &str, cwd: impl Fn(&std::path::Path) -> PathBuf,
+        temp: Option<&str>, root: Option<&std::path::Path>, slug: &'static str) -> Self {
         let home = match temp {
             Some(path) => tempfile::Builder::new().prefix("hf-").tempdir_in(path).unwrap(),
             None => tempfile::tempdir().unwrap(),
         };
         let key = home.path().join("owner");
-        assert!(Command::new("/usr/bin/ssh-keygen").args(["-q", "-t", "ed25519", "-N", "", "-f"]).arg(&key).output().unwrap().status.success());
+        if let Some(root) = root {
+            // Projects served by one ticker use the same owner configuration.
+            // Their repositories, executables and execution homes stay isolated.
+            let owner_home = root.parent().unwrap();
+            fs::copy(owner_home.join("owner"), &key).unwrap();
+            fs::copy(owner_home.join("owner.pub"), key.with_extension("pub")).unwrap();
+        } else {
+            assert!(Command::new("/usr/bin/ssh-keygen").args(["-q", "-t", "ed25519", "-N", "", "-f"]).arg(&key).output().unwrap().status.success());
+        }
         let public = fs::read_to_string(key.with_extension("pub")).unwrap().split_whitespace().take(2).collect::<Vec<_>>().join(" ");
         let config = home.path().join(".config/herdr-farm/config.toml");
         fs::create_dir_all(config.parent().unwrap()).unwrap();
-        fs::write(&config, format!("[authority]\nversion=1\nrevision=1\napproval_public_key={public:?}\n[profiles.worker]\nkind='{kind}'\npermission_policy='interactive'\n[profiles.worker.budget]\nmax_wall_seconds=600\n{budget}\n")).unwrap();
+        if let Some(root) = root {
+            fs::copy(root.parent().unwrap().join(".config/herdr-farm/config.toml"), &config).unwrap();
+        } else {
+            fs::write(&config, format!("[authority]\nversion=1\nrevision=1\napproval_public_key={public:?}\n[profiles.worker]\nkind='{kind}'\npermission_policy='interactive'\n[profiles.worker.budget]\nmax_wall_seconds=600\n{budget}\n")).unwrap();
+        }
         for dir in ["repo", "bin", "agent-home", "lab"] { fs::create_dir(home.path().join(dir)).unwrap(); }
-        let mut lab = Lab { project: home.path().join("root/demo"), key, repo: home.path().join("repo"), herdr: home.path().join("bin/herdr"),
+        let mut lab = Lab { slug, project: root.map_or_else(|| home.path().join("root"), std::path::Path::to_owned).join(slug), key, repo: home.path().join("repo"), herdr: home.path().join("bin/herdr"),
             profile: VersionedReference { id: String::new(), revision: 1, digest: String::new() }, binding: String::new(), server: None, coordinator_listener: None, home, kind };
         fs::write(lab.path("lab/agent-kind"), kind).unwrap();
-        lab.ok(&["new", "--legacy", "demo"]);
-        lab.ok(&["pause", "demo"]);
+        lab.ok(&["new", "--legacy", lab.slug]);
+        lab.ok(&["pause", lab.slug]);
         migration::apply(&lab.project, &migration::inspect_with_config(&lab.project, &config).unwrap(), true).unwrap();
         lab.git(&["init", "-q", "--object-format=sha256"]);
         lab.git(&["commit", "-q", "--allow-empty", "-m", "base"]);
-        lab.ok(&["task", "demo", "add", "work", "--title", "work", "--expected-head", &lab.head().to_string()]);
+        lab.ok(&["task", lab.slug, "add", "work", "--title", "work", "--expected-head", &lab.head().to_string()]);
         let request = lab.path("queue.json");
         fs::write(&request, r#"{"priority":0,"dependencies":[]}"#).unwrap();
-        lab.ok(&["task", "demo", "queue", "work", "--input-file", request.to_str().unwrap(), "--expected-revision", "1", "--expected-head", &lab.head().to_string()]);
+        lab.ok(&["task", lab.slug, "queue", "work", "--input-file", request.to_str().unwrap(), "--expected-revision", "1", "--expected-head", &lab.head().to_string()]);
         let policy = lab.state().scheduler.unwrap().policy.revision.to_string();
-        lab.ok(&["scheduler", "demo", "policy", "--max-active-workers", "1", "--max-attempts-per-task", "3", "--expected-revision", &policy, "--expected-head", &lab.head().to_string()]);
+        lab.ok(&["scheduler", lab.slug, "policy", "--max-active-workers", "1", "--max-attempts-per-task", "3", "--expected-revision", &policy, "--expected-head", &lab.head().to_string()]);
         let route = RuntimeRoute { socket: lab.socket().display().to_string(), cwd: cwd(&lab.repo.canonicalize().unwrap()).display().to_string(), ..Default::default() };
         let id = TaskId::new("work").unwrap();
         let revision = runtime::snapshot(&lab.project).unwrap().tasks.into_iter().find(|t| t.id == id).unwrap().revision;
@@ -142,10 +163,14 @@ impl Lab {
             config_digest: migration::config_reference(&config).unwrap().digest.clone(), ..Default::default() }).collect::<Vec<_>>();
         migration::open_active(&self.project).unwrap().record_observations(state.head, &observations).unwrap();
         let control = self.state().control.unwrap().revision.to_string();
-        self.ok(&["runtime", "demo", "state", "active", "--expected-revision", &control, "--expected-head", &self.head().to_string()]);
+        self.ok(&["runtime", self.slug, "state", "active", "--expected-revision", &control, "--expected-head", &self.head().to_string()]);
     }
-    fn path(&self, name: &str) -> PathBuf { self.home.path().join(name) }
-    fn socket(&self) -> PathBuf { self.path("lab/native.sock") }
+    fn path(&self, name: &str) -> PathBuf {
+        if name == "root" {return self.project.parent().unwrap().to_owned();}
+        if let Some(suffix) = name.strip_prefix("root/") {return self.project.parent().unwrap().join(suffix);}
+        self.home.path().join(name)
+    }
+    fn socket(&self) -> PathBuf { self.path("lab/rnative/s") }
     /// The lab agent executable, `bin/<kind>`.
     fn agent(&self) -> PathBuf { self.path(&format!("bin/{}", self.kind)) }
     /// What the lab agent prints for `--version`.
@@ -222,7 +247,7 @@ sys.stdout.buffer.write(json.dumps({'result':json.loads(reply)['result']}).encod
     /// evidence, which needs a real agent session, is planted.
     fn prepare_profile(&mut self) {
         use herdr_farm::worker_supervision::{ProcessIncarnation, SupervisorIdentity};
-        let prepared = self.ok(&["profile", "prepare", "demo", "worker", "--herdr-executable", self.herdr.to_str().unwrap(),
+        let prepared = self.ok(&["profile", "prepare", self.slug, "worker", "--herdr-executable", self.herdr.to_str().unwrap(),
             "--agent-executable", self.agent().to_str().unwrap(), "--execution-home", self.path("agent-home").to_str().unwrap()]);
         let mut profile: FrozenProfile = serde_json::from_value(prepared["profile"].clone()).unwrap();
         #[derive(serde::Serialize)] struct Interaction { session: ResourceIdentity, terminal: &'static str, readiness_manifest: &'static str, prompt_digest: String, acknowledged_unix_ms: i64 }
@@ -251,7 +276,7 @@ sys.stdout.buffer.write(json.dumps({'result':json.loads(reply)['result']}).encod
         fs::write(self.project.join("PROJECT.md"), instructions).unwrap();
         let scope = self.path("scope.json");
         fs::write(&scope, json!({"schema_version":1,"task_id":task,"profile":"worker","domains":[],"paths":[],"pinned_keys":[],"sensitivity":"default"}).to_string()).unwrap();
-        let snapshot = self.ok(&["memory", "demo", "snapshot", "--task", task, "--profile", "worker", "--input-file", scope.to_str().unwrap(), "--worker"]);
+        let snapshot = self.ok(&["memory", self.slug, "snapshot", "--task", task, "--profile", "worker", "--input-file", scope.to_str().unwrap(), "--worker"]);
         let selection = self.path("selection.json");
         fs::write(&selection, json!({"task":task,"binding":binding,"profile":self.profile,
             "knowledge":{"id":snapshot["id"],"revision":1,"digest":snapshot["manifest_hash"]},"repositories":[self.repo.canonicalize().unwrap()]}).to_string()).unwrap();
@@ -259,19 +284,23 @@ sys.stdout.buffer.write(json.dumps({'result':json.loads(reply)['result']}).encod
     }
     /// Draft, owner-sign, import and reserve a launch; returns (approval id, attempt).
     fn reserve(&mut self, instructions: &str) -> (String, AttemptId) {
+        self.reserve_with_validity(instructions, 900)
+    }
+    fn reserve_with_validity(&mut self, instructions: &str, validity: u64) -> (String, AttemptId) {
         self.prepare_profile();
         let selection = self.selection(instructions);
-        let drafted = self.ok(&["launch", "demo", "draft", "--selection", selection.to_str().unwrap(), "--expected-head", &self.head().to_string()]);
+        let drafted = self.ok(&["launch", self.slug, "draft", "--selection", selection.to_str().unwrap(), "--expected-head", &self.head().to_string(), "--validity-seconds", &validity.to_string()]);
         let document = self.path("approval.json");
         fs::write(&document, serde_json::to_vec_pretty(&drafted["approval"]).unwrap()).unwrap();
         assert!(Command::new("/usr/bin/ssh-keygen").args(["-Y", "sign", "-f"]).arg(&self.key).args(["-n", authority::SIGNATURE_NAMESPACE]).arg(&document).output().unwrap().status.success());
-        let approval = self.ok(&["approval", "demo", "import", document.to_str().unwrap(), self.path("approval.json.sig").to_str().unwrap(), "--expected-head", &self.head().to_string()]);
-        let reservation = self.ok(&["launch", "demo", "reserve", "--selection", selection.to_str().unwrap(), "--approval-digest", approval["digest"].as_str().unwrap(), "--expected-head", &self.head().to_string()]);
+        let approval = self.ok(&["approval", self.slug, "import", document.to_str().unwrap(), self.path("approval.json.sig").to_str().unwrap(), "--expected-head", &self.head().to_string()]);
+        let reservation = self.ok(&["launch", self.slug, "reserve", "--selection", selection.to_str().unwrap(), "--approval-digest", approval["digest"].as_str().unwrap(), "--expected-head", &self.head().to_string()]);
         let id = self.state().approvals.iter().find(|a| a.reference.digest == approval["digest"].as_str().unwrap()).unwrap().reference.id.clone();
         (id, AttemptId::new(reservation["record"]["attempt"].as_str().unwrap()).unwrap())
     }
     fn serve(&mut self) {
-        self.server = Some(Command::new("/usr/bin/python3").args(["-c", SERVER]).arg(self.socket()).spawn().unwrap());
+        fs::create_dir_all(self.socket().parent().unwrap()).unwrap();
+        self.server = Some(Command::new("/usr/bin/python3").args(["-c", SERVER]).arg(self.socket()).arg("server").env("HERDR_SOCKET_PATH", self.socket()).env("HERDR_FARM_LAB_ROOT", self.path("lab")).spawn().unwrap());
         let deadline = Instant::now() + Duration::from_secs(10);
         while !self.socket().exists() { assert!(Instant::now() < deadline); std::thread::sleep(Duration::from_millis(10)); }
     }
@@ -315,7 +344,7 @@ sys.stdout.buffer.write(json.dumps({'result':json.loads(reply)['result']}).encod
             assert!(exited.is_none(), "ticker exited ({exited:?}) while waiting for: {stage}\nticker log:\n{}",
                 fs::read_to_string(self.path("root/.ticker.log")).unwrap_or_default());
             if Instant::now() >= deadline {
-                let jobs = self.cli(&["result", "demo", "jobs"]);
+                let jobs = self.cli(&["result", self.slug, "jobs"]);
                 panic!("timed out after {seconds}s waiting for: {stage}\nattempt: {:?}\njobs: {}{}\nticker log:\n{}", self.attempt(attempt).state,
                     String::from_utf8_lossy(&jobs.stdout), String::from_utf8_lossy(&jobs.stderr), fs::read_to_string(self.path("root/.ticker.log")).unwrap_or_default());
             }
@@ -332,6 +361,14 @@ sys.stdout.buffer.write(json.dumps({'result':json.loads(reply)['result']}).encod
             std::thread::sleep(Duration::from_millis(10));
         }
         fs::remove_file(&stop).unwrap();
+    }
+    fn bounded_passes(&self, passes: u32) {
+        let output = Command::new(BIN).env_clear().env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin")
+            .env("HERDR_BIN_PATH", &self.herdr)
+            .env("HERDR_FARM_TEST_TIME_SCALE", include_str!("support/time-scale.txt").trim())
+            .args(["--root", self.path("root").to_str().unwrap(), "ticker", "run", "--passes", &passes.to_string()])
+            .output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     }
     /// Run a fresh ticker for `passes` completed passes (each pass republishes
     /// the executor metrics file), then stop it.
@@ -4136,6 +4173,98 @@ fn proven_launch_server_loss_retires_owned_runtime_and_next_brief_succeeds() {
 }
 
 #[test]
+fn expired_started_brief_releases_ownership_once_and_superseding_task_relaunches() {
+    let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+    // `launch run` checks login as well as the retained transport evidence
+    // used by `draft`/`reserve`. Configure both launches with the same private
+    // setup-token fixture before preparing and freezing the worker profile.
+    let token = lab.path("claude-setup-token");
+    fs::write(&token, "fixture-setup-token\n").unwrap();
+    fs::set_permissions(&token, fs::Permissions::from_mode(0o600)).unwrap();
+    let config = lab.path(".config/herdr-farm/config.toml");
+    let configured = fs::read_to_string(&config).unwrap();
+    fs::write(&config, format!("{configured}\n[worker_isolation.login]\nclaude_token_file={token:?}\n")).unwrap();
+    lab.resume();
+    // Match a coordinator launch's lineage before the lower-level reservation.
+    migration::open_active(&lab.project).unwrap()
+        .prepare_task_lineage("work", "work", "plan", None).unwrap();
+    let (approval, attempt) = lab.reserve_with_validity("Never send an expired brief.", 120);
+    lab.serve();
+    fs::write(lab.path("lab/agent-status"), "working").unwrap();
+    lab.run_until(120, &|| lab.state().operations.iter().any(|o| o.kind == "runtime.worker_brief"));
+    assert_eq!(lab.attempt(&attempt).state, AttemptState::Launching);
+    assert_eq!(lab.events("runtime.launch_started").len(), 1);
+    assert_eq!(lab.count("agent.prompt"), 0);
+    let epoch = lab.state().control.unwrap().epoch;
+    let expiry = lab.state().approvals.iter().find(|a| a.reference.id == approval).unwrap().grant.expires_unix_ms;
+    while jiff::Timestamp::now().as_millisecond() <= expiry {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    lab.run_until(120, &|| lab.attempt(&attempt).termination_observed);
+    assert!(!lab.attempt(&attempt).retains_capacity());
+    assert_eq!(lab.events("attempt.launch_failed").len(), 1);
+    assert_eq!(lab.events("attempt.launch_failed")[0].payload["reason"], "brief_approval_expired");
+    assert!(lab.state().ownership.iter().all(|o| o.attempt.as_ref() != Some(&attempt)));
+    assert_eq!(lab.count("agent.prompt"), 0);
+    lab.run_passes(4);
+    assert_eq!(lab.state().inbox.iter().filter(|i| i.content.kind == "attempt.launch_failure").count(), 1);
+    assert_eq!(lab.events("attempt.launch_failed").len(), 1);
+    assert_eq!(lab.count("agent.prompt"), 0);
+    let control = lab.state().control.unwrap();
+    assert_eq!(control.state, herdr_farm::domain::ProjectState::Active);
+    assert_eq!(control.epoch, epoch);
+    fs::remove_file(lab.path("lab/agent-status")).unwrap();
+    fs::write(lab.path("lab/reset-workspace"), "").unwrap();
+    fs::write(lab.project.join("PROJECT.md"), format!("+++\n[[repos]]\npath={:?}\n+++\nRelaunch after expired approval.\n", lab.repo)).unwrap();
+    // A coordinator replaces the failed task with a new task in its work item.
+    let retry = lab.ok(&["launch", "demo", "run", "--task", "work-retry", "--profile", "worker",
+        "--work-item", "work", "--supersedes", "work",
+        "--repository", lab.repo.to_str().unwrap(), "--plan-output", "docs/retry.md",
+        "--herdr-socket", lab.socket().to_str().unwrap(), "--sign-with", lab.key.to_str().unwrap()]);
+    let next = AttemptId::new(retry["attempt"].as_str().unwrap()).unwrap();
+    assert_ne!(next, attempt);
+    lab.run_until(120, &|| lab.attempt(&next).state == AttemptState::Running);
+    assert_eq!(lab.count("agent.prompt"), 1);
+    let attempts = lab.ok(&["telemetry", "demo", "attempts", "--json"]);
+    let row = attempts["attempts"].as_array().unwrap().iter()
+        .find(|a| a["attempt_id"] == retry["attempt"]).unwrap();
+    assert_eq!(row["task_id"], "work-retry");
+    assert_eq!(row["lineage"], json!({"work_item":"work","role":"plan","supersedes":"work"}));
+    assert_eq!(lab.events("attempt.launch_failed").len(), 1);
+    assert_eq!(lab.state().inbox.iter().filter(|i| i.content.kind == "attempt.launch_failure").count(), 1);
+    let control = lab.state().control.unwrap();
+    assert_eq!(control.state, herdr_farm::domain::ProjectState::Active);
+}
+
+#[test]
+fn started_brief_survives_a_neighbour_root_exclusive_operation() {
+    let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+    let (_, attempt) = lab.reserve_with_validity("Deliver after the neighbouring launch releases the root.", 120);
+    lab.serve();
+    fs::write(lab.path("lab/agent-status"), "working").unwrap();
+    lab.run_until(120, &|| lab.state().operations.iter().any(|o| o.kind == "runtime.worker_brief"));
+    assert_eq!(lab.attempt(&attempt).state, AttemptState::Launching);
+    assert_eq!(lab.events("runtime.launch_started").len(), 1);
+    assert_eq!(lab.count("agent.prompt"), 0);
+    lab.ok(&["new", "--legacy", "neighbour"]);
+    lab.ok(&["pause", "neighbour"]);
+    let lock = fs::OpenOptions::new().read(true).write(true).open(lab.path("root/.execution.lock")).unwrap();
+    lock.lock().unwrap();
+    fs::remove_file(lab.path("lab/agent-status")).unwrap();
+    let started = Instant::now();
+    let mut ticker = lab.spawn();
+    // The neighbouring project's external-operation fixture holds the shared
+    // root barrier while the ticker queues this already-prepared brief.
+    std::thread::sleep(Duration::from_secs(3));
+    lock.unlock().unwrap();
+    lab.wait(&mut ticker, 120, &|| lab.attempt(&attempt).state == AttemptState::Running);
+    lab.stop(ticker);
+    eprintln!("root contention to brief: {:?}", started.elapsed());
+    assert_eq!(lab.count("agent.prompt"), 1);
+    assert!(lab.events("attempt.launch_failed").is_empty());
+}
+
+#[test]
 fn stale_sealed_brief_authority_fails_once_without_prompt_or_retry() {
     for change_digest in [false, true] {
         let mut lab = Lab::new("unknown_usage='allow_with_warning'");
@@ -4289,4 +4418,147 @@ fn signed_launch_renewal_preserves_generation_and_expiry_is_not_revived() {
     db.extend_launch_lease(&operation, expired.revision, until + 1, 50_000).unwrap();
     assert!(db.claim_operation(&operation, expired.revision, "replacement", until + 1, 50_000).is_err());
     assert_eq!(db.read_snapshot(None).unwrap().deliveries.into_iter().find(|d| d.operation == operation).unwrap(), expired);
+}
+
+
+/// Two projects offer root-exclusive launch work in one ticker. A refused native
+/// creation has no target; public-store expiry models a dead launcher. Recovery
+/// must finish before the stream of launch failures in the other project.
+#[test]
+fn shared_root_recovers_an_empty_launch_while_another_project_keeps_launching() {
+    let mut recovery = Lab::new("unknown_usage='allow_with_warning'");
+    let (_, attempt) = recovery.reserve("Recover me");
+    fs::write(recovery.path("lab/refuse-create"), "").unwrap();
+    fs::write(recovery.path("lab/startup-shell"), "").unwrap();
+    recovery.serve();
+    record_dedicated_lab_server(&recovery);
+    let mut ticker = recovery.spawn();
+    recovery.wait(&mut ticker, 60, &|| recovery.count("workspace.create_command") == 1);
+    recovery.stop(ticker);
+    let launch = recovery.state().deliveries.into_iter().find(|d| d.operation.as_str().starts_with("launch-")).unwrap();
+    migration::open_active(&recovery.project).unwrap().expire_claims(launch.lease_until_ms.unwrap()).unwrap();
+    assert!(recovery.events("runtime.launch_target").is_empty());
+    let mut launches = Lab::of_kind_at("claude", "unknown_usage='allow_with_warning'", |p| p.to_owned(), None,
+        Some(recovery.project.parent().unwrap()), "busy");
+    launches.reserve("Keep offering new launch advancement");
+    launches.serve();
+    // Retried observations stay pending even during backoff. A fresh launch in
+    // another project must wait for that safety work rather than take the gap.
+    fs::write(recovery.path("lab/refuse-list"), "").unwrap();
+    let observed_before = recovery.count("workspace.list");
+    recovery.bounded_passes(10);
+    assert_eq!(launches.count("workspace.create_command"), 0);
+    assert_eq!(recovery.state().deliveries.iter().find(|d| d.operation == launch.operation).unwrap().state, DeliveryState::Ambiguous);
+    let observations = recovery.count("workspace.list") - observed_before;
+    assert!((1..=20).contains(&observations));
+    fs::remove_file(recovery.path("lab/refuse-list")).unwrap();
+    recovery.bounded_passes(30);
+    let ended = recovery.attempt(&attempt);
+    assert!(matches!(ended.state, AttemptState::Failed | AttemptState::Lost));
+    assert!(ended.termination_observed && !ended.retains_capacity());
+    assert_eq!(recovery.state().deliveries.iter().find(|d| d.operation == launch.operation).unwrap().state, DeliveryState::PermanentFailure);
+    assert_eq!(recovery.count("workspace.create_command"), 1);
+    assert_eq!(recovery.events("attempt.launch_failed").len(), 1);
+    let failure = recovery.events("attempt.launch_failed").remove(0);
+    assert_eq!(failure.payload["phase"], "launch_lease_expired");
+    assert_eq!(failure.payload["reason"], "dedicated_server_lost");
+    assert_eq!(failure.payload["terminal"], true);
+    let busy_attempt = launches.state().attempts[0].id.clone();
+    let mut ticker = recovery.spawn();
+    recovery.wait(&mut ticker, 120, &|| launches.attempt(&busy_attempt).state == AttemptState::Running);
+    recovery.stop(ticker);
+    assert_eq!(launches.count("workspace.create_command"), 1);
+}
+
+fn record_dedicated_lab_server(lab: &Lab) {
+    let directory = lab.path(&format!("root/.herdr-run/{}-work/herdr", lab.slug));
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(directory.join("server.json"), json!({"project": lab.slug, "task":"work",
+        "pid":lab.server.as_ref().unwrap().id(), "socket":lab.socket()}).to_string()).unwrap();
+}
+
+#[test]
+fn a_native_creation_exceeding_its_budget_is_cancelled_and_ends_typed() {
+    for restart in [false, true] {
+        let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+        let (_, attempt) = lab.reserve("Bounded creation");
+        fs::write(lab.path("lab/hang-create"), "").unwrap();
+        lab.serve();
+        record_dedicated_lab_server(&lab);
+        let mut ticker = lab.spawn_with_env("300", &[("HERDR_FARM_LAUNCH_LEASE_SECS", "1")]);
+        lab.wait(&mut ticker, 60, &|| lab.count("workspace.create_command") == 1);
+        let claimed = lab.state().deliveries.into_iter().find(|d| d.operation.as_str().starts_with("launch-")).unwrap();
+        let until = claimed.lease_until_ms.unwrap();
+        if restart {
+            ticker.0.kill().unwrap();
+            ticker.0.wait().unwrap();
+            ticker = lab.spawn();
+        }
+        lab.wait_for(&mut ticker, "typed native creation failure", &attempt, 90, &|| lab.attempt(&attempt).termination_observed);
+        lab.stop(ticker);
+        assert_eq!(lab.count("workspace.create_command"), 1);
+        assert!(lab.events("runtime.launch_target").is_empty());
+        assert!(!lab.attempt(&attempt).retains_capacity());
+        assert!(matches!(lab.attempt(&attempt).state, AttemptState::Failed | AttemptState::Lost));
+        assert!(lab.server.as_mut().unwrap().try_wait().unwrap().is_some());
+        let delivery = lab.state().deliveries.into_iter().find(|d| d.operation.as_str().starts_with("launch-")).unwrap();
+        assert_eq!(delivery.state, DeliveryState::PermanentFailure);
+        let failure = lab.events("attempt.launch_failed").remove(0);
+        assert!(failure.payload["observed_unix_ms"].as_i64().unwrap() < until, "{failure:?}");
+        assert_eq!(failure.payload["reason"], "launch_creation_timed_out");
+        assert!(matches!(delivery.last_outcome, Some(herdr_farm::operations::Outcome::PermanentFailure {diagnostic})
+            if diagnostic.contains("launch_creation_timed_out")));
+        assert!(!lab.state().events.iter().any(|e| e.kind == "operation.outcome" && e.payload["outcome"]["kind"] == "ambiguous"));
+    }
+}
+
+
+/// A failed termination commit preserves the stop obligation. Its retry delay
+/// must not become a slot for launch advancement in a different project.
+#[test]
+fn shared_root_finishes_a_pending_termination_before_starting_another_project() {
+    let mut termination = Lab::new("unknown_usage='allow_with_warning'");
+    let (_, attempt) = termination.reserve("Stop me first");
+    termination.serve();
+    let mut ticker = termination.spawn();
+    termination.wait(&mut ticker, 120, &|| termination.attempt(&attempt).state == AttemptState::Running);
+    termination.stop(ticker);
+    // A healthy worker's passive polls must allow the next project to launch.
+    let mut healthy = Lab::of_kind_at("claude", "unknown_usage='allow_with_warning'", |p| p.to_owned(), None,
+        Some(termination.project.parent().unwrap()), "healthy");
+    let (_, healthy_attempt) = healthy.reserve("Keep running beside the other projects");
+    healthy.serve();
+    let mut ticker = termination.spawn();
+    termination.wait(&mut ticker, 120, &|| healthy.attempt(&healthy_attempt).state == AttemptState::Running);
+    termination.stop(ticker);
+    assert_eq!(termination.attempt(&attempt).state, AttemptState::Running);
+    assert!(termination.attempt(&attempt).retains_capacity());
+    let connection = rusqlite::Connection::open(termination.project.join(".state/state.db")).unwrap();
+    connection.execute_batch("CREATE TRIGGER defer_termination BEFORE INSERT ON events WHEN NEW.kind='runtime.worker_terminated' BEGIN SELECT RAISE(ABORT,'fixture termination deferred'); END;").unwrap();
+    let current = termination.attempt(&attempt);
+    termination.ok(&["task", "demo", "cancel-attempt", attempt.as_str(), "--expected-revision", &current.revision.to_string(),
+        "--expected-head", &termination.head().to_string(), "--reason", "finish safety work first"]);
+    let mut launches = Lab::of_kind_at("claude", "unknown_usage='allow_with_warning'", |p| p.to_owned(), None,
+        Some(termination.project.parent().unwrap()), "busy");
+    let (_, busy) = launches.reserve("Launch after termination commits");
+    launches.serve();
+    termination.bounded_passes(10);
+    assert_eq!(launches.count("workspace.create_command"), 0);
+    assert!(!termination.attempt(&attempt).termination_observed);
+    assert!(termination.attempt(&attempt).retains_capacity());
+    let log = fs::read_to_string(termination.path("root/.ticker.log")).unwrap();
+    let failures = log.lines().filter(|line| line.contains("canonical-worker:terminate-")
+        && line.contains("fixture termination deferred")).count();
+    assert!((1..=10).contains(&failures), "{log}");
+    connection.execute_batch("DROP TRIGGER defer_termination").unwrap();
+    termination.bounded_passes(30);
+    assert!(termination.attempt(&attempt).termination_observed);
+    assert!(!termination.attempt(&attempt).retains_capacity());
+    assert_eq!(termination.events("runtime.worker_terminated").len(), 1);
+    let mut ticker = termination.spawn();
+    termination.wait(&mut ticker, 120, &|| launches.attempt(&busy).state == AttemptState::Running);
+    termination.stop(ticker);
+    assert_eq!(launches.count("workspace.create_command"), 1);
+    assert_eq!(healthy.attempt(&healthy_attempt).state, AttemptState::Running);
+    assert!(healthy.attempt(&healthy_attempt).retains_capacity());
 }

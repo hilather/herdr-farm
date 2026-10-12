@@ -1253,9 +1253,43 @@ A sealed brief control epoch or configuration digest mismatch is permanent for
 that attempt (`brief_authority_stale`). Preparation checks this fence before
 rendering retained knowledge, and delivery checks it before submission. The
 attempt fails once with one coordinator launch-failure notice, rather than
-retrying unchanged sealed inputs. An already-started worker still retains capacity
-until cancellation or observation proves its termination; this failure alone
-never claims that the worker stopped. No store schema migration is required.
+retrying unchanged sealed inputs. Expired or changed consumed approvals fail as
+`brief_approval_expired`; other permanent authority `Invalid` errors fail as
+`brief_authority_invalid`. The supervisor stops a failed started worker, preserves
+its outputs, and records proven termination before releasing capacity and the task
+pointer. Only the typed `brief_approval_expired` failure also retires runtime
+ownership in that same termination transaction; a failed commit rolls back the
+retirement and its audit event. Revoked barriers and other authority failures
+retain ownership for preservation and review. A coordinator can then launch a
+replacement with fresh signed approval using a new task id, `--work-item WORK` and `--supersedes OLD`,
+without pausing project control. The superseded task must already have matching
+work-item lineage; lineage cannot be added after a task's first attempt.
+Same-task reruns require matching retained lineage and the installed contract.
+No prompt is sent under invalid
+authority. No store schema migration is required.
+
+Previously both the project inventory and root queue rotated launches and briefs
+with equal priority, allowing neighbouring exclusive launch stages to displace
+ready briefs. Brief preparation and delivery now take priority over new launch
+advancement in the project hint inventory and across the root's background queue. An already admitted
+root-exclusive operation finishes first; priority applies at the next admission,
+with rotation retained among briefs. Approval expiry remains a hard authority
+boundary, including while queued. The default signed validity is 900 seconds
+from draft issuance, not reservation or worker start. Root jobs retry launch
+failures after 1 second and brief lock failures after 2 seconds; persisted delivery
+backoff grows from 1 second to 256 seconds. Readiness rejection occurs before
+claiming a brief, so its zero-attempt delivery does not accumulate that persisted
+backoff; the volatile queue delay and project/root rotation govern those retries.
+In the reported 2026-10-11 incident,
+launch confirmation around 09:40Z preceded the first observed expiry at 09:59:37Z
+by about 19 minutes; the 09:42:34Z preparation contention preceded expiry by
+17 minutes 3 seconds. The intervening readiness rejection also shows that contention alone cannot
+explain the entire gap. These log bounds do not reveal the draft issuance time or
+the duration of each neighbouring exclusive stage. The isolated E2E contention
+lab holds the root exclusively for 3 seconds and reports elapsed time to Running;
+the expiry lab waits past its actual 120-second signed grant and verifies supervised
+retirement and a successful launch of a new task superseding the failed task in
+the same work item, with persisted lineage and no operator recovery action.
 
 For stores already affected by #52, observation also recognizes the retained
 terminal `attempt.launch_failed` proof with reason `dedicated_server_lost`, a lost
@@ -1306,8 +1340,12 @@ exact resource. An observed target without a release intent ends promptly with
 typed `launch_lease_expired` failure and a coordinator/operator diagnostic. The
 existing supervised termination path stops the gated worker, proves quiescence
 and retires capacity and ownership. The finished-task sweep then stops a recorded
-dedicated server. Before a target exists, ambiguous creation remains in launch
-observation. Once an unreleased target exists, termination observation takes
+dedicated server. Before a target exists, ambiguous creation observes the
+native workspace inventory. An inventory with no workspace for this attempt
+ends with a typed failure; an
+automatically managed dedicated server is cancelled using a pinned process
+handle before capacity is released. A present workspace retains the existing
+identity adoption path. Once an unreleased target exists, termination observation takes
 priority and records the typed expiry failure exactly once; its next pass stops
 the worker using the updated attempt revision. Cancelled staged launches also
 select termination alone. Released launches continue start observation.
@@ -1341,3 +1379,70 @@ capture still refuses oversized untracked source. Tracked byte omissions carry
 raw Git identities in worktree manifest v5; see [worktree capture budget
 recovery](canonical-worktrees.md). This does not establish a verified result or
 permit repository deletion.
+
+The shared root queue prioritizes recovery (`canonical-worker:recover:` and
+`recover-`), termination, brief preparation and brief delivery before launch
+advancement in any project. Pending safety work blocks new launch advancement
+even during its retry delay. Failed recovery requests remain executable between
+inventory scans. Three failed turns or a wait exceeding the recovery observation
+interval promotes the oldest waiting job within its priority class; refreshed
+inventory offers do not reset that history. Admission starts a new wait and
+spends a promoted job's contention credit; successful completion clears its
+failure count. A repeatedly failing safety job cannot monopolize other safety work.
+Root acquisition holds `.execution-turn.lock` while draining shared holders,
+so new status/start probes cannot overtake an already waiting exclusive effect.
+The existing `.execution.lock` remains the inherited execution barrier.
+
+Native creation has a 15-second external request budget inside the unscaled
+45-second phase; the lease covers the phase plus a five-second commit reserve.
+A creation timeout first tries to retain an observable exact supervisor for
+advancement under the still-live original claim (or normal termination at expiry). Otherwise it cancels only the automatically
+managed server recorded for that project, task and socket, using a pidfd after
+checking the live command, environment and socket incarnation. The existing
+server-disappearance proof releases the reservation, with typed
+`launch_creation_timed_out` for a call cancelled before lease expiry. The server record stays
+available to the ordinary retirement sweep. Operator-managed servers are never
+signalled; their uncertain resources retain capacity. Expired no-target launches
+whose dedicated server remains blocked are cancelled by the same path after a
+bounded workspace observation. Existing tables and retained events carry the
+typed failure; there is no schema change or new dependency.
+
+E2E workflows in `tests/canonical_worker.rs` exercise a shared root with a
+continuously offered launch in one project and empty-workspace recovery in
+another, bounded to 30 completed passes. Projects share the lab owner's key and
+configuration, while repositories, executables and execution homes remain
+separate. A separate hung native creation exceeds
+the configured one-second lease floor, is cancelled within the phase lease,
+and finishes with a typed delivery, no target, no ambiguity and released capacity.
+
+Pending recovery E2E first refuses workspace observation for ten passes, checks
+that the other project's native creation is still held, then permits observation
+and verifies terminal recovery within 30 passes and a new launch reaching Running.
+Termination E2E refuses the termination journal commit, verifies bounded retries
+and held launch advancement across projects, then permits the commit and verifies
+capacity release, one persisted termination and the other launch reaching Running.
+These replace the obsolete queue unit policies that allowed launches during
+recovery/termination cooldown; coverage remains through public CLI workflows.
+
+Passive liveness polls use `canonical-worker:monitor:terminate-` and keep their
+existing observation cadence. They do not hold new launches throughout cooldown.
+The controller distinguishes requested cancellation/completion, failed attempts
+and expired unreleased launches using existing state and events, promotes those
+stops ahead of project-local launch hints, and emits ordinary priority termination
+jobs. The worker still validates the current attempt before any signal. This
+allows additional projects to launch beside healthy workers without weakening
+pending-stop priority.
+
+The pending-stop workflow also starts a second healthy project while the first
+worker is still Running, then holds a third project's launch behind the requested
+stop. It verifies that passive monitoring permits concurrent projects and that
+requested termination blocks advancement until its persisted outcome commits.
+
+A restarted ticker also observes a still-live original creation claim. Its native
+observation deadline leaves five seconds for bridge draining and five for server
+cancellation/receipt; an unresponsive creation is cancelled before the original
+lease expires, without renewal or replay. Expired Claimed rows have the same
+terminal handling as Ambiguous rows, so a deferred expiry service cannot leave
+an empty launch or gated target parked indefinitely. The hung-creation E2E runs
+both with the original ticker and with a killed/restarted ticker, checking that
+the typed failure commits before the original lease deadline in both scenarios.
