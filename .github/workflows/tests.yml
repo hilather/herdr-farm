@@ -5,6 +5,10 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  # Nightly: the full gate on main plus the long-running `nightly` nextest
+  # profile (tests too slow for every PR; see .config/nextest.toml).
+  schedule:
+    - cron: '17 7 * * *'
 
 concurrency:
   group: tests-${{ github.ref }}
@@ -198,6 +202,14 @@ jobs:
           --extract-to ${{ github.workspace }}
           --extract-overwrite
           --partition count:${{ matrix.partition }}/8
+      - name: Run nightly profile
+        if: github.event_name == 'schedule' && matrix.partition == 1
+        run: >
+          cargo nextest run --profile nightly
+          --archive-file nextest-archive.tar.zst
+          --workspace-remap .
+          --extract-to ${{ github.workspace }}
+          --extract-overwrite
       - uses: actions/upload-artifact@v4
         if: always()
         with:
