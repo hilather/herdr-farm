@@ -215,3 +215,7 @@ remaining native observation time. A short lease alone does not count as a
 native timeout. Pending-termination labs keep the ticker alive through the persisted
 termination and next launch after removing journal deferral. Completed passes
 alone do not imply executor completion.
+The journal-deferral trigger raises a SQLite constraint violation, exposed by
+the store as `Conflict`; the lab waits for that queue failure tied to the exact
+attempt. It checks the post-cancellation hint revision and requires the same
+ticker to commit termination after trigger removal before the next launch.

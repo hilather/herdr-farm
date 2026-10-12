@@ -4468,6 +4468,7 @@ fn shared_root_finishes_a_pending_termination_before_starting_another_project() 
         assert_eq!(hint.operation.kind, "runtime.worker_termination");
         assert_eq!(hint.operation.target, attempt.as_str());
         assert_eq!(hint.operation.payload["stop_requested"], true);
+        assert_eq!(hint.delivery_revision, termination.attempt(&attempt).revision);
     }
     let mut launches = Lab::of_kind_at("claude", "unknown_usage='allow_with_warning'", |p| p.to_owned(), None,
         Some(termination.project.parent().unwrap()), "busy");
@@ -4476,9 +4477,14 @@ fn shared_root_finishes_a_pending_termination_before_starting_another_project() 
     // Pass completion does not imply that the background termination reached
     // its commit. In particular, stopping a ten-pass ticker can cancel its
     // initial maintenance batch before the stop is even admitted.
+    // SQLite's trigger abort is a constraint violation, which the store exposes
+    // as Conflict. Match this attempt's queue failure, not the discarded SQLite
+    // message. Removing the trigger below must let this same ticker finish the
+    // stop, ruling out a permanently stale revision as the source of Conflict.
+    let termination_job = format!("canonical-worker:terminate-{}:", attempt.as_str());
     let failures = || fs::read_to_string(termination.path("root/.ticker.log")).unwrap_or_default()
-        .lines().filter(|line| line.contains("canonical-worker:terminate-")
-            && line.contains("fixture termination deferred")).count();
+        .lines().filter(|line| line.contains(&termination_job)
+            && line.contains("background queue: state store: Conflict")).count();
     let mut ticker = termination.spawn();
     termination.wait_for(&mut ticker, "refused termination commit", &attempt, 120, &|| failures() > 0);
     assert_eq!(launches.count("workspace.create_command"), 0);

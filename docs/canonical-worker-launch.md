@@ -1415,6 +1415,10 @@ and verifies terminal recovery within 30 passes and a new launch reaching Runnin
 Termination E2E refuses the termination journal commit, verifies bounded retries
 and held launch advancement across projects, then permits the commit and verifies
 capacity release, one persisted termination and the other launch reaching Running.
+The injected SQLite journal refusal surfaces as the store's `Conflict`, so the
+workflow matches the queue diagnostic for the exact attempt and checks that the
+stop hint carries its post-cancellation revision. The same ticker must finish
+termination after the refusal is removed, excluding a permanent stale-fence loop.
 These replace the obsolete queue unit policies that allowed launches during
 recovery/termination cooldown; coverage remains through public CLI workflows.
 
