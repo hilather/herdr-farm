@@ -4576,6 +4576,25 @@ fn owner_toolchain_acceptance_runs_tests_and_preserves_the_boundary() {
     let tools = repo.join(".tools");
     fs::create_dir(&tools).unwrap();
     fs::write(tools.join("seal"), "owner tool data").unwrap();
+    // A real ELF dependency reached through $ORIGIN/../lib, with a final
+    // symlink whose identity must survive dependency normalization.
+    fs::create_dir(tools.join("bin")).unwrap();
+    fs::create_dir(tools.join("lib")).unwrap();
+    let library_source = fixture.path().join("origin.c");
+    fs::write(&library_source, "int origin_value(void) { return 42; }\n").unwrap();
+    let library = tools.join("lib/liborigin-real.so");
+    let built = Command::new("nice").args(["-n", "19", "ionice", "-c", "3", "gcc", "-shared", "-fPIC", "-o"])
+        .arg(&library).arg(&library_source).output().unwrap();
+    assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+    std::os::unix::fs::symlink("liborigin-real.so", tools.join("lib/liborigin.so")).unwrap();
+    let library_bytes = fs::read(&library).unwrap();
+    let binary_source = fixture.path().join("origin-main.c");
+    fs::write(&binary_source, "extern int origin_value(void); int main(void) { return origin_value() == 42 ? 0 : 1; }\n").unwrap();
+    let built = Command::new("nice").args(["-n", "19", "ionice", "-c", "3", "gcc", "-o"])
+        .arg(tools.join("bin/origin")).arg(&binary_source)
+        .arg(format!("-L{}", tools.join("lib").display()))
+        .args(["-lorigin", "-Wl,-rpath,$ORIGIN/../lib"]).output().unwrap();
+    assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
     let secret = fixture.path().join("owner-secret");
     fs::write(&secret, "OWNER PRIVATE SECRET").unwrap();
     let source = fixture.path().join("probe.rs");
@@ -4618,15 +4637,15 @@ fn main() {
     fs::create_dir(repo.join(".godot")).unwrap();
     fs::write(repo.join(".godot/.keep"), "keep the fixture directory").unwrap();
     fs::write(repo.join(".gitignore"), ".godot/\n.tools/\n").unwrap();
-    fs::write(repo.join("tools/run-tests.sh"), "#!/bin/sh\nset -eu\n[ \"$FIXTURE_VALUE\" = pinned ]\n[ -z \"${HP_VERIFY_COMMIT+x}\" ]\n./.tools/probe \"$1\" \"$2\"\n").unwrap();
+    fs::write(repo.join("tools/run-tests.sh"), "#!/bin/sh\nset -eu\n[ \"$FIXTURE_VALUE\" = pinned ]\n[ -z \"${HP_VERIFY_COMMIT+x}\" ]\n./.tools/bin/origin\n./.tools/probe \"$1\" \"$2\"\n").unwrap();
     fs::set_permissions(repo.join("tools/run-tests.sh"), fs::Permissions::from_mode(0o755)).unwrap();
     git(&repo, &["add", "tools/run-tests.sh", ".gitignore"]);
     git(&repo, &["add", "-f", ".godot/.keep"]);
     git(&repo, &["commit", "-qm", "test command"]);
     let oid = git(&repo, &["rev-parse", "HEAD"]).trim().to_owned();
     let host_net = format!("FIXTURE_HOST_NET={}", fs::read_link("/proc/self/ns/net").unwrap().display());
-    let config = format!("[verification.toolchains.fixture]\npaths=[\"/bin/sh\",\"/usr/bin/env\",{:?}]\nenv=[\"FIXTURE_VALUE=pinned\",{host_net:?}]\ntimeout_seconds=10\n", tools.to_str().unwrap());
-    for case in ["undeclared", "changed-before-install", "changed", "pass", "outbound", "fail", "tracked", "unignored", "timeout"] {
+    let config = format!("[verification.toolchains.fixture]\npaths=[\"/bin/sh\",\"/usr/bin/env\",{:?},{:?}]\nenv=[\"FIXTURE_VALUE=pinned\",{host_net:?}]\ntimeout_seconds=10\n", tools.join("bin/origin").to_str().unwrap(), tools.to_str().unwrap());
+    for case in ["undeclared", "changed-before-install", "changed", "changed-dependency", "pass", "outbound", "fail", "tracked", "unignored", "timeout"] {
         let lab = memory_project_with_config(&if case == "timeout" { config.replace("timeout_seconds=10", "timeout_seconds=1") } else { config.clone() });
         let db_path = state_db(&lab.project);
         let mut store = SqliteStore::open(&db_path).unwrap();
@@ -4671,6 +4690,7 @@ fn main() {
         let submitted = store.submit_result(&serde_json::to_vec(&serde_json::json!({"idempotency_key":"submit","task_id":"tests","contract_revision":1,"contract_digest":installed.digest,
             "attempt_id":attempt,"repository":repo,"base_oid":oid,"candidate_oid":oid,"object_format":"sha1","artifact_manifest":[],"claimed_checks":[],"objects":objects})).unwrap()).unwrap();
         if case == "changed" { fs::write(tools.join("seal"), "changed after signing").unwrap(); }
+        if case == "changed-dependency" { fs::write(&library, b"changed dependency after signing").unwrap(); }
         let policy_path = lab.tmp.path().join("policy.json"); fs::write(&policy_path, &body).unwrap();
         // Exercise an actual /tmp checkout as well: installing private /tmp
         // must preserve copies and tool aliases beneath that path.
@@ -4697,17 +4717,23 @@ fn main() {
             let metadata: serde_json::Value = serde_json::from_str(&metadata).unwrap();
             assert_eq!(metadata["toolchain"]["name"], "fixture");
             assert!(metadata["toolchain"]["paths"].as_array().unwrap().iter().any(|p| p["path"] == tools.join("seal").display().to_string() && p["sha256"].as_str().is_some_and(|s| s.len() == 64)));
+            let pinned = metadata["toolchain"]["paths"].as_array().unwrap();
+            assert!(pinned.iter().any(|p| p["path"] == library.display().to_string()
+                && p["sha256"].as_str().is_some_and(|s| s.len() == 64)));
+            assert!(pinned.iter().any(|p| p["path"] == tools.join("lib/liborigin.so").display().to_string()
+                && p["symlink"] == "liborigin-real.so"));
             assert_eq!(metadata["toolchain"]["timeout_seconds"], 10);
         } else {
             assert_eq!(outcome.state, "rejected", "{case}");
             assert!(outcome.receipt.is_none());
-            assert_eq!(outcome.reason.as_deref(), Some(match case { "changed" => "toolchain_identity_mismatch", "timeout" => "timeout", "tracked" | "unignored" => "tampered_tree", _ => "checks_failed" }), "{case}: {:?}", outcome.reason);
+            assert_eq!(outcome.reason.as_deref(), Some(match case { "changed" | "changed-dependency" => "toolchain_identity_mismatch", "timeout" => "timeout", "tracked" | "unignored" => "tampered_tree", _ => "checks_failed" }), "{case}: {:?}", outcome.reason);
         }
         assert_eq!(fs::read_to_string(&secret).unwrap(), "OWNER PRIVATE SECRET");
         assert_eq!(git(&repo, &["status", "--porcelain"]), "");
         assert!(!repo.join(".godot/cache").exists());
         assert!(!repo.join(".tools/cache").exists());
         if case == "changed" { fs::write(tools.join("seal"), "owner tool data").unwrap(); }
+        if case == "changed-dependency" { fs::write(&library, &library_bytes).unwrap(); }
     }
 }
 
