@@ -23,6 +23,9 @@ use std::{
     process::{Command, Output},
 };
 
+#[path = "support/agent_build_cache.rs"]
+mod agent_build_cache;
+
 const BIN: &str = env!("CARGO_BIN_EXE_herdr-farm");
 
 /// The stand-in Herdr: `--version`, probes and the API bridge as in the other
@@ -234,8 +237,7 @@ impl Lab {
         for (name, version, login, trust) in [("codex", "codex-cli 0.154.0", ".codex/auth.json", ".codex/config.toml"), ("claude", "2.1.0 (Claude Code)", "", ".claude.json")] {
             let source = lab.home.join(format!("bin/{name}.rs"));
             fs::write(&source, agent_source(version, login, trust)).unwrap();
-            let built = Command::new("rustc").args(["--edition", "2021", "-o"]).arg(lab.home.join("bin").join(name)).arg(&source).output().unwrap();
-            assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+            agent_build_cache::copy_agent(&fs::read_to_string(&source).unwrap(), &lab.home.join("bin").join(name));
         }
         for name in ["herdr", "codex", "claude"] {
             fs::set_permissions(lab.home.join("bin").join(name), fs::Permissions::from_mode(0o700)).unwrap();
@@ -253,8 +255,7 @@ impl Lab {
     fn build_agent(&self, name: &str, source: &str) {
         let file = self.home.join(format!("bin/{name}.rs"));
         fs::write(&file, source).unwrap();
-        let built = Command::new("rustc").args(["--edition", "2021", "-o"]).arg(self.home.join("bin").join(name)).arg(&file).output().unwrap();
-        assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+        agent_build_cache::copy_agent(&fs::read_to_string(&file).unwrap(), &self.home.join("bin").join(name));
         fs::set_permissions(self.home.join("bin").join(name), fs::Permissions::from_mode(0o700)).unwrap();
     }
     fn prepare(&self, profile: &str, kind: &str) -> Output {

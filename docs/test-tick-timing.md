@@ -17,6 +17,25 @@ acceptance suite uses real CLI processes and persisted ticker metrics/logs,
 without sockets. It checks three bounded passes, the minimum pass floor, invalid
 values, doctor diagnostics, normal draining, and the unset 15-second cadence.
 
+## Compiled agent fixtures
+
+`tests/support/agent_build_cache.rs` caches Rust stand-ins in
+`CARGO_TARGET_TMPDIR/agents/<digest>/agent`, keyed by the exact source bytes and
+compiler flags. A per-entry OS file lock serializes builds across integration
+test processes; failed or interrupted builds never publish an executable.
+Each lab receives a separate `fs::copy` with mode `0700` at its original agent
+path, preserving per-lab profile freezing and replacement workflows. The copy
+is renamed into place so replacing a running stand-in remains possible.
+Lab-specific constants remain part of the source and therefore get distinct
+cache entries. No test assertions or production configuration change.
+
+The cache persists across test runs. Remove `target/tmp/agents` (or the
+`agents` directory under a custom Cargo target's temporary directory) after
+changing Rust toolchains to rebuild fixtures. To measure cold-cache compiler
+counts, clear that directory before the run and count test-time `rustc`
+invocations separately from Cargo's crate builds; a warm-cache run should
+compile only previously unseen source/flag combinations.
+
 ## Policies scaled
 
 | Policy | Production default | Rule |

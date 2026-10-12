@@ -123,7 +123,7 @@ impl Lab {
         fs::write(self.path("bin/herdr"), "#!/bin/sh\n[ \"$1\" = --version ] && echo 'herdr 0.9.1'\n").unwrap();
         let (agent, source) = (self.path("bin/claude"), self.path("bin/claude.rs"));
         fs::write(&source, "fn main(){if std::env::args().nth(1).as_deref()==Some(\"--version\"){println!(\"2.1.0 (Claude Code)\");return}loop{std::thread::park()}}").unwrap();
-        assert!(Command::new("rustc").args(["--edition", "2021", "-o"]).arg(&agent).arg(&source).status().unwrap().success());
+        support::agent_build_cache::copy_agent(&fs::read_to_string(&source).unwrap(), &agent);
         for path in [self.path("bin/herdr"), agent] { fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap(); }
     }
     /// Prepare `worker` over the lab binaries; only the native interaction
