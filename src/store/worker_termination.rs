@@ -63,7 +63,7 @@ impl SqliteStore {
 fn validate_preservation(record:&AttemptInputRecord,snapshots:&[WorktreeSnapshotReference])->Result<()> {
     let plans=if record.inputs.repositories.is_empty(){vec![]}else{worktree_plans(&record.inputs,&record.attempt).map_err(StoreError::Invalid)?};
     if !snapshots.iter().map(|s|&s.plan).eq(plans.iter()) || snapshots.iter().any(|s|
-        s.digest.len()!=64 || !s.digest.bytes().all(|b|b.is_ascii_digit() || (b'a'..=b'f').contains(&b))) {
+        if s.capture_incomplete.is_some() { !s.digest.is_empty() } else {s.digest.len()!=64 || !s.digest.bytes().all(|b|b.is_ascii_digit() || (b'a'..=b'f').contains(&b))}) {
         return Err(StoreError::Invalid("termination requires exact repository preservation references".into()));
     }
     Ok(())
@@ -295,6 +295,18 @@ impl SqliteStore {
         ] {
             tx.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES(?1,?2,?3,1,?4)",params![kind,entity,integer(revision)?,value.map_err(|_|StoreError::Invalid("termination event encoding failed".into()))?])?;
         }
+        capture_incomplete_notice(&tx,&receipt.repository_snapshots,&attempt)?;
+        // An expired brief never authorized a prompt. Exact
+        // supervisor termination is enough to retire its launch ownership;
+        // waiting for a later terminal inventory can spuriously pause control.
+        let brief_failure: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM events WHERE kind='attempt.launch_failed' AND entity=?1
+             AND json_extract(payload,'$.reason')='brief_approval_expired')",
+            [attempt.id.as_str()], |row| row.get(0))?;
+        if brief_failure {
+            super::ownership::relinquish_ended(&tx, &owner, "failed brief worker termination proven",
+                serde_json::to_value(receipt).map_err(|_| StoreError::Invalid("termination evidence encoding failed".into()))?)?;
+        }
         output_omission_notice(&tx,receipt.output_snapshot.as_ref(),&attempt)?;
         super::inbox::ended_notice(&tx, &attempt)?;
         super::consumer_bindings::reconcile_task(&tx,attempt.task.as_str(),budget)?;
@@ -462,6 +474,7 @@ impl SqliteStore {
             super::ownership::relinquish_ended(&tx, &owned, "staged worker termination proven",
                 serde_json::to_value(receipt).map_err(|error| StoreError::Invalid(error.to_string()))?)?;
         }
+        capture_incomplete_notice(&tx,&receipt.repository_snapshots,&attempt)?;
         output_omission_notice(&tx,receipt.output_snapshot.as_ref(),&attempt)?;
         super::inbox::ended_notice(&tx, &attempt)?;
         super::consumer_bindings::reconcile_task(&tx,attempt.task.as_str(),budget)?;
@@ -673,4 +686,12 @@ fn output_omission_notice(db:&Connection,reference:Option<&AttemptOutputReferenc
     if reference.omitted_entries==0{return Ok(());}
     super::inbox::result_notice(db,"attempt.output_omitted",attempt.id.as_str(),attempt.task.as_str(),attempt.id.as_str(),reference.digest.as_deref().unwrap(),
         &format!("{} output entries omitted from retained snapshot; original files remain at {}. Inspect the receipt-bound output manifest for paths, bytes and reasons.",reference.omitted_entries,reference.source))
+}
+
+fn capture_incomplete_notice(db:&Connection,references:&[WorktreeSnapshotReference],attempt:&Attempt)->Result<()> {
+    let incomplete=references.iter().filter(|r|r.capture_incomplete.is_some()).collect::<Vec<_>>();
+    if incomplete.is_empty() {return Ok(());}
+    let details=incomplete.iter().map(|r|format!("{} ({:?})",r.plan.path,r.capture_incomplete.as_ref().unwrap())).collect::<Vec<_>>().join(", ");
+    super::inbox::result_notice(db,"attempt.capture_incomplete",attempt.id.as_str(),attempt.task.as_str(),attempt.id.as_str(),"capture_incomplete",
+        &format!("Worker termination proven; repository capture exceeded bounds. Worktrees retained for operator recovery: {details}"))
 }

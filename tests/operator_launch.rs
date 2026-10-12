@@ -1903,6 +1903,28 @@ fn owner_toolchain_policy_refuses_verifier_control_environment() {
 }
 
 #[test]
+fn owner_toolchain_policy_names_unavailable_paths_and_bounds() {
+    let lab = Lab::with_herdr(STATIC_HERDR);
+    let path = lab.home.join(".config/herdr-farm/config.toml");
+    let missing = lab.home.join("missing-toolchain");
+    let mut config = fs::read_to_string(&path).unwrap();
+    config.push_str(&format!("\n[verification.toolchains.missing]\npaths=[{missing:?}]\n"));
+    config.push_str("\n[verification.toolchains.invalid]\npaths=['/../invalid']\n");
+    config.push_str(&format!("\n[verification.toolchains.paths]\npaths=[{}]\n", ["'/bin/sh'"; 33].join(",")));
+    config.push_str("\n[verification.toolchains.timeout]\npaths=['/bin/sh']\ntimeout_seconds=3601\n");
+    fs::write(path, config).unwrap();
+    for (name, reason, detail) in [
+        ("missing", "toolchain path unavailable", missing.to_str().unwrap()),
+        ("invalid", "invalid toolchain path", "/../invalid"),
+        ("paths", "toolchain exceeds bounds", "paths > 32"),
+        ("timeout", "toolchain exceeds bounds", "timeout"),
+    ] {
+        let error = lab.fail(&["result", "demo", "toolchain-policy", name, "--", "/bin/sh", "-c", "true"]);
+        assert!(error.contains(reason) && error.contains(detail), "{error}");
+    }
+}
+
+#[test]
 fn launch_run_busy_execution_lock_exhaustion_keeps_the_resumable_step_report() {
     use std::{io::{BufRead, BufReader}, process::Stdio, time::{Duration, Instant}};
     let mut lab = Lab::new();
