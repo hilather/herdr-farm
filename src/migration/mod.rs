@@ -652,7 +652,7 @@ fn open_published_with(project: &Path, enforce_control: bool, open: fn(&Path) ->
     ensure!(db.import_operation_count()?==journal.plan.operations.len() as u64,"store imported operation count mismatch");
     let receipt=db.import_receipt()?;
     ensure!(receipt==(journal.plan.digest,journal.plan.sources.iter().filter(|s|s.kind!="backup").count() as u64,journal.plan.tasks.len() as u64),"store import identity mismatch");
-    if enforce_control {ensure!(marker.reconciliation_required==db.project_control()?.map(|c|c.reconciliation_required).unwrap_or(true),"control/format publication interrupted; run migration recover before runtime commands");}
+    if enforce_control&&marker.reconciliation_required!=db.project_control()?.map(|c|c.reconciliation_required).unwrap_or(true) {return Err(crate::store::StoreError::ControlPublicationPending.into());}
     Ok(db)
 }
 
@@ -729,7 +729,7 @@ pub(crate) fn publish_control_marker(project:&Path,db:&SqliteStore)->Result<()> 
 
 mod identity_inventory;
 pub(crate) use identity_inventory::publish_control_marker_controlled;
-pub use identity_inventory::{open_active_controlled,open_active_scoped,read_identity_inventory,read_routine_queued,read_launch_target_inventory,read_worktree_inventory,read_observation_head,read_controller_effect_hint,read_controller_dispatch_hint,read_routine_execution_hint};
+pub use identity_inventory::{repair_control_publication,open_active_controlled,open_active_scoped,read_identity_inventory,read_routine_queued,read_launch_target_inventory,read_worktree_inventory,read_observation_head,read_controller_effect_hint,read_controller_dispatch_hint,read_routine_execution_hint};
 
 pub(crate) use identity_inventory::read_worktree_operation;
 
