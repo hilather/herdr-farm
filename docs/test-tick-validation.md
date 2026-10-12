@@ -22,6 +22,74 @@ an isolated rerun. A later canonical budget run hit transient SQLite disk I/O;
 its isolated rerun passed. The CLI submission workflow now retries busy ingress
 through the public CLI/store entry points, and its focused rerun passed.
 
+## GitHub Actions merge gate (CI-PORTABILITY-2)
+
+The `ci` nextest profile runs all tests, including `canonical_worker`,
+`operator_launch`, `worker_login_share`, `replay_suite`, `thread_sandbox`,
+and the formerly excluded individual tests. There is no CI skip list.
+It uses four test threads per runner, eight count partitions, and one retry:
+a pass on retry is reported as flaky; two failures block the gate.
+The default profile remains available for full local validation.
+
+Both archive build and test jobs create a private `/tmp/hf-ci-XXXXXX`
+directory and export `TMPDIR` and `CARGO_TARGET_TMPDIR` through `GITHUB_ENV`.
+Do not use `runner.temp`: `/home/runner/work/_temp` and the checkout are
+inside the runner's owner home. Workers protect owner homes with recursive
+read-only mounts and hide owner secret directories. An execution home beneath
+that protected home can fail while creating the shared-login mount point
+(`worker isolation refused: .../exec-home/.codex/auth.json`).
+Moving temporary fixtures outside that home preserves these protections;
+it does not require relaxing the owner-home protections or changing the schema.
+Sandbox fixtures that previously
+used compile-time `CARGO_TARGET_TMPDIR` now use runtime `TMPDIR`, so extracted
+archives do not retain their builder's scratch location.
+
+A product fix scopes each private-directory pass to its own keep entries.
+Previously `/tmp` also consumed the nested thread-homes keep entries, restored
+the home twice, and failed with `File exists`. This affects real thread projects
+under `/tmp`, not only tests; the existing workflow exercises the same layout
+and still checks that other homes and owner secrets remain hidden.
+
+The existing thread sandbox workflow also checks a fake runner checkout under
+its declared owner home: writes and creation of `target/tmp/execution-home`
+must fail read-only while its external execution home remains writable.
+Canonical-worker and replay ticker helpers capture stderr in each temporary
+lab and include it alongside the ticker log in `ticker exited` panics. Failed launches can leave no
+reachable work and cause the scaled ticker idle exit; the old CI output did
+not capture enough evidence to establish that as the cause of every exit.
+The health helper retains main's persisted-evaluation synchronization with a
+60-second wait margin for loaded runners, matching the prior portability patch.
+The no-`XDG_RUNTIME_DIR` case uses the product's short private socket fallback;
+CI does not depend on a desktop runtime directory.
+
+A manual login-sharing run on this branch with a fake owner home, checkout
+and `work/_temp` below it, and no `XDG_RUNTIME_DIR`, passed. That layout
+alone therefore did not reproduce the old login refusal locally. The same
+thread-sandbox reproduction hit the existing native protocol argument bound
+before launch; a short external-scratch rerun without `XDG_RUNTIME_DIR`
+passed in this session. These probes do not establish the cause of
+the old runner ticker exits.
+
+Local resumed validation selected all 135 tests in the five sandbox suites
+plus `telemetry_health`: 63 passed and 72 failed. Both thread-sandbox tests
+and login sharing passed. The seven remaining formerly excluded tests had
+two passes and five failures. Socket-denied failures remain enabled in CI;
+three canonical workflows that initially hit store deadlines reached the
+socket restriction on focused rerun. The admission deadline remained
+unresolved. Operator native-probe exits did not all expose their cause.
+The health clock-window test passed on focused rerun, but the ticker-health
+interval assertion still failed: under the shared test scale the five-minute
+interval is six seconds, so a sufficiently slow sequence can permit another
+evaluation. A one-pass helper experiment could not finish deferred health
+within the scaled shutdown drain and was reverted; its assertions remain
+intact. Clippy completed with no diagnostics on changed lines. These
+remaining failures need runner evidence before further changes or exclusions.
+
+Hosted runners still require the workflow's AppArmor user-namespace setup,
+OpenSSH, and pinned SQLite. Namespace/mount or native launch failures may need
+another iteration with runner logs; the steward pushes and runs Actions.
+The local hard sandbox cannot validate successful socket-backed workflows.
+
 ## Before and after
 
 Baseline means the untouched archive in this same sandbox. Socket-blocked groups

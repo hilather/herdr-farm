@@ -290,7 +290,7 @@ sys.stdout.buffer.write(json.dumps({'result':json.loads(reply)['result']}).encod
         command.env_clear();
         for (name, value) in extra { command.env(name, value); }
         Ticker(command.env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", &self.herdr).env("HERDR_FARM_TELEMETRY_COLLECT_SECS", interval)
-            .args(["--root", self.path("root").to_str().unwrap(), "ticker", "run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap())
+            .args(["--root", self.path("root").to_str().unwrap(), "ticker", "run"]).stdout(Stdio::null()).stderr(fs::File::create(self.path("ticker.stderr")).unwrap()).spawn().unwrap())
     }
     fn wait(&self, ticker: &mut Ticker, seconds: u64, predicate: &dyn Fn() -> bool) {
         let deadline = Instant::now() + Duration::from_secs(seconds.max(15));
@@ -299,7 +299,7 @@ sys.stdout.buffer.write(json.dumps({'result':json.loads(reply)['result']}).encod
         // waited on. Back off to 250 ms; the deadline is unchanged.
         let mut pause = Duration::from_millis(20);
         while !predicate() {
-            assert!(ticker.0.try_wait().unwrap().is_none(), "ticker exited");
+            assert!(ticker.0.try_wait().unwrap().is_none(), "ticker exited; stderr:\n{}\nticker log:\n{}", fs::read_to_string(self.path("ticker.stderr")).unwrap_or_default(), fs::read_to_string(self.path("root/.ticker.log")).unwrap_or_default());
             assert!(Instant::now() < deadline, "{}", fs::read_to_string(self.path("root/.ticker.log")).unwrap_or_default());
             std::thread::sleep(pause);
             pause = (pause * 2).min(Duration::from_millis(250));
@@ -312,7 +312,8 @@ sys.stdout.buffer.write(json.dumps({'result':json.loads(reply)['result']}).encod
         let mut pause = Duration::from_millis(20);
         while !predicate() {
             let exited = ticker.0.try_wait().unwrap();
-            assert!(exited.is_none(), "ticker exited ({exited:?}) while waiting for: {stage}\nticker log:\n{}",
+            assert!(exited.is_none(), "ticker exited ({exited:?}) while waiting for: {stage}\nticker stderr:\n{}\nticker log:\n{}",
+                fs::read_to_string(self.path("ticker.stderr")).unwrap_or_default(),
                 fs::read_to_string(self.path("root/.ticker.log")).unwrap_or_default());
             if Instant::now() >= deadline {
                 let jobs = self.cli(&["result", "demo", "jobs"]);
@@ -3468,7 +3469,7 @@ fn a_worker_that_exits_during_its_own_verification_ends_after_the_verdict_withou
     // Several termination observations pass while the check runs: none records, none contends.
     let began = Instant::now();
     while began.elapsed() < Duration::from_secs(4) {
-        assert!(ticker.0.try_wait().unwrap().is_none(), "ticker exited");
+        assert!(ticker.0.try_wait().unwrap().is_none(), "ticker exited; stderr:\n{}\nticker log:\n{}", fs::read_to_string(lab.path("ticker.stderr")).unwrap_or_default(), fs::read_to_string(lab.path("root/.ticker.log")).unwrap_or_default());
         assert!(!lab.attempt(&attempt).termination_observed, "terminated under its own running check");
         std::thread::sleep(Duration::from_millis(200));
     }
@@ -3510,7 +3511,7 @@ fn a_launch_outlasts_an_operator_holding_the_root_after_its_workspace_creation()
     file.lock().unwrap();
     let held = Instant::now();
     while held.elapsed() < Duration::from_secs(45) {
-        assert!(ticker.0.try_wait().unwrap().is_none(), "ticker exited");
+        assert!(ticker.0.try_wait().unwrap().is_none(), "ticker exited; stderr:\n{}\nticker log:\n{}", fs::read_to_string(lab.path("ticker.stderr")).unwrap_or_default(), fs::read_to_string(lab.path("root/.ticker.log")).unwrap_or_default());
         assert_ne!(lab.attempt(&attempt).state, AttemptState::Running, "ran while the root was held exclusively");
         std::thread::sleep(Duration::from_millis(500));
     }

@@ -241,13 +241,13 @@ sys.stdout.buffer.write(json.dumps({'result':json.loads(reply)['result']}).encod
     }
     pub(crate) fn spawn(&self) -> Ticker {
         Ticker(Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", &self.herdr)
-            .args(["--root", self.root().to_str().unwrap(), "ticker", "run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap())
+            .args(["--root", self.root().to_str().unwrap(), "ticker", "run"]).stdout(Stdio::null()).stderr(fs::File::create(self.path("ticker.stderr")).unwrap()).spawn().unwrap())
     }
     pub(crate) fn wait(&self, ticker: &mut Ticker, seconds: u64, predicate: &dyn Fn() -> bool) {
         let deadline = Instant::now() + Duration::from_secs((seconds / 4).max(15));
         let mut pause = Duration::from_millis(20);
         while !predicate() {
-            assert!(ticker.0.try_wait().unwrap().is_none(), "ticker exited");
+            assert!(ticker.0.try_wait().unwrap().is_none(), "ticker exited; stderr:\n{}\nticker log:\n{}", fs::read_to_string(self.path("ticker.stderr")).unwrap_or_default(), fs::read_to_string(self.path("root/.ticker.log")).unwrap_or_default());
             assert!(Instant::now() < deadline, "{}", fs::read_to_string(self.path("root/.ticker.log")).unwrap_or_default());
             std::thread::sleep(pause);
             pause = (pause * 2).min(Duration::from_millis(250));

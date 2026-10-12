@@ -387,11 +387,11 @@ const SANDBOX: &str = concat!(
     r#"if [ -d "/proc/self/fd/$n" ]; then /usr/bin/mkdir -- "$root/$rel" || fail "$p"; else : > "$root/$rel" || fail "$p"; fi; "#,
     r#"/usr/bin/mount -c --bind "/proc/self/fd/$n" "$root/$rel" || fail "$p"; eval "exec $n<&-"; n=$((n+1));; esac; done; "#,
     r#"/usr/bin/mount -o remount,bind,ro,nosuid,nodev,noexec "$root" || fail "$root"; fi; "#,
-    r#"for d in "$@"; do case $d in --) break;; private:*) d=${d#private:}; if [ -d "$d" ] && [ ! -L "$d" ]; then n=3; "#,
-    r#"for a in "$@"; do case $a in --) break;; keep:"$d"/*) [ "$n" -le 9 ] || fail keep; p=${a#keep:}; "#,
+    r#"for d in "$@"; do case $d in --) break;; private:*) d=${d#private:}; if [ -d "$d" ] && [ ! -L "$d" ]; then n=3; active=0; "#,
+    r#"for a in "$@"; do case $a in --) break;; private:*) active=0; [ "${a#private:}" = "$d" ] && active=1;; keep:"$d"/*) [ "$active" = 1 ] || continue; [ "$n" -le 9 ] || fail keep; p=${a#keep:}; "#,
     r#"eval "exec $n<\"\$p\"" || fail "$p"; n=$((n+1));; esac; done; "#,
-    r#"/usr/bin/mount -t tmpfs -o nosuid,nodev,mode=1777 herdr-farm-private "$d" || fail "$d"; n=3; "#,
-    r#"for a in "$@"; do case $a in --) break;; keep:"$d"/*) p=${a#keep:}; if [ -d "/proc/self/fd/$n" ]; then "#,
+    r#"/usr/bin/mount -t tmpfs -o nosuid,nodev,mode=1777 herdr-farm-private "$d" || fail "$d"; n=3; active=0; "#,
+    r#"for a in "$@"; do case $a in --) break;; private:*) active=0; [ "${a#private:}" = "$d" ] && active=1;; keep:"$d"/*) [ "$active" = 1 ] || continue; p=${a#keep:}; if [ -d "/proc/self/fd/$n" ]; then "#,
     r#"/usr/bin/mkdir -- "$p" && /usr/bin/mount -c --rbind "/proc/self/fd/$n" "$p" || fail "$p"; "#,
     r#"else { case ${p#"$d"/} in */*) /usr/bin/mkdir -p -- "${p%/*}";; esac && : > "$p" && "#,
     r#"/usr/bin/mount -c --bind "/proc/self/fd/$n" "$p"; } || fail "$p"; fi; "#,
@@ -1228,8 +1228,10 @@ impl Isolation {
         let mut args = vec![self.root.clone()];
         args.extend(self.expose.iter().map(|p| format!("expose:{p}")));
         for (dir, keep) in &self.private {
-            args.extend(keep.iter().map(|p| format!("keep:{p}")));
+            // Scope keep entries to this pass: a nested private directory may
+            // preserve a path already beneath an enclosing pass's exposure.
             args.push(format!("private:{dir}"));
+            args.extend(keep.iter().map(|p| format!("keep:{p}")));
         }
         for (quarantine, common) in &self.git {
             args.extend([format!("quarantine:{quarantine}"), format!("overlay:{common}")]);

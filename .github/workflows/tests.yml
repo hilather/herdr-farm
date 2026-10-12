@@ -21,6 +21,12 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - name: Prepare test scratch outside owner home
+        run: |
+          # runner.temp is under /home/runner, protected read-only by workers.
+          scratch=$(mktemp -d /tmp/hf-ci-XXXXXX)
+          echo "TMPDIR=$scratch" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_TMPDIR=$scratch" >> "$GITHUB_ENV"
       # herdr-farm requires SQLite 3.53.4+ (Ubuntu 24.04 ships 3.45.1).
       # Built from the release source, pinned by SHA-256, cached per version.
       - name: Cache SQLite
@@ -66,9 +72,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        partition: [1, 2, 3, 4]
+        partition: [1, 2, 3, 4, 5, 6, 7, 8]
     steps:
       - uses: actions/checkout@v4
+      - name: Prepare test scratch outside owner home
+        run: |
+          # runner.temp is under /home/runner, protected read-only by workers.
+          scratch=$(mktemp -d /tmp/hf-ci-XXXXXX)
+          echo "TMPDIR=$scratch" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_TMPDIR=$scratch" >> "$GITHUB_ENV"
       # herdr-farm requires SQLite 3.53.4+ (Ubuntu 24.04 ships 3.45.1).
       # Built from the release source, pinned by SHA-256, cached per version.
       - name: Cache SQLite
@@ -113,18 +125,16 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: nextest-archive
-      - name: Run tests (partition ${{ matrix.partition }}/4)
+      - name: Run tests (partition ${{ matrix.partition }}/8)
         # Tests find the CLI through the compile-time CARGO_BIN_EXE path, so
         # unpack target/ into the workspace at the path it was built at.
-        env:
-          TMPDIR: ${{ runner.temp }}
         run: >
           cargo nextest run --profile ci
           --archive-file nextest-archive.tar.zst
           --workspace-remap .
           --extract-to ${{ github.workspace }}
           --extract-overwrite
-          --partition count:${{ matrix.partition }}/4
+          --partition count:${{ matrix.partition }}/8
       - uses: actions/upload-artifact@v4
         if: always()
         with:
