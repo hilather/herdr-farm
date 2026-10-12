@@ -17,14 +17,14 @@ fn publication(project:&Path,budget:&mut Budget)->Result<(std::path::PathBuf,Pub
 /// controlled writable handle returned to the caller. No intervening readonly
 /// connection can certify a subsequently reopened database.
 pub fn open_active_controlled(project:&Path,control:crate::store::controlled::ReadControl)->Result<crate::store::controlled::ControlledStore> {
-    open_active_checked(project,control,true)
+    open_active_checked(project,control,true,true)
 }
 /// Foreground selected-row reads retain publication and file-identity checks.
 /// Whole-store integrity verification remains available through the administrative opener.
 pub fn open_active_scoped(project:&Path,control:crate::store::controlled::ReadControl)->Result<crate::store::controlled::ControlledStore> {
-    open_active_checked(project,control,false)
+    open_active_checked(project,control,false,true)
 }
-fn open_active_checked(project:&Path,control:crate::store::controlled::ReadControl,integrity:bool)->Result<crate::store::controlled::ControlledStore> {
+fn open_active_checked(project:&Path,control:crate::store::controlled::ReadControl,integrity:bool,enforce_control:bool)->Result<crate::store::controlled::ControlledStore> {
     control.check()?;
     let mut budget=Budget::new(50*1024*1024,0,control.deadline(),control.cancellation())?;
     let(project,expected)=publication(project,&mut budget)?;control.check()?;
@@ -33,7 +33,7 @@ fn open_active_checked(project:&Path,control:crate::store::controlled::ReadContr
         else {crate::store::controlled::ControlledStore::open_scoped(&path,control.clone())?};
     ensure!(db.import_operation_count()?==expected.operations,"store imported operation count mismatch");
     ensure!(db.import_receipt()?==(expected.digest,expected.sources,expected.tasks),"store import identity mismatch");
-    ensure!(db.project_control()?.map(|c|c.reconciliation_required).unwrap_or(true)==expected.reconciliation_required,"control/format publication interrupted; run migration recover before runtime commands");
+    if enforce_control&&db.project_control()?.map(|c|c.reconciliation_required).unwrap_or(true)!=expected.reconciliation_required {return Err(crate::store::StoreError::ControlPublicationPending.into());}
     control.check()?;Ok(db)
 }
 /// DB-first publication under the caller's retained project and record locks.
@@ -50,9 +50,24 @@ pub(crate) fn publish_control_marker_controlled(project:&Path,db:&crate::store::
     let marker=Format{version:1,runtime:"sqlite-v2".into(),memory:current.memory,migration:old.digest,reconciliation_required:required};
     let temporary=project.join(".state/migration/control-format.next");
     control.check()?;
-    if exists(&temporary){ensure!(fs::symlink_metadata(&temporary)?.is_file(),"invalid control marker temporary");fs::remove_file(&temporary)?;}
-    control.check()?;write_new(&temporary,&serde_json::to_vec_pretty(&marker)?)?;
-    control.check()?;fs::rename(temporary,project.join(".state/format.json"))?;
+    let pending=control.io(||match fs::symlink_metadata(&temporary) {
+        Err(error) if error.kind()==std::io::ErrorKind::NotFound=>Ok(None),
+        result=>result.map(Some),
+    })?;
+    if let Some(metadata)=pending {ensure!(metadata.is_file(),"invalid control marker temporary");control.io(||fs::remove_file(&temporary))?;}
+    control.check()?;
+    let bytes=serde_json::to_vec_pretty(&marker)?;
+    let mut file=control.io(||OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(&temporary))?;
+    let mut remaining=bytes.as_slice();
+    while !remaining.is_empty() {
+        let written=control.io(||file.write(remaining))?;
+        ensure!(written>0,"control marker write made no progress");
+        remaining=&remaining[written..];
+    }
+    control.io(||file.sync_all())?;
+    let directory=control.io(||File::open(project.join(".state/migration")))?;
+    control.io(||directory.sync_all())?;
+    control.check()?;control.io(||fs::rename(&temporary,project.join(".state/format.json")))?;
     // Once renamed, finish the existing durability boundary. Do not claim the
     // marker was unpublished if cancellation arrives during these fsync calls.
     sync_dir(&project.join(".state"))?;sync_dir(&project.join(".state/migration"))?;Ok(())
@@ -122,6 +137,41 @@ pub fn read_observation_head(project:&Path,budget:&mut Budget)->Result<u64> {
     let(project,publication)=publication(project,budget)?;
     crate::store::identity_inventory::read_head(&project.join(".state/state.db"),&publication,budget)
 }
+
+/// Ticker maintenance owns the project and record locks while repairing the
+/// derived marker. Import identity and the latest durable control event must
+/// certify the DB; arbitrary ownership/provenance mismatches remain errors.
+pub fn repair_control_publication(project:&Path,guard:&crate::execution_guard::ProjectGuard,control:&crate::store::controlled::ReadControl)->Result<bool> {
+    control.check()?;guard.check_project(project)?;
+    let _record=crate::execution_guard::exclusive_file(&project.join(".state/lock"))?;
+    let mut budget=Budget::new(50*1024*1024,0,control.deadline(),control.cancellation())?;
+    let (_,expected)=publication(project,&mut budget)?;
+    let mut db=open_active_checked(project,control.clone(),false,false)?;
+    let state=db.project_control()?.context("canonical control missing")?;
+    let temporary=project.join(".state/migration/control-format.next");
+    let pending=control.io(||match fs::symlink_metadata(&temporary) {
+        Err(error) if error.kind()==std::io::ErrorKind::NotFound=>Ok(None),
+        result=>result.map(Some),
+    })?;
+    let matched=state.reconciliation_required==expected.reconciliation_required;
+    if matched&&pending.is_none() {return Ok(false);}
+    if let Some(metadata)=pending {use std::os::unix::fs::MetadataExt;ensure!(metadata.is_file()&&metadata.nlink()==1,"invalid control marker temporary");}
+    if !matched {db.certify_control_publication()?;}
+    guard.check_project(project)?;
+    let action=if matched {crate::domain::ControlPublicationRepairAction::DiscardPending}else{crate::domain::ControlPublicationRepairAction::Republish};
+    // Persist the decision first: cancellation after rename/unlink cannot erase
+    // its audit. A retry of the same control revision and action is idempotent.
+    db.record_control_publication_repair(expected.reconciliation_required,action)?;
+    if matched {
+        control.io(||fs::remove_file(&temporary))?;
+        let directory=control.io(||File::open(project.join(".state/migration")))?;
+        control.io(||directory.sync_all())?;
+    } else {
+        publish_control_marker_controlled(project,&db,control)?;
+    }
+    Ok(true)
+}
+
 
 #[cfg(test)]
 mod tests {
