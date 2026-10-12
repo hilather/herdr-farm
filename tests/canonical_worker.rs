@@ -4460,6 +4460,15 @@ fn shared_root_finishes_a_pending_termination_before_starting_another_project() 
     let current = termination.attempt(&attempt);
     termination.ok(&["task", "demo", "cancel-attempt", attempt.as_str(), "--expected-revision", &current.revision.to_string(),
         "--expected-head", &termination.head().to_string(), "--reason", "finish safety work first"]);
+    for turn in 0..4 {
+        let mut budget = herdr_farm::store::identity_inventory::Budget::new(2 * 1024 * 1024, 1024,
+            Instant::now() + Duration::from_secs(5), Default::default()).unwrap();
+        let hint = migration::read_controller_dispatch_hint(&termination.project, &mut budget, turn,
+            jiff::Timestamp::now().as_millisecond(), true).unwrap().expect("cancelled worker must offer a stop");
+        assert_eq!(hint.operation.kind, "runtime.worker_termination");
+        assert_eq!(hint.operation.target, attempt.as_str());
+        assert_eq!(hint.operation.payload["stop_requested"], true);
+    }
     let mut launches = Lab::of_kind_at("claude", "unknown_usage='allow_with_warning'", |p| p.to_owned(), None,
         Some(termination.project.parent().unwrap()), "busy");
     let (_, busy) = launches.reserve("Launch after termination commits");
@@ -4499,4 +4508,61 @@ fn shared_root_finishes_a_pending_termination_before_starting_another_project() 
     assert_eq!(launches.count("workspace.create_command"), 1);
     assert_eq!(healthy.attempt(&healthy_attempt).state, AttemptState::Running);
     assert!(healthy.attempt(&healthy_attempt).retains_capacity());
+}
+
+/// Cancellation is durable intent even before launch observation has populated
+/// the controller's passive-monitor inventory. Ingress owns evidence validation.
+#[test]
+fn cancelled_running_attempt_offers_termination_without_a_passive_monitor_hint() {
+    let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+    let (_, attempt) = lab.reserve("Cancel a worker awaiting launch observation");
+    let current = lab.attempt(&attempt);
+    // Seed the observation gap; cancellation and hint production below use
+    // the real CLI/store entry points, rather than constructing their results.
+    rusqlite::Connection::open(lab.project.join(".state/state.db")).unwrap().execute(
+        "UPDATE attempts SET state='running',revision=revision+1 WHERE id=?1", [attempt.as_str()]).unwrap();
+    let mut budget = herdr_farm::store::identity_inventory::Budget::new(2 * 1024 * 1024, 1024,
+        Instant::now() + Duration::from_secs(5), Default::default()).unwrap();
+    assert!(migration::read_controller_dispatch_hint(&lab.project, &mut budget, 0,
+        jiff::Timestamp::now().as_millisecond(), true).unwrap().is_none());
+    lab.ok(&["task", "demo", "cancel-attempt", attempt.as_str(), "--expected-revision", &(current.revision + 1).to_string(),
+        "--expected-head", &lab.head().to_string(), "--reason", "stop before another root launch"]);
+    let mut launches = Lab::of_kind_at("claude", "unknown_usage='allow_with_warning'", |p| p.to_owned(), None,
+        Some(lab.project.parent().unwrap()), "busy");
+    let (_, busy) = launches.reserve("Launch after cancellation is serviced");
+    for turn in 0..4 {
+        let mut budget = herdr_farm::store::identity_inventory::Budget::new(2 * 1024 * 1024, 1024,
+            Instant::now() + Duration::from_secs(5), Default::default()).unwrap();
+        let hint = migration::read_controller_dispatch_hint(&lab.project, &mut budget, turn,
+            jiff::Timestamp::now().as_millisecond(), true).unwrap().expect("cancellation must produce a stop hint");
+        assert_eq!(hint.operation.kind, "runtime.worker_termination");
+        assert_eq!(hint.operation.target, attempt.as_str());
+        assert_eq!(hint.operation.payload["stop_requested"], true);
+    }
+    assert!(!lab.attempt(&attempt).termination_observed);
+    assert!(lab.attempt(&attempt).retains_capacity());
+    assert_eq!(launches.attempt(&busy).state, AttemptState::Reserved);
+    let mut ticker = lab.spawn();
+    lab.wait_for(&mut ticker, "termination admission without passive evidence", &attempt, 120, &||
+        fs::read_to_string(lab.path("root/.ticker.log")).unwrap_or_default()
+            .contains(&format!("canonical-worker:terminate-{}:", attempt.as_str())));
+    // Missing exact worker evidence must fail at ingress, without consuming
+    // another project's launch turn or releasing the cancelled worker's slot.
+    assert_eq!(launches.attempt(&busy).state, AttemptState::Reserved);
+    assert!(!lab.attempt(&attempt).termination_observed);
+    assert!(lab.attempt(&attempt).retains_capacity());
+    // No server is present in this fixture. Allow the admitted observation's
+    // unscaled 15-second budget to drain on normal ticker shutdown.
+    let stop = lab.path("root/.ticker.stop");
+    fs::write(&stop, b"").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        if let Some(status) = ticker.0.try_wait().unwrap() {
+            assert!(status.success(), "ticker shutdown failed: {status}");
+            break;
+        }
+        assert!(Instant::now() < deadline, "socket-free ticker did not drain");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    fs::remove_file(stop).unwrap();
 }

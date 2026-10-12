@@ -192,6 +192,15 @@ Root safety work (recovery, termination and briefs) precedes launch advancement
 across projects, including while safety work backs off. Queue fairness promotes
 jobs after three failed turns or one recovery observation interval of waiting.
 The root writer turn prevents fresh shared probes from overtaking acquisition.
+Cancellation and completion requests offer termination immediately, independently
+of passive launch-observation hints. Requested stops rotate among themselves
+before other project-local effects; their workers still validate retained launch
+and ownership evidence before stopping anything. The socket-free cancellation
+workflow covers a Running attempt whose passive monitor inventory is not yet
+populated, including admission beside another project's reserved launch and
+retention of capacity when exact worker evidence is missing. The shared-root
+workflow also checks stop hints before starting its
+ticker, then retains its refused-commit and cross-project launch assertions.
 Native creation requests retain their unscaled 15-second external budget. On
 timeout, observation and cancellation run within the remaining 45-second phase
 and five-second lease reserve; labs do not scale that execution budget. The

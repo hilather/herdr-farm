@@ -54,7 +54,7 @@ fn notification_socket(db:&Connection,operation:&Operation,budget:&mut Budget)->
 fn termination_requested(db:&Connection,attempt:&AttemptId,now:i64,budget:&mut Budget)->Result<bool> {
     budget.record()?;budget.charge(16)?;
     let requested=db.query_row("SELECT EXISTS(SELECT 1 FROM attempts a JOIN attempt_inputs i ON i.attempt_id=a.id
-        JOIN operation_delivery d ON d.operation_id=i.operation_id WHERE a.id=?1 AND
+        LEFT JOIN operation_delivery d ON d.operation_id=i.operation_id WHERE a.id=?1 AND
         (a.state IN ('cancelled','failed','lost')
          OR EXISTS(SELECT 1 FROM attempt_cancellations c WHERE c.attempt_id=a.id)
          OR EXISTS(SELECT 1 FROM events e WHERE e.entity=a.id AND e.kind='attempt.completion_requested')
@@ -89,7 +89,10 @@ pub(crate) fn read_with_launches(path:&Path,publication:&Publication,budget:&mut
                 (a.state='launching' AND NOT EXISTS(SELECT 1 FROM attempt_cancellations c WHERE c.attempt_id=a.id)
                  AND NOT EXISTS(SELECT 1 FROM operations o WHERE o.kind='runtime.worker_brief' AND json_extract(o.payload,'$.attempt')=a.id))
                 FROM attempts a JOIN attempt_inputs i ON i.attempt_id=a.id
-                WHERE a.termination_observed=0 AND (EXISTS(SELECT 1 FROM events e WHERE e.kind IN ('runtime.launch_started','runtime.launch_target') AND e.entity=i.operation_id AND json_extract(e.payload,'$.version')=2)
+                WHERE a.termination_observed=0 AND ((a.state IN ('launching','running') AND
+                    (EXISTS(SELECT 1 FROM attempt_cancellations c WHERE c.attempt_id=a.id)
+                     OR EXISTS(SELECT 1 FROM events e WHERE e.entity=a.id AND e.kind='attempt.completion_requested')))
+                    OR EXISTS(SELECT 1 FROM events e WHERE e.kind IN ('runtime.launch_started','runtime.launch_target') AND e.entity=i.operation_id AND json_extract(e.payload,'$.version')=2)
                     OR (a.state='reserved' AND EXISTS(SELECT 1 FROM events e WHERE e.kind='runtime.worktrees_creation' AND e.entity=i.operation_id)
                         AND NOT EXISTS(SELECT 1 FROM events e WHERE e.kind GLOB 'runtime.launch_*' AND e.entity=i.operation_id)
                         AND (EXISTS(SELECT 1 FROM attempt_cancellations c WHERE c.attempt_id=a.id)
@@ -161,7 +164,11 @@ pub(crate) fn read_with_launches(path:&Path,publication:&Publication,budget:&mut
             if kind=="runtime.worker_termination" && let Some(attempt)=attempt
                 && termination_requested(tx,attempt,now,budget)? {stops.insert(attempt.clone());}
         }
-        if !stops.is_empty() {candidates.retain(|(_,kind,_,_,_)|kind!="runtime.launch");}
+        // A requested stop must reach the root queue on this pass, rather than
+        // rotate behind passive monitors or unrelated project-local effects.
+        // The worker still validates exact retained launch/ownership evidence.
+        if !stops.is_empty() {candidates.retain(|(_,kind,_,_,attempt)|
+            kind=="runtime.worker_termination" && attempt.as_ref().is_some_and(|attempt|stops.contains(attempt)));}
         // Do not let project-local rotation hide a pending brief from the root queue.
         if candidates.iter().any(|(_,kind,_,_,_)| matches!(kind.as_str(), "runtime.worker_brief" | "runtime.worker_brief_prepare")) {
             candidates.retain(|(_,kind,_,_,_)| kind != "runtime.launch");
