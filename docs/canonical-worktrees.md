@@ -245,6 +245,8 @@ clear. Owner pauses are preserved.
 
 `result submit-captured` selects only the requested attempt's retained inputs
 and worktree provenance, rather than loading the entire project snapshot.
+Capture rejects a missing attempt or absent retained launch inputs before reading
+that provenance, including historical attempts without a prepared worktree.
 Its document references candidate/output Git object identities; worktree binary
 size does not enter snapshot read accounting. Submission object-transfer limits
 and verification requirements remain unchanged. No canonical schema migration
