@@ -12,7 +12,7 @@ pub use output_reader::{load_outputs,load_binding_outputs,load_binding_output_ro
 pub use outputs::OutputManifest;
 pub use crate::domain::{OutputOmission,OutputOmissionReason};
 pub(crate) use outputs::capture_outputs_held;
-pub use git::Archive as GitArchive;
+pub use git::{Archive as GitArchive,State as GitState};
 
 #[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -24,16 +24,40 @@ pub struct Entry {
 fn is_false(value:&bool)->bool {!*value}
 #[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct TrackedFile {pub path:String,pub bytes:u64,pub blob:String,pub mode:String}
+#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrackedOmission {pub path:String,pub bytes:u64,pub blob:String,pub mode:String,pub reason:OutputOmissionReason}
+#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub version:u32,pub scope:String,pub attempt:AttemptId,pub worktree:WorktreeReceipt,pub entries:Vec<Entry>,
     #[serde(default,skip_serializing_if="Option::is_none")]
     pub git:Option<GitArchive>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub git_identity:Option<GitState>,
     #[serde(default,skip_serializing_if="Vec::is_empty")]
     pub excluded_ignored_paths:Vec<String>,
+    #[serde(default,skip_serializing_if="Vec::is_empty")]
+    pub omissions:Vec<TrackedOmission>,
+    #[serde(default,skip_serializing_if="Vec::is_empty")]
+    pub tracked_files:Vec<TrackedFile>,
 }
 #[derive(Debug,Clone,Serialize)]
 pub struct Snapshot {pub digest:String,pub directory:PathBuf,pub manifest:Manifest}
 fn hash(bytes:&[u8])->String {format!("{:x}",Sha256::digest(bytes))}
+
+#[derive(Debug)]
+pub(crate) struct CaptureLimit(pub CaptureIncomplete,pub &'static str);
+impl std::fmt::Display for CaptureLimit {
+    fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result {f.write_str(self.1)}
+}
+impl std::error::Error for CaptureLimit {}
+fn structure_limit(error:anyhow::Error)->anyhow::Error {
+    if error.chain().any(|e|e.is::<crate::worktree_preparation::GitCaptureLimit>()) {
+        CaptureLimit(CaptureIncomplete::StructureLimit,"checkout Git inventory exceeds preservation bounds").into()
+    }else{error}
+}
 
 // Some exclusions select worktree semantics (including skipping the .git pointer);
 // Output exclusions are independent and never select Git/link semantics.
@@ -76,17 +100,117 @@ fn scan(directory:&Directory,relative:&Path,budget:&mut Budget,entries:&mut Vec<
 // Worker-controlled ignore rules can only shrink preserved working files:
 // ignored toolchains, caches and build output are by definition not work.
 fn ignored_paths(git:&crate::worktree_preparation::Git,path:&Path)->Result<Vec<PathBuf>> {
-    let raw=git.capture(path,&["ls-files","--others","--ignored","--exclude-standard","--directory","-z"],None,4*1024*1024)?;
+    let raw=git.capture(path,&["ls-files","--others","--ignored","--exclude-standard","--directory","-z"],None,4*1024*1024).map_err(structure_limit)?;
     ensure!(raw.is_empty() || raw.last()==Some(&0),"incomplete ignored path inventory");
     let mut paths=Vec::new();
     for record in raw.split(|b|*b==0).filter(|p|!p.is_empty()) {
         let text=std::str::from_utf8(record)?.trim_end_matches('/');
         let path=PathBuf::from(text);
         ensure!(!text.is_empty() && text.len()<=4096 && path.components().all(|c|matches!(c,std::path::Component::Normal(_))),"invalid ignored checkout path");
-        ensure!(paths.len()<10_000,"ignored checkout inventory exceeds bounds");
+        if paths.len()>=10_000 {return Err(CaptureLimit(CaptureIncomplete::StructureLimit,"ignored checkout inventory exceeds bounds").into());}
         paths.push(path);
     }
     Ok(paths)
+}
+
+fn tracked_file(source:&Directory,path:&Path)->Result<Option<std::fs::File>> {
+    let mut parent=source.directory(Path::new(""))?;
+    for part in path.parent().unwrap_or(Path::new("")).components() {
+        let std::path::Component::Normal(name)=part else {anyhow::bail!("invalid tracked parent");};
+        if parent.kind(name)?!=Some(source_tree::NodeKind::Directory) {return Ok(None);}
+        parent=parent.directory(Path::new(name))?;
+    }
+    let leaf=path.file_name().context("tracked leaf missing")?;
+    if parent.kind(leaf)?!=Some(source_tree::NodeKind::File) {return Ok(None);}
+    Ok(Some(parent.child(leaf)?))
+}
+
+type TrackedInventory=Vec<(String,u64,bool)>;
+type WorkingEvidence=(Vec<TrackedFile>,Vec<TrackedOmission>);
+type WorkingSource<'a>=(&'a Directory,&'a WorktreeReceipt,&'a [PathBuf]);
+
+fn tracked_inventory(git:&crate::worktree_preparation::Git,source:&Directory,receipt:&WorktreeReceipt,control:&Control)->Result<TrackedInventory> {
+    let path=Path::new(&receipt.plan.path);
+    let raw=git.capture(path,&["ls-files","-z"],None,4*1024*1024).map_err(structure_limit)?;
+    ensure!(raw.is_empty() || raw.last()==Some(&0),"incomplete tracked inventory");
+    let mut tracked=std::collections::BTreeSet::new();
+    let mut candidates=Vec::new();
+    for name in raw.split(|b|*b==0).filter(|b|!b.is_empty()) {
+        let name=std::str::from_utf8(name)?;
+        let relative=Path::new(name);
+        ensure!(name.len()<=4096 && relative.components().all(|c|matches!(c,std::path::Component::Normal(_))),"invalid tracked path");
+        control.check()?;
+        if !tracked.insert(relative.to_owned()) {continue;}
+        if tracked.len()>source_tree::ENTRY_LIMIT {return Err(source_tree::Limit::Entries.into());}
+        if relative.components().count()>source_tree::DEPTH_LIMIT {return Err(source_tree::Limit::Depth.into());}
+        let Some(file)=tracked_file(source,relative)? else {continue;};let metadata=file.metadata()?;
+        ensure!(metadata.is_file() && metadata.nlink()==1,"tracked source must be a regular file with one link");
+        candidates.push((name.to_owned(),metadata.len(),metadata.mode()&0o111!=0));
+    }
+    Ok(candidates)
+}
+
+fn tracked_selections(git:&crate::worktree_preparation::Git,sources:&[WorkingSource<'_>],control:&Control)->Result<Vec<WorkingEvidence>> {
+    let mut inventories=Vec::new();let mut priority=Vec::new();
+    let mut untracked_budget=control.budget();let mut untracked_bytes=0;
+    for (repository,(source,receipt,ignored)) in sources.iter().enumerate() {
+        let candidates=tracked_inventory(git,source,receipt,control)?;
+        if priority.len()+candidates.len()>source_tree::ENTRY_LIMIT {return Err(source_tree::Limit::Entries.into());}
+        // Reserve all non-ignored untracked bytes across the approved worktrees
+        // before selecting any tracked byte copies. This scan remains fail-hard.
+        let exclusions=candidates.iter().map(|c|PathBuf::from(&c.0)).collect::<Vec<_>>();
+        let mut entries=Vec::new();let mut blobs=BTreeMap::new();
+        scan(source,Path::new(""),&mut untracked_budget,&mut entries,&mut blobs,Some(ignored),&exclusions)?;
+        untracked_bytes+=entries.iter().map(|e|e.bytes).sum::<u64>();
+        for (index,(name,bytes,_)) in candidates.iter().enumerate() {
+            let binary=matches!(Path::new(name).extension().and_then(|e|e.to_str()),Some("uasset"|"umap"|"png"|"jpg"|"jpeg"|"zip"|"bin"|"so"|"dll"|"exe"|"mp4"|"wav"));
+            priority.push((repository,index,binary,*bytes,name.clone()));
+        }
+        inventories.push(candidates);
+    }
+    priority.sort_by(|a,b|(a.2,a.3,&a.4,a.0).cmp(&(b.2,b.3,&b.4,b.0)));
+    let mut remaining=source_tree::BYTE_LIMIT.checked_sub(untracked_bytes).ok_or(source_tree::Limit::Bytes)?;
+    let mut selected=vec![std::collections::BTreeSet::new();sources.len()];
+    for (repository,index,_,bytes,_) in priority {
+        if bytes<=remaining {remaining-=bytes;selected[repository].insert(index);}
+    }
+    sources.iter().zip(inventories).zip(selected).map(|(((source,receipt,_),candidates),selected)|
+        tracked_evidence(git,source,receipt,candidates,&selected,control)).collect()
+}
+
+fn tracked_evidence(git:&crate::worktree_preparation::Git,source:&Directory,receipt:&WorktreeReceipt,candidates:TrackedInventory,selected:&std::collections::BTreeSet<usize>,control:&Control)->Result<WorkingEvidence> {
+    let path=Path::new(&receipt.plan.path);
+    let mut pending=Vec::new();
+    for (index,(name,bytes,executable)) in candidates.into_iter().enumerate() {
+        control.check()?;
+        let omitted=!selected.contains(&index);
+        let relative=Path::new(&name);let parent=source.directory(relative.parent().unwrap())?;
+        let file=parent.child(relative.file_name().unwrap())?;let before=file.metadata()?;
+        ensure!(before.len()==bytes && (before.mode()&0o111!=0)==executable,"tracked source changed during inventory");
+        pending.push((name,bytes,executable,before,omitted));
+    }
+    // Bounded descriptor batches stream bytes through Git. Worker-controlled
+    // path replacement cannot redirect hashing to a symlink or outside file.
+    let mut omissions=Vec::new();let mut tracked_files=Vec::new();
+    let batch_size=crate::runner::INPUT_DESCRIPTOR_LIMIT;
+    for batch in pending.chunks(batch_size) {
+        control.check()?;
+        let files=batch.iter().map(|(name,_,_,before,_)|->Result<std::fs::File>{
+            let file=tracked_file(source,Path::new(name))?.context("tracked file disappeared before hashing")?;
+            source_tree::unchanged(&file,before)?;Ok(file)
+        }).collect::<Result<Vec<_>>>()?;
+        let raw=String::from_utf8(git.hash_files(path,&files)?)?;
+        let identities=raw.lines().collect::<Vec<_>>();
+        ensure!(identities.len()==batch.len(),"incomplete tracked blob identities");
+        for (((name,bytes,executable,before,omitted),file),blob) in batch.iter().zip(&files).zip(identities) {
+            ensure!(matches!(blob.len(),40|64) && blob.bytes().all(|b|b.is_ascii_hexdigit()),"invalid tracked blob identity");
+            source_tree::unchanged(file,before)?;
+            let mode=if *executable{"100755"}else{"100644"}.to_owned();
+            tracked_files.push(TrackedFile{path:name.clone(),bytes:*bytes,blob:blob.into(),mode:mode.clone()});
+            if *omitted {omissions.push(TrackedOmission{path:name.clone(),bytes:*bytes,blob:blob.into(),mode,reason:OutputOmissionReason::ByteLimit});}
+        }
+    }
+    omissions.sort_by(|a,b|a.path.cmp(&b.path));tracked_files.sort_by(|a,b|a.path.cmp(&b.path));Ok((tracked_files,omissions))
 }
 
 fn exact_file(directory:&Directory,name:&str,bytes:&[u8],control:&Control)->Result<bool> {
@@ -150,23 +274,36 @@ fn capture_receipts(project:&Path,record:&AttemptInputRecord,proof:crate::worktr
     let attempt=&record.attempt;let deadline=control.deadline;
     let git=crate::worktree_preparation::Git{deadline,cancellation:control.cancellation.clone(),locks:guard.inherit()?};
     let mut remaining=source_tree::BYTE_LIMIT as usize;
-    let mut budget=control.budget();let mut captured=Vec::new();
+    let mut sources=Vec::new();
     for receipt in receipts {
         let source=Directory::open(Path::new(&receipt.plan.path))?;
         let ignored=ignored_paths(&git,Path::new(&receipt.plan.path))?;
+        sources.push((source,receipt,ignored));
+    }
+    let selections=tracked_selections(&git,&sources.iter().map(|(source,receipt,ignored)|
+        (source,receipt,ignored.as_slice())).collect::<Vec<_>>(),control)?;
+    let mut budget=control.budget();let mut captured=Vec::new();
+    for ((source,receipt,ignored),(tracked_files,omissions)) in sources.into_iter().zip(selections) {
         let mut entries=Vec::new();let mut blobs=BTreeMap::new();
-        scan(&source,Path::new(""),&mut budget,&mut entries,&mut blobs,Some(&ignored),&[])?;
+        let exclusions=omissions.iter().map(|o|PathBuf::from(&o.path)).collect::<Vec<_>>();
+        scan(&source,Path::new(""),&mut budget,&mut entries,&mut blobs,Some(&ignored),&exclusions)?;
         source.matches_path(Path::new(&receipt.plan.path))?;
-        let archive=if include_git {Some(git::capture(&git,&receipt,&control,&mut remaining,&mut blobs)?)}else{None};
-        captured.push((source,Manifest{version:if !ignored.is_empty(){4}else if entries.iter().any(|e|e.symlink){3}else if include_git{2}else{1},scope:if include_git{"repository_state"}else{"working_files"}.into(),attempt:attempt.clone(),worktree:receipt,entries,git:archive,excluded_ignored_paths:ignored.iter().map(|p|p.to_str().expect("validated UTF-8 ignored path").to_owned()).collect()},blobs,ignored));
+        let git_identity=if include_git && !omissions.is_empty() {Some(git::observe(&git,&receipt,control,&mut remaining,&mut blobs)?)}else{None};
+        let archive=if include_git && omissions.is_empty() {Some(git::capture(&git,&receipt,control,&mut remaining,&mut blobs)?)}else{None};
+        captured.push((source,Manifest{tracked_files:if omissions.is_empty(){vec![]}else{tracked_files},git_identity,omissions:omissions.clone(),version:if !omissions.is_empty(){5}else if !ignored.is_empty(){4}else if entries.iter().any(|e|e.symlink){3}else if include_git{2}else{1},scope:if include_git{"repository_state"}else{"working_files"}.into(),attempt:attempt.clone(),worktree:receipt,entries,git:archive,excluded_ignored_paths:ignored.iter().map(|p|p.to_str().expect("validated UTF-8 ignored path").to_owned()).collect()},blobs,ignored));
     }
     // Verify again using bytes, not Git status or a size/mtime shortcut.
+    let repeated=tracked_selections(&git,&captured.iter().map(|(source,manifest,_,ignored)|
+        (source,&manifest.worktree,ignored.as_slice())).collect::<Vec<_>>(),control)?;
     let mut budget=control.budget();
-    for (source,manifest,_,ignored) in &captured {
+    for ((source,manifest,_,ignored),(tracked_files,omissions)) in captured.iter().zip(repeated) {
         let mut entries=Vec::new();let mut blobs=BTreeMap::new();
-        scan(source,Path::new(""),&mut budget,&mut entries,&mut blobs,Some(ignored),&[])?;
+        ensure!(omissions==manifest.omissions && (omissions.is_empty() || tracked_files==manifest.tracked_files),"tracked identities changed during capture");
+        let exclusions=omissions.iter().map(|o|PathBuf::from(&o.path)).collect::<Vec<_>>();
+        scan(source,Path::new(""),&mut budget,&mut entries,&mut blobs,Some(ignored),&exclusions)?;
         ensure!(entries==manifest.entries,"checkout changed during capture");
         source.matches_path(Path::new(&manifest.worktree.plan.path))?;
+        if let Some(identity)=&manifest.git_identity {ensure!(&git::observe(&git,&manifest.worktree,control,&mut (source_tree::BYTE_LIMIT as usize),&mut BTreeMap::new())?==identity,"Git identity changed during preservation");}
         if let Some(archive)=&manifest.git {git::verify(&git,&manifest.worktree,&control,archive)?;}
     }
     proof.check()?;control.check()?;
@@ -179,7 +316,8 @@ fn capture_receipts(project:&Path,record:&AttemptInputRecord,proof:crate::worktr
     ensure!(inventory.len()<=1024,"checkout snapshot inventory is full");
     let mut results=Vec::new();
     for (_,manifest,blobs,_) in captured {
-        let bytes=serde_json::to_vec(&manifest)?;ensure!(bytes.len()<=4*1024*1024,"checkout manifest exceeds bounds");
+        let bytes=serde_json::to_vec(&manifest)?;
+        if bytes.len()>4*1024*1024 {return Err(CaptureLimit(CaptureIncomplete::StructureLimit,"checkout manifest exceeds bounds").into());}
         let digest=hash(&bytes);
         if parent.kind(OsStr::new(&digest))?.is_none() {ensure!(inventory.len()+results.len()<1024,"checkout snapshot inventory is full");}
         let directory=parent.create_dir(OsStr::new(&digest))?;
@@ -188,6 +326,7 @@ fn capture_receipts(project:&Path,record:&AttemptInputRecord,proof:crate::worktr
         for (id,body) in blobs {retain(&directory,&id,&body,&control)?;}
         // Manifest is the completion marker and is published only after every
         // content-addressed file has been persisted and read back successfully.
+        if let Some(identity)=&manifest.git_identity {ensure!(&git::observe(&git,&manifest.worktree,control,&mut (source_tree::BYTE_LIMIT as usize),&mut BTreeMap::new())?==identity,"Git identity changed during preservation");}
         if let Some(archive)=&manifest.git {git::verify(&git,&manifest.worktree,&control,archive)?;}
         proof.check()?;control.check()?;
         state_dir.matches_path(&project.join(".state"))?;

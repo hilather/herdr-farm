@@ -733,8 +733,20 @@ fn preserve_terminated_repositories(project:&Path,events:&[Event],record:&Attemp
     // The worker has provably ended: import its attempt branch from its Git
     // quarantine first, so preservation records the branch it committed.
     crate::git_quarantine::import_terminated(project,events,record,deadline,cancellation.clone())?;
-    let snapshots=crate::worktree_preservation::capture_events_held(project,events,record,guard,&crate::source_tree::Control{deadline,cancellation},true)?;
-    Ok(snapshots.into_iter().map(|s|WorktreeSnapshotReference{plan:s.manifest.worktree.plan,digest:s.digest}).collect())
+    match crate::worktree_preservation::capture_events_held(project,events,record,guard,&crate::source_tree::Control{deadline,cancellation},true) {
+        Ok(snapshots)=>Ok(snapshots.into_iter().map(|s|WorktreeSnapshotReference{plan:s.manifest.worktree.plan,digest:s.digest,capture_incomplete:None}).collect()),
+        Err(error)=>{
+            let reason=error.chain().find_map(|e|match e.downcast_ref::<crate::source_tree::Limit>() {
+                Some(crate::source_tree::Limit::Bytes)=>Some(CaptureIncomplete::ByteLimit),
+                Some(crate::source_tree::Limit::Entries)=>Some(CaptureIncomplete::EntryLimit),
+                Some(crate::source_tree::Limit::Depth)=>Some(CaptureIncomplete::DepthLimit),
+                None=>e.downcast_ref::<crate::worktree_preservation::CaptureLimit>().map(|limit|limit.0.clone()),
+            });
+            let Some(reason)=reason else {return Err(error);};
+            Ok(worktree_plans(&record.inputs,&record.attempt).map_err(anyhow::Error::msg)?.into_iter()
+                .map(|plan|WorktreeSnapshotReference{plan,digest:String::new(),capture_incomplete:Some(reason.clone())}).collect())
+        }
+    }
 }
 
 /// Recover the durable start-to-brief handoff without sending any terminal input.

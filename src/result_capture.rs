@@ -38,18 +38,15 @@ pub fn capture(project: &Path, attempt: &AttemptId, message: Option<&str>, deadl
     let project = project.canonicalize()?;
     let guard = crate::execution_guard::RootGuard::exclusive(project.parent().context("project root missing")?)?;
     let mut db = crate::migration::open_active_scoped(&project, crate::store::controlled::ReadControl::new(deadline, cancellation.clone()))?;
-    let state = db.read_snapshot(None)?;
-    ensure!(state.attempts.iter().any(|a| &a.id == attempt), "attempt missing");
-    let record = state.attempt_inputs.iter().find(|r| &r.attempt == attempt)
-        .context("capture requires the attempt's retained launch inputs")?;
+    let (record,events)=db.result_capture_inputs(attempt)?;
     ensure!(record.inputs.repositories.len() == 1, "capture requires exactly one repository worktree");
     let contract = db.attempt_contract(record.inputs.task.as_str(), record.inputs.task_contract.as_ref())?;
     let scopes = contract.as_ref().and_then(|contract| contract.write_scopes());
     drop(db);
     // Exact provenance: the worktree, its gitdir, lock and branch are the ones
     // recorded when this attempt's worktree was prepared.
-    let proof = crate::worktree_preparation::pin_started_events_held(&project, &state.events, record, deadline, cancellation.clone())?;
-    let ready = state.events.iter().find(|e| e.kind == "runtime.worktrees_ready" && e.entity == record.operation.as_str())
+    let proof = crate::worktree_preparation::pin_started_events_held(&project, &events, &record, deadline, cancellation.clone())?;
+    let ready = events.iter().find(|e| e.kind == "runtime.worktrees_ready" && e.entity == record.operation.as_str())
         .context("ready worktree evidence missing")?;
     let receipts: Vec<WorktreeReceipt> = serde_json::from_value(ready.payload.clone())?;
     let plan = &receipts.first().context("ready worktree evidence missing")?.plan;
@@ -157,9 +154,8 @@ pub fn submit_captured(project: &Path, attempt: &str, message: Option<&str>) -> 
     let capture = capture_project(project, attempt, message)?;
     let project = project.canonicalize()?;
     let (contract, frozen) = {
-        let mut db = crate::migration::open_active(&project)?;
-        let state = db.read_snapshot(None)?;
-        let record = state.attempt_inputs.iter().find(|r| r.attempt == attempt_id).context("attempt's retained launch inputs missing")?;
+        let mut db = crate::migration::open_active_scoped(&project,crate::store::controlled::ReadControl::new(Instant::now()+Duration::from_secs(60),Default::default()))?;
+        let (record,_)=db.result_capture_inputs(&attempt_id)?;
         let contract = db.attempt_contract(record.inputs.task.as_str(), record.inputs.task_contract.as_ref())?.context("the attempt has no task contract")?;
         (contract.clone(), record.inputs.task_contract.clone())
     };

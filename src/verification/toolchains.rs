@@ -73,15 +73,15 @@ fn normal(path: &Path) -> bool {
 fn collect(path: &Path, seen: &mut BTreeSet<PathBuf>) -> Result<()> {
     ensure!(
         normal(path) && path != Path::new("/"),
-        "invalid toolchain path"
+        "invalid toolchain path: {}", path.display()
     );
     if !seen.insert(path.to_path_buf()) {
         return Ok(());
     }
     ensure!(seen.len() <= 100_000, "toolchain exceeds path limit");
-    let meta = fs::symlink_metadata(path).context("toolchain path unavailable")?;
+    let meta = fs::symlink_metadata(path).with_context(|| format!("toolchain path unavailable: {}", path.display()))?;
     if meta.file_type().is_symlink() {
-        let canonical = fs::canonicalize(path)?;
+        let canonical = fs::canonicalize(path).with_context(|| format!("toolchain path unavailable: {}", path.display()))?;
         collect(&canonical, seen)?;
         if fs::metadata(path)?.is_dir() {
             for entry in fs::read_dir(path)? {
@@ -94,6 +94,21 @@ fn collect(path: &Path, seen: &mut BTreeSet<PathBuf>) -> Result<()> {
         }
     } else if meta.is_file() {
         for dependency in crate::worker_supervision::executable_dependencies(path) {
+            // Normalize only declared toolchain dependencies. The shared
+            // executable walker also serves ordinary worker launches, whose
+            // project turns must not acquire this extra filesystem work.
+            // Resolve parents through the filesystem: symlinks before `..`
+            // make lexical popping incorrect. Keep the final symlink pinned.
+            let dependency = if dependency.is_absolute()
+                && dependency.components().any(|c| c == Component::ParentDir)
+                && let Some(parent) = dependency.parent()
+                && let Some(name) = dependency.file_name()
+                && let Ok(parent) = parent.canonicalize()
+            {
+                parent.join(name)
+            } else {
+                dependency
+            };
             collect(&dependency, seen)?;
         }
     } else {
@@ -177,12 +192,9 @@ pub fn resolve(project: &Path, name: &str) -> Result<Resolved> {
                 .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b)),
         "invalid toolchain name"
     );
-    ensure!(
-        !toolchain.paths.is_empty()
-            && toolchain.paths.len() <= 32
-            && (1..=3600).contains(&toolchain.timeout_seconds),
-        "toolchain exceeds bounds"
-    );
+    ensure!(!toolchain.paths.is_empty(), "toolchain exceeds bounds: paths must not be empty");
+    ensure!(toolchain.paths.len() <= 32, "toolchain exceeds bounds: paths > 32 ({} declared)", toolchain.paths.len());
+    ensure!((1..=3600).contains(&toolchain.timeout_seconds), "toolchain exceeds bounds: timeout must be 1..=3600 seconds ({} declared)", toolchain.timeout_seconds);
     crate::worker_supervision::validate_thread_env(&toolchain.env)?;
     let mut paths = BTreeSet::new();
     for path in &toolchain.paths {
