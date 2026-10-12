@@ -23,30 +23,47 @@ impl Budget {
     pub fn used(&self)->usize {self.used}
     pub(crate) fn record(&mut self)->Result<()> {self.check()?;ensure!(self.records>0,"{} exceeds candidate budget at {} records (limit {})",self.reader,self.record_limit-self.records,self.record_limit);self.records-=1;Ok(())}
     pub(crate) fn charge(&mut self,n:usize)->Result<()> {self.check()?;ensure!(n<=self.remaining,"{} exhausted byte budget after {} bytes and {} records",self.reader,self.used,self.record_limit-self.records);self.remaining-=n;self.used+=n;Ok(())}
+    fn io<T>(&self,mut operation:impl FnMut()->std::io::Result<T>)->Result<T> {
+        loop {
+            self.check()?;
+            match operation() {
+                Err(error) if error.kind()==std::io::ErrorKind::Interrupted=>continue,
+                result=>return Ok(result?),
+            }
+        }
+    }
     pub(crate) fn read(&mut self,path:&Path)->Result<Vec<u8>> {
         use std::{io::Read,os::unix::fs::MetadataExt};
         self.check()?;
-        let mut file=OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_NONBLOCK).open(path)?;
-        let before=file.metadata()?;ensure!(before.is_file()&&before.nlink()==1,"identity publication must be a single-link regular file");
+        let mut file=self.io(||OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_NONBLOCK).open(path))?;
+        let before=self.io(||file.metadata())?;ensure!(before.is_file()&&before.nlink()==1,"identity publication must be a single-link regular file");
         let limit=self.remaining.min(16*1024*1024);ensure!(before.len()<=limit as u64,"{} publication exceeds byte budget after {} bytes and {} records",self.reader,self.used,self.record_limit-self.records);
-        let mut bytes=Vec::new();(&mut file).take(limit as u64+1).read_to_end(&mut bytes)?;ensure!(bytes.len()<=limit,"{} publication exceeds byte budget after {} bytes and {} records",self.reader,self.used,self.record_limit-self.records);
-        let after=file.metadata()?;ensure!(before.len()==after.len()&&before.mtime()==after.mtime()&&before.mtime_nsec()==after.mtime_nsec()&&before.ctime()==after.ctime()&&before.ctime_nsec()==after.ctime_nsec(),"identity publication changed");
+        let mut bytes=Vec::new();let mut buffer=[0u8;8192];
+        while bytes.len()<=limit {
+            let available=buffer.len().min(limit+1-bytes.len());
+            let n=self.io(||file.read(&mut buffer[..available]))?;
+            if n==0 {break;}
+            bytes.extend_from_slice(&buffer[..n]);
+        }
+        ensure!(bytes.len()<=limit,"{} publication exceeds byte budget after {} bytes and {} records",self.reader,self.used,self.record_limit-self.records);
+        let after=self.io(||file.metadata())?;ensure!(before.len()==after.len()&&before.mtime()==after.mtime()&&before.mtime_nsec()==after.mtime_nsec()&&before.ctime()==after.ctime()&&before.ctime_nsec()==after.ctime_nsec(),"identity publication changed");
         self.charge(bytes.len())?;Ok(bytes)
     }
 }
 pub(crate) struct Publication {pub digest:String,pub sources:u64,pub tasks:u64,pub operations:u64,pub reconciliation_required:bool}
 /// Caller has validated and budgeted the active journal and format marker.
-pub(super) fn read_published<T>(path:&Path,publication:&Publication,budget:&mut Budget,read:impl FnOnce(&rusqlite::Transaction<'_>,&mut Budget)->Result<T>)->Result<T> {
+pub(super) fn read_published<T>(path:&Path,publication:&Publication,budget:&mut Budget,mut read:impl FnMut(&rusqlite::Transaction<'_>,&mut Budget)->Result<T>)->Result<T> {
     use std::os::unix::fs::MetadataExt;
     budget.check()?;engine_check()?;
     for suffix in ["-wal","-shm","-journal"] {
         let mut name=path.as_os_str().to_os_string();name.push(suffix);
-        match std::fs::symlink_metadata(Path::new(&name)) {
-            Ok(m)=>ensure!(m.is_file()&&m.nlink()==1,"identity database sidecar must be a single-link regular file"),
-            Err(e) if e.kind()==std::io::ErrorKind::NotFound=>{},Err(e)=>return Err(e.into()),
-        }
+        let metadata=budget.io(||match std::fs::symlink_metadata(Path::new(&name)) {
+            Err(error) if error.kind()==std::io::ErrorKind::NotFound=>Ok(None),
+            result=>result.map(Some),
+        })?;
+        ensure!(metadata.is_none_or(|m|m.is_file()&&m.nlink()==1),"identity database sidecar must be a single-link regular file");
     }
-    let before=std::fs::symlink_metadata(path)?;ensure!(before.is_file()&&before.nlink()==1,"identity database must be a single-link regular file");
+    let before=budget.io(||std::fs::symlink_metadata(path))?;ensure!(before.is_file()&&before.nlink()==1,"identity database must be a single-link regular file");
     let identity=reuse::Identity::of(&before);
     let mut db=match reuse::take(path,&identity) {Some(db)=>db,None=>reuse::open(path)?};
     let deadline=budget.deadline;let cancellation=budget.cancellation.clone();
@@ -59,17 +76,29 @@ pub(super) fn read_published<T>(path:&Path,publication:&Publication,budget:&mut 
             cancellation.is_cancelled()||Instant::now()>=deadline
         }));
     }
-    let value=(||->Result<T>{
+    let value=loop {
+        budget.check()?;
+        let result=(||->Result<T>{
         let tx=db.transaction()?;check_schema(&tx)?;
         let version:u32=tx.query_row("PRAGMA user_version",[],|r|r.get(0))?;ensure!(version>=5,"identity inventory requires schema v5");
         let receipt:(String,u64,u64,u64)=tx.query_row("SELECT source_digest,source_count,task_count,operation_count FROM migration_receipt WHERE singleton=1 AND octet_length(source_digest)=64",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
         ensure!(receipt==(publication.digest.clone(),publication.sources,publication.tasks,publication.operations),"identity migration receipt mismatch");
         let required=if version>=7 {tx.query_row("SELECT reconciliation_required FROM project_control WHERE singleton=1",[],|r|r.get::<_,bool>(0))?}else{true};
-        ensure!(required==publication.reconciliation_required,"identity control publication interrupted");
+        if required!=publication.reconciliation_required {return Err(StoreError::ControlPublicationPending.into());}
         // Dropping the transaction ends it: no read snapshot outlives this call.
         let value=read(&tx,budget)?;budget.check()?;Ok(value)
-    })()?;
-    let after=std::fs::symlink_metadata(path)?;ensure!(before.dev()==after.dev()&&before.ino()==after.ino()&&after.is_file()&&after.nlink()==1,"identity database replaced");
+        })();
+        match result {
+            Err(error) if error.chain().any(|cause|
+                matches!(cause.downcast_ref::<StoreError>(),Some(StoreError::Io(message)) if message=="interrupted")
+                || cause.downcast_ref::<rusqlite::Error>().is_some_and(|e|e.sqlite_error_code()==Some(rusqlite::ErrorCode::OperationInterrupted)))=>{
+                if budget.cancellation.is_cancelled() {return Err(StoreError::Cancelled.into());}
+                if Instant::now()>=budget.deadline {return Err(StoreError::Deadline.into());}
+            },
+            result=>break result?,
+        }
+    };
+    let after=budget.io(||std::fs::symlink_metadata(path))?;ensure!(before.dev()==after.dev()&&before.ino()==after.ino()&&after.is_file()&&after.nlink()==1,"identity database replaced");
     reuse::give(path,identity,db);
     Ok(value)
 }

@@ -15,6 +15,16 @@ impl ReadControl {
     pub fn cancellation(&self)->Cancellation {self.cancellation.clone()}
     pub fn check(&self)->Result<()> {match self.reason(){1=>Err(StoreError::Cancelled),2=>Err(StoreError::Deadline),_=>Ok(())}}
     fn reason(&self)->u8 {if self.cancellation.is_cancelled(){1}else if Instant::now()>=self.deadline{2}else{0}}
+    /// Retry transient syscall interruption within the original cooperative bound.
+    pub(crate) fn io<T>(&self,mut operation:impl FnMut()->std::io::Result<T>)->Result<T> {
+        loop {
+            self.check()?;
+            match operation() {
+                Err(error) if error.kind()==std::io::ErrorKind::Interrupted=>continue,
+                result=>return result.map_err(|error|StoreError::Io(error.to_string())),
+            }
+        }
+    }
     pub fn with_row_limit(mut self,bytes:usize)->Result<Self> {
         if !(1024*1024..=32*1024*1024).contains(&bytes){return Err(StoreError::Invalid("encoded row limit must be 1–32 MiB".into()));}
         self.row_bytes=bytes as i32;Ok(self)
@@ -383,13 +393,16 @@ impl ControlledStore {
     pub(crate) fn open_scoped_observed(path:&Path,control:ReadControl,work:SqlWork)->Result<Self> { Self::open_checked(path,control,false,Some(work)) }
     fn open_checked(path:&Path,control:ReadControl,integrity:bool,sql_work:Option<SqlWork>)->Result<Self> {
         control.check()?;engine_check()?;
-        let before=std::fs::symlink_metadata(path).map_err(|e|StoreError::Io(e.to_string()))?;
+        let before=control.io(||std::fs::symlink_metadata(path))?;
         if !before.is_file()||before.nlink()!=1{return Err(StoreError::Invalid("controlled database must be a single-link regular file".into()));}
         for suffix in ["-wal","-shm","-journal"] {
             let mut name=path.as_os_str().to_os_string();name.push(suffix);
-            match std::fs::symlink_metadata(Path::new(&name)) {
-                Ok(m) if !m.is_file()||m.nlink()!=1=>return Err(StoreError::Invalid("controlled database sidecar must be a single-link regular file".into())),
-                Ok(_)=>{},Err(e) if e.kind()==std::io::ErrorKind::NotFound=>{},Err(e)=>return Err(StoreError::Io(e.to_string())),
+            let metadata=control.io(||match std::fs::symlink_metadata(Path::new(&name)) {
+                Err(error) if error.kind()==std::io::ErrorKind::NotFound=>Ok(None),
+                result=>result.map(Some),
+            })?;
+            if metadata.is_some_and(|m|!m.is_file()||m.nlink()!=1) {
+                return Err(StoreError::Invalid("controlled database sidecar must be a single-link regular file".into()));
             }
         }
         control.check()?;
@@ -411,7 +424,7 @@ impl ControlledStore {
         store.read(|s|check_schema(&s.connection))?;
         store.read(|s|enable_wal(&s.connection))?;
         if integrity {store.read(SqliteStore::integrity_check)?;} else {store.read(|s|super::integrity::check_if_schema_changed(path,s))?;}
-        let after=std::fs::symlink_metadata(path).map_err(|e|StoreError::Io(e.to_string()))?;
+        let after=store.control.io(||std::fs::symlink_metadata(path))?;
         if !after.is_file()||after.nlink()!=1||(before.dev(),before.ino())!=(after.dev(),after.ino()){return Err(StoreError::Invalid("controlled database changed during open".into()));}
         store.control.check()?;Ok(store)
     }
@@ -434,10 +447,21 @@ impl ControlledStore {
         })
     }
     fn error(&self,error:StoreError)->StoreError {
-        match self.interrupted.load(Ordering::SeqCst) {1=>StoreError::Cancelled,2=>StoreError::Deadline,_=>error}
+        let latched=self.interrupted.load(Ordering::SeqCst);
+        let reason=if latched!=0 {latched}
+            else if matches!(&error,StoreError::Io(message) if message=="interrupted") {self.control.reason()}
+            else {0};
+        match reason {1=>StoreError::Cancelled,2=>StoreError::Deadline,_=>error}
     }
-    fn read<T>(&self,read:impl FnOnce(&SqliteStore)->Result<T>)->Result<T> {
-        self.control.check()?;let value=read(&self.store).map_err(|e|self.error(e))?;self.control.check()?;Ok(value)
+    fn read<T>(&self,mut read:impl FnMut(&SqliteStore)->Result<T>)->Result<T> {
+        loop {
+            self.control.check()?;
+            match read(&self.store).map_err(|e|self.error(e)) {
+                Err(StoreError::Io(message)) if message=="interrupted"=>continue,
+                Ok(value)=>{self.control.check()?;return Ok(value);},
+                Err(error)=>return Err(error),
+            }
+        }
     }
     /// Cancellable pieces of the resumable whole-store check.
     pub(crate) fn integrity_schema(&self)->Result<u32> {self.read(super::integrity::schema)}
@@ -447,6 +471,24 @@ impl ControlledStore {
     pub fn attempt_tokens(&mut self, bindings: &[String]) -> Result<super::attempt_tokens::Rows> {
         self.control.check()?;
         self.store.attempt_token_rows(bindings, &self.work_budget).map_err(|e| self.error(e))
+    }
+    pub(crate) fn certify_control_publication(&self)->Result<()> {
+        self.read(|store| {
+            let state=store.project_control()?.ok_or_else(||StoreError::Corrupt("canonical control missing".into()))?;
+            let payload:String=read_budget::one(&store.connection,"SELECT payload FROM events WHERE entity='project' AND revision=?1 AND kind IN ('project.control_changed','project.reconciliation_invalidated','project.launch_run_paused') ORDER BY sequence DESC LIMIT 1",[state.revision],Some(&self.work_budget),&[(0,1)],|r|r.get(0))?;
+            let recorded:ProjectControl=serde_json::from_str(&payload).map_err(|e|StoreError::Corrupt(e.to_string()))?;
+            if recorded!=state {return Err(StoreError::Corrupt("control publication lacks matching durable transition".into()));}
+            Ok(())
+        })
+    }
+    pub(crate) fn record_control_publication_repair(&mut self,previous:bool,action:crate::domain::ControlPublicationRepairAction)->Result<()> {
+        self.control.check()?;
+        let state=self.project_control()?.ok_or_else(||StoreError::Corrupt("canonical control missing".into()))?;
+        let payload=serde_json::to_string(&crate::domain::ControlPublicationRepair{previous_reconciliation_required:previous,action,control:state.clone()}).map_err(|e|StoreError::Invalid(e.to_string()))?;
+        self.read(|store| {
+            store.connection.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) SELECT 'project.control_publication_repair','project',?1,1,?2 WHERE NOT EXISTS(SELECT 1 FROM events WHERE kind='project.control_publication_repair' AND entity='project' AND revision=?1 AND payload=?2)",params![state.revision,payload])?;
+            Ok(())
+        })
     }
     pub fn project_control(&self)->Result<Option<ProjectControl>> {self.read(SqliteStore::project_control)}
     pub fn import_operation_count(&self)->Result<u64> {self.read(SqliteStore::import_operation_count)}
@@ -468,8 +510,14 @@ impl ControlledStore {
     pub fn read_snapshot(&mut self,at:Option<u64>)->Result<Snapshot> {
         self.control.check()?;
         let budget=read_budget::ReadBudget::for_store(self.control.clone(), &self.store.connection);
-        let value=self.store.read_snapshot_with_budget(at,Some(&budget)).map_err(|e|self.error(e))?;
-        self.control.check()?;Ok(value)
+        loop {
+            self.control.check()?;
+            match self.store.read_snapshot_with_budget(at,Some(&budget)).map_err(|e|self.error(e)) {
+                Err(StoreError::Io(message)) if message=="interrupted"=>continue,
+                Ok(value)=>{self.control.check()?;return Ok(value);},
+                Err(error)=>return Err(error),
+            }
+        }
     }
     pub(crate) fn launch_rows(&mut self,at:u64,task:&TaskId,binding:&str,approval:Option<&VersionedReference>)->Result<super::effect_rows::LaunchRows> {
         self.control.check()?;
@@ -486,21 +534,21 @@ impl ControlledStore {
     }
     pub(crate) fn schedule_routine(&mut self,prepared:&PreparedRoutineTick,head:u64)->Result<Option<RoutineOccurrence>> {
         self.control.check()?;
-        self.store.schedule_routine_with_budget(prepared,head,Some(&self.work_budget)).map_err(|e|self.error(e))
+        self.retry_transaction(|store,budget|store.schedule_routine_with_budget(prepared,head,Some(budget)))
     }
     pub(crate) fn routine_planning_selection(&mut self,last:Option<&str>)->Result<(u64,Option<RoutineDefinition>)> {
         self.control.check()?;
-        let value=self.store.routine_planning_selection(last,&self.work_budget).map_err(|e|self.error(e))?;
+        let value=self.retry_transaction(|store,budget|store.routine_planning_selection(last,budget))?;
         self.control.check()?;Ok(value)
     }
     pub(crate) fn routine_planning_turn(&mut self,turn:u64)->Result<(u64,Option<RoutineDefinition>)> {
         self.control.check()?;
-        let value=self.store.routine_planning_turn(turn,&self.work_budget).map_err(|e|self.error(e))?;
+        let value=self.retry_transaction(|store,budget|store.routine_planning_turn(turn,budget))?;
         self.control.check()?;Ok(value)
     }
     pub(crate) fn record_observations(&mut self,head:u64,observations:&[crate::reconcile::RuntimeObservation])->Result<u64> {
         self.control.check()?;
-        self.store.record_observations_with_budget(head,observations,Some(&self.work_budget)).map_err(|e|self.error(e))
+        self.retry_transaction(|store,budget|store.record_observations_with_budget(head,observations,Some(budget)))
     }
     pub(crate) fn expire_claims(&mut self,now:i64)->Result<usize> {self.mutation(|store|store.expire_claims(now))}
     pub(crate) fn validate_launch_draft(&mut self,inputs:&LaunchInputs,head:u64,now:i64)->Result<()> {
@@ -526,11 +574,21 @@ impl ControlledStore {
         self.control.check()?;
         Ok(result)
     }
-    fn mutation<T>(&mut self,write:impl FnOnce(&mut SqliteStore)->Result<T>)->Result<T> {
-        self.control.check()?;
+    /// These callers own a SQL transaction that rolls back on error. Retry
+    /// interruption only after it has dropped, with the same fences and budget.
+    fn retry_transaction<T>(&mut self,mut operation:impl FnMut(&mut SqliteStore,&read_budget::ReadBudget)->Result<T>)->Result<T> {
+        loop {
+            self.control.check()?;
+            match operation(&mut self.store,&self.work_budget).map_err(|e|self.error(e)) {
+                Err(StoreError::Io(message)) if message=="interrupted"=>continue,
+                result=>return result,
+            }
+        }
+    }
+    fn mutation<T>(&mut self,mut write:impl FnMut(&mut SqliteStore)->Result<T>)->Result<T> {
         // A successful commit remains success even if cancellation arrives
         // during final fsync. Only a latched hook veto explains a failed commit.
-        write(&mut self.store).map_err(|e|self.error(e))
+        self.retry_transaction(|store,_budget|write(store))
     }
 }
 
