@@ -3154,7 +3154,7 @@ fn idle_worker_notice_restarts_stretch_and_deduplicates_within_a_ticker() {
         assert_eq!(notices().len(), 1);
     }
     lab.stop(ticker);
-    lab.run_quiet(3);
+    // Do not start a quiet ticker here: each restart intentionally rearms idle.
     let first = notices();
     assert_eq!(first.len(), 1);
     assert!(first[0].content.summary.contains(attempt.as_str()));
@@ -3168,8 +3168,14 @@ fn idle_worker_notice_restarts_stretch_and_deduplicates_within_a_ticker() {
     lab.wait(&mut ticker, 60, &|| lab.count("agent.list") >= observed + 3);
     fs::write(lab.path("lab/agent-status"), "idle").unwrap();
     lab.wait(&mut ticker, 60, &|| notices().len() == 3);
+    // Keep the post-rearm quiet check in this ticker, preserving its dedup memory.
+    last = fs::metadata(&metrics).unwrap().ino();
+    for _ in 0..3 {
+        lab.wait(&mut ticker, 60, &|| fs::metadata(&metrics).unwrap().ino() != last);
+        last = fs::metadata(&metrics).unwrap().ino();
+        assert_eq!(notices().len(), 3);
+    }
     lab.stop(ticker);
-    lab.run_quiet(2);
     assert_eq!(notices().len(), 3);
 }
 

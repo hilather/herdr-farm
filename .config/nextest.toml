@@ -21,7 +21,7 @@ filter = "binary(telemetry_scale)"
 test-group = "heavy"
 
 # Quick inner loop: everything except the ticker-driven end-to-end groups.
-# The CI merge gate runs all tests with the ci profile.
+# The CI merge gate uses ci; the long idle workflow runs with nightly.
 [profile.fast]
 default-filter = "not (binary(cli) | binary(artifacts) | binary(canonical_worker) | binary(recovery) | binary(delivery) | binary(ticker_jobs) | binary(ticker) | binary(controller) | binary(pull_requests) | binary(adopt) | binary(remote) | binary(routines) | binary(operator_launch) | binary(telemetry_scale))"
 
@@ -32,6 +32,9 @@ test-group = "heavy"
 # GitHub Actions: JUnit output, partitioned across runners with
 # `--partition count:N/M`.
 [profile.ci]
+# This multi-stretch cadence workflow takes about seven minutes on the owner host.
+# Keep its full assertions in the nightly gate.
+default-filter = "not (binary(canonical_worker) & test(idle_worker_notice_restarts_stretch_and_deduplicates_within_a_ticker))"
 test-threads = 4
 # Owner rule: a test that fails once and passes on retry counts as green and
 # is reported FLAKY; a test failing both tries blocks.
@@ -46,3 +49,10 @@ path = "junit.xml"
 [[profile.ci.overrides]]
 filter = "binary(telemetry_scale)"
 test-group = "heavy"
+
+# Run explicitly with --profile nightly; the steward schedules this workflow.
+[profile.nightly]
+default-filter = "binary(canonical_worker) & test(idle_worker_notice_restarts_stretch_and_deduplicates_within_a_ticker)"
+test-threads = 1
+fail-fast = false
+slow-timeout = { period = "60s", terminate-after = 15 }

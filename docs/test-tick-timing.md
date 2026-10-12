@@ -187,3 +187,19 @@ and E2E coverage of slow creation and killed-launcher recovery.
 Expired unreleased targets select termination observation alone. It records the
 typed expiry outcome, then stops the gated worker in the same reconciliation;
 it never renews or reclaims the expired launch.
+
+The idle-worker multi-stretch E2E workflow runs in nextest's `nightly` profile
+rather than `ci` because its owner-host runtime is about seven minutes. Run it
+with `cargo nextest run --features state-store --profile nightly`. Its dedup
+window observes 30 completed passes in one ticker. Additional quiet tickers must
+not be inserted before the one-notice assertion: a restart intentionally starts
+a new idle stretch, so enough elapsed native observation time can emit a second
+notice. The explicit restart and working-to-idle rearming assertions remain.
+
+The canonical notification owner-death fixture retains a present pane and matching
+working agent, adopts the coordinator through the public CLI, then records fresh
+post-adoption identity evidence before activation. An unrecorded route provides
+no reachable session to refresh the accelerated ticker idle-exit deadline; a
+present route without adoption cannot authorize activation. Helper exceptions,
+ticker stderr and ticker logs remain in failed-wait diagnostics. Unix socket
+restrictions prevent exercising this fixture past socket creation in the sandbox.

@@ -1255,7 +1255,7 @@ sys.excepthook=failure
 if sys.argv[1:]==['--version']:print('herdr 0.9.1');sys.exit(0)
 if sys.argv[1:] in [['pane','list'],['agent','list']]:
  p={{'pane_id':'p','workspace_id':'w','tab_id':'t','cwd':str(project)}}
- print(json.dumps({{'result':{{'panes':[p]}} if sys.argv[1:]==['pane','list'] else {{'agents':[]}}}}));sys.exit(0)
+ print(json.dumps({{'result':{{'panes':[p]}} if sys.argv[1:]==['pane','list'] else {{'agents':[dict(p,agent='fixture',name='coordinator',agent_status='working')]}}}}));sys.exit(0)
 if sys.argv[1:]==['remote-api-bridge','--check']:print('herdr-api-bridge-v1');sys.exit(0)
 assert sys.argv[1:]==['remote-api-bridge']
 request=json.loads(sys.stdin.readline());assert request['method']=='notification.show'
@@ -1272,7 +1272,15 @@ if mode=='death':time.sleep(60)
 if mode=='lost':sys.exit(0)
 print(json.dumps({{'id':request['id'],'result':{{'type':'notification_show','shown':True,'reason':'shown'}}}}))
 "#,home=home.path().display().to_string(),project=project.display().to_string())).unwrap();fs::set_permissions(&helper,fs::Permissions::from_mode(0o700)).unwrap();
-        assert!(Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME",home.path()).env("HERDR_BIN_PATH",&helper).args(["--root",r,"reconcile","demo","--record"]).output().unwrap().status.success());let snapshot=runtime::snapshot(&project).unwrap();assert!(snapshot.observations.iter().any(|o|o.pane==herdr_farm::reconcile::ResourceState::Present));let config=home.path().join(".config/herdr-farm/config.toml");runtime::set_state(&project,snapshot.head,snapshot.control.unwrap().revision,ProjectState::Active,&config).unwrap();
+        let command = |args: &[&str]| Command::new(BIN).env_clear()
+            .env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim())
+            .env("HOME", home.path()).env("HERDR_BIN_PATH", &helper).args(args).output().unwrap();
+        let head = runtime::snapshot(&project).unwrap().head.to_string();
+        let adopted = command(&["--root", r, "runtime", "demo", "adopt", "coordinator", "--expected-revision", "1", "--expected-head", &head]);
+        assert!(adopted.status.success(), "{}", String::from_utf8_lossy(&adopted.stderr));
+        let recorded = command(&["--root", r, "reconcile", "demo", "--record"]);
+        assert!(recorded.status.success(), "{}", String::from_utf8_lossy(&recorded.stderr));
+        let snapshot=runtime::snapshot(&project).unwrap();assert!(snapshot.observations.iter().any(|o|o.pane==herdr_farm::reconcile::ResourceState::Present));let config=home.path().join(".config/herdr-farm/config.toml");runtime::set_state(&project,snapshot.head,snapshot.control.unwrap().revision,ProjectState::Active,&config).unwrap();
         let op=runtime::enqueue_notification(&project,&task,runtime::snapshot(&project).unwrap().head,&migration::config_reference(&config).unwrap()).unwrap();
         struct Child(std::process::Child);impl Drop for Child{fn drop(&mut self){let _=self.0.kill();let _=self.0.wait();}}
         let spawn=||Child(Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME",home.path()).env("PATH","/usr/bin:/bin").env("HERDR_BIN_PATH",&helper).args(["--root",r,"ticker","run"]).stdout(Stdio::null()).stderr(Stdio::from(fs::OpenOptions::new().create(true).append(true).open(home.path().join("ticker-stderr")).unwrap())).spawn().unwrap());
