@@ -22,7 +22,25 @@ pub(crate) struct Git {
     pub(crate) cancellation: Cancellation,
     pub(crate) locks: Vec<InheritedLock>,
 }
+#[derive(Debug)]
+pub(crate) struct GitCaptureLimit;
+impl std::fmt::Display for GitCaptureLimit {
+    fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result {f.write_str("worktree Git operation exceeded output bounds (output withheld)")}
+}
+impl std::error::Error for GitCaptureLimit {}
+
 impl Git {
+    /// Hash pinned files without resolving worker-controlled paths again. The
+    /// supervisor inherits these read-only descriptors into its PID namespace.
+    pub(crate) fn hash_files(&self,path:&Path,files:&[std::fs::File])->Result<Vec<u8>> {
+        ensure!(!self.locks.is_empty() && files.len()<=crate::runner::INPUT_DESCRIPTOR_LIMIT,"Git input descriptor ownership exceeds bounds");
+        let mut inputs=Vec::new();let mut paths=Vec::new();
+        for file in files {
+            let input=crate::runner::InheritedInput::new(file)?;
+            paths.push(format!("/proc/self/fd/{}",input.fd()));inputs.push(input);
+        }
+        self.capture_inputs(path,&["hash-object","--no-filters","--stdin-paths"],Some(paths.join("\n")+"\n"),16*1024,inputs)
+    }
     fn check(&self) -> Result<()> {
         ensure!(
             !self.cancellation.is_cancelled() && Instant::now() < self.deadline,
@@ -37,6 +55,9 @@ impl Git {
         stdin: Option<String>,
         limit: usize,
     ) -> Result<Vec<u8>> {
+        self.capture_inputs(path,args,stdin,limit,vec![])
+    }
+    fn capture_inputs(&self,path:&Path,args:&[&str],stdin:Option<String>,limit:usize,inputs:Vec<crate::runner::InheritedInput>)->Result<Vec<u8>> {
         self.check()?;
         let mut cmd = Cmd::new("/usr/bin/git", Duration::from_secs(20))
             .args([
@@ -68,6 +89,7 @@ impl Git {
         cmd.env_clear = true;
         cmd.capture_limit = limit;
         cmd.stdin = stdin;
+        cmd.inherited_inputs=inputs;
         cmd.env = [
             ("PATH", "/usr/bin:/bin"),
             ("LANG", "C"),
@@ -84,10 +106,11 @@ impl Git {
         let output =
             crate::supervision::run(cmd, self.deadline, self.cancellation.clone(), &self.locks)?;
         ensure!(
-            output.success() && !output.stdout_truncated && !output.stderr_truncated,
+            output.code==Some(0) && !output.timed_out && !output.cancelled && !output.stderr_truncated,
             "worktree Git operation failed or exceeded output bounds (output withheld)"
         );
         self.check()?;
+        if output.stdout_truncated {return Err(GitCaptureLimit.into());}
         Ok(output.stdout_bytes)
     }
     pub(crate) fn run(&self, path: &Path, args: &[&str]) -> Result<String> {

@@ -165,8 +165,9 @@ Staged and started native workers now capture repository state after exact
 supervisor/workspace quiescence and before the terminal-state transaction. The
 trusted adapter retains the root barrier across capture and commit. Stop receipts
 carry the ordered `repository_snapshots` vector; the store requires every approved
-plan and a manifest digest before releasing capacity. Missing references, changed
-sources, unsupported entries, publication errors, or failed commits retain the
+plan and either a manifest digest or typed capture-incomplete evidence before
+releasing capacity. Missing references, changed sources, unsupported entries,
+publication errors, or failed commits retain the
 reservation and desired cancellation for retry. Repeated capture verifies existing
 bytes, so a lost database commit does not require deleting or replacing a snapshot.
 
@@ -178,7 +179,7 @@ output directory, including partial report/library files, or an explicit absent
 source observation. Empty directories inside it are captured distinctly; an
 empty output directory itself (gate release pre-creates it) is recorded as
 absent. Output capture
-failure retains capacity just like repository capture failure.
+failure retains capacity just like unsafe or unpublishable repository evidence.
 
 Worktree-only preparation retirement uses the same repository/output capture
 boundary, with explicit absence evidence for plans without created resources.
@@ -191,8 +192,8 @@ Working-file snapshots exclude Git-ignored files and directories, including
 toolchains, caches and build output. Git determines exclusions using the
 worktree’s ignore rules; excluded directories are never descended into or read.
 Both capture and verification use the same exclusions. The 50 MiB working-file
-limit still applies to non-ignored work; Git history and index preservation are
-unchanged. Version 4 manifests record the ignored exclusion roots returned by
+limit still applies to non-ignored work; tracked byte omissions and identity-only
+Git evidence are described below. Version 4 manifests record the ignored exclusion roots returned by
 Git in `excluded_ignored_paths`; versions 1–3 remain loadable with an empty list.
 This changes no canonical store schema.
 
@@ -206,6 +207,48 @@ worktree or copy receipt.
 Dedicated worker-output capture is fail-soft only for its byte and retained-entry
 budgets. Output manifest v2 prioritizes reports and small files, records omitted
 paths/sizes/reasons, and leaves source files intact. The termination receipt and
-one coordinator notice expose omissions. Working-file and repository-state
-capture keep their fail-hard limits; output omissions grant no worktree cleanup
+one coordinator notice expose omissions. Untracked working-file capture keeps its fail-hard limits; tracked files can
+carry identity-bound byte omissions. Neither kind grants worktree cleanup
 authority. See [attempt output preservation](canonical-worker-launch.md#attempt-output-and-preservation-contract).
+
+Worktree capture budget recovery (WORKTREE-CAPTURE-BUDGET-1): the working-file
+budget remains 50 MiB. Non-ignored untracked files have first claim on that
+budget and exceeding it still refuses explicit capture; there is no silent
+untracked-source omission or new owner setting. Tracked regular files are then
+selected deterministically across the approved worktrees, source/text before
+known binary extensions, smallest first, then path and approved repository order
+as tie breakers. Manifest v5 records every omitted
+tracked file's path, byte size, raw Git blob identity (`hash-object --no-filters`),
+Git mode and `byte_limit` reason. Its `tracked_files` inventory also records
+raw Git identities for retained tracked regular files. Hashing streams pinned read-only descriptors through Git in bounded batches; it does
+not load omitted binaries into the snapshot. Two independent observations must
+agree before publication. Missing tracked files remain recorded by the preserved
+Git index versus working-file inventory.
+
+When tracked omissions exist, `git_identity` records HEAD, base, index entries,
+object format and retained exact index evidence instead of embedding a complete
+history pack. This evidence references objects; it is not an independently
+restorable full repository archive. The original worktree and repository must
+remain available for recovery. Manifests without omissions keep the existing
+portable pack behavior and versions 1–4 retain their meaning.
+
+After native worker/workspace quiescence is proven, a typed capture byte, entry,
+depth or metadata-structure limit no longer prevents termination. Each approved worktree reference
+carries `capture_incomplete` and an empty digest instead of claiming a completed
+snapshot. The termination transaction releases capacity and emits one
+`attempt.capture_incomplete` coordinator inbox notice naming retained paths.
+It does not pause control or authorize cleanup. Provenance changes, unsafe file
+types, publication failures and cancellation/deadline failures still fail closed.
+A retry of an already wedged termination uses the same rule without operator
+intervention; existing automatic control reactivation applies once its blockers
+clear. Owner pauses are preserved.
+
+`result submit-captured` selects only the requested attempt's retained inputs
+and worktree provenance, rather than loading the entire project snapshot.
+Capture rejects a missing attempt or absent retained launch inputs before reading
+that provenance, including historical attempts without a prepared worktree.
+Its document references candidate/output Git object identities; worktree binary
+size does not enter snapshot read accounting. Submission object-transfer limits
+and verification requirements remain unchanged. No canonical schema migration
+is needed: manifest files, existing termination event payloads and inbox rows
+carry the new evidence.

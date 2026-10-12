@@ -153,7 +153,7 @@ pub use inbox::{InboxContent,InboxItem,ReminderOutcome};
 mod runtime;
 pub use runtime::{RuntimeBinding,RuntimeIdentity,RuntimeVerification,RuntimeRoute,RouteChange};
 mod control;
-pub use control::{ProjectState,ProjectControl,AdmissionReport,ControlChange};
+pub use control::{ProjectState,ProjectControl,AdmissionReport,ControlChange,ControlPublicationRepair,ControlPublicationRepairAction};
 
 mod ownership;
 pub use ownership::{RuntimeOwnership,ResourceIdentity,AgentIdentity};

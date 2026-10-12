@@ -276,7 +276,13 @@ impl Queue {
                 &&entry.resources.iter().all(|resource|!held.iter().any(|held| *held==resource))
         }).min_by(|(a,_),(b,_)|self.compare(a,b)).map(|(key,_)|key.clone())
     }
-    fn compare(&self,a:&Key,b:&Key)->std::cmp::Ordering {self.cursor.compare(a,b)}
+    fn compare(&self,a:&Key,b:&Key)->std::cmp::Ordering {
+        // Finish the start-to-brief handoff before advancing another launch,
+        // including launches belonging to a different project in this root.
+        let brief = |key: &Key| key.1.starts_with("canonical-worker:prepare-brief-")
+            || key.1.starts_with("canonical-worker:brief-");
+        brief(b).cmp(&brief(a)).then_with(|| self.cursor.compare(a,b))
+    }
     fn next_where(&self,allowed:&impl Fn(&Identity)->bool)->Option<Key> {
         let now=Instant::now();
         self.entries.iter().filter(|(_,e)|e.work.as_ref().is_some_and(|r|allowed(&r.identity))&&now>=e.not_before)

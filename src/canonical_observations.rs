@@ -18,6 +18,11 @@ const LIMIT:usize=1024*1024;
 const HEAD_READ:Duration=if cfg!(test){Duration::from_secs(10)}else{Duration::from_millis(100)};
 
 fn sql_control(control:&Control)->herdr_farm::store::controlled::ReadControl {herdr_farm::store::controlled::ReadControl::new(control.deadline,control.cancellation.clone())}
+fn repair_publication(path:&Path)->Result<bool> {
+    let guard=ProjectGuard::acquire(path)?;
+    let control=herdr_farm::store::controlled::ReadControl::new(Instant::now()+Duration::from_secs(5),Default::default());
+    migration::repair_control_publication(path,&guard,&control)
+}
 fn observation_head(path:&Path)->Result<u64> {
     let mut budget=herdr_farm::store::identity_inventory::Budget::new(2*1024*1024,0,Instant::now()+HEAD_READ,Default::default())?;
     migration::read_observation_head(path,&mut budget)
@@ -167,7 +172,23 @@ impl Reads {
     }
     pub fn poll(&mut self,ctx:&Ctx,path:&Path)->Result<Poll> {
         let mut input=match Input::new(ctx,path){Ok(input)=>input,Err(error)=>{self.unknown=true;return Err(error);}};
-        let head=match observation_head(path){Ok(head)=>head,Err(error)=>{self.unknown=true;return Err(error);}};
+        let head=(||->Result<u64> {
+            // A staged publication is repair work even if the short advisory
+            // head read would expire, or the DB already matches format.json.
+            match std::fs::symlink_metadata(path.join(".state/migration/control-format.next")) {
+                Ok(_)=>{repair_publication(path)?;},
+                Err(error) if error.kind()==std::io::ErrorKind::NotFound=>{},
+                Err(error)=>return Err(error.into()),
+            }
+            match observation_head(path) {
+                Ok(head)=>Ok(head),
+                Err(error) if matches!(error.downcast_ref::<herdr_farm::store::StoreError>(),Some(herdr_farm::store::StoreError::ControlPublicationPending))=>{
+                    if repair_publication(path)? {observation_head(path)}else{Err(error)}
+                },
+                Err(error)=>Err(error),
+            }
+        })();
+        let head=match head {Ok(head)=>head,Err(error)=>{self.unknown=true;return Err(error);}};
         let text=serde_json::to_string(&input)?;ensure!(text.len()<=64*1024,"canonical observation input exceeds bounds");
         let fingerprint=crate::thread::sha256_hex(text.as_bytes());let key=(input.project.display().to_string(),"canonical-observation".into());
         if !self.rotation.contains_key(&key)&&self.rotation.len()>=ROTATION_LIMIT {self.unknown=true;anyhow::bail!("canonical planning registry exceeds 1024 project paths; restart ticker after reducing inventory");}

@@ -207,7 +207,11 @@ pub fn record_controller_observations_guarded(project:&Path,batch:&crate::reconc
 pub fn record_controller_observations_controlled(project:&Path,batch:&crate::reconcile::ObservationBatch,guard:&crate::execution_guard::ProjectGuard,control:&crate::store::controlled::ReadControl)->Result<()> {
     record_controller_controlled(project,batch,guard,control,||{})
 }
-fn record_controller_controlled(project:&Path,batch:&crate::reconcile::ObservationBatch,guard:&crate::execution_guard::ProjectGuard,control:&crate::store::controlled::ReadControl,after_record:impl FnOnce())->Result<()> {
+/// Observation publication with a commit-boundary observer. The observer runs
+/// after the durable observation commit, under retained ownership, and may
+/// cancel the original control; it cannot roll back the committed observations.
+#[doc(hidden)]
+pub fn record_controller_controlled(project:&Path,batch:&crate::reconcile::ObservationBatch,guard:&crate::execution_guard::ProjectGuard,control:&crate::store::controlled::ReadControl,after_record:impl FnOnce())->Result<()> {
     control.check()?;guard.check_project(project)?;
     ensure!(!batch.dispatch_allowed,"observations cannot authorize dispatch");
     let _record=crate::execution_guard::exclusive_file(&project.join(".state/lock"))?;

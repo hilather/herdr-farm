@@ -140,6 +140,10 @@ pub(crate) fn read_with_launches(path:&Path,publication:&Publication,budget:&mut
             }
         }
         if candidates.is_empty(){return Ok(None);}
+        // Do not let project-local rotation hide a pending brief from the root queue.
+        if candidates.iter().any(|(_,kind,_,_,_)| matches!(kind.as_str(), "runtime.worker_brief" | "runtime.worker_brief_prepare")) {
+            candidates.retain(|(_,kind,_,_,_)| kind != "runtime.launch");
+        }
         candidates.sort_by(|a,b|a.0.cmp(&b.0));
         let(id,kind,revision,mode,attempt)=&candidates[(turn%candidates.len() as u64) as usize];
         // Preparation and termination are identity-bound maintenance hints, not
