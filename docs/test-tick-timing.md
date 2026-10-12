@@ -265,3 +265,8 @@ The journal-deferral trigger raises a SQLite constraint violation, exposed by
 the store as `Conflict`; the lab waits for that queue failure tied to the exact
 attempt. It checks the post-cancellation hint revision and requires the same
 ticker to commit termination after trigger removal before the next launch.
+
+LAB-REQUESTS-TORN-1: canonical worker, operator viewer, and replay request-log
+readers only parse newline-terminated JSON records. Polling during an append
+ignores the unfinished final record until its newline arrives; malformed complete
+records still fail the harness. Product behavior and workflow assertions are unchanged.

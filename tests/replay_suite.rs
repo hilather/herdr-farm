@@ -398,7 +398,7 @@ fn launched_replay_candidate_cannot_read_hidden_checks_and_is_verified_by_them()
 
 /// The supervisor argv of every worker the Herdr stand-in created, in order.
 fn launched_commands(lab: &Lab) -> Vec<Vec<String>> {
-    fs::read_to_string(lab.path("lab/requests")).unwrap().lines().map(|l| serde_json::from_str::<Value>(l).unwrap())
+    lab.requests().into_iter()
         .filter(|r| r["method"] == "workspace.create_command").map(|r| serde_json::from_value(r["params"]["command"].clone()).unwrap()).collect()
 }
 
