@@ -4473,11 +4473,14 @@ fn shared_root_finishes_a_pending_termination_before_starting_another_project() 
         && line.contains("fixture termination deferred")).count();
     assert!((1..=10).contains(&failures), "{log}");
     connection.execute_batch("DROP TRIGGER defer_termination").unwrap();
-    termination.bounded_passes(30);
+    // Completed passes precede background commits. Keep this ticker alive
+    // through the next launch too: stopping at an arbitrary pass can cancel
+    // that launch just after the safety obligation commits.
+    let mut ticker = termination.spawn();
+    termination.wait(&mut ticker, 120, &|| termination.attempt(&attempt).termination_observed);
     assert!(termination.attempt(&attempt).termination_observed);
     assert!(!termination.attempt(&attempt).retains_capacity());
     assert_eq!(termination.events("runtime.worker_terminated").len(), 1);
-    let mut ticker = termination.spawn();
     termination.wait(&mut ticker, 120, &|| launches.attempt(&busy).state == AttemptState::Running);
     termination.stop(ticker);
     assert_eq!(launches.count("workspace.create_command"), 1);

@@ -1388,8 +1388,9 @@ The existing `.execution.lock` remains the inherited execution barrier.
 
 Native creation has a 15-second external request budget inside the unscaled
 45-second phase; the lease covers the phase plus a five-second commit reserve.
-A creation timeout first tries to retain an observable exact supervisor for
-advancement under the still-live original claim (or normal termination at expiry). Otherwise it cancels only the automatically
+A creation timeout first observes whether an exact supervisor exists, without
+publishing a launch target or acknowledging the lost creation reply. An observed
+supervisor retains uncertainty and capacity for ordinary recovery. Otherwise it cancels only the automatically
 managed server recorded for that project, task and socket, using a pidfd after
 checking the live command, environment and socket incarnation. The existing
 server-disappearance proof releases the reservation, with typed
@@ -1439,3 +1440,11 @@ terminal handling as Ambiguous rows, so a deferred expiry service cannot leave
 an empty launch or gated target parked indefinitely. The hung-creation E2E runs
 both with the original ticker and with a killed/restarted ticker, checking that
 the typed failure commits before the original lease deadline in both scenarios.
+
+Native short socket namespaces (`r*/s`) also hide their containing private Herdr
+directory; shared temporary and owner/project directories remain protected by
+the existing shared-directory checks. Socket incarnation checks precede lease
+budget decisions, and a short remaining lease alone never proves a hung server.
+The pending-stop workflow keeps its ticker alive through persisted termination
+and the next launch after removing the journal failure fixture. Completed passes
+can precede background commits; stopping then can interrupt the newly admitted launch.

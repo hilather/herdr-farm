@@ -200,3 +200,9 @@ through the output's `timed_out` flag, including when its surviving helper
 finishes before the collector deadline. The
 shared-root recovery E2E uses 30 completed passes, and the hung-creation E2E
 uses observable terminal state with a generous 90-second wait deadline.
+
+Root fairness recovery preserves socket observation errors before considering
+remaining native observation time. A short lease alone does not count as a
+native timeout. Pending-termination labs keep the ticker alive through the persisted
+termination and next launch after removing journal deferral. Completed passes
+alone do not imply executor completion.

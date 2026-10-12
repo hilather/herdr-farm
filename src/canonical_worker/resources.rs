@@ -329,11 +329,15 @@ fn creation_result<T>(result: Result<T>, project: &Path, record: &AttemptInputRe
     if error.downcast_ref::<NativeCreationTimeout>().is_none() {return result;}
     // The lease includes this cleanup reserve. Native work must not continue
     // after its bounded request has returned without an acknowledgment.
-    // If the request completed but lost its reply, retain its exact supervisor
-    // and continue under the still-live original claim without replaying creation.
-    if let Ok(Some((target, _proof))) = recover_supervised_root(api, intent) {
-        db.retain_observed_launch_target(&target, now())?;
-        return result;
+    // If the request completed but lost its reply, retain uncertainty and
+    // leave target publication to ordinary recovery without replaying creation.
+    match recover_supervised_root(api, intent) {
+        // Observation during timeout cleanup does not acknowledge creation.
+        // Only the public recovery path may publish a recovered target.
+        Ok(Some(_)) => return result,
+        Ok(None) => {},
+        Err(error) if error.downcast_ref::<NativeObservationTimeout>().is_some() => {},
+        Err(_) => return result,
     }
     if cancel_creation_server(project, record, intent)? {
         db.record_launch_failure(&intent.operation, "launch_creation_timed_out",
@@ -937,7 +941,17 @@ pub fn reconcile_resource(
         .effective_profile
         .as_ref()
         .context("launch profile missing")?;
-    let mut observation_deadline = deadline;
+    let mut api = Api {
+        executable: &profile.herdr,
+        socket: &intent.route.socket,
+        session: &intent.session,
+        deadline,
+        cancellation: cancellation.clone(),
+        locks: guard.inherit()?,
+    };
+    // Route errors retain their transient/escalation semantics before any
+    // decision based on the remaining creation lease.
+    api.check_session()?;
     if state.delivery.state == crate::operations::DeliveryState::Claimed
         && let Some(until) = state.delivery.lease_until_ms
         && until > now() {
@@ -945,17 +959,12 @@ pub fn reconcile_resource(
         // Five seconds for the supervised bridge to drain, then five for
         // cancellation and its receipt. A dying launcher cannot consume the
         // remaining lease by issuing another full native observation.
-        if remaining <= 10_000 {return Err(NativeObservationTimeout.into());}
-        observation_deadline = deadline.min(Instant::now() + Duration::from_millis((remaining - 5_000) as u64));
+        // A short lease is not evidence that the native server is hung.
+        // Preserve a real observation window rather than synthesizing timeout.
+        if remaining > 10_000 {
+            api.deadline = deadline.min(Instant::now() + Duration::from_millis((remaining - 5_000) as u64));
+        }
     }
-    let api = Api {
-        executable: &profile.herdr,
-        socket: &intent.route.socket,
-        session: &intent.session,
-        deadline: observation_deadline,
-        cancellation: cancellation.clone(),
-        locks: guard.inherit()?,
-    };
     let route = if intent.route.workspace_id.is_empty() && intent.version == 1 {
         let Some(event) = state
             .events
