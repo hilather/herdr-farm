@@ -116,6 +116,11 @@ impl Lab {
     }
     pub(crate) fn path(&self, name: &str) -> PathBuf { self.home.path().join(name) }
     pub(crate) fn root(&self) -> PathBuf { self.path("root") }
+    pub(crate) fn requests(&self) -> Vec<Value> {
+        // A concurrent append may leave the final JSON record incomplete.
+        fs::read_to_string(self.path("lab/requests")).unwrap().split_inclusive('\n')
+            .filter(|line| line.ends_with('\n')).map(|line| serde_json::from_str(line).unwrap()).collect()
+    }
     pub(crate) fn socket(&self) -> PathBuf { self.path("lab/native.sock") }
     pub(crate) fn db(&self) -> rusqlite::Connection { rusqlite::Connection::open(self.project.join(".state/state.db")).unwrap() }
     pub(crate) fn store(&self) -> String { self.project.join(".state/state.db").canonicalize().unwrap().display().to_string() }

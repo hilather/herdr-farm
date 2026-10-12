@@ -1111,7 +1111,7 @@ impl CoordinatorSession {
     }
 
     fn calls(&self) -> Vec<Value> {
-        fs::read_to_string(&self.calls).unwrap_or_default().lines()
+        fs::read_to_string(&self.calls).unwrap_or_default().split_inclusive('\n').filter(|line| line.ends_with('\n'))
             .map(|line| serde_json::from_str(line).unwrap()).collect()
     }
 }

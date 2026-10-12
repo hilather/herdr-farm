@@ -187,3 +187,8 @@ and E2E coverage of slow creation and killed-launcher recovery.
 Expired unreleased targets select termination observation alone. It records the
 typed expiry outcome, then stops the gated worker in the same reconciliation;
 it never renews or reclaims the expired launch.
+
+LAB-REQUESTS-TORN-1: canonical worker, operator viewer, and replay request-log
+readers only parse newline-terminated JSON records. Polling during an append
+ignores the unfinished final record until its newline arrives; malformed complete
+records still fail the harness. Product behavior and workflow assertions are unchanged.

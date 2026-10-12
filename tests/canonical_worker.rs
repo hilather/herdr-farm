@@ -277,7 +277,7 @@ sys.stdout.buffer.write(json.dumps({'result':json.loads(reply)['result']}).encod
     }
     /// Every request the server has received, as (method, params).
     fn requests(&self) -> Vec<(String, Value)> {
-        fs::read_to_string(self.path("lab/requests")).unwrap_or_default().lines()
+        fs::read_to_string(self.path("lab/requests")).unwrap_or_default().split_inclusive('\n').filter(|line| line.ends_with('\n'))
             .map(|line| { let v: Value = serde_json::from_str(line).unwrap(); (v["method"].as_str().unwrap().to_owned(), v["params"].clone()) }).collect()
     }
     fn count(&self, method: &str) -> usize { self.requests().iter().filter(|(m, _)| m == method).count() }
