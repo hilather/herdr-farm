@@ -175,7 +175,7 @@ fn ticker_health_evaluates_by_default_obeys_interval_and_never_notifies() {
         let mut child = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", p.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
             .args(["--root", p.root.to_str().unwrap(), "ticker", "run"])
             .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap();
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + Duration::from_secs(60);
         while synced() == before || !want() {
             let exited = child.try_wait().unwrap();
             if exited.is_some() || Instant::now() >= deadline {

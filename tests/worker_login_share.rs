@@ -29,7 +29,7 @@ struct World {
     agent: PathBuf,
 }
 
-/// An owner home (outside the private `/tmp`) with logins and private agent
+/// A fixture owner home with logins and private agent
 /// data, a projects root with one project, an execution home and a probe agent.
 fn world(base: &Path) -> World {
     let guard = tempfile::tempdir_in(base).unwrap();
@@ -54,8 +54,10 @@ fn world(base: &Path) -> World {
     let project = root.join("project");
     fs::create_dir_all(&project).unwrap();
     fs::write(root.join(".execution.lock"), b"").unwrap();
-    let home = top.join("exec-home");
-    fs::create_dir(&home).unwrap();
+    // The execution home must be writable inside the recursive read-only owner
+    // anchor, matching Ubuntu CI and the normal owner cache layout.
+    let home = owner.join(".cache/exec-home");
+    fs::create_dir_all(&home).unwrap();
     // The probe reports what the worker can reach; nothing in it is a secret.
     let agent = top.join("probe-agent");
     let owner_text = owner.display();
@@ -64,6 +66,7 @@ fn world(base: &Path) -> World {
         format!(
             r#"#!/bin/sh
 out="$HOME/probe.txt"; : > "$out"
+if touch "{owner_text}/.cache/escape" 2>/dev/null; then exit 1; fi
 show() {{ printf '%s=%s\n' "$1" "$(cat "$2" 2>/dev/null | head -c 64)" >> "$out"; }}
 show home_codex_login "$HOME/.codex/auth.json"
 show home_claude_login "$HOME/.claude/.credentials.json"
@@ -122,9 +125,10 @@ fn isolation(world: &World) -> Isolation {
 
 #[test]
 fn the_worker_shares_the_owners_single_login_file_and_nothing_else_of_the_agent_directories() {
-    let base = Path::new(env!("CARGO_TARGET_TMPDIR"));
-    fs::create_dir_all(base).unwrap();
-    let world = world(base);
+    // Honor runtime TMPDIR so CI can keep fixtures outside the owner home.
+    let base = std::env::temp_dir();
+    fs::create_dir_all(&base).unwrap();
+    let world = world(&base);
     // The fixture owner home is declared explicitly: the real owner's home
     // (passwd entry or HOME) is never consulted for logins or hidden paths.
     // SAFETY: this binary has one test and no other thread reads the environment.

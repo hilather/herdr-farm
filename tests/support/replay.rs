@@ -24,8 +24,11 @@ pub(crate) const CLEAN: &str = r#"{"version":1,"checks":["/usr/bin/git","diff","
 /// The Herdr stand-in of tests/canonical_worker.rs: runs `workspace.create_command`
 /// for real and logs each request beside the socket.
 const SERVER: &str = r#"
-import json,os,sys,socket,subprocess
+import json,os,sys,socket,subprocess,threading
 path=sys.argv[1];root=os.path.dirname(path);s={}
+def record_exit(child,root):
+ with open(os.path.join(root,'agent-exits.jsonl'),'a') as log:
+  log.write(json.dumps({'host_supervisor_pid':child.pid,'exit_status':child.wait()})+'\n');log.flush()
 server=socket.socket(socket.AF_UNIX);server.bind(path);server.listen()
 while True:
  c,_=server.accept();f=c.makefile('rw');r=json.loads(f.readline());m=r['method'];p=r.get('params') or {}
@@ -37,7 +40,8 @@ while True:
  if m=='ping':res={'type':'pong','version':'0.9.1','capabilities':{'workspace_create_command':True}}
  elif m=='workspace.create_command' and 'pid' not in s:
   fifo=os.path.join(root,'input');os.mkfifo(fifo);fd=os.open(fifo,os.O_RDWR)
-  child=subprocess.Popen(p['command'],cwd=p['cwd'],stdin=fd,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True,env={'PATH':'/usr/bin:/bin'})
+  child=subprocess.Popen(p['command'],cwd=p['cwd'],stdin=fd,stdout=subprocess.DEVNULL,stderr=open(os.path.join(root,'agent.log'),'a'),start_new_session=True,env={'PATH':'/usr/bin:/bin'})
+  threading.Thread(target=record_exit,args=(child,root),daemon=True).start()
   s.update(pid=child.pid,argv=p['command'],cwd=p['cwd'],label=p['label'],fifo=fifo)
   res={'type':'workspace_created','workspace':{'workspace_id':'w1'},'root_pane':{'pane_id':'w1:p1'}}
  elif m=='workspace.list':res={'type':'workspace_list','workspaces':[{'workspace_id':'w1','label':s['label'],'pane_count':1,'tab_count':1}] if live else []}
@@ -64,6 +68,13 @@ pub(crate) struct History { pub(crate) names: BTreeMap<String, String>, pub(crat
 
 impl Drop for Lab {
     fn drop(&mut self) {
+        if std::thread::panicking() {
+            for name in ["lab/agent-exits.jsonl", "lab/agent.log", "ticker.stderr", "root/.ticker.log"] {
+                if let Ok(evidence) = fs::read_to_string(self.home.path().join(name)) {
+                    eprintln!("{name}:\n{evidence}");
+                }
+            }
+        }
         let _ = Command::new("/usr/bin/pkill").args(["-KILL", "-f"]).arg(self.home.path().join("agent-home")).status();
         if let Some(server) = &mut self.server { let _ = server.kill(); let _ = server.wait(); }
     }
@@ -116,6 +127,11 @@ impl Lab {
     }
     pub(crate) fn path(&self, name: &str) -> PathBuf { self.home.path().join(name) }
     pub(crate) fn root(&self) -> PathBuf { self.path("root") }
+    pub(crate) fn requests(&self) -> Vec<Value> {
+        // A concurrent append may leave the final JSON record incomplete.
+        fs::read_to_string(self.path("lab/requests")).unwrap().split_inclusive('\n')
+            .filter(|line| line.ends_with('\n')).map(|line| serde_json::from_str(line).unwrap()).collect()
+    }
     pub(crate) fn socket(&self) -> PathBuf { self.path("lab/native.sock") }
     pub(crate) fn db(&self) -> rusqlite::Connection { rusqlite::Connection::open(self.project.join(".state/state.db")).unwrap() }
     pub(crate) fn store(&self) -> String { self.project.join(".state/state.db").canonicalize().unwrap().display().to_string() }
@@ -183,8 +199,7 @@ sys.stdout.buffer.write(json.dumps({'result':json.loads(reply)['result']}).encod
     pub(crate) fn build_agent(&self, source: &str) {
         let (agent, file) = (self.path("bin/claude"), self.path("bin/agent.rs"));
         fs::write(&file, source).unwrap();
-        let built = Command::new("rustc").args(["--edition", "2021", "-o"]).arg(&agent).arg(&file).output().unwrap();
-        assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+        super::agent_build_cache::copy_agent(&fs::read_to_string(&file).unwrap(), &agent);
         fs::set_permissions(&agent, fs::Permissions::from_mode(0o700)).unwrap();
     }
     /// `profile prepare` over the lab binaries; only the native interaction evidence is planted.
@@ -241,13 +256,13 @@ sys.stdout.buffer.write(json.dumps({'result':json.loads(reply)['result']}).encod
     }
     pub(crate) fn spawn(&self) -> Ticker {
         Ticker(Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", &self.herdr)
-            .args(["--root", self.root().to_str().unwrap(), "ticker", "run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap())
+            .args(["--root", self.root().to_str().unwrap(), "ticker", "run"]).stdout(Stdio::null()).stderr(fs::File::create(self.path("ticker.stderr")).unwrap()).spawn().unwrap())
     }
     pub(crate) fn wait(&self, ticker: &mut Ticker, seconds: u64, predicate: &dyn Fn() -> bool) {
         let deadline = Instant::now() + Duration::from_secs((seconds / 4).max(15));
         let mut pause = Duration::from_millis(20);
         while !predicate() {
-            assert!(ticker.0.try_wait().unwrap().is_none(), "ticker exited");
+            assert!(ticker.0.try_wait().unwrap().is_none(), "ticker exited; stderr:\n{}\nticker log:\n{}", fs::read_to_string(self.path("ticker.stderr")).unwrap_or_default(), fs::read_to_string(self.path("root/.ticker.log")).unwrap_or_default());
             assert!(Instant::now() < deadline, "{}", fs::read_to_string(self.path("root/.ticker.log")).unwrap_or_default());
             std::thread::sleep(pause);
             pause = (pause * 2).min(Duration::from_millis(250));

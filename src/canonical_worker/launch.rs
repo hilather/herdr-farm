@@ -120,6 +120,11 @@ pub fn advance_launch(project: &Path, operation: &OperationId, mut revision: u64
         match advance_launch_once(project, operation, revision, deadline, cancellation.clone()) {
             Ok(value) => return Ok(value),
             Err(error) => {
+                if error.downcast_ref::<super::resources::NativeObservationTimeout>().is_some()
+                    && super::resources::cancel_unresponsive_creation(project, operation, revision,
+                        deadline, cancellation.clone())? {
+                    return Err(error.context("native creation cancelled; typed failure recorded"));
+                }
                 let conflict = error.chain().any(|e| matches!(e.downcast_ref::<crate::store::StoreError>(), Some(crate::store::StoreError::Conflict)));
                 if !conflict { return Err(error); }
                 if pass < 2 && check(deadline, &cancellation).is_ok() {

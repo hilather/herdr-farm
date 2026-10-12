@@ -5,6 +5,10 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  # Nightly: the full gate on main plus the long-running `nightly` nextest
+  # profile (tests too slow for every PR; see .config/nextest.toml).
+  schedule:
+    - cron: '17 7 * * *'
 
 concurrency:
   group: tests-${{ github.ref }}
@@ -21,6 +25,14 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - name: Prepare test scratch outside checkout and private mounts
+        run: |
+          # Keep the owner-home anchor, but avoid work/_temp and the checkout.
+          # /tmp, /var/tmp and /dev/shm are replaced by private worker mounts.
+          mkdir -p "$HOME/.cache"
+          scratch=$(mktemp -d "$HOME/.cache/hf-ci-XXXXXX")
+          echo "TMPDIR=$scratch" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_TMPDIR=$scratch" >> "$GITHUB_ENV"
       # herdr-farm requires SQLite 3.53.4+ (Ubuntu 24.04 ships 3.45.1).
       # Built from the release source, pinned by SHA-256, cached per version.
       - name: Cache SQLite
@@ -66,9 +78,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        partition: [1, 2, 3, 4]
+        partition: [1, 2, 3, 4, 5, 6, 7, 8]
     steps:
       - uses: actions/checkout@v4
+      - name: Prepare test scratch outside checkout and private mounts
+        run: |
+          # Keep the owner-home anchor, but avoid work/_temp and the checkout.
+          # /tmp, /var/tmp and /dev/shm are replaced by private worker mounts.
+          mkdir -p "$HOME/.cache"
+          scratch=$(mktemp -d "$HOME/.cache/hf-ci-XXXXXX")
+          echo "TMPDIR=$scratch" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_TMPDIR=$scratch" >> "$GITHUB_ENV"
       # herdr-farm requires SQLite 3.53.4+ (Ubuntu 24.04 ships 3.45.1).
       # Built from the release source, pinned by SHA-256, cached per version.
       - name: Cache SQLite
@@ -110,21 +130,86 @@ jobs:
           git config --global user.name ci
           git config --global user.email ci@invalid
           df -h / /dev/shm
+      - name: Worker sandbox diagnostics
+        run: |
+          # Diagnostic failures must leave the full test gate running.
+          set +e
+          uname -a
+          cat /proc/sys/kernel/unprivileged_userns_clone /proc/sys/user/max_user_namespaces 2>&1
+          sysctl -a 2>/dev/null | grep apparmor
+          unshare --version
+          mount --version
+          unshare --user --map-root-user --mount --pid --fork true
+          echo "user/mount/pid namespace status=$?"
+          # Match --mount-proc and the second user namespace used by workers.
+          unshare --user --map-root-user --pid --fork --mount-proc --kill-child=KILL -- sh -c '
+            probe() { "$@"; echo "primitive status=$?: $*"; }
+            d=$(mktemp -d "$TMPDIR/sandbox-probe-XXXXXX") || exit 1
+            trap "rm -rf -- \"\$d\"" EXIT
+            # Match the owner-home anchor and execution-home writable exposure.
+            # The rest of TMPDIR stays read-only; only this lab home is writable.
+            mkdir "$d/exec-home"
+            printf "%s\n" "printf scratch-write > \"\$1/exec-home/probe\" && test -s \"\$1/exec-home/probe\" && ! touch \"\$1/owner-write-must-fail\"" > "$d/scratch-probe.sh"
+            # A separate mount namespace drops these mounts before other probes.
+            probe unshare --mount -- sh -c "
+              mount --rbind -o ro=recursive \"\$1\" \"\$1\" &&
+              mount --rbind \"\$2/exec-home\" \"\$2/exec-home\" &&
+              mount -o remount,bind,rw \"\$2/exec-home\" &&
+              mount -t tmpfs -o nosuid,nodev,mode=1777 herdr-farm-private /tmp &&
+              unshare --user --map-root-user -- sh \"\$2/scratch-probe.sh\" \"\$2\"
+            " sh "$HOME" "$d"
+            # Root cover + descriptor bind-back: the parent remount alone
+            # does not protect the exposed file on util-linux 2.39.
+            mkdir -p "$d/projects/demo/repo" "$d/projects/demo/.git-quarantine/upper" "$d/projects/demo/.git-quarantine/work"
+            printf lower > "$d/projects/demo/repo/base"
+            printf owner > "$d/projects/PROJECT.md"
+            printf "%s\n" "test \"\$(cat \"\$1/projects/PROJECT.md\")\" = owner && ! printf escaped > \"\$1/projects/PROJECT.md\" && test \"\$(cat \"\$1/projects/demo/repo/base\")\" = lower && printf overlay-write > \"\$1/projects/demo/repo/new\" && ! touch \"\$1/projects/demo/.git-quarantine/escape\" && ! touch \"\$1/projects/outside\"" > "$d/root-probe.sh"
+            probe unshare --mount -- sh -c "
+              mount -t overlay -o \"lowerdir=\$1/projects/demo/repo,upperdir=\$1/projects/demo/.git-quarantine/upper,workdir=\$1/projects/demo/.git-quarantine/work,userxattr,index=off,metacopy=off,redirect_dir=nofollow\" herdr-farm-git \"\$1/projects/demo/repo\" &&
+              exec 3<\"\$1/projects/PROJECT.md\" 4<\"\$1/projects/demo\" &&
+              mount -t tmpfs -o nosuid,nodev,noexec,mode=0755,size=1m herdr-farm-root \"\$1/projects\" &&
+              touch \"\$1/projects/PROJECT.md\" &&
+              mkdir \"\$1/projects/demo\" &&
+              mount -c --rbind /proc/self/fd/4 \"\$1/projects/demo\" &&
+              mount -o remount,bind,ro,nosuid,nodev \"\$1/projects/demo\" &&
+              mount -c --bind /proc/self/fd/3 \"\$1/projects/PROJECT.md\" &&
+              mount -o remount,bind,ro,nosuid,nodev,noexec \"\$1/projects/PROJECT.md\" &&
+              mount -o remount,bind,ro,nosuid,nodev,noexec \"\$1/projects\" &&
+              findmnt --kernel --mountpoint \"\$1/projects/PROJECT.md\" -o TARGET,VFS-OPTIONS &&
+              findmnt --kernel --mountpoint \"\$1/projects/demo/repo\" -o TARGET,VFS-OPTIONS &&
+              unshare --user --map-root-user -- sh \"\$1/root-probe.sh\" \"\$1\"
+            " sh "$d"
+            mkdir "$d/tmpfs" "$d/lower" "$d/upper" "$d/work" "$d/merged" "$d/ro"
+            probe mount -t tmpfs -o nosuid,nodev,mode=1777 herdr-farm-private "$d/tmpfs"
+            probe mount -t overlay -o "lowerdir=$d/lower,upperdir=$d/upper,workdir=$d/work,userxattr,index=off,metacopy=off,redirect_dir=nofollow" herdr-farm-git "$d/merged"
+            probe mount --rbind -o ro=recursive "$d/ro" "$d/ro"
+            probe unshare --user --map-root-user -- true
+            umount "$d/ro" "$d/merged" "$d/tmpfs"
+          '
+          echo "product namespace/mount probe status=$?"
+          sudo dmesg | tail -80
+          exit 0
       - uses: actions/download-artifact@v4
         with:
           name: nextest-archive
-      - name: Run tests (partition ${{ matrix.partition }}/4)
+      - name: Run tests (partition ${{ matrix.partition }}/8)
         # Tests find the CLI through the compile-time CARGO_BIN_EXE path, so
         # unpack target/ into the workspace at the path it was built at.
-        env:
-          TMPDIR: ${{ runner.temp }}
         run: >
           cargo nextest run --profile ci
           --archive-file nextest-archive.tar.zst
           --workspace-remap .
           --extract-to ${{ github.workspace }}
           --extract-overwrite
-          --partition count:${{ matrix.partition }}/4
+          --partition hash:${{ matrix.partition }}/8
+      - name: Run nightly profile
+        if: github.event_name == 'schedule' && matrix.partition == 1
+        run: >
+          cargo nextest run --profile nightly
+          --archive-file nextest-archive.tar.zst
+          --workspace-remap .
+          --extract-to ${{ github.workspace }}
+          --extract-overwrite
       - uses: actions/upload-artifact@v4
         if: always()
         with:

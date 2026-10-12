@@ -535,7 +535,9 @@ pub fn reconcile_termination(
     if current.termination_observed {return Ok(Some(current.clone()));}
     let state=selected.worker.as_ref().context("canonical attempt inputs missing")?;
     let record=&state.record;
-    if state.delivery.state == crate::operations::DeliveryState::Ambiguous
+    if (state.delivery.state == crate::operations::DeliveryState::Ambiguous
+        || (state.delivery.state == crate::operations::DeliveryState::Claimed
+            && state.delivery.lease_until_ms.is_some_and(|until| until <= now())))
         && !state.events.iter().any(|event| event.entity == record.operation.as_str()
             && event.kind == "runtime.launch_release")
         && state.events.iter().any(|event| event.entity == record.operation.as_str()

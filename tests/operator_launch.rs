@@ -23,15 +23,22 @@ use std::{
     process::{Command, Output},
 };
 
+#[path = "support/agent_build_cache.rs"]
+mod agent_build_cache;
+
 const BIN: &str = env!("CARGO_BIN_EXE_herdr-farm");
 
 /// The stand-in Herdr: `--version`, probes and the API bridge as in the other
 /// suites, plus `server`, which serves one native workspace backed by a real
 /// process (stdin is a FIFO the gate reads its release token from).
 const HERDR: &str = r#"#!/usr/bin/python3
-import json,os,socket,subprocess,sys
+import json,os,socket,subprocess,sys,threading
 args=sys.argv[1:]
+diagnostics=os.path.dirname(os.path.dirname(os.path.realpath(sys.argv[0])))
 if args==['--version']:print('herdr 0.9.1');sys.exit(0)
+def record_exit(child,root):
+ with open(os.path.join(root,'agent-exits.jsonl'),'a') as log:
+  log.write(json.dumps({'host_supervisor_pid':child.pid,'exit_status':child.wait()})+'\n');log.flush()
 def serve(path):
  root=os.path.dirname(path);s={};next_tab=0;tabs=[{'tab_id':'owner-tab','label':'Owner'}]
  server=socket.socket(socket.AF_UNIX);server.bind(path);server.listen()
@@ -49,7 +56,8 @@ def serve(path):
   if m=='ping':res={'type':'pong','version':'0.9.1','capabilities':{'workspace_create_command':True}}
   elif m=='workspace.create_command' and not live:
    fifo=os.path.join(root,'input');os.mkfifo(fifo);fd=os.open(fifo,os.O_RDWR)
-   child=subprocess.Popen(p['command'],cwd=p['cwd'],stdin=fd,stdout=subprocess.DEVNULL,stderr=open(os.path.join(root,'agent.log'),'w'),start_new_session=True,env={'PATH':'/usr/bin:/bin'})
+   child=subprocess.Popen(p['command'],cwd=p['cwd'],stdin=fd,stdout=subprocess.DEVNULL,stderr=open(os.path.join(diagnostics,'agent.log'),'a'),start_new_session=True,env={'PATH':'/usr/bin:/bin'})
+   threading.Thread(target=record_exit,args=(child,diagnostics),daemon=True).start()
    s.update(pid=child.pid,argv=p['command'],cwd=p['cwd'],label=p['label'],fifo=fifo,kind='codex' if any(a.endswith('/codex') for a in p['command']) else 'claude')
    res={'type':'workspace_created','workspace':{'workspace_id':'w1','pane_count':1},'root_pane':{'pane_id':'w1:p1'}}
   elif m=='workspace.list':res={'type':'workspace_list','workspaces':[{'workspace_id':'w1','label':s['label'],'pane_count':1,'tab_count':1}] if live else []}
@@ -181,6 +189,15 @@ struct Lab {
 impl Drop for Lab {
     /// Safety net: a failed test must not leave a stand-in Herdr server behind.
     fn drop(&mut self) {
+        if std::thread::panicking() {
+            // Retain evidence in the lab home, including disposable probe servers
+            // whose socket directories the CLI removes before returning an error.
+            for name in ["agent-exits.jsonl", "agent.log", "ticker.stderr", "root/.ticker.log"] {
+                if let Ok(evidence) = fs::read_to_string(self.home.join(name)) {
+                    eprintln!("{name}:\n{evidence}");
+                }
+            }
+        }
         let _ = Command::new("/usr/bin/pkill").args(["-KILL", "-f"]).arg(format!("{} server", self.home.join("bin/herdr").display())).status();
     }
 }
@@ -192,11 +209,11 @@ impl Lab {
     fn new() -> Self { Self::with_herdr(HERDR) }
     /// As `new`, with `herdr` as the Herdr executable's source.
     fn with_herdr(herdr: &str) -> Self {
-        // Not under /tmp: the worker sandbox keeps /tmp private, and the owner's
-        // home (with its logins) is where the shared login files live.
-        let base = Path::new(env!("CARGO_TARGET_TMPDIR"));
-        fs::create_dir_all(base).unwrap();
-        let top = tempfile::tempdir_in(base).unwrap();
+        // The sandbox preserves the fixture subtree when privatizing /tmp.
+        // Honor runtime TMPDIR so CI can keep fixtures outside the owner home.
+        let base = std::env::temp_dir();
+        fs::create_dir_all(&base).unwrap();
+        let top = tempfile::tempdir_in(&base).unwrap();
         let home = top.path().canonicalize().unwrap().join("home");
         for dir in ["", "bin", "repo", "agent-home-codex", "agent-home-claude", ".codex", ".claude"] {
             fs::create_dir_all(home.join(dir)).unwrap();
@@ -234,8 +251,7 @@ impl Lab {
         for (name, version, login, trust) in [("codex", "codex-cli 0.154.0", ".codex/auth.json", ".codex/config.toml"), ("claude", "2.1.0 (Claude Code)", "", ".claude.json")] {
             let source = lab.home.join(format!("bin/{name}.rs"));
             fs::write(&source, agent_source(version, login, trust)).unwrap();
-            let built = Command::new("rustc").args(["--edition", "2021", "-o"]).arg(lab.home.join("bin").join(name)).arg(&source).output().unwrap();
-            assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+            agent_build_cache::copy_agent(&fs::read_to_string(&source).unwrap(), &lab.home.join("bin").join(name));
         }
         for name in ["herdr", "codex", "claude"] {
             fs::set_permissions(lab.home.join("bin").join(name), fs::Permissions::from_mode(0o700)).unwrap();
@@ -253,8 +269,7 @@ impl Lab {
     fn build_agent(&self, name: &str, source: &str) {
         let file = self.home.join(format!("bin/{name}.rs"));
         fs::write(&file, source).unwrap();
-        let built = Command::new("rustc").args(["--edition", "2021", "-o"]).arg(self.home.join("bin").join(name)).arg(&file).output().unwrap();
-        assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+        agent_build_cache::copy_agent(&fs::read_to_string(&file).unwrap(), &self.home.join("bin").join(name));
         fs::set_permissions(self.home.join("bin").join(name), fs::Permissions::from_mode(0o700)).unwrap();
     }
     fn prepare(&self, profile: &str, kind: &str) -> Output {
@@ -1111,7 +1126,7 @@ impl CoordinatorSession {
     }
 
     fn calls(&self) -> Vec<Value> {
-        fs::read_to_string(&self.calls).unwrap_or_default().lines()
+        fs::read_to_string(&self.calls).unwrap_or_default().split_inclusive('\n').filter(|line| line.ends_with('\n'))
             .map(|line| serde_json::from_str(line).unwrap()).collect()
     }
 }

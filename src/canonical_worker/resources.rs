@@ -165,6 +165,20 @@ impl std::fmt::Display for LaunchSocketFailure {
 }
 impl std::error::Error for LaunchSocketFailure {}
 
+#[derive(Debug)]
+struct NativeCreationTimeout;
+impl std::fmt::Display for NativeCreationTimeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {f.write_str("native creation exceeded its phase budget")}
+}
+impl std::error::Error for NativeCreationTimeout {}
+
+#[derive(Debug)]
+pub(super) struct NativeObservationTimeout;
+impl std::fmt::Display for NativeObservationTimeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {f.write_str("native workspace observation exceeded its budget")}
+}
+impl std::error::Error for NativeObservationTimeout {}
+
 struct Api<'a> {
     executable: &'a ExecutableIdentity,
     socket: &'a str,
@@ -236,6 +250,13 @@ impl Api<'_> {
         let output =
             crate::supervision::run(cmd, self.deadline, self.cancellation.clone(), &self.locks)?;
         self.check_session()?;
+        if (output.timed_out || matches!(output.code, Some(124 | 137)))
+            && matches!(method, "workspace.create" | "workspace.create_command") {
+            return Err(NativeCreationTimeout.into());
+        }
+        if (output.timed_out || matches!(output.code, Some(124 | 137))) && method == "workspace.list" {
+            return Err(NativeObservationTimeout.into());
+        }
         ensure!(
             output.success(),
             "native resource request failed; retain launch claim"
@@ -251,6 +272,106 @@ impl Api<'_> {
             .cloned()
             .context("native resource acknowledgment missing")
     }
+}
+
+/// Retire only the recorded, automatically managed server for this exact
+/// launch. A pidfd pins the incarnation before checking its command/environment.
+/// Killing it cancels native creation, including a call whose bridge timed out.
+#[cfg(target_os = "linux")]
+fn cancel_creation_server(project: &Path, record: &AttemptInputRecord, intent: &LaunchCreationIntent) -> Result<bool> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::fs::MetadataExt;
+    let slug = project.file_name().and_then(|s| s.to_str()).context("project slug missing")?;
+    let path = project.parent().context("project root missing")?.join(".herdr-run")
+        .join(format!("{slug}-{}", record.inputs.task.as_str())).join("herdr/server.json");
+    let Ok(metadata) = std::fs::symlink_metadata(&path) else {return Ok(false);};
+    ensure!(metadata.is_file() && metadata.uid() == unsafe {libc::geteuid()} && metadata.mode() & 0o022 == 0,
+        "unsafe dedicated server record");
+    let value: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+    if value["managed_by"] == "operator" || value["project"] != slug
+        || value["task"] != record.inputs.task.as_str() || value["socket"] != intent.route.socket {
+        return Ok(false);
+    }
+    let pid = value["pid"].as_i64().filter(|pid| *pid > 1).context("dedicated server pid missing")?;
+    let pid = i32::try_from(pid)?;
+    // SAFETY: pidfd_open returns a new descriptor, owned below.
+    let fd = unsafe {libc::syscall(libc::SYS_pidfd_open, pid, 0)};
+    if fd < 0 {return Err(std::io::Error::last_os_error()).context("pin dedicated server");}
+    let process = unsafe {std::fs::File::from_raw_fd(fd as i32)};
+    let cmd = std::fs::read(format!("/proc/{pid}/cmdline"))?;
+    let env = std::fs::read(format!("/proc/{pid}/environ"))?;
+    let wanted = format!("HERDR_SOCKET_PATH={}", intent.route.socket);
+    ensure!(cmd.split(|b| *b == 0).rfind(|a| !a.is_empty()) == Some(b"server".as_slice())
+        && env.split(|b| *b == 0).any(|e| e == wanted.as_bytes()), "dedicated server incarnation changed");
+    ensure!(session_identity(Path::new(&intent.route.socket))? == intent.session, "dedicated server socket changed");
+    // SAFETY: signal the pinned process, never a reused PID.
+    let sent = unsafe {libc::syscall(libc::SYS_pidfd_send_signal, process.as_raw_fd(), libc::SIGKILL,
+        std::ptr::null::<libc::siginfo_t>(), 0)};
+    ensure!(sent == 0, "could not cancel native creation: {}", std::io::Error::last_os_error());
+    let mut poll = libc::pollfd {fd: process.as_raw_fd(), events: libc::POLLIN, revents: 0};
+    // SAFETY: one initialized poll descriptor; bounded wait for process exit.
+    ensure!(unsafe {libc::poll(&mut poll, 1, 2000)} == 1 && poll.revents & libc::POLLIN != 0,
+        "native creation server did not exit");
+    let socket = Path::new(&intent.route.socket);
+    // Preserve server.json as provenance for the existing disappearance proof.
+    if socket.file_name().is_some_and(|s| s == "s")
+        && let Some(directory) = socket.parent().filter(|p| p.file_name().and_then(|s| s.to_str()).is_some_and(|s| s.starts_with('r'))) {
+        std::fs::remove_file(socket)?;
+        std::fs::remove_dir(directory)?;
+    }
+    Ok(true)
+}
+
+#[cfg(target_os = "linux")]
+fn creation_result<T>(result: Result<T>, project: &Path, record: &AttemptInputRecord,
+    intent: &LaunchCreationIntent, db: &mut crate::store::controlled::ControlledStore, api: &Api<'_>) -> Result<T> {
+    let Err(error) = &result else {return result;};
+    if error.downcast_ref::<NativeCreationTimeout>().is_none() {return result;}
+    // The lease includes this cleanup reserve. Native work must not continue
+    // after its bounded request has returned without an acknowledgment.
+    // If the request completed but lost its reply, retain uncertainty and
+    // leave target publication to ordinary recovery without replaying creation.
+    match recover_supervised_root(api, intent) {
+        // Observation during timeout cleanup does not acknowledge creation.
+        // Only the public recovery path may publish a recovered target.
+        Ok(Some(_)) => return result,
+        Ok(None) => {},
+        Err(error) if error.downcast_ref::<NativeObservationTimeout>().is_some() => {},
+        Err(_) => return result,
+    }
+    if cancel_creation_server(project, record, intent)? {
+        db.record_launch_failure(&intent.operation, "launch_creation_timed_out",
+            "launch_creation_timed_out: native creation exceeded phase budget; dedicated server cancelled before lease expiry", false, now())?;
+    }
+    result
+}
+
+/// A dead launcher can leave its native call blocking the dedicated server.
+/// Cancel that incarnation instead of polling an unresponsive server forever.
+#[cfg(target_os = "linux")]
+pub(super) fn cancel_unresponsive_creation(project: &Path, operation: &OperationId, revision: u64,
+    deadline: Instant, cancellation: Cancellation) -> Result<bool> {
+    let _guard = crate::execution_guard::RootGuard::exclusive_by(project.parent().context("project root missing")?, deadline, &cancellation)?;
+    let mut db = crate::migration::open_active_scoped(project, crate::store::controlled::ReadControl::new(deadline, cancellation))?;
+    let state = db.resource_recovery_selection(operation, revision)?;
+    if !matches!(state.delivery.state, crate::operations::DeliveryState::Claimed | crate::operations::DeliveryState::Ambiguous)
+        || state.events.iter().any(|e| e.entity == operation.as_str()
+            && matches!(e.kind.as_str(), "runtime.launch_target" | "runtime.launch_release" | "runtime.launch_started")) {
+        return Ok(false);
+    }
+    let event = state.events.iter().find(|e| e.entity == operation.as_str() && e.kind == "runtime.launch_creation")
+        .context("creation intent missing")?;
+    let intent: LaunchCreationIntent = serde_json::from_value(event.payload.clone())?;
+    ensure!(intent.operation == *operation && intent.attempt == state.record.attempt && intent.route == state.route
+        && state.binding.revision == state.record.inputs.binding_revision
+        && crate::store::ownership::identity_digest(&state.binding)? == state.record.inputs.binding_digest,
+        "creation cancellation provenance changed");
+    if !cancel_creation_server(project, &state.record, &intent)? {return Ok(false);}
+    let live = state.delivery.state == crate::operations::DeliveryState::Claimed
+        && state.delivery.lease_until_ms.is_some_and(|until| until > now());
+    let phase = if live {"launch_creation_timed_out"} else {"launch_lease_expired"};
+    Ok(db.record_launch_failure(operation, phase,
+        "native creation server unresponsive without a recorded target; dedicated server cancelled", false, now())?)
 }
 
 /// Create a directly supervised workspace root, or a gated tab in an existing
@@ -506,10 +627,11 @@ fn create_resource_inner(
             + Duration::from_millis(claim.lease_until_ms.saturating_sub(now()).max(0) as u64),
     );
     if let Some(launch) = &launch {
-        let target = stock_root(&api, &creation, launch, &argv, || {
+        let result = stock_root(&api, &creation, launch, &argv, || {
             worktrees.check()?;
             Ok(db.validate_launch_claim(&claim, now())?)
-        })?;
+        });
+        let target = creation_result(result, &project, record, &creation, &mut db, &api)?;
         inventory::check(
             &project,
             &record.inputs.binding,
@@ -521,13 +643,14 @@ fn create_resource_inner(
         return Ok(target);
     }
     if direct_root {
-        let created = api.call(
+        let result = api.call(
             operation.as_str(),
             "workspace.create_command",
             json!({"cwd":route.cwd,"label":worker_agent_name(&record.attempt),
                 "focus":false,"command":argv,"env":{}}),
             || {worktrees.check()?;Ok(db.validate_launch_claim(&claim, now())?)},
-        )?;
+        );
+        let created = creation_result(result, &project, record, &creation, &mut db, &api)?;
         ensure!(
             created["type"].as_str() == Some("workspace_created"),
             "invalid direct workspace response"
@@ -754,8 +877,8 @@ fn create_resource_inner(
     Ok(target)
 }
 
-/// Recover only an exact live resource from a durably prepared creation. Missing
-/// resources retain uncertainty and capacity; this never creates or releases one.
+/// Recover an exact live resource from a durably prepared creation. Expired
+/// creation with no workspace ends typed; this never creates or releases one.
 #[cfg(target_os = "linux")]
 pub fn reconcile_resource(
     project: &Path,
@@ -818,7 +941,7 @@ pub fn reconcile_resource(
         .effective_profile
         .as_ref()
         .context("launch profile missing")?;
-    let api = Api {
+    let mut api = Api {
         executable: &profile.herdr,
         socket: &intent.route.socket,
         session: &intent.session,
@@ -826,6 +949,22 @@ pub fn reconcile_resource(
         cancellation: cancellation.clone(),
         locks: guard.inherit()?,
     };
+    // Route errors retain their transient/escalation semantics before any
+    // decision based on the remaining creation lease.
+    api.check_session()?;
+    if state.delivery.state == crate::operations::DeliveryState::Claimed
+        && let Some(until) = state.delivery.lease_until_ms
+        && until > now() {
+        let remaining = until.saturating_sub(now());
+        // Five seconds for the supervised bridge to drain, then five for
+        // cancellation and its receipt. A dying launcher cannot consume the
+        // remaining lease by issuing another full native observation.
+        // A short lease is not evidence that the native server is hung.
+        // Preserve a real observation window rather than synthesizing timeout.
+        if remaining > 10_000 {
+            api.deadline = deadline.min(Instant::now() + Duration::from_millis((remaining - 5_000) as u64));
+        }
+    }
     let route = if intent.route.workspace_id.is_empty() && intent.version == 1 {
         let Some(event) = state
             .events
@@ -885,6 +1024,24 @@ pub fn reconcile_resource(
         // A stock launch that was never confirmed must not start later.
         if intent.version == 3 {
             super::launch_spec::remove(&super::launch_spec::path(&project.join(".state"), &intent.command_digest))?;
+        }
+        if state.delivery.state == crate::operations::DeliveryState::Ambiguous
+            || (state.delivery.state == crate::operations::DeliveryState::Claimed
+                && state.delivery.lease_until_ms.is_some_and(|until| until <= now())) {
+            let list = api.call(operation.as_str(), "workspace.list", json!({}), || Ok(()))?;
+            ensure!(list["type"] == "workspace_list", "invalid workspace inventory");
+            let workspaces = list["workspaces"].as_array().context("workspace inventory missing")?;
+            // A present but not yet identifiable worker stays in observation.
+            ensure!(workspaces.len() <= 128, "workspace recovery inventory exceeds limit");
+            let absent = intent.version >= 2 && workspaces.iter().all(|workspace|
+                workspace["label"].as_str() != Some(worker_agent_name(&intent.attempt).as_str()));
+            if absent && cancel_creation_server(&project, record, &intent)? {
+                db.record_launch_failure(operation, "launch_lease_expired",
+                    "launch_lease_expired: native creation produced no workspace; dedicated server cancelled", false, now())?;
+            } else if absent {
+                db.record_launch_failure(operation, "launch_lease_expired",
+                    "launch_lease_expired: native creation produced no workspace; external server retained for observation", false, now())?;
+            }
         }
         return Ok(None);
     };

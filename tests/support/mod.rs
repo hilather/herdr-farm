@@ -2,3 +2,6 @@
 pub mod telemetry;
 #[cfg(all(feature = "state-store", target_os = "linux"))]
 pub mod replay;
+
+#[cfg(all(feature = "state-store", target_os = "linux"))]
+pub mod agent_build_cache;

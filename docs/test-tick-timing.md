@@ -17,6 +17,25 @@ acceptance suite uses real CLI processes and persisted ticker metrics/logs,
 without sockets. It checks three bounded passes, the minimum pass floor, invalid
 values, doctor diagnostics, normal draining, and the unset 15-second cadence.
 
+## Compiled agent fixtures
+
+`tests/support/agent_build_cache.rs` caches Rust stand-ins in
+`CARGO_TARGET_TMPDIR/agents/<digest>/agent`, keyed by the exact source bytes and
+compiler flags. A per-entry OS file lock serializes builds across integration
+test processes; failed or interrupted builds never publish an executable.
+Each lab receives a separate `fs::copy` with mode `0700` at its original agent
+path, preserving per-lab profile freezing and replacement workflows. The copy
+is renamed into place so replacing a running stand-in remains possible.
+Lab-specific constants remain part of the source and therefore get distinct
+cache entries. No test assertions or production configuration change.
+
+The cache persists across test runs. Remove `target/tmp/agents` (or the
+`agents` directory under a custom Cargo target's temporary directory) after
+changing Rust toolchains to rebuild fixtures. To measure cold-cache compiler
+counts, clear that directory before the run and count test-time `rustc`
+invocations separately from Cargo's crate builds; a warm-cache run should
+compile only previously unseen source/flag combinations.
+
 ## Policies scaled
 
 | Policy | Production default | Rule |
@@ -105,6 +124,20 @@ shape changes are required; retention/backup classifications are unchanged.
 The scale is an opt-in lab contract: do not mix scaled processes with unscaled
 processes on a root, or apply it to an owner's existing persisted deadlines.
 
+## Test scheduling
+
+`.config/nextest.toml` keeps the default pool at six test threads. The
+`canonical_worker`, `operator_launch`, `worker_login_share`, `replay_suite`, and
+`thread_sandbox` binaries share a `sandbox` group capped at three concurrent
+tests in the default, fast, and CI profiles. Profile filters still determine
+which tests run; the group only limits concurrency. The telemetry scale group
+retains its separate single-thread limit.
+
+GitHub Actions distributes the CI selection across eight `hash:N/8` partitions.
+Each runner uploads its JUnit file as `junit-N`; sum the testcase `time`
+attributes in each file to compare test-seconds across partitions. These sums
+measure test work, while runner wall time also includes scheduling and setup.
+
 ## Validation and timings
 
 See [sandbox validation](test-tick-validation.md) for commands, every group timing,
@@ -162,6 +195,22 @@ worker-attention snapshot is follow-up work.
 
 ## Canonical result wake labs (COORD-WAKE-ON-SUBMIT-1)
 
+The worker result-wake setup retries the public `ticker stop` for up to 30 real
+seconds, with 50 ms between unsuccessful calls, matching the coordinator lab
+helper (LAB-STOP-WAIT-1). A native call admitted before the stop request can
+outlast the scaled CLI wait (60 s becomes 1.2 s at the shared 0.02 scale).
+The helper still requires a successful stop before reserving the worker;
+all subsequent workflow assertions remain unchanged. Product timing is unchanged.
+
+The public stop call-site audit leaves the other sites unchanged: the
+coordinator helper already retries; coordinator and legacy ticker Drop handlers
+are best-effort cleanup; the four legacy ticker lifecycle stops check stale
+requests and replacement without native work; the two `ticker_timing` stops
+exercise production timing and a socket-free accelerated lab; `live_phase_a`
+and its support Drop handler belong to opt-in live acceptance. This accounts
+for the eleven other literal public stop sites, including `tests/support/live.rs`.
+Foreground stop-file helpers are separate from the public stop retry.
+
 Canonical result wakes use the shared claim retry/backoff timing and the existing
 executor. Native calls retain their unscaled budgets; a wake job has a 45-second
 real deadline, and its admission uses the canonical work pass while queued.
@@ -187,3 +236,56 @@ and E2E coverage of slow creation and killed-launcher recovery.
 Expired unreleased targets select termination observation alone. It records the
 typed expiry outcome, then stops the gated worker in the same reconciliation;
 it never renews or reclaims the expired launch.
+
+The idle-worker multi-stretch E2E workflow runs in nextest's `nightly` profile
+rather than `ci` because its owner-host runtime is about seven minutes. Run it
+with `cargo nextest run --features state-store --profile nightly`. Its dedup
+window observes 30 completed passes in one ticker. Additional quiet tickers must
+not be inserted before the one-notice assertion: a restart intentionally starts
+a new idle stretch, so enough elapsed native observation time can emit a second
+notice. The explicit restart and working-to-idle rearming assertions remain.
+
+The canonical notification owner-death fixture retains a present pane and matching
+working agent, adopts the coordinator through the public CLI, then records fresh
+post-adoption identity evidence before activation. An unrecorded route provides
+no reachable session to refresh the accelerated ticker idle-exit deadline; a
+present route without adoption cannot authorize activation. Helper exceptions,
+ticker stderr and ticker logs remain in failed-wait diagnostics. Unix socket
+restrictions prevent exercising this fixture past socket creation in the sandbox.
+
+Root safety work (recovery, termination and briefs) precedes launch advancement
+across projects, including while safety work backs off. Queue fairness promotes
+jobs after three failed turns or one recovery observation interval of waiting.
+The root writer turn prevents fresh shared probes from overtaking acquisition.
+Cancellation and completion requests offer termination immediately, independently
+of passive launch-observation hints. Requested stops rotate among themselves
+before other project-local effects; their workers still validate retained launch
+and ownership evidence before stopping anything. The socket-free cancellation
+workflow covers a Running attempt whose passive monitor inventory is not yet
+populated, including admission beside another project's reserved launch and
+retention of capacity when exact worker evidence is missing. The shared-root
+workflow also checks stop hints before starting its
+ticker, then retains its refused-commit and cross-project launch assertions.
+Native creation requests retain their unscaled 15-second external budget. On
+timeout, observation and cancellation run within the remaining 45-second phase
+and five-second lease reserve; labs do not scale that execution budget. The
+supervisor preserves its public exit-200 failure contract and exposes timeout
+through the output's `timed_out` flag, including when its surviving helper
+finishes before the collector deadline. The
+shared-root recovery E2E uses 30 completed passes, and the hung-creation E2E
+uses observable terminal state with a generous 90-second wait deadline.
+
+Root fairness recovery preserves socket observation errors before considering
+remaining native observation time. A short lease alone does not count as a
+native timeout. Pending-termination labs keep the ticker alive through the persisted
+termination and next launch after removing journal deferral. Completed passes
+alone do not imply executor completion.
+The journal-deferral trigger raises a SQLite constraint violation, exposed by
+the store as `Conflict`; the lab waits for that queue failure tied to the exact
+attempt. It checks the post-cancellation hint revision and requires the same
+ticker to commit termination after trigger removal before the next launch.
+
+LAB-REQUESTS-TORN-1: canonical worker, operator viewer, and replay request-log
+readers only parse newline-terminated JSON records. Polling during an append
+ignores the unfinished final record until its newline arrives; malformed complete
+records still fail the harness. Product behavior and workflow assertions are unchanged.

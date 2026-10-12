@@ -170,7 +170,7 @@ impl SupervisorObservation {
             )? == expected_command,
             "command is not the canonical supervisor vector"
         );
-        let outer = pidfd(outer_pid)?;
+        let outer = pidfd(outer_pid).context("opening native pane host supervisor")?;
         ensure!(!exited(&outer)?, "supervisor already exited");
         verify_command(outer_pid, expected_command)?;
         let children = read_bounded(
@@ -186,7 +186,7 @@ impl SupervisorObservation {
             "supervisor must have exactly one namespace init child"
         );
         let init_pid = children[0];
-        let init = pidfd(init_pid)?;
+        let init = pidfd(init_pid).context("opening namespace init by its host PID")?;
         ensure!(!exited(&init)?, "namespace init already exited");
         verify_command(init_pid, &expected_command[8..])?;
         let status = read_bounded(&format!("/proc/{init_pid}/status"), 65536)?;
@@ -407,8 +407,10 @@ impl SupervisorObservation {
     pub fn reconnect(identity: &SupervisorIdentity) -> Result<Self> {
         identity.validate()?;
         ensure_view(identity)?;
-        let outer = pidfd(identity.outer.pid)?;
-        let init = pidfd(identity.init.pid)?;
+        let outer = pidfd(identity.outer.pid)
+            .context("reopening retained host supervisor for observation")?;
+        let init = pidfd(identity.init.pid)
+            .context("reopening retained namespace init by its host PID")?;
         ensure!(
             incarnation(identity.outer.pid, &outer)? == identity.outer
                 && incarnation(identity.init.pid, &init)? == identity.init
@@ -648,7 +650,9 @@ fn pidfd(pid: u32) -> Result<File> {
     // SAFETY: pidfd_open takes scalar arguments and returns a new owned FD.
     let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) };
     if fd < 0 {
-        return Err(io::Error::last_os_error()).context("pidfd observation unavailable");
+        return Err(io::Error::last_os_error()).with_context(|| {
+            format!("pidfd observation unavailable for observer-visible PID {pid}")
+        });
     }
     Ok(unsafe { File::from_raw_fd(fd as i32) })
 }

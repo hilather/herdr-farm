@@ -7,6 +7,72 @@ runtime work, not packaging or general release acceptance. See the current
 Later dated sections preserve the implementation history; earlier disabled-gate
 statements describe their original validation point.
 
+## CI launch diagnostics
+
+The native pane process PID identifies the host-side `unshare` supervisor,
+not the agent's PID inside the worker namespace. Initial resource observation
+opens that PID, then discovers the namespace init's host PID through the supervisor's
+`/proc/<pid>/task/<pid>/children`. Observation errors include the PID and whether
+opening the outer supervisor or namespace init failed. Naming/start observation
+reopens those retained PIDs after gate release; by then the filesystem sandbox
+and agent may already have exited. Reaching naming means the initial gated
+supervisor was previously observed, so post-release mounts, the nested user
+namespace and agent startup deserve particular attention. The exit log identifies
+the outer supervisor. ESRCH can mean a namespace/setup failure, an exited agent
+and supervisor, or a stale/invisible
+native process inventory; it alone does not identify a sandbox primitive.
+
+The canonical-worker, operator-launch and replay CLI labs retain sandbox/agent
+stderr in `agent.log` and append host supervisor PIDs and exit statuses to
+`agent-exits.jsonl` (negative statuses identify signals). Canonical/replay labs
+keep these beside the native socket; operator labs use their fixture home so
+evidence survives disposal of verification server socket directories.
+An independent waiter records exits even if no further native API requests
+arrive. Failed tests print these files before fixture cleanup, alongside retained
+ticker diagnostics. Multiple launches append evidence rather than overwriting it.
+
+Before the eight test partitions run, the workflow prints kernel, namespace
+limits, AppArmor settings and util-linux versions, then probes user/mount/PID
+namespaces, mount-proc, tmpfs, overlayfs, recursive read-only bind mounts and the
+nested user namespace. Each primitive reports its status and kernel messages are
+printed afterward. Probe failures leave the full test gate enabled. The existing
+runner-only AppArmor user-namespace setting remains in place; further setup
+changes require evidence identifying the failing primitive. The canonical
+schema is unchanged.
+
+Read-only anchors no longer depend on util-linux interpreting `ro=recursive`.
+After each recursive bind, the sandbox enumerates `/proc/self/mountinfo`,
+remounts every descendant mount with `remount,bind,ro,nosuid,nodev`, and checks
+its kernel VFS options with `findmnt --direction backward --mountpoint`
+(covered mounts can share the same pathname; the last mount is visible).
+Root-cover bind-back entries receive this protection individually; remounting only the covering tmpfs leaves child
+mounts writable. Hidden tmpfs and file masks are also checked. File masks bind `/dev/null`
+with `ro,nosuid,noexec`, omitting `nodev` so reads return empty bytes rather
+than EACCES; the read-only VFS check still applies. A missing mount
+or writable VFS result exits 125 before the worker starts. These checks happen
+before explicitly allowed writable exposures are mounted on top; protected
+anchors are checked again after setup.
+
+CI diagnostics additionally mirror the descriptor bind-back under a covering
+root tmpfs and attempt an actual write from the nested worker user namespace.
+The owner-environment E2E probe now poisons `HERDR_DIR` and an unrelated owner
+variable and verifies neither reaches the worker. Both sandbox setup and final
+agent exec use `env -i`; retry commands use the same retained command builder.
+The previously intermittent filesystem sentinel leak still requires an
+outside-sandbox reproduction to identify its cause; environment scrubbing
+alone does not establish that filesystem hiding is sound.
+
+Writable exposures use `mount --rbind "$p" "$p"` followed by
+`mount -o remount,bind,rw "$p"`. The explicit bind remount clears the inherited
+read-only attribute on util-linux 2.39 (Ubuntu 24.04) as well as newer versions,
+without remounting the enclosing owner-home anchor or filesystem superblock.
+Inherited submounts remain read-only unless separately declared writable.
+Login-file binds already use the same explicit remount pattern; private keep
+binds preserve their source attributes, and exposed executables and hidden
+files remain read-only. CI scratch stays under `$HOME/.cache` so the diagnostic
+probe and login-sharing workflow exercise an execution home beneath the owner
+anchor. Any bind or remount failure refuses the launch before the agent runs.
+
 ## Implemented safeguards
 
 - Reservation checks the exact stored approval, its validity interval, permission
@@ -1340,8 +1406,12 @@ exact resource. An observed target without a release intent ends promptly with
 typed `launch_lease_expired` failure and a coordinator/operator diagnostic. The
 existing supervised termination path stops the gated worker, proves quiescence
 and retires capacity and ownership. The finished-task sweep then stops a recorded
-dedicated server. Before a target exists, ambiguous creation remains in launch
-observation. Once an unreleased target exists, termination observation takes
+dedicated server. Before a target exists, ambiguous creation observes the
+native workspace inventory. An inventory with no workspace for this attempt
+ends with a typed failure; an
+automatically managed dedicated server is cancelled using a pinned process
+handle before capacity is released. A present workspace retains the existing
+identity adoption path. Once an unreleased target exists, termination observation takes
 priority and records the typed expiry failure exactly once; its next pass stops
 the worker using the updated attempt revision. Cancelled staged launches also
 select termination alone. Released launches continue start observation.
@@ -1375,3 +1445,84 @@ capture still refuses oversized untracked source. Tracked byte omissions carry
 raw Git identities in worktree manifest v5; see [worktree capture budget
 recovery](canonical-worktrees.md). This does not establish a verified result or
 permit repository deletion.
+
+
+The shared root queue prioritizes recovery (`canonical-worker:recover:` and
+`recover-`), termination, brief preparation and brief delivery before launch
+advancement in any project. Pending safety work blocks new launch advancement
+even during its retry delay. Failed recovery requests remain executable between
+inventory scans. Three failed turns or a wait exceeding the recovery observation
+interval promotes the oldest waiting job within its priority class; refreshed
+inventory offers do not reset that history. Admission starts a new wait and
+spends a promoted job's contention credit; successful completion clears its
+failure count. A repeatedly failing safety job cannot monopolize other safety work.
+Root acquisition holds `.execution-turn.lock` while draining shared holders,
+so new status/start probes cannot overtake an already waiting exclusive effect.
+The existing `.execution.lock` remains the inherited execution barrier.
+
+Native creation has a 15-second external request budget inside the unscaled
+45-second phase; the lease covers the phase plus a five-second commit reserve.
+A creation timeout first observes whether an exact supervisor exists, without
+publishing a launch target or acknowledging the lost creation reply. An observed
+supervisor retains uncertainty and capacity for ordinary recovery. Otherwise it cancels only the automatically
+managed server recorded for that project, task and socket, using a pidfd after
+checking the live command, environment and socket incarnation. The existing
+server-disappearance proof releases the reservation, with typed
+`launch_creation_timed_out` for a call cancelled before lease expiry. The server record stays
+available to the ordinary retirement sweep. Operator-managed servers are never
+signalled; their uncertain resources retain capacity. Expired no-target launches
+whose dedicated server remains blocked are cancelled by the same path after a
+bounded workspace observation. Existing tables and retained events carry the
+typed failure; there is no schema change or new dependency.
+
+E2E workflows in `tests/canonical_worker.rs` exercise a shared root with a
+continuously offered launch in one project and empty-workspace recovery in
+another, bounded to 30 completed passes. Projects share the lab owner's key and
+configuration, while repositories, executables and execution homes remain
+separate. A separate hung native creation exceeds
+the configured one-second lease floor, is cancelled within the phase lease,
+and finishes with a typed delivery, no target, no ambiguity and released capacity.
+
+Pending recovery E2E first refuses workspace observation for ten passes, checks
+that the other project's native creation is still held, then permits observation
+and verifies terminal recovery within 30 passes and a new launch reaching Running.
+Termination E2E refuses the termination journal commit, verifies bounded retries
+and held launch advancement across projects, then permits the commit and verifies
+capacity release, one persisted termination and the other launch reaching Running.
+The injected SQLite journal refusal surfaces as the store's `Conflict`, so the
+workflow matches the queue diagnostic for the exact attempt and checks that the
+stop hint carries its post-cancellation revision. The same ticker must finish
+termination after the refusal is removed, excluding a permanent stale-fence loop.
+These replace the obsolete queue unit policies that allowed launches during
+recovery/termination cooldown; coverage remains through public CLI workflows.
+
+Passive liveness polls use `canonical-worker:monitor:terminate-` and keep their
+existing observation cadence. They do not hold new launches throughout cooldown.
+The controller distinguishes requested cancellation/completion, failed attempts
+and expired unreleased launches using existing state and events, promotes those
+stops ahead of project-local launch hints, and emits ordinary priority termination
+jobs. The worker still validates the current attempt before any signal. This
+allows additional projects to launch beside healthy workers without weakening
+pending-stop priority.
+
+The pending-stop workflow also starts a second healthy project while the first
+worker is still Running, then holds a third project's launch behind the requested
+stop. It verifies that passive monitoring permits concurrent projects and that
+requested termination blocks advancement until its persisted outcome commits.
+
+A restarted ticker also observes a still-live original creation claim. Its native
+observation deadline leaves five seconds for bridge draining and five for server
+cancellation/receipt; an unresponsive creation is cancelled before the original
+lease expires, without renewal or replay. Expired Claimed rows have the same
+terminal handling as Ambiguous rows, so a deferred expiry service cannot leave
+an empty launch or gated target parked indefinitely. The hung-creation E2E runs
+both with the original ticker and with a killed/restarted ticker, checking that
+the typed failure commits before the original lease deadline in both scenarios.
+
+Native short socket namespaces (`r*/s`) also hide their containing private Herdr
+directory; shared temporary and owner/project directories remain protected by
+the existing shared-directory checks. Socket incarnation checks precede lease
+budget decisions, and a short remaining lease alone never proves a hung server.
+The pending-stop workflow keeps its ticker alive through persisted termination
+and the next launch after removing the journal failure fixture. Completed passes
+can precede background commits; stopping then can interrupt the newly admitted launch.
