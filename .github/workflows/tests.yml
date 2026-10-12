@@ -149,7 +149,8 @@ jobs:
             # A separate mount namespace drops these mounts before other probes.
             probe unshare --mount -- sh -c "
               mount --rbind -o ro=recursive \"\$1\" \"\$1\" &&
-              mount --rbind -o rw \"\$2/exec-home\" \"\$2/exec-home\" &&
+              mount --rbind \"\$2/exec-home\" \"\$2/exec-home\" &&
+              mount -o remount,bind,rw \"\$2/exec-home\" &&
               mount -t tmpfs -o nosuid,nodev,mode=1777 herdr-farm-private /tmp &&
               unshare --user --map-root-user -- sh \"\$2/scratch-probe.sh\" \"\$2\"
             " sh "$HOME" "$d"

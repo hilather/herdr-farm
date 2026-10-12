@@ -37,8 +37,19 @@ namespaces, mount-proc, tmpfs, overlayfs, recursive read-only bind mounts and th
 nested user namespace. Each primitive reports its status and kernel messages are
 printed afterward. Probe failures leave the full test gate enabled. The existing
 runner-only AppArmor user-namespace setting remains in place; further setup
-changes require evidence identifying the failing primitive. Product isolation
-and canonical schema are unchanged.
+changes require evidence identifying the failing primitive. The canonical
+schema is unchanged.
+
+Writable exposures use `mount --rbind "$p" "$p"` followed by
+`mount -o remount,bind,rw "$p"`. The explicit bind remount clears the inherited
+read-only attribute on util-linux 2.39 (Ubuntu 24.04) as well as newer versions,
+without remounting the enclosing owner-home anchor or filesystem superblock.
+Inherited submounts remain read-only unless separately declared writable.
+Login-file binds already use the same explicit remount pattern; private keep
+binds preserve their source attributes, and exposed executables and hidden
+files remain read-only. CI scratch stays under `$HOME/.cache` so the diagnostic
+probe and login-sharing workflow exercise an execution home beneath the owner
+anchor. Any bind or remount failure refuses the launch before the agent runs.
 
 ## Implemented safeguards
 

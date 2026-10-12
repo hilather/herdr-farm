@@ -54,8 +54,10 @@ fn world(base: &Path) -> World {
     let project = root.join("project");
     fs::create_dir_all(&project).unwrap();
     fs::write(root.join(".execution.lock"), b"").unwrap();
-    let home = top.join("exec-home");
-    fs::create_dir(&home).unwrap();
+    // The execution home must be writable inside the recursive read-only owner
+    // anchor, matching Ubuntu CI and the normal owner cache layout.
+    let home = owner.join(".cache/exec-home");
+    fs::create_dir_all(&home).unwrap();
     // The probe reports what the worker can reach; nothing in it is a secret.
     let agent = top.join("probe-agent");
     let owner_text = owner.display();
@@ -64,6 +66,7 @@ fn world(base: &Path) -> World {
         format!(
             r#"#!/bin/sh
 out="$HOME/probe.txt"; : > "$out"
+if touch "{owner_text}/.cache/escape" 2>/dev/null; then exit 1; fi
 show() {{ printf '%s=%s\n' "$1" "$(cat "$2" 2>/dev/null | head -c 64)" >> "$out"; }}
 show home_codex_login "$HOME/.codex/auth.json"
 show home_claude_login "$HOME/.claude/.credentials.json"

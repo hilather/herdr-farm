@@ -353,7 +353,9 @@ const OWNER_SECRETS: &[&str] = &[
 ///    mount_setattr), a writable exposure (execution home, its own worktrees,
 ///    the overlaid Git common directories, and the attempt's submission spool
 ///    and output directory under the otherwise read-only project `.state`) is
-///    bound onto itself on top, writable; every executable the worker runs
+///    recursively bound onto itself on top, then explicitly remounted writable
+///    at that new mount only (including on util-linux 2.39). Inherited submounts
+///    stay read-only unless separately declared writable; every executable runs
 ///    from outside a read-only anchor is bound read-only onto itself;
 /// 5. binds the owner's single login file (`loginsrc:`/`logindst:`), when it
 ///    exists, read-write onto its place in the execution home, before the
@@ -403,7 +405,7 @@ const SANDBOX: &str = concat!(
     r#"herdr-farm-git "$c" || fail "$c"; exec 3<&- 4<&-;; esac; done; "#,
     r#"for a in "$@"; do case $a in --) break;; "#,
     r#"ro:*) p=${a#ro:}; if [ -e "$p" ]; then /usr/bin/mount --rbind -o ro=recursive "$p" "$p" || fail "$p"; fi;; "#,
-    r#"rw:*) p=${a#rw:}; if [ -e "$p" ]; then /usr/bin/mount --rbind -o rw "$p" "$p" || fail "$p"; fi;; "#,
+    r#"rw:*) p=${a#rw:}; if [ -e "$p" ]; then { /usr/bin/mount --rbind "$p" "$p" && /usr/bin/mount -o remount,bind,rw "$p"; } || fail "$p"; fi;; "#,
     r#"esac; done; "#,
     r#"for a in "$@"; do case $a in --) break;; loginsrc:*) s=${a#loginsrc:};; logindst:*) d=${a#logindst:}; "#,
     r#"if [ -f "$s" ]; then { [ ! -L "$d" ] && [ ! -L "${d%/*}" ] && /usr/bin/mkdir -p -- "${d%/*}" && { [ -e "$d" ] || : > "$d"; } && "#,
