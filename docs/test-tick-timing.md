@@ -105,6 +105,20 @@ shape changes are required; retention/backup classifications are unchanged.
 The scale is an opt-in lab contract: do not mix scaled processes with unscaled
 processes on a root, or apply it to an owner's existing persisted deadlines.
 
+## Test scheduling
+
+`.config/nextest.toml` keeps the default pool at six test threads. The
+`canonical_worker`, `operator_launch`, `worker_login_share`, `replay_suite`, and
+`thread_sandbox` binaries share a `sandbox` group capped at three concurrent
+tests in the default, fast, and CI profiles. Profile filters still determine
+which tests run; the group only limits concurrency. The telemetry scale group
+retains its separate single-thread limit.
+
+GitHub Actions distributes the CI selection across eight `hash:N/8` partitions.
+Each runner uploads its JUnit file as `junit-N`; sum the testcase `time`
+attributes in each file to compare test-seconds across partitions. These sums
+measure test work, while runner wall time also includes scheduling and setup.
+
 ## Validation and timings
 
 See [sandbox validation](test-tick-validation.md) for commands, every group timing,

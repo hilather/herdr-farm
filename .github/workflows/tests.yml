@@ -66,7 +66,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        partition: [1, 2, 3, 4]
+        partition: [1, 2, 3, 4, 5, 6, 7, 8]
     steps:
       - uses: actions/checkout@v4
       # herdr-farm requires SQLite 3.53.4+ (Ubuntu 24.04 ships 3.45.1).
@@ -113,7 +113,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: nextest-archive
-      - name: Run tests (partition ${{ matrix.partition }}/4)
+      - name: Run tests (partition ${{ matrix.partition }}/8)
         # Tests find the CLI through the compile-time CARGO_BIN_EXE path, so
         # unpack target/ into the workspace at the path it was built at.
         env:
@@ -124,7 +124,7 @@ jobs:
           --workspace-remap .
           --extract-to ${{ github.workspace }}
           --extract-overwrite
-          --partition count:${{ matrix.partition }}/4
+          --partition hash:${{ matrix.partition }}/8
       - uses: actions/upload-artifact@v4
         if: always()
         with:
