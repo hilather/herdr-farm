@@ -349,8 +349,9 @@ const OWNER_SECRETS: &[&str] = &[
 ///    private copy;
 /// 4. walks the read-only/writable plan, parents first: a read-only anchor
 ///    (owner homes, source repositories, the own project) is bound onto
-///    itself recursively read-only (`ro=recursive`, applied by libmount with
-///    mount_setattr), a writable exposure (execution home, its own worktrees,
+///    itself recursively, then each kernel mount is explicitly remounted
+///    read-only and its VFS flags checked (including on util-linux 2.39).
+///    A writable exposure (execution home, its own worktrees,
 ///    the overlaid Git common directories, and the attempt's submission spool
 ///    and output directory under the otherwise read-only project `.state`) is
 ///    recursively bound onto itself on top, then explicitly remounted writable
@@ -377,6 +378,14 @@ const OWNER_SECRETS: &[&str] = &[
 /// exits 125 before the agent runs.
 const SANDBOX: &str = concat!(
     r#"set -u; fail() { printf 'herdr-farm: worker isolation refused: %s\n' "$1" >&2; exit 125; }; "#,
+    // mount(8) 2.39 can accept ro=recursive without enforcing it. Enumerate
+    // the kernel mount tree and use the classic per-mount bind remount instead.
+    // mountinfo escapes whitespace/backslashes; decode only after reading a line.
+    // Search backwards: stacked mounts retain covered entries with the same
+    // target. Check the last (visible) mount without opening owner secret data.
+    r#"check_ro() { opts=$(/usr/bin/findmnt --kernel --direction backward --first-only --noheadings --output VFS-OPTIONS --mountpoint "$1") || fail "$1"; case ,$opts, in *,ro,*) ;; *) fail "writable mount: $1";; esac; }; "#,
+    r#"readonly_tree() { mounts=$(HF_RO_PATH=$1 /usr/bin/awk 'function decode(s) { gsub(/\\040/, " ", s); gsub(/\\011/, sprintf("%c", 9), s); gsub(/\\012/, sprintf("%c", 10), s); gsub(/\\134/, sprintf("%c", 92), s); return s } { p=decode($5); root=ENVIRON["HF_RO_PATH"]; if (p==root || index(p, root "/")==1) print $5 }' /proc/self/mountinfo) || fail "$1"; [ -n "$mounts" ] || fail "$1"; printf '%s\n' "$mounts" | "#,
+    r#"while IFS= read -r encoded; do m=$(printf '%b' "$encoded"); /usr/bin/mount -o remount,bind,ro,nosuid,nodev "$m" || fail "$m"; check_ro "$m"; done || fail "$1"; check_ro "$1"; }; "#,
     r#"root=$1; shift; cwd=$(pwd -P) || fail cwd; "#,
     r#"for a in "$@"; do case $a in --) break;; tokensrc:*) t=${a#tokensrc:}; "#,
     r#"{ [ -f "$t" ] && [ ! -L "$t" ] && eval "exec 9<\"\$t\""; } || fail "$t";; esac; done; "#,
@@ -387,8 +396,8 @@ const SANDBOX: &str = concat!(
     r#"for a in "$@"; do case $a in --) break;; expose:*) p=${a#expose:}; rel=${p#"$root"/}; "#,
     r#"case $rel in */*) /usr/bin/mkdir -p -- "$root/${rel%/*}" || fail "$p";; esac; "#,
     r#"if [ -d "/proc/self/fd/$n" ]; then /usr/bin/mkdir -- "$root/$rel" || fail "$p"; else : > "$root/$rel" || fail "$p"; fi; "#,
-    r#"/usr/bin/mount -c --bind "/proc/self/fd/$n" "$root/$rel" || fail "$p"; eval "exec $n<&-"; n=$((n+1));; esac; done; "#,
-    r#"/usr/bin/mount -o remount,bind,ro,nosuid,nodev,noexec "$root" || fail "$root"; fi; "#,
+    r#"/usr/bin/mount -c --bind "/proc/self/fd/$n" "$root/$rel" || fail "$p"; readonly_tree "$root/$rel"; eval "exec $n<&-"; n=$((n+1));; esac; done; "#,
+    r#"/usr/bin/mount -o remount,bind,ro,nosuid,nodev,noexec "$root" || fail "$root"; check_ro "$root"; fi; "#,
     r#"for d in "$@"; do case $d in --) break;; private:*) d=${d#private:}; if [ -d "$d" ] && [ ! -L "$d" ]; then n=3; active=0; "#,
     r#"for a in "$@"; do case $a in --) break;; private:*) active=0; [ "${a#private:}" = "$d" ] && active=1;; keep:"$d"/*) [ "$active" = 1 ] || continue; [ "$n" -le 9 ] || fail keep; p=${a#keep:}; "#,
     r#"eval "exec $n<\"\$p\"" || fail "$p"; n=$((n+1));; esac; done; "#,
@@ -404,17 +413,20 @@ const SANDBOX: &str = concat!(
     r#"lowerdir=/proc/self/fd/3,upperdir=/proc/self/fd/4/upper,workdir=/proc/self/fd/4/work,userxattr,index=off,metacopy=off,redirect_dir=nofollow "#,
     r#"herdr-farm-git "$c" || fail "$c"; exec 3<&- 4<&-;; esac; done; "#,
     r#"for a in "$@"; do case $a in --) break;; "#,
-    r#"ro:*) p=${a#ro:}; if [ -e "$p" ]; then /usr/bin/mount --rbind -o ro=recursive "$p" "$p" || fail "$p"; fi;; "#,
+    r#"ro:*) p=${a#ro:}; if [ -e "$p" ]; then /usr/bin/mount --rbind "$p" "$p" || fail "$p"; readonly_tree "$p"; fi;; "#,
     r#"rw:*) p=${a#rw:}; if [ -e "$p" ]; then { /usr/bin/mount --rbind "$p" "$p" && /usr/bin/mount -o remount,bind,rw "$p"; } || fail "$p"; fi;; "#,
     r#"esac; done; "#,
     r#"for a in "$@"; do case $a in --) break;; loginsrc:*) s=${a#loginsrc:};; logindst:*) d=${a#logindst:}; "#,
     r#"if [ -f "$s" ]; then { [ ! -L "$d" ] && [ ! -L "${d%/*}" ] && /usr/bin/mkdir -p -- "${d%/*}" && { [ -e "$d" ] || : > "$d"; } && "#,
     r#"/usr/bin/mount --bind "$s" "$d" && /usr/bin/mount -o remount,bind,rw,nosuid,nodev,noexec "$d"; } || fail "$d"; fi;; esac; done; "#,
     r#"for a in "$@"; do case $a in --) break;; hide:*) p=${a#hide:}; "#,
-    r#"if [ -d "$p" ]; then /usr/bin/mount -t tmpfs -o ro,nosuid,nodev,noexec,size=4k,mode=0555 herdr-farm-hidden "$p" || fail "$p"; "#,
-    r#"elif [ -e "$p" ]; then { /usr/bin/mount --bind /dev/null "$p" && /usr/bin/mount -o remount,bind,ro "$p"; } || fail "$p"; fi;; esac; done; "#,
+    r#"if [ -d "$p" ]; then /usr/bin/mount -t tmpfs -o ro,nosuid,nodev,noexec,size=4k,mode=0555 herdr-farm-hidden "$p" || fail "$p"; check_ro "$p"; "#,
+    r#"elif [ -e "$p" ]; then { /usr/bin/mount --bind /dev/null "$p" && /usr/bin/mount -o remount,bind,ro,nosuid,nodev,noexec "$p"; } || fail "$p"; check_ro "$p"; fi;; esac; done; "#,
     r#"for p in /tmp/ssh-* /tmp/tmux-*; do if [ -d "$p" ] && [ -O "$p" ]; then "#,
-    r#"/usr/bin/mount -t tmpfs -o ro,nosuid,nodev,noexec,size=4k,mode=0555 herdr-farm-hidden "$p" || fail "$p"; fi; done; "#,
+    r#"/usr/bin/mount -t tmpfs -o ro,nosuid,nodev,noexec,size=4k,mode=0555 herdr-farm-hidden "$p" || fail "$p"; check_ro "$p"; fi; done; "#,
+    // Recheck protected anchors after all writable exposures and masks exist.
+    // Writable remounts must affect their new mount only, never these anchors.
+    r#"[ -z "$root" ] || check_ro "$root"; for a in "$@"; do case $a in --) break;; ro:*|hide:*) p=${a#*:}; [ ! -e "$p" ] || check_ro "$p";; esac; done; "#,
     r#"cd -- "$cwd" || fail "$cwd"; while [ "$1" != -- ]; do shift; done; shift; "#,
     r#"exec /usr/bin/unshare --user --map-root-user -- "$@""#,
 );

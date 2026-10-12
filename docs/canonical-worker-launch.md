@@ -40,6 +40,26 @@ runner-only AppArmor user-namespace setting remains in place; further setup
 changes require evidence identifying the failing primitive. The canonical
 schema is unchanged.
 
+Read-only anchors no longer depend on util-linux interpreting `ro=recursive`.
+After each recursive bind, the sandbox enumerates `/proc/self/mountinfo`,
+remounts every descendant mount with `remount,bind,ro,nosuid,nodev`, and checks
+its kernel VFS options with `findmnt --direction backward --mountpoint`
+(covered mounts can share the same pathname; the last mount is visible).
+Root-cover bind-back entries receive this protection individually; remounting only the covering tmpfs leaves child
+mounts writable. Hidden tmpfs and file masks are also checked. A missing mount
+or writable VFS result exits 125 before the worker starts. These checks happen
+before explicitly allowed writable exposures are mounted on top; protected
+anchors are checked again after setup.
+
+CI diagnostics additionally mirror the descriptor bind-back under a covering
+root tmpfs and attempt an actual write from the nested worker user namespace.
+The owner-environment E2E probe now poisons `HERDR_DIR` and an unrelated owner
+variable and verifies neither reaches the worker. Both sandbox setup and final
+agent exec use `env -i`; retry commands use the same retained command builder.
+The previously intermittent filesystem sentinel leak still requires an
+outside-sandbox reproduction to identify its cause; environment scrubbing
+alone does not establish that filesystem hiding is sound.
+
 Writable exposures use `mount --rbind "$p" "$p"` followed by
 `mount -o remount,bind,rw "$p"`. The explicit bind remount clears the inherited
 read-only attribute on util-linux 2.39 (Ubuntu 24.04) as well as newer versions,
