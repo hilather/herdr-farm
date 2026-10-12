@@ -162,6 +162,22 @@ worker-attention snapshot is follow-up work.
 
 ## Canonical result wake labs (COORD-WAKE-ON-SUBMIT-1)
 
+The worker result-wake setup retries the public `ticker stop` for up to 30 real
+seconds, with 50 ms between unsuccessful calls, matching the coordinator lab
+helper (LAB-STOP-WAIT-1). A native call admitted before the stop request can
+outlast the scaled CLI wait (60 s becomes 1.2 s at the shared 0.02 scale).
+The helper still requires a successful stop before reserving the worker;
+all subsequent workflow assertions remain unchanged. Product timing is unchanged.
+
+The public stop call-site audit leaves the other sites unchanged: the
+coordinator helper already retries; coordinator and legacy ticker Drop handlers
+are best-effort cleanup; the four legacy ticker lifecycle stops check stale
+requests and replacement without native work; the two `ticker_timing` stops
+exercise production timing and a socket-free accelerated lab; `live_phase_a`
+and its support Drop handler belong to opt-in live acceptance. This accounts
+for the eleven other literal public stop sites, including `tests/support/live.rs`.
+Foreground stop-file helpers are separate from the public stop retry.
+
 Canonical result wakes use the shared claim retry/backoff timing and the existing
 executor. Native calls retain their unscaled budgets; a wake job has a 45-second
 real deadline, and its admission uses the canonical work pass while queued.
