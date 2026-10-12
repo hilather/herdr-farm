@@ -37,6 +37,9 @@ pub mod integrity;
 pub(crate) mod read_budget;
 impl fmt::Display for StoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if matches!(self,Self::Deadline) {
+            return f.write_str("state store: Deadline (operation budget expired)");
+        }
         if matches!(self,Self::ControlPublicationPending) {
             return f.write_str("control/format publication interrupted; the ticker will repair a pending publication; run migration recover if no ticker is running");
         }

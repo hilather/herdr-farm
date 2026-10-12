@@ -877,6 +877,9 @@ does not establish that a signal or telemetry pass caused an EINTR. Controlled
 reads now retry that transient result only while
 the original cancellation/deadline remains live, and check that control when
 classifying failures. Bounded filesystem operations retry actual EINTR as well.
+Budget expiry retains the typed `StoreError::Deadline` used for recovery and
+renders as `state store: Deadline (operation budget expired)`, including when a
+SQLite progress handler interrupts a query at that deadline.
 The SQLite transaction has already committed before marker publication. A
 cancellation check after writing `control-format.next` deliberately stops before
 rename; filesystem staging is outside that transaction and cannot roll it back.
