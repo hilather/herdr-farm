@@ -666,6 +666,73 @@ fn an_operator_finishes_a_worker_that_never_submitted_and_the_result_lands_autom
     assert_eq!(lab.git(&["cat-file", "-p", &format!("{candidate}:work.txt")]), "worker change");
 }
 
+// Exercise actual worker execution, controller capture/submission and native stop.
+#[test]
+fn worktree_capture_budgets_preserve_tracked_identity_and_release_untracked_refusals() {
+    for tracked in [true,false] {
+        let mut lab=Lab::new("unknown_usage='allow_with_warning'\n");
+        // Four tracked assets exceed the worktree budget in aggregate, while
+        // individual Git objects stay within unrelated submission limits.
+        fs::write(lab.repo.join("work.txt"),b"base").unwrap();
+        fs::create_dir(lab.repo.join("Content")).unwrap();
+        for n in 0..4 {fs::write(lab.repo.join(format!("Content/{n}.uasset")),b"base asset").unwrap();}
+        lab.git(&["add","work.txt","Content"]);lab.git(&["commit","-qm","tracked binary base"]);
+        lab.install_work_contract_policy_with_scope("verify_only",WORK_POLICY,&["work.txt","Content/"]);
+        let source=format!(r#"
+use std::{{fs,time::Duration}};
+fn main() {{
+    if std::env::args().nth(1).as_deref()==Some("--version") {{println!("2.1.0 (Claude Code)");return;}}
+    if {} {{
+        for n in 0..4 {{fs::File::create(format!("Content/{{n}}.uasset")).unwrap().set_len(14*1024*1024).unwrap();}}
+        fs::write("work.txt",b"worker change").unwrap();
+    }} else {{fs::File::create("untracked-source.txt").unwrap().set_len(51*1024*1024).unwrap();}}
+    while !std::path::Path::new("fixture-end").exists() {{std::thread::sleep(Duration::from_millis(20));}}
+}}
+"#,tracked);
+        lab.write_agent(&source,&[]);
+        let (_,attempt)=lab.reserve("Capture budget workflow");
+        let worktree=lab.planned_worktree(&attempt);
+        lab.serve();let mut ticker=lab.spawn();
+        lab.wait_for(&mut ticker,"worker binary edits",&attempt,120,&||fs::metadata(worktree.join(if tracked {"Content/3.uasset"}else{"untracked-source.txt"})).is_ok_and(|m|m.len()==if tracked {14*1024*1024}else{51*1024*1024}) && (!tracked || fs::read(worktree.join("work.txt")).is_ok_and(|b|b==b"worker change")) && lab.attempt(&attempt).state==AttemptState::Running);
+        if tracked {
+            let submitted=lab.ok_live(&||["result","demo","submit-captured",attempt.as_str()].map(String::from).to_vec());
+            assert_eq!(submitted["submission"]["replayed"],false);
+        }
+        fs::write(worktree.join("fixture-end"),b"end").unwrap();
+        lab.wait_for(&mut ticker,"exact termination despite capture budget",&attempt,120,&||lab.attempt(&attempt).termination_observed);
+        lab.stop(ticker);
+        let state=lab.state();assert_eq!(state.control.as_ref().unwrap().state,ProjectState::Active);
+        assert!(!lab.attempt(&attempt).retains_capacity());
+        let receipt:WorkerTerminationReceipt=serde_json::from_value(lab.events("runtime.worker_terminated")[0].payload.clone()).unwrap();
+        assert_eq!(receipt.cause,WorkerTerminationCause::ProcessExit);
+        let reference=&receipt.repository_snapshots[0];
+        if tracked {
+            assert!(reference.capture_incomplete.is_none());
+            let directory=lab.project.join(".state/worktree-file-snapshots").join(attempt.as_str()).join(&reference.digest);
+            let manifest:herdr_farm::worktree_preservation::Manifest=serde_json::from_slice(&fs::read(directory.join("manifest.json")).unwrap()).unwrap();
+            let omission=manifest.omissions.iter().find(|o|o.path=="Content/3.uasset").unwrap();
+            assert_eq!(omission.bytes,14*1024*1024);assert_eq!(omission.mode,"100644");
+            let output=Command::new("/usr/bin/git").arg("-C").arg(&worktree).args(["hash-object","--no-filters","Content/3.uasset"]).output().unwrap();
+            assert!(output.status.success());assert_eq!(omission.blob,String::from_utf8(output.stdout).unwrap().trim());
+            assert!(manifest.git_identity.is_some());
+            assert!(!manifest.entries.iter().any(|e|e.path=="Content/3.uasset"));
+            assert_eq!(manifest.tracked_files.iter().find(|e|e.path=="Content/3.uasset").unwrap().blob,omission.blob);
+            let retained_bytes=fs::read_dir(&directory).unwrap().map(|e|e.unwrap().metadata().unwrap().len()).sum::<u64>();
+            assert!(retained_bytes<50*1024*1024,"omitted binary bytes were retained: {retained_bytes}");
+        } else {
+            assert_eq!(reference.capture_incomplete,Some(CaptureIncomplete::ByteLimit));
+            assert!(reference.digest.is_empty());
+            assert_eq!(state.inbox.iter().filter(|i|i.content.kind=="attempt.capture_incomplete").count(),1);
+            let error=herdr_farm::worktree_preservation::capture_stopped_files(&lab.project,&attempt,state.head,Instant::now()+Duration::from_secs(45),Default::default()).unwrap_err();
+            assert!(format!("{error:#}").contains("artifact source exceeds 50 MiB"));
+        }
+        assert_eq!(fs::metadata(worktree.join(if tracked {"Content/3.uasset"}else{"untracked-source.txt"})).unwrap().len(),if tracked {14*1024*1024}else{51*1024*1024});
+        lab.run_for("agent.list",1);
+        assert_eq!(lab.events("runtime.worker_terminated").len(),1);
+        assert_eq!(lab.state().inbox.iter().filter(|i|i.content.kind=="attempt.capture_incomplete").count(),usize::from(!tracked));
+    }
+}
+
 // Like EDITING_AGENT, but commits and submits through the worker's public
 // CLI/spool, then stays idle. An owner marker asks it to resubmit a new commit.
 const SUBMITTING_EDITING_AGENT: &str = r#"
@@ -1770,10 +1837,13 @@ impl Lab {
         self.install_work_contract_policy(route, WORK_POLICY)
     }
     fn install_work_contract_policy(&self, route: &str, policy: &str) -> (String, String) {
+        self.install_work_contract_policy_with_scope(route,policy,&["work.txt"])
+    }
+    fn install_work_contract_policy_with_scope(&self, route:&str, policy:&str, writes:&[&str])->(String,String) {
         let base = self.git(&["rev-parse", "HEAD"]);
         let store = self.project.join(".state/state.db").canonicalize().unwrap().display().to_string();
         let mut document = serde_json::to_vec_pretty(&json!({
-            "version": 3, "outputs": [{"path": "work.txt", "kind": "git_file"}], "scope": {"paths": [{"path": "work.txt", "access": "write"}]},
+            "version": 3, "outputs": [{"path": "work.txt", "kind": "git_file"}], "scope": {"paths": writes.iter().map(|path|json!({"path":path,"access":"write"})).collect::<Vec<_>>()},
             "project_store": store, "expected_head": self.head(), "task_id": "work", "contract_revision": 1, "deliverable": "work", "non_goals": "none",
             "acceptance_policies": [{"id": "clean", "text": policy}],
             "repository": self.repo.canonicalize().unwrap().display().to_string(), "base_oid": base,
@@ -3537,6 +3607,10 @@ fn an_automatic_pause_names_its_blockers_and_lifts_itself_once_they_clear() {
     lab.serve();
     let mut ticker = lab.spawn();
     lab.wait_for(&mut ticker, "the worker to run", &attempt, 120, &|| lab.attempt(&attempt).state == AttemptState::Running);
+    // A pre-existing oversized untracked source must not keep the automatic
+    // reconciliation pause wedged once the exact worker end is observed.
+    let worktree=lab.planned_worktree(&attempt);
+    fs::File::create(worktree.join("oversized-source.txt")).unwrap().set_len(51*1024*1024).unwrap();
     fs::write(lab.path("lab/vanish"), b"").unwrap();
     let paused = || lab.state().control.is_some_and(|c| c.state == ProjectState::Paused && c.reconciliation_required);
     lab.wait_for(&mut ticker, "the automatic pause", &attempt, 60, &|| paused());
@@ -3560,6 +3634,10 @@ fn an_automatic_pause_names_its_blockers_and_lifts_itself_once_they_clear() {
     lab.wait_for(&mut ticker, "the termination record", &attempt, 60, &|| lab.attempt(&attempt).termination_observed);
     lab.wait_for(&mut ticker, "automatic re-activation", &attempt, 60, &|| lab.state().control.is_some_and(|c| c.state == ProjectState::Active && !c.reconciliation_required));
     lab.stop(ticker);
+    let receipt:WorkerTerminationReceipt=serde_json::from_value(lab.events("runtime.worker_terminated")[0].payload.clone()).unwrap();
+    assert_eq!(receipt.repository_snapshots[0].capture_incomplete,Some(CaptureIncomplete::ByteLimit));
+    assert_eq!(lab.state().inbox.iter().filter(|i|i.content.kind=="attempt.capture_incomplete").count(),1);
+    assert_eq!(fs::metadata(worktree.join("oversized-source.txt")).unwrap().len(),51*1024*1024);
     let log = fs::read_to_string(lab.path("root/.ticker.log")).unwrap_or_default();
     assert_eq!(log.lines().filter(|l| l.contains("control re-activated automatically")).count(), 1, "{log}");
     let last = lab.state().events.into_iter().filter(|e| e.kind.starts_with("project.")).last().unwrap();
