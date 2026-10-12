@@ -4464,19 +4464,32 @@ fn shared_root_finishes_a_pending_termination_before_starting_another_project() 
         Some(termination.project.parent().unwrap()), "busy");
     let (_, busy) = launches.reserve("Launch after termination commits");
     launches.serve();
-    termination.bounded_passes(10);
+    // Pass completion does not imply that the background termination reached
+    // its commit. In particular, stopping a ten-pass ticker can cancel its
+    // initial maintenance batch before the stop is even admitted.
+    let failures = || fs::read_to_string(termination.path("root/.ticker.log")).unwrap_or_default()
+        .lines().filter(|line| line.contains("canonical-worker:terminate-")
+            && line.contains("fixture termination deferred")).count();
+    let mut ticker = termination.spawn();
+    termination.wait_for(&mut ticker, "refused termination commit", &attempt, 120, &|| failures() > 0);
     assert_eq!(launches.count("workspace.create_command"), 0);
     assert!(!termination.attempt(&attempt).termination_observed);
     assert!(termination.attempt(&attempt).retains_capacity());
-    let log = fs::read_to_string(termination.path("root/.ticker.log")).unwrap();
-    let failures = log.lines().filter(|line| line.contains("canonical-worker:terminate-")
-        && line.contains("fixture termination deferred")).count();
-    assert!((1..=10).contains(&failures), "{log}");
+    assert!((1..=10).contains(&failures()), "{}",
+        fs::read_to_string(termination.path("root/.ticker.log")).unwrap());
+    // Observe further passes with the refusal still installed, including the
+    // retry backoff, and verify that launch advancement cannot use the gap.
+    let metrics = termination.path("root/.ticker-metrics.json");
+    for _ in 0..10 {
+        let inode = fs::metadata(&metrics).unwrap().ino();
+        termination.wait(&mut ticker, 60, &|| fs::metadata(&metrics).map(|m| m.ino()).ok() != Some(inode));
+        assert_eq!(launches.count("workspace.create_command"), 0);
+        assert!(!termination.attempt(&attempt).termination_observed);
+        assert!(termination.attempt(&attempt).retains_capacity());
+    }
     connection.execute_batch("DROP TRIGGER defer_termination").unwrap();
-    // Completed passes precede background commits. Keep this ticker alive
-    // through the next launch too: stopping at an arbitrary pass can cancel
-    // that launch just after the safety obligation commits.
-    let mut ticker = termination.spawn();
+    // Preserve the same queue's retry history through the successful commit
+    // and the next launch; neither phase is cancelled by a ticker restart.
     termination.wait(&mut ticker, 120, &|| termination.attempt(&attempt).termination_observed);
     assert!(termination.attempt(&attempt).termination_observed);
     assert!(!termination.attempt(&attempt).retains_capacity());
