@@ -250,8 +250,13 @@ working agent, adopts the coordinator through the public CLI, then records fresh
 post-adoption identity evidence before activation. An unrecorded route provides
 no reachable session to refresh the accelerated ticker idle-exit deadline; a
 present route without adoption cannot authorize activation. Helper exceptions,
-ticker stderr and ticker logs remain in failed-wait diagnostics. Unix socket
-restrictions prevent exercising this fixture past socket creation in the sandbox.
+ticker stderr and ticker logs remain in failed-wait diagnostics. The fixture also
+records each helper invocation and dumps public operation inspection, the runtime
+snapshot, notification authority validation, the controller dispatch hint, effect
+pause reason, lock availability and executor metrics on a failed wait. The dump
+includes the wall clock so persisted due and lease times can be compared directly.
+Unix socket restrictions prevent exercising this fixture past socket creation in
+the sandbox.
 
 Root safety work (recovery, termination and briefs) precedes launch advancement
 across projects, including while safety work backs off. Queue fairness promotes

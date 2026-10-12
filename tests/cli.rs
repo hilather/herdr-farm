@@ -1248,6 +1248,7 @@ fn ticker_canonical_notification_confirms_or_retains_ambiguity_after_owner_death
         let helper=home.path().join("herdr");fs::write(&helper,format!(r#"#!/usr/bin/python3
 import sys,json,pathlib,os,time,fcntl,sqlite3,traceback
 root=pathlib.Path({home:?});project=pathlib.Path({project:?});mode={mode:?}
+with open(root/'helper-calls','a') as f:f.write(str(time.time())+' '+repr(sys.argv[1:])+'\n')
 def failure(kind,value,tb):
  with open(root/'helper-errors','a') as f:
   f.write('Python '+sys.version+'; SQLite '+sqlite3.sqlite_version+'\n')
@@ -1288,9 +1289,35 @@ print(json.dumps({{'id':request['id'],'result':{{'type':'notification_show','sho
         struct Child(std::process::Child);impl Drop for Child{fn drop(&mut self){let _=self.0.kill();let _=self.0.wait();}}
         let spawn=||Child(Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME",home.path()).env("PATH","/usr/bin:/bin").env("HERDR_BIN_PATH",&helper).args(["--root",r,"ticker","run"]).stdout(Stdio::null()).stderr(Stdio::from(fs::OpenOptions::new().create(true).append(true).open(home.path().join("ticker-stderr")).unwrap())).spawn().unwrap());
         let read=||runtime::snapshot(&project).unwrap().deliveries.into_iter().find(|d|d.operation==op.id).unwrap();
-        let wait=|child:&mut Child,predicate:&dyn Fn()->bool|{let end=Instant::now()+wait_budget;while !predicate(){let diagnostic=||format!("mode={mode}\n{}\n{}\n{}\nwrong lock: {}",fs::read_to_string(root.join(".ticker.log")).unwrap_or_default(),fs::read_to_string(home.path().join("ticker-stderr")).unwrap_or_default(),fs::read_to_string(home.path().join("helper-errors")).unwrap_or_default(),fs::read_to_string(home.path().join("WRONG_LOCK")).unwrap_or_default());assert!(child.0.try_wait().unwrap().is_none(),"{}",diagnostic());assert!(Instant::now()<end,"{}",diagnostic());std::thread::sleep(Duration::from_millis(10));}};
+        let diagnostic = || {
+            // These are public runtime/store reads, not copies of fixture values.
+            // Keep failures in the dump: a failed read can explain missing admission.
+            let inspected = command(&["--root", r, "operations", "demo", "inspect"]);
+            let now = jiff::Timestamp::now().as_millisecond();
+            let state = runtime::snapshot(&project);
+            let validation = state.as_ref().map_err(|error| format!("{error:#}")).and_then(|snapshot| {
+                herdr_farm::operations::notification::Notification::decode(&op)
+                    .and_then(|notice| notice.validate(&op, snapshot, &migration::config_reference(&config)?).map(|_| ()))
+                    .map_err(|error| format!("{error:#}"))
+            });
+            let mut budget = herdr_farm::store::identity_inventory::Budget::new(
+                2 * 1024 * 1024, 1024, Instant::now() + Duration::from_secs(2), Default::default()).unwrap();
+            let hint = migration::read_controller_dispatch_hint(&project, &mut budget, 0, now, true)
+                .map(|hint| hint.map(|hint| (hint.operation.id, hint.delivery_revision, hint.notification_socket)));
+            format!("mode={mode}; now_ms={now}\noperations inspect ({status}):\n{stdout}\n{stderr}\nruntime: {state:#?}\nnotification validation: {validation:?}\ncontroller hint: {hint:?}\neffect pause: {pause:?}\nroot available: {root_available}; project available: {project_available}\nmetrics: {metrics}\nticker log: {log}\nticker stderr: {ticker_stderr}\nhelper calls: {calls}\nhelper errors: {errors}\nwrong lock: {wrong}",
+                status=inspected.status, stdout=String::from_utf8_lossy(&inspected.stdout), stderr=String::from_utf8_lossy(&inspected.stderr),
+                pause=herdr_farm::watchdog::effects_paused(&project),
+                root_available=RootGuard::exclusive(&root).is_ok(), project_available=ProjectGuard::acquire(&project).is_ok(),
+                metrics=fs::read_to_string(root.join(".ticker-metrics.json")).unwrap_or_else(|error| error.to_string()),
+                log=fs::read_to_string(root.join(".ticker.log")).unwrap_or_default(),
+                ticker_stderr=fs::read_to_string(home.path().join("ticker-stderr")).unwrap_or_default(),
+                calls=fs::read_to_string(home.path().join("helper-calls")).unwrap_or_default(),
+                errors=fs::read_to_string(home.path().join("helper-errors")).unwrap_or_default(),
+                wrong=fs::read_to_string(home.path().join("WRONG_LOCK")).unwrap_or_default())
+        };
+        let wait=|child:&mut Child,phase:&str,predicate:&dyn Fn()->bool|{let end=Instant::now()+wait_budget;while !predicate(){assert!(child.0.try_wait().unwrap().is_none(),"phase={phase}\n{}",diagnostic());assert!(Instant::now()<end,"phase={phase}\n{}",diagnostic());std::thread::sleep(Duration::from_millis(10));}};
         let stop=|child:&mut Child|{fs::write(root.join(".ticker.stop"),b"").unwrap();let end=Instant::now()+wait_budget;while child.0.try_wait().unwrap().is_none(){assert!(Instant::now()<end);std::thread::sleep(Duration::from_millis(10));}fs::remove_file(root.join(".ticker.stop")).unwrap();};
-        let mut child=spawn();wait(&mut child,&||home.path().join("sent").exists());
+        let mut child=spawn();wait(&mut child,"native notification send",&||home.path().join("sent").exists());
         if mode=="death" {
             child.0.kill().unwrap();child.0.wait().unwrap();assert!(RootGuard::exclusive(&root).is_err());assert!(ProjectGuard::acquire(&project).is_err());
             let routine=fs::OpenOptions::new().write(true).open(root.join(".routine-execution.lock")).unwrap();assert!(routine.try_lock().is_err());
@@ -1298,11 +1325,11 @@ print(json.dumps({{'id':request['id'],'result':{{'type':'notification_show','sho
             routine.try_lock().unwrap();routine.unlock().unwrap();assert!(ProjectGuard::acquire(&project).is_ok());assert_eq!(read().state,DeliveryState::Claimed);
             let until=read().lease_until_ms.unwrap();assert_eq!(migration::open_active(&project).unwrap().expire_claims(until).unwrap(),1);assert_eq!(read().state,DeliveryState::Ambiguous);
             std::thread::sleep(Duration::from_secs(6));assert!(!home.path().join("escaped").exists());
-        }else{wait(&mut child,&||read().state==if mode=="ok"{DeliveryState::Confirmed}else{DeliveryState::Ambiguous});stop(&mut child);}
+        }else{wait(&mut child,"delivery outcome",&||read().state==if mode=="ok"{DeliveryState::Confirmed}else{DeliveryState::Ambiguous});stop(&mut child);}
         assert!(!home.path().join("WRONG_LOCK").exists());
         // A later pass refreshes the observation time (no event when unchanged) and must not resend.
         let seen=runtime::snapshot(&project).unwrap().observations.iter().map(|o|o.observed_unix_ms).max().unwrap_or(0);
-        let mut child=spawn();wait(&mut child,&||runtime::snapshot(&project).unwrap().observations.iter().any(|o|o.observed_unix_ms>seen&&o.pane==herdr_farm::reconcile::ResourceState::Present));stop(&mut child);
+        let mut child=spawn();wait(&mut child,"post-restart observation",&||runtime::snapshot(&project).unwrap().observations.iter().any(|o|o.observed_unix_ms>seen&&o.pane==herdr_farm::reconcile::ResourceState::Present));stop(&mut child);
         assert_eq!(fs::read_to_string(home.path().join("sent")).unwrap(),"send\n");assert_eq!(read().attempts,1);
     }
 }
