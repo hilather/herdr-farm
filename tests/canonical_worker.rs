@@ -11,6 +11,9 @@ use sha2::{Digest, Sha256};
 use std::{fs, os::unix::fs::{MetadataExt, PermissionsExt}, path::PathBuf, process::{Child, Command, Output, Stdio}, time::{Duration, Instant}};
 
 mod inventory_history { include!("support/inventory_history.rs"); }
+#[path = "support/agent_build_cache.rs"]
+mod agent_build_cache;
+
 const BIN: &str = env!("CARGO_BIN_EXE_herdr-farm");
 
 /// A Herdr server on `argv[1]` that runs `workspace.create_command` for real
@@ -251,7 +254,7 @@ c=socket.socket(socket.AF_UNIX);c.connect(os.environ['HERDR_SOCKET_PATH']);c.sen
 sys.stdout.buffer.write(json.dumps({'result':json.loads(reply)['result']}).encode() if probe else reply)\n").unwrap();
         let (agent, source) = (self.agent(), self.path("bin/agent.rs"));
         fs::write(&source, format!("fn main(){{if std::env::args().nth(1).as_deref()==Some(\"--version\"){{println!({:?});return}}loop{{std::thread::park()}}}}", self.version())).unwrap();
-        assert!(Command::new("rustc").args(["--edition", "2021", "-o"]).arg(&agent).arg(&source).status().unwrap().success());
+        agent_build_cache::copy_agent(&fs::read_to_string(&source).unwrap(), &agent);
         for path in [&self.herdr, &agent] { fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap(); }
     }
     /// Prepare `worker` over the lab binaries; only the native interaction
@@ -1885,8 +1888,7 @@ impl Lab {
     fn build_agent(&self, source: &str) {
         let (agent, file) = (self.agent(), self.path("bin/probe.rs"));
         fs::write(&file, source).unwrap();
-        let built = Command::new("rustc").args(["--edition", "2021", "-o"]).arg(&agent).arg(&file).output().unwrap();
-        assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+        agent_build_cache::copy_agent(&fs::read_to_string(&file).unwrap(), &agent);
         fs::set_permissions(&agent, fs::Permissions::from_mode(0o700)).unwrap();
     }
     /// Install an owner-signed contract for the queued task `work` whose one
@@ -2472,8 +2474,7 @@ impl Lab {
         for (name, value) in consts { text += &format!("const {name}: &str = {value:?};\n"); }
         let (agent, file) = (self.agent(), self.path("bin/probe.rs"));
         fs::write(&file, text).unwrap();
-        let built = Command::new("rustc").args(["--edition", "2021", "-o"]).arg(&agent).arg(&file).output().unwrap();
-        assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+        agent_build_cache::copy_agent(&fs::read_to_string(&file).unwrap(), &agent);
         fs::set_permissions(&agent, fs::Permissions::from_mode(0o700)).unwrap();
     }
     /// The `spool.request_denied` reasons recorded for `attempt`.

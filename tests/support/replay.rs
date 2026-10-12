@@ -199,8 +199,7 @@ sys.stdout.buffer.write(json.dumps({'result':json.loads(reply)['result']}).encod
     pub(crate) fn build_agent(&self, source: &str) {
         let (agent, file) = (self.path("bin/claude"), self.path("bin/agent.rs"));
         fs::write(&file, source).unwrap();
-        let built = Command::new("rustc").args(["--edition", "2021", "-o"]).arg(&agent).arg(&file).output().unwrap();
-        assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+        super::agent_build_cache::copy_agent(&fs::read_to_string(&file).unwrap(), &agent);
         fs::set_permissions(&agent, fs::Permissions::from_mode(0o700)).unwrap();
     }
     /// `profile prepare` over the lab binaries; only the native interaction evidence is planted.
