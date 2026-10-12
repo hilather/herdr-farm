@@ -201,7 +201,7 @@ jobs:
           --workspace-remap .
           --extract-to ${{ github.workspace }}
           --extract-overwrite
-          --partition count:${{ matrix.partition }}/8
+          --partition hash:${{ matrix.partition }}/8
       - name: Run nightly profile
         if: github.event_name == 'schedule' && matrix.partition == 1
         run: >
