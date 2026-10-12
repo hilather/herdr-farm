@@ -4061,8 +4061,11 @@ fn proven_launch_server_loss_retires_owned_runtime_and_next_brief_succeeds() {
 }
 
 #[test]
-fn expired_started_brief_releases_ownership_once_and_same_task_relaunches() {
+fn expired_started_brief_releases_ownership_once_and_superseding_task_relaunches() {
     let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+    // Match a coordinator launch's lineage before the lower-level reservation.
+    migration::open_active(&lab.project).unwrap()
+        .prepare_task_lineage("work", "work", "plan", None).unwrap();
     let (approval, attempt) = lab.reserve_with_validity("Never send an expired brief.", 120);
     lab.serve();
     fs::write(lab.path("lab/agent-status"), "working").unwrap();
@@ -4091,13 +4094,24 @@ fn expired_started_brief_releases_ownership_once_and_same_task_relaunches() {
     fs::remove_file(lab.path("lab/agent-status")).unwrap();
     fs::write(lab.path("lab/reset-workspace"), "").unwrap();
     fs::write(lab.project.join("PROJECT.md"), format!("+++\n[[repos]]\npath={:?}\n+++\nRelaunch after expired approval.\n", lab.repo)).unwrap();
-    let retry = lab.ok(&["launch", "demo", "run", "--task", "work", "--profile", "worker",
+    // A coordinator replaces the failed task with a new task in its work item.
+    let retry = lab.ok(&["launch", "demo", "run", "--task", "work-retry", "--profile", "worker",
+        "--work-item", "work", "--supersedes", "work",
         "--repository", lab.repo.to_str().unwrap(), "--plan-output", "docs/retry.md",
         "--herdr-socket", lab.socket().to_str().unwrap(), "--sign-with", lab.key.to_str().unwrap()]);
     let next = AttemptId::new(retry["attempt"].as_str().unwrap()).unwrap();
     assert_ne!(next, attempt);
     lab.run_until(120, &|| lab.attempt(&next).state == AttemptState::Running);
     assert_eq!(lab.count("agent.prompt"), 1);
+    let attempts = lab.ok(&["telemetry", "demo", "attempts", "--json"]);
+    let row = attempts["attempts"].as_array().unwrap().iter()
+        .find(|a| a["attempt_id"] == retry["attempt"]).unwrap();
+    assert_eq!(row["task_id"], "work-retry");
+    assert_eq!(row["lineage"], json!({"work_item":"work","role":"plan","supersedes":"work"}));
+    assert_eq!(lab.events("attempt.launch_failed").len(), 1);
+    assert_eq!(lab.state().inbox.iter().filter(|i| i.content.kind == "attempt.launch_failure").count(), 1);
+    let control = lab.state().control.unwrap();
+    assert_eq!(control.state, herdr_farm::domain::ProjectState::Active);
 }
 
 #[test]

@@ -1257,8 +1257,12 @@ retrying unchanged sealed inputs. Expired or changed consumed approvals fail as
 `brief_approval_expired`; other permanent authority `Invalid` errors fail as
 `brief_authority_invalid`. The supervisor stops a failed started worker, preserves
 its outputs, and records proven termination before releasing capacity, runtime
-ownership and the task pointer. The task can then be relaunched with fresh signed
-approval, without pausing project control. No prompt is sent under invalid
+ownership and the task pointer. A coordinator can then launch a replacement with
+fresh signed approval using a new task id, `--work-item WORK` and `--supersedes OLD`,
+without pausing project control. The superseded task must already have matching
+work-item lineage; lineage cannot be added after a task's first attempt.
+Same-task reruns require matching retained lineage and the installed contract.
+No prompt is sent under invalid
 authority. No store schema migration is required.
 
 Previously both the project inventory and root queue rotated launches and briefs
@@ -1281,7 +1285,8 @@ explain the entire gap. These log bounds do not reveal the draft issuance time o
 the duration of each neighbouring exclusive stage. The isolated E2E contention
 lab holds the root exclusively for 3 seconds and reports elapsed time to Running;
 the expiry lab waits past its actual 120-second signed grant and verifies supervised
-retirement and a successful relaunch of the same task.
+retirement and a successful launch of a new task superseding the failed task in
+the same work item, with persisted lineage and no operator recovery action.
 
 For stores already affected by #52, observation also recognizes the retained
 terminal `attempt.launch_failed` proof with reason `dedicated_server_lost`, a lost
