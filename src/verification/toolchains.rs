@@ -94,6 +94,21 @@ fn collect(path: &Path, seen: &mut BTreeSet<PathBuf>) -> Result<()> {
         }
     } else if meta.is_file() {
         for dependency in crate::worker_supervision::executable_dependencies(path) {
+            // Normalize only declared toolchain dependencies. The shared
+            // executable walker also serves ordinary worker launches, whose
+            // project turns must not acquire this extra filesystem work.
+            // Resolve parents through the filesystem: symlinks before `..`
+            // make lexical popping incorrect. Keep the final symlink pinned.
+            let dependency = if dependency.is_absolute()
+                && dependency.components().any(|c| c == Component::ParentDir)
+                && let Some(parent) = dependency.parent()
+                && let Some(name) = dependency.file_name()
+                && let Ok(parent) = parent.canonicalize()
+            {
+                parent.join(name)
+            } else {
+                dependency
+            };
             collect(&dependency, seen)?;
         }
     } else {
