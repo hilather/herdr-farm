@@ -21,7 +21,9 @@ const SCRIPT:&str=r#"duration=$1
 shift
 /usr/bin/timeout --foreground --signal=KILL -- "$duration" "$@"
 result=$?
-if [ "$result" -eq 0 ]; then exit 0; else exit 200; fi"#;
+if [ "$result" -eq 0 ]; then exit 0;
+elif [ "$result" -eq 124 ] || [ "$result" -eq 137 ]; then exit 201;
+else exit 200; fi"#;
 
 /// The original argv/stdin/output sink stay literal. Only the fixed supervisor
 /// interprets shell syntax. Nonzero target exits normalize to 200; callers must
@@ -33,7 +35,15 @@ pub fn run(target:Cmd,deadline:Instant,cancellation:Cancellation,locks:&[Inherit
     // The living collector enforces the absolute deadline. After owner death,
     // the surviving helper's bound is relative to its start; no absolute orphan
     // deadline is claimed across arbitrary OS scheduling/bootstrap delays.
-    RealRunner.run(&command(target,deadline,cancellation,locks)?)
+    let mut output = RealRunner.run(&command(target,deadline,cancellation,locks)?)?;
+    // The surviving timeout helper can finish before the collector's longer
+    // cleanup deadline. Preserve that timeout as an observable result too.
+    if output.code == Some(201) {
+        output.timed_out = true;
+        // Preserve the supervisor's public nonzero-exit contract.
+        output.code = Some(200);
+    }
+    Ok(output)
 }
 fn command(mut target:Cmd,deadline:Instant,cancellation:Cancellation,locks:&[InheritedLock])->Result<Cmd> {
     ensure!(cfg!(target_os="linux"),"transfer supervision requires Linux PID namespaces");

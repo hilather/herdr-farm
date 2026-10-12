@@ -1340,8 +1340,12 @@ exact resource. An observed target without a release intent ends promptly with
 typed `launch_lease_expired` failure and a coordinator/operator diagnostic. The
 existing supervised termination path stops the gated worker, proves quiescence
 and retires capacity and ownership. The finished-task sweep then stops a recorded
-dedicated server. Before a target exists, ambiguous creation remains in launch
-observation. Once an unreleased target exists, termination observation takes
+dedicated server. Before a target exists, ambiguous creation observes the
+native workspace inventory. An inventory with no workspace for this attempt
+ends with a typed failure; an
+automatically managed dedicated server is cancelled using a pinned process
+handle before capacity is released. A present workspace retains the existing
+identity adoption path. Once an unreleased target exists, termination observation takes
 priority and records the typed expiry failure exactly once; its next pass stops
 the worker using the updated attempt revision. Cancelled staged launches also
 select termination alone. Released launches continue start observation.
@@ -1367,3 +1371,71 @@ A socket-free signed-reservation workflow also exercises renewal through the
 public store API: the old lease token is fenced, the original expiry does not
 expire the renewed generation, and neither elapsed nor ambiguous claims can be
 revived or reclaimed.
+
+
+The shared root queue prioritizes recovery (`canonical-worker:recover:` and
+`recover-`), termination, brief preparation and brief delivery before launch
+advancement in any project. Pending safety work blocks new launch advancement
+even during its retry delay. Failed recovery requests remain executable between
+inventory scans. Three failed turns or a wait exceeding the recovery observation
+interval promotes the oldest waiting job within its priority class; refreshed
+inventory offers do not reset that history. Admission starts a new wait and
+spends a promoted job's contention credit; successful completion clears its
+failure count. A repeatedly failing safety job cannot monopolize other safety work.
+Root acquisition holds `.execution-turn.lock` while draining shared holders,
+so new status/start probes cannot overtake an already waiting exclusive effect.
+The existing `.execution.lock` remains the inherited execution barrier.
+
+Native creation has a 15-second external request budget inside the unscaled
+45-second phase; the lease covers the phase plus a five-second commit reserve.
+A creation timeout first tries to retain an observable exact supervisor for
+advancement under the still-live original claim (or normal termination at expiry). Otherwise it cancels only the automatically
+managed server recorded for that project, task and socket, using a pidfd after
+checking the live command, environment and socket incarnation. The existing
+server-disappearance proof releases the reservation, with typed
+`launch_creation_timed_out` for a call cancelled before lease expiry. The server record stays
+available to the ordinary retirement sweep. Operator-managed servers are never
+signalled; their uncertain resources retain capacity. Expired no-target launches
+whose dedicated server remains blocked are cancelled by the same path after a
+bounded workspace observation. Existing tables and retained events carry the
+typed failure; there is no schema change or new dependency.
+
+E2E workflows in `tests/canonical_worker.rs` exercise a shared root with a
+continuously offered launch in one project and empty-workspace recovery in
+another, bounded to 30 completed passes. Projects share the lab owner's key and
+configuration, while repositories, executables and execution homes remain
+separate. A separate hung native creation exceeds
+the configured one-second lease floor, is cancelled within the phase lease,
+and finishes with a typed delivery, no target, no ambiguity and released capacity.
+
+Pending recovery E2E first refuses workspace observation for ten passes, checks
+that the other project's native creation is still held, then permits observation
+and verifies terminal recovery within 30 passes and a new launch reaching Running.
+Termination E2E refuses the termination journal commit, verifies bounded retries
+and held launch advancement across projects, then permits the commit and verifies
+capacity release, one persisted termination and the other launch reaching Running.
+These replace the obsolete queue unit policies that allowed launches during
+recovery/termination cooldown; coverage remains through public CLI workflows.
+
+Passive liveness polls use `canonical-worker:monitor:terminate-` and keep their
+existing observation cadence. They do not hold new launches throughout cooldown.
+The controller distinguishes requested cancellation/completion, failed attempts
+and expired unreleased launches using existing state and events, promotes those
+stops ahead of project-local launch hints, and emits ordinary priority termination
+jobs. The worker still validates the current attempt before any signal. This
+allows additional projects to launch beside healthy workers without weakening
+pending-stop priority.
+
+The pending-stop workflow also starts a second healthy project while the first
+worker is still Running, then holds a third project's launch behind the requested
+stop. It verifies that passive monitoring permits concurrent projects and that
+requested termination blocks advancement until its persisted outcome commits.
+
+A restarted ticker also observes a still-live original creation claim. Its native
+observation deadline leaves five seconds for bridge draining and five for server
+cancellation/receipt; an unresponsive creation is cancelled before the original
+lease expires, without renewal or replay. Expired Claimed rows have the same
+terminal handling as Ambiguous rows, so a deferred expiry service cannot leave
+an empty launch or gated target parked indefinitely. The hung-creation E2E runs
+both with the original ticker and with a killed/restarted ticker, checking that
+the typed failure commits before the original lease deadline in both scenarios.

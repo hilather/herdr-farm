@@ -187,3 +187,16 @@ and E2E coverage of slow creation and killed-launcher recovery.
 Expired unreleased targets select termination observation alone. It records the
 typed expiry outcome, then stops the gated worker in the same reconciliation;
 it never renews or reclaims the expired launch.
+
+Root safety work (recovery, termination and briefs) precedes launch advancement
+across projects, including while safety work backs off. Queue fairness promotes
+jobs after three failed turns or one recovery observation interval of waiting.
+The root writer turn prevents fresh shared probes from overtaking acquisition.
+Native creation requests retain their unscaled 15-second external budget. On
+timeout, observation and cancellation run within the remaining 45-second phase
+and five-second lease reserve; labs do not scale that execution budget. The
+supervisor preserves its public exit-200 failure contract and exposes timeout
+through the output's `timed_out` flag, including when its surviving helper
+finishes before the collector deadline. The
+shared-root recovery E2E uses 30 completed passes, and the hung-creation E2E
+uses observable terminal state with a generous 90-second wait deadline.

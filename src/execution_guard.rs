@@ -202,6 +202,7 @@ impl RootGuard {
         foreground_acquire(|| Self::exclusive_now(root))
     }
     fn exclusive_now(root:&Path)->Result<Self> {
+        let _turn=exclusive_file(&root.join(".execution-turn.lock"))?;
         let file=exclusive_file(&root.join(".execution.lock"))?;
         // After the root: a check holds this shared without the root, and
         // narrowing takes it under the root, so this try-lock never deadlocks.
@@ -218,10 +219,14 @@ impl RootGuard {
     /// The lock is the same exclusive lock; only the wait for it is added.
     pub fn exclusive_by(root:&Path,deadline:std::time::Instant,cancellation:&crate::runner::Cancellation)->Result<Self> {
         let until=deadline.min(std::time::Instant::now()+EXCLUSIVE_WAIT);
+        // Hold a writer turn while draining existing shared holders. New
+        // status/start probes cannot repeatedly overtake this queued effect.
+        let _turn=exclusive_file_until(&root.join(".execution-turn.lock"),until,&|| cancellation.is_cancelled())?;
         let file=exclusive_file_until(&root.join(".execution.lock"),until,&|| cancellation.is_cancelled())?;
         Ok(Self{_file:file,_check:None})
     }
     fn shared(root:&Path)->Result<Self> {
+        let _turn=shared_file(&root.join(".execution-turn.lock"),"root exclusive operation is waiting; retry")?;
         let file=shared_file(&root.join(".execution.lock"),"root maintenance or exclusive external operation is active; retry")?;
         Ok(Self{_file:file,_check:None})
     }
