@@ -35,8 +35,9 @@ fn text(git:&Git,receipt:&WorktreeReceipt,args:&[&str])->Result<String> {
 fn file(directory:&Directory,name:&str,control:&Control,remaining:&mut usize,blobs:&mut BTreeMap<String,Vec<u8>>)->Result<Option<FileEvidence>> {
     let Some(mut file)=directory.optional(OsStr::new(name))? else {return Ok(None);};
     let before=file.metadata()?;
-    ensure!(before.len()<=4*1024*1024 && before.len()<=*remaining as u64,"Git index exceeds preservation bounds");
     let mut budget=control.budget();budget.size(&file)?;
+    if before.len()>4*1024*1024 {return Err(CaptureLimit(CaptureIncomplete::StructureLimit,"Git index exceeds preservation bounds").into());}
+    if before.len()>*remaining as u64 {return Err(source_tree::Limit::Bytes.into());}
     let mut bytes=Vec::new();let mut buffer=[0u8;65536];
     loop {let n=budget.read(&mut file,&mut buffer)?;if n==0 {break;}bytes.extend_from_slice(&buffer[..n]);}
     source_tree::unchanged(&file,&before)?;
@@ -44,17 +45,17 @@ fn file(directory:&Directory,name:&str,control:&Control,remaining:&mut usize,blo
     let evidence=FileEvidence{sha256:hash(&bytes),bytes:bytes.len() as u64};
     blobs.entry(evidence.sha256.clone()).or_insert(bytes);Ok(Some(evidence))
 }
-fn observe(git:&Git,receipt:&WorktreeReceipt,control:&Control,remaining:&mut usize,blobs:&mut BTreeMap<String,Vec<u8>>)->Result<State> {
+pub(super) fn observe(git:&Git,receipt:&WorktreeReceipt,control:&Control,remaining:&mut usize,blobs:&mut BTreeMap<String,Vec<u8>>)->Result<State> {
     control.check()?;
     let object_format=text(git,receipt,&["rev-parse","--show-object-format"])?;
     let length=match object_format.as_str(){"sha1"=>40,"sha256"=>64,_=>anyhow::bail!("unsupported Git object format")};
     let head=text(git,receipt,&["rev-parse","--verify","HEAD^{commit}"])?;
     ensure!(oid(&head,length) && oid(&receipt.plan.source.commit,length),"invalid preserved Git commit");
-    let raw=run(git,receipt,&["ls-files","--stage","--sparse","-z"],None,4*1024*1024)?;
+    let raw=run(git,receipt,&["ls-files","--stage","--sparse","-z"],None,4*1024*1024).map_err(structure_limit)?;
     ensure!(raw.is_empty() || raw.last()==Some(&0),"incomplete Git index inventory");
     let mut entries=Vec::new();let mut seen=BTreeSet::new();
     for record in raw.split(|b|*b==0).filter(|s|!s.is_empty()) {
-        ensure!(entries.len()<10_000,"Git index inventory exceeds bounds");
+        if entries.len()>=10_000 {return Err(CaptureLimit(CaptureIncomplete::StructureLimit,"Git index inventory exceeds bounds").into());}
         let (header,path)=std::str::from_utf8(record)?.split_once('\t').context("invalid Git index record")?;
         let fields=header.split(' ').collect::<Vec<_>>();
         ensure!(fields.len()==3 && matches!(fields[0],"100644"|"100755"|"120000"|"040000") && oid(fields[1],length),"unsupported or invalid Git index object");
@@ -82,8 +83,10 @@ pub(super) fn capture(git:&Git,receipt:&WorktreeReceipt,control:&Control,remaini
     let state=observe(git,receipt,control,remaining,blobs)?;
     let mut roots=BTreeSet::from([state.head.clone(),state.base.clone()]);
     roots.extend(state.entries.iter().map(|entry|entry.object.clone()));
-    ensure!(*remaining>0,"Git pack preservation budget exhausted");
-    let pack=run(git,receipt,&["-c","pack.threads=1","pack-objects","--revs","--stdout","--window=0","--compression=0","--no-reuse-object","--no-reuse-delta"],Some(format!("{}\n",roots.into_iter().collect::<Vec<_>>().join("\n"))),*remaining)?;
+    if *remaining==0 {return Err(source_tree::Limit::Bytes.into());}
+    let pack=run(git,receipt,&["-c","pack.threads=1","pack-objects","--revs","--stdout","--window=0","--compression=0","--no-reuse-object","--no-reuse-delta"],Some(format!("{}\n",roots.into_iter().collect::<Vec<_>>().join("\n"))),*remaining).map_err(|error| {
+        if error.chain().any(|e|e.is::<crate::worktree_preparation::GitCaptureLimit>()) {source_tree::Limit::Bytes.into()}else{error}
+    })?;
     ensure!(pack.starts_with(b"PACK"),"Git archive is not a pack");
     *remaining=remaining.checked_sub(pack.len()).context("Git pack preservation budget exhausted")?;
     let evidence=FileEvidence{sha256:hash(&pack),bytes:pack.len() as u64};

@@ -1333,3 +1333,11 @@ A socket-free signed-reservation workflow also exercises renewal through the
 public store API: the old lease token is fenced, the original expiry does not
 expire the renewed generation, and neither elapsed nor ambiguous claims can be
 revived or reclaimed.
+
+Repository capture budget exhaustion after exact native termination now records
+`capture_incomplete` in the retained worktree references and one coordinator
+notice, releasing capacity while preserving the original worktree. Explicit
+capture still refuses oversized untracked source. Tracked byte omissions carry
+raw Git identities in worktree manifest v5; see [worktree capture budget
+recovery](canonical-worktrees.md). This does not establish a verified result or
+permit repository deletion.

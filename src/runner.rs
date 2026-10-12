@@ -34,6 +34,16 @@ impl InheritedLock {
     pub(crate) fn new(file:crate::execution_guard::TransferredFile)->Self {Self(Arc::new(file))}
 }
 
+/// Bounded, sealed read-only data descriptors, separate from execution ownership.
+#[derive(Debug,Clone)]
+pub struct InheritedInput(Arc<crate::execution_guard::TransferredFile>);
+impl PartialEq for InheritedInput {fn eq(&self,other:&Self)->bool {Arc::ptr_eq(&self.0,&other.0)}}
+impl InheritedInput {
+    pub(crate) fn new(file:&std::fs::File)->Result<Self> {Ok(Self(Arc::new(crate::execution_guard::TransferredFile::input(file)?)))}
+    pub(crate) fn fd(&self)->std::os::fd::RawFd {self.0.as_raw_fd()}
+}
+pub(crate) const INPUT_DESCRIPTOR_LIMIT:usize=128;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cmd {
     pub program: String,
@@ -57,6 +67,7 @@ pub struct Cmd {
     pub stdout_file: Option<(PathBuf, usize)>,
     pub cancellation: Option<Cancellation>,
     pub inherited_locks: Vec<InheritedLock>,
+    pub inherited_inputs: Vec<InheritedInput>,
     /// Sealed running image for namespace re-exec; unrelated children never inherit it.
     pub executable_image: Option<crate::self_executable::Image>,
 }
@@ -80,6 +91,7 @@ impl Cmd {
             stdout_file: None,
             cancellation: None,
             inherited_locks: Vec::new(),
+            inherited_inputs: Vec::new(),
             executable_image: None,
         }
     }
@@ -252,19 +264,32 @@ impl Runner for RealRunner {
         // through a concurrent spawn in another executor worker. These copies
         // close ungated: `cmd` keeps a gated copy alive until they are gone.
         anyhow::ensure!(cmd.inherited_locks.len()<=16,"too many inherited execution locks");
-        let inherited=cmd.inherited_locks.iter().map(|lock|->io::Result<std::fs::File>{
+        anyhow::ensure!(cmd.inherited_inputs.len()<=INPUT_DESCRIPTOR_LIMIT,"too many inherited read-only inputs");
+        let duplicate=|fd|->io::Result<std::fs::File>{
             use std::os::fd::FromRawFd;
-            let fd=unsafe{libc::fcntl(lock.0.as_raw_fd(),libc::F_DUPFD_CLOEXEC,3)};
+            // SAFETY: each sealed handle owns its descriptor. Duplication leaves
+            // the parent and copies CLOEXEC until this child's pre_exec.
+            let fd=unsafe{libc::fcntl(fd,libc::F_DUPFD_CLOEXEC,3)};
             if fd<0 {return Err(io::Error::last_os_error());}
             Ok(unsafe{std::fs::File::from_raw_fd(fd)})
-        }).collect::<io::Result<Vec<_>>>()?;
-        if !inherited.is_empty() || cmd.executable_image.is_some() {
+        };
+        let inherited=cmd.inherited_locks.iter().map(|lock|duplicate(lock.0.as_raw_fd())).collect::<io::Result<Vec<_>>>()?;
+        let input_files=cmd.inherited_inputs.iter().map(|input|duplicate(input.fd())).collect::<io::Result<Vec<_>>>()?;
+        if !inherited.is_empty() || !input_files.is_empty() || cmd.executable_image.is_some() {
             use std::os::unix::process::CommandExt;
-            let mut descriptors=inherited.iter().map(AsRawFd::as_raw_fd).collect::<Vec<_>>();
+            let mut descriptors=inherited.iter().chain(&input_files).map(AsRawFd::as_raw_fd).collect::<Vec<_>>();
+            let inputs=cmd.inherited_inputs.iter().zip(&input_files).map(|(input,copy)|
+                (copy.as_raw_fd(),input.fd())).collect::<Vec<_>>();
             if let Some(image) = &cmd.executable_image { descriptors.push(image.fd()); }
-            // SAFETY: only fcntl syscalls and errno reads after fork; descriptors
+            // SAFETY: only dup2/fcntl syscalls and errno reads after fork; descriptors
             // are owned above and no allocation or Rust locks occur here.
             unsafe{command.pre_exec(move || {
+                // Copies cannot alias these targets: each original descriptor
+                // remains open in the parent. Restore input FD numbers only in
+                // this child so /proc/self/fd paths remain literal across exec.
+                for &(fd,target) in &inputs {
+                    if libc::dup2(fd,target)<0 {return Err(io::Error::last_os_error());}
+                }
                 for &fd in &descriptors {
                     if libc::fcntl(fd,libc::F_SETFD,0)<0 {return Err(io::Error::last_os_error());}
                 }
