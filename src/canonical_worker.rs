@@ -671,7 +671,7 @@ pub fn reconcile_termination(
         .context("worker supervisor identity missing")?;
     let cancelled = state.cancelled;
     if !SupervisorObservation::recover_exited(&identity)? {
-        if !cancelled && !state.completion {
+        if !cancelled && !state.completion && current.state != AttemptState::Failed {
             return Ok(None);
         }
         check(deadline, &cancellation)?;
@@ -768,6 +768,17 @@ fn prepare_brief_once(
 fn brief_conflict(error: &anyhow::Error) -> bool {
     error.chain().any(|e| matches!(e.downcast_ref::<crate::store::StoreError>(), Some(crate::store::StoreError::Conflict)))
 }
+fn brief_failure_phase(error: &anyhow::Error) -> Option<&'static str> {
+    error.chain().find_map(|error| match error.downcast_ref::<crate::store::StoreError>() {
+        Some(crate::store::StoreError::BriefAuthorityStale) => Some("brief_authority_stale"),
+        Some(crate::store::StoreError::Invalid(message)) if message == "worker brief approval expired or changed" => Some("brief_approval_expired"),
+        // A queued hint can lose its delivery revision to another dispatcher.
+        // That observation does not revoke the worker's authority.
+        Some(crate::store::StoreError::Invalid(message)) if message == "brief delivery is stale or was already claimed" => None,
+        Some(crate::store::StoreError::Invalid(_)) => Some("brief_authority_invalid"),
+        _ => None,
+    })
+}
 fn notify_brief_conflict(project: &Path, attempt: &AttemptId, phase: &str, error: &anyhow::Error) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(5);
     let _guard = crate::execution_guard::RootGuard::exclusive_by(project.parent().context("project root missing")?,deadline,&Default::default())?;
@@ -781,9 +792,9 @@ pub fn prepare_brief(project: &Path, attempt: &AttemptId, mut revision: u64, dea
     for pass in 0..3 {
         match prepare_brief_once(project, attempt, revision, deadline, cancellation.clone()) {
             Ok(value) => return Ok(value),
-            Err(error) if error.chain().any(|e| matches!(e.downcast_ref::<crate::store::StoreError>(), Some(crate::store::StoreError::BriefAuthorityStale))) => {
+            Err(error) if brief_failure_phase(&error).is_some() => {
                 check(deadline, &cancellation)?;
-                notify_brief_conflict(project, attempt, "brief_authority_stale", &error)?;
+                notify_brief_conflict(project, attempt, brief_failure_phase(&error).unwrap(), &error)?;
                 return Err(error);
             }
             Err(error) if brief_conflict(&error) => {
@@ -806,12 +817,12 @@ pub fn deliver_brief(project: &Path, operation: &OperationId, mut revision: u64,
     for pass in 0..3 {
         match deliver_brief_once(project, operation, revision, deadline, cancellation.clone()) {
             Ok(value) => return Ok(value),
-            Err(error) if error.chain().any(|e| matches!(e.downcast_ref::<crate::store::StoreError>(), Some(crate::store::StoreError::BriefAuthorityStale))) => {
+            Err(error) if brief_failure_phase(&error).is_some() => {
                 check(deadline, &cancellation)?;
                 let db=crate::migration::open_active_scoped(project,crate::store::controlled::ReadControl::new(deadline,cancellation.clone()))?;
                 let attempt=db.brief_attempt(operation)?;
                 drop(db);
-                notify_brief_conflict(project, &attempt, "brief_authority_stale", &error)?;
+                notify_brief_conflict(project, &attempt, brief_failure_phase(&error).unwrap(), &error)?;
                 return Err(error);
             }
             Err(error) if brief_conflict(&error) => {

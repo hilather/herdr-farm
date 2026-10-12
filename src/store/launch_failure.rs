@@ -6,6 +6,8 @@ use crate::operations::Outcome;
 enum LaunchFailureReason {
     LaunchConflict,
     BriefAuthorityStale,
+    BriefApprovalExpired,
+    BriefAuthorityInvalid,
     DedicatedServerLost,
     LaunchRecoveryFailed,
     LaunchLeaseExpired,
@@ -13,6 +15,8 @@ enum LaunchFailureReason {
 impl LaunchFailureReason {
     fn as_str(self) -> &'static str {
         match self {
+            Self::BriefApprovalExpired => "brief_approval_expired",
+            Self::BriefAuthorityInvalid => "brief_authority_invalid",
             Self::BriefAuthorityStale => "brief_authority_stale",
             Self::LaunchConflict => "launch_conflict",
             Self::DedicatedServerLost => "dedicated_server_lost",
@@ -285,6 +289,10 @@ impl SqliteStore {
             LaunchFailureReason::DedicatedServerLost
         } else if phase == "launch_lease_expired" {
             LaunchFailureReason::LaunchLeaseExpired
+        } else if phase == "brief_approval_expired" {
+            LaunchFailureReason::BriefApprovalExpired
+        } else if phase == "brief_authority_invalid" {
+            LaunchFailureReason::BriefAuthorityInvalid
         } else if phase == "brief_authority_stale" {
             LaunchFailureReason::BriefAuthorityStale
         } else if conflict {

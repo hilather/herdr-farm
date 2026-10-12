@@ -259,9 +259,12 @@ sys.stdout.buffer.write(json.dumps({'result':json.loads(reply)['result']}).encod
     }
     /// Draft, owner-sign, import and reserve a launch; returns (approval id, attempt).
     fn reserve(&mut self, instructions: &str) -> (String, AttemptId) {
+        self.reserve_with_validity(instructions, 900)
+    }
+    fn reserve_with_validity(&mut self, instructions: &str, validity: u64) -> (String, AttemptId) {
         self.prepare_profile();
         let selection = self.selection(instructions);
-        let drafted = self.ok(&["launch", "demo", "draft", "--selection", selection.to_str().unwrap(), "--expected-head", &self.head().to_string()]);
+        let drafted = self.ok(&["launch", "demo", "draft", "--selection", selection.to_str().unwrap(), "--expected-head", &self.head().to_string(), "--validity-seconds", &validity.to_string()]);
         let document = self.path("approval.json");
         fs::write(&document, serde_json::to_vec_pretty(&drafted["approval"]).unwrap()).unwrap();
         assert!(Command::new("/usr/bin/ssh-keygen").args(["-Y", "sign", "-f"]).arg(&self.key).args(["-n", authority::SIGNATURE_NAMESPACE]).arg(&document).output().unwrap().status.success());
@@ -4133,6 +4136,98 @@ fn proven_launch_server_loss_retires_owned_runtime_and_next_brief_succeeds() {
         assert_eq!(lab.count("agent.prompt"), 1);
         assert_eq!(lab.state().control.unwrap().epoch, epoch);
     }
+}
+
+#[test]
+fn expired_started_brief_releases_ownership_once_and_superseding_task_relaunches() {
+    let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+    // `launch run` checks login as well as the retained transport evidence
+    // used by `draft`/`reserve`. Configure both launches with the same private
+    // setup-token fixture before preparing and freezing the worker profile.
+    let token = lab.path("claude-setup-token");
+    fs::write(&token, "fixture-setup-token\n").unwrap();
+    fs::set_permissions(&token, fs::Permissions::from_mode(0o600)).unwrap();
+    let config = lab.path(".config/herdr-farm/config.toml");
+    let configured = fs::read_to_string(&config).unwrap();
+    fs::write(&config, format!("{configured}\n[worker_isolation.login]\nclaude_token_file={token:?}\n")).unwrap();
+    lab.resume();
+    // Match a coordinator launch's lineage before the lower-level reservation.
+    migration::open_active(&lab.project).unwrap()
+        .prepare_task_lineage("work", "work", "plan", None).unwrap();
+    let (approval, attempt) = lab.reserve_with_validity("Never send an expired brief.", 120);
+    lab.serve();
+    fs::write(lab.path("lab/agent-status"), "working").unwrap();
+    lab.run_until(120, &|| lab.state().operations.iter().any(|o| o.kind == "runtime.worker_brief"));
+    assert_eq!(lab.attempt(&attempt).state, AttemptState::Launching);
+    assert_eq!(lab.events("runtime.launch_started").len(), 1);
+    assert_eq!(lab.count("agent.prompt"), 0);
+    let epoch = lab.state().control.unwrap().epoch;
+    let expiry = lab.state().approvals.iter().find(|a| a.reference.id == approval).unwrap().grant.expires_unix_ms;
+    while jiff::Timestamp::now().as_millisecond() <= expiry {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    lab.run_until(120, &|| lab.attempt(&attempt).termination_observed);
+    assert!(!lab.attempt(&attempt).retains_capacity());
+    assert_eq!(lab.events("attempt.launch_failed").len(), 1);
+    assert_eq!(lab.events("attempt.launch_failed")[0].payload["reason"], "brief_approval_expired");
+    assert!(lab.state().ownership.iter().all(|o| o.attempt.as_ref() != Some(&attempt)));
+    assert_eq!(lab.count("agent.prompt"), 0);
+    lab.run_passes(4);
+    assert_eq!(lab.state().inbox.iter().filter(|i| i.content.kind == "attempt.launch_failure").count(), 1);
+    assert_eq!(lab.events("attempt.launch_failed").len(), 1);
+    assert_eq!(lab.count("agent.prompt"), 0);
+    let control = lab.state().control.unwrap();
+    assert_eq!(control.state, herdr_farm::domain::ProjectState::Active);
+    assert_eq!(control.epoch, epoch);
+    fs::remove_file(lab.path("lab/agent-status")).unwrap();
+    fs::write(lab.path("lab/reset-workspace"), "").unwrap();
+    fs::write(lab.project.join("PROJECT.md"), format!("+++\n[[repos]]\npath={:?}\n+++\nRelaunch after expired approval.\n", lab.repo)).unwrap();
+    // A coordinator replaces the failed task with a new task in its work item.
+    let retry = lab.ok(&["launch", "demo", "run", "--task", "work-retry", "--profile", "worker",
+        "--work-item", "work", "--supersedes", "work",
+        "--repository", lab.repo.to_str().unwrap(), "--plan-output", "docs/retry.md",
+        "--herdr-socket", lab.socket().to_str().unwrap(), "--sign-with", lab.key.to_str().unwrap()]);
+    let next = AttemptId::new(retry["attempt"].as_str().unwrap()).unwrap();
+    assert_ne!(next, attempt);
+    lab.run_until(120, &|| lab.attempt(&next).state == AttemptState::Running);
+    assert_eq!(lab.count("agent.prompt"), 1);
+    let attempts = lab.ok(&["telemetry", "demo", "attempts", "--json"]);
+    let row = attempts["attempts"].as_array().unwrap().iter()
+        .find(|a| a["attempt_id"] == retry["attempt"]).unwrap();
+    assert_eq!(row["task_id"], "work-retry");
+    assert_eq!(row["lineage"], json!({"work_item":"work","role":"plan","supersedes":"work"}));
+    assert_eq!(lab.events("attempt.launch_failed").len(), 1);
+    assert_eq!(lab.state().inbox.iter().filter(|i| i.content.kind == "attempt.launch_failure").count(), 1);
+    let control = lab.state().control.unwrap();
+    assert_eq!(control.state, herdr_farm::domain::ProjectState::Active);
+}
+
+#[test]
+fn started_brief_survives_a_neighbour_root_exclusive_operation() {
+    let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+    let (_, attempt) = lab.reserve_with_validity("Deliver after the neighbouring launch releases the root.", 120);
+    lab.serve();
+    fs::write(lab.path("lab/agent-status"), "working").unwrap();
+    lab.run_until(120, &|| lab.state().operations.iter().any(|o| o.kind == "runtime.worker_brief"));
+    assert_eq!(lab.attempt(&attempt).state, AttemptState::Launching);
+    assert_eq!(lab.events("runtime.launch_started").len(), 1);
+    assert_eq!(lab.count("agent.prompt"), 0);
+    lab.ok(&["new", "--legacy", "neighbour"]);
+    lab.ok(&["pause", "neighbour"]);
+    let lock = fs::OpenOptions::new().read(true).write(true).open(lab.path("root/.execution.lock")).unwrap();
+    lock.lock().unwrap();
+    fs::remove_file(lab.path("lab/agent-status")).unwrap();
+    let started = Instant::now();
+    let mut ticker = lab.spawn();
+    // The neighbouring project's external-operation fixture holds the shared
+    // root barrier while the ticker queues this already-prepared brief.
+    std::thread::sleep(Duration::from_secs(3));
+    lock.unlock().unwrap();
+    lab.wait(&mut ticker, 120, &|| lab.attempt(&attempt).state == AttemptState::Running);
+    lab.stop(ticker);
+    eprintln!("root contention to brief: {:?}", started.elapsed());
+    assert_eq!(lab.count("agent.prompt"), 1);
+    assert!(lab.events("attempt.launch_failed").is_empty());
 }
 
 #[test]
