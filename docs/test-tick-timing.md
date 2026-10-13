@@ -312,3 +312,12 @@ LAB-REQUESTS-TORN-1: canonical worker, operator viewer, and replay request-log
 readers only parse newline-terminated JSON records. Polling during an append
 ignores the unfinished final record until its newline arrives; malformed complete
 records still fail the harness. Product behavior and workflow assertions are unchanged.
+
+The owner-death fixture enables temporary stderr diagnostics with
+`HERDR_FARM_TRACE_DELIVERY=1`. They show prepare, claim, delivery budgets and
+command completion, each receipt attempt, the dispatch result, and executor
+completion/reply delivery. Tracing is off by default. Cancellation permits one
+receipt attempt bounded to 20 ms and the original control/claim deadline, so an
+in-flight cancelled effect can persist Ambiguous. Receipt retries check
+cancellation before each attempt and stop immediately after a failed attempt
+when cancellation is active; they never repeat the external effect.
