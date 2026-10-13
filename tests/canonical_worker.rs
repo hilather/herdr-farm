@@ -4737,7 +4737,7 @@ fn exit_watch_maintenance(permanent: bool) {
         assert!(notices[0].summary.contains("deferrals") && notices[0].summary.contains("root maintenance or exclusive external operation"));
         let health = lab.ok(&["telemetry", "demo", "health", "--json"]);
         assert_eq!(health["worker_exit_contention"].as_array().unwrap().len(), 1);
-        let view = lab.ok(&["telemetry", "demo", "attempts"]);
+        let view = lab.ok(&["telemetry", "demo", "attempts", "--json"]);
         assert_eq!(view["attempts"].as_array().unwrap().iter().find(|row|row["attempt_id"]==attempt.as_str()).unwrap()["worker_exit_contention"].as_array().unwrap().len(), 1);
         assert!(!lab.attempt(&attempt).termination_observed);
     } else {
