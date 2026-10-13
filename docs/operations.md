@@ -869,6 +869,24 @@ trip the runtime refusal gate; the gate compares the published marker and DB.
 No ticker restart or operator recovery is needed. Unexplained control or
 ownership/provenance mismatches still refuse recovery. With no ticker running,
 explicit migration recovery remains available.
+Before a controller observation commit, `.state/control-publication.json` retains
+its retry start time. Publication and claim expiry still honour the original
+caller's deadline and cancellation, including after commit. On a later pass,
+the ticker drains retained work before new observations with a fresh five-second
+budget, reusing the audited marker repair above. An expired retry keeps its intent
+for the next pass. This advisory file never pauses or adopts the project and has
+no dispatch authority. Doctor reports `publication lagging: age ... ms` until
+publication and expiry finish; whole-project backups retain the intent.
+Repeated publication/claim-expiry and maintenance-result diagnostics are summarized
+once per project every five minutes, with a count; error counters still count
+every occurrence.
+
+Live artifact scan, stream and verification phases share the admitted copy
+deadline (180 seconds by default), instead of each imposing an independent
+ten-second read cap. This makes copying load-tolerant while preserving the
+caller's shorter deadline and cancellation, byte/entry bounds and source identity
+checks. Interrupted artifact reads retry within that same budget.
+
 SQLite `SQLITE_INTERRUPT` formerly surfaced as `Io("interrupted")` through the
 generic SQLite error conversion. In particular, bounded identity readers install
 a progress handler that interrupts SQL on cancellation or deadline, but previously

@@ -298,6 +298,11 @@ fn report(
                         Ok(lines) => for line in lines { check(&mut out, None, &label, line); },
                         Err(error) => check(&mut out, None, &label, format!("coordinator manifest diagnostics: {error:#}; inspect owner session agent explain")),
                     }
+                    match herdr_farm::runtime::control_publication_age_ms(&dir) {
+                        Ok(Some(age))=>check(&mut out,None,&label,format!("publication lagging: age {age} ms; controller retries automatically")),
+                        Ok(None)=>{},
+                        Err(error)=>check(&mut out,None,&label,format!("publication health unreadable: {error:#}")),
+                    }
                     // Doctor always runs the whole-store check and shows the ticker's last one.
                     let last = herdr_farm::store::integrity::load(&dir.join(".state/state.db"))
                         .map_or("none recorded".to_string(), |r| format!("{} at {} (schema {})", r.result, r.checked_unix_ms, r.schema));

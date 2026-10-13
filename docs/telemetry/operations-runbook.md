@@ -146,6 +146,7 @@ optin.external_export_files prune 7d source_of_truth destructive
 optin.captured_evidence not_built 7d source_of_truth destructive
 canonical.worker_permissions external_lifecycle - canonical destructive
 canonical.state external_lifecycle - canonical destructive
+canonical.control_publication external_lifecycle - derivable
 canonical.owner_request_lock external_lifecycle - canonical destructive
 canonical.coordinator_journal external_lifecycle - canonical destructive
 canonical.coordinator_wake external_lifecycle - canonical destructive
@@ -597,3 +598,14 @@ Treat `schema_unrecognized` with its `cli_version` as an adapter format-change
 incident. Keep the isolated rollout for diagnosis, update its field mapping and
 exercise the public collection/accounting workflows before relying on usage.
 The attempt's total stays unavailable while any required usage record is rejected.
+
+Controller publication lag is advisory: doctor reports its retained age from
+`<project>/.state/control-publication.json`. The ticker retries the committed
+marker and claim-expiry work before new observations, with a fresh bounded budget
+on each later pass; the original call still honours its own cancellation/deadline.
+Do not pause or adopt a project merely for this lag. Persistent identity or
+provenance refusals require investigation. Retain the retry file in whole-project
+backups; telemetry maintenance does not prune it. Publication/maintenance log
+summaries appear at most once per project per five minutes and include a count;
+error counters retain every occurrence. Live copy phases share the admitted
+180-second default deadline and retry EINTR without renewing that deadline.

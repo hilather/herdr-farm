@@ -13,6 +13,8 @@ fn sql_control(control:&Control)->herdr_farm::store::controlled::ReadControl {he
 fn repair_publication(path:&Path)->Result<bool> {
     let guard=ProjectGuard::acquire(path)?;
     let control=herdr_farm::store::controlled::ReadControl::new(Instant::now()+Duration::from_secs(5),Default::default());
+    runtime::finish_pending_control_publication(path,&guard,&control)
+        .context("control publication incomplete; retry pending")?;
     migration::repair_control_publication(path,&guard,&control)
 }
 fn observation_head(path:&Path)->Result<u64> {
@@ -65,6 +67,7 @@ fn collect_with(input:&Input,control:&Control,observe:impl FnOnce(&Input,&Contro
     input.current(control)?;
     let guard=ProjectGuard::acquire(&input.project)?;
     input.current(control)?;
+    runtime::finish_pending_control_publication(&input.project,&guard,&sql_control(control))?;
     // Only the schema header is needed here. Loading historical task bodies can
     // block unrelated observation and planning work before either gets a turn.
     let schema=migration::open_active_scoped(&input.project,sql_control(control))?
@@ -165,6 +168,7 @@ impl Reads {
     pub fn poll(&mut self,ctx:&Ctx,path:&Path)->Result<Poll> {
         let mut input=match Input::new(ctx,path){Ok(input)=>input,Err(error)=>{self.unknown=true;return Err(error);}};
         let head=(||->Result<u64> {
+            if runtime::control_publication_age_ms(path)?.is_some(){repair_publication(path)?;}
             // A staged publication is repair work even if the short advisory
             // head read would expire, or the DB already matches format.json.
             match std::fs::symlink_metadata(path.join(".state/migration/control-format.next")) {
