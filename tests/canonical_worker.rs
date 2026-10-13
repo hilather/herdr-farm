@@ -3752,8 +3752,8 @@ fn an_owner_pause_is_not_lifted_by_the_ticker() {
     assert!(text.lines().any(|l| l.contains("Paused") && l.contains("paused by the owner") && l.contains("runtime demo state active")), "{text}");
 }
 
-/// A queued task's dedicated server exists before its attempt does; the sweep
-/// leaves it alone. The finished-task case is `ticker_stops_the_dedicated_herdr_server_of_a_finished_task`.
+/// Launch preparation owns the queued task server before its attempt exists;
+/// the sweep leaves it alone while that preparation holds its lock. The finished-task case is `ticker_stops_the_dedicated_herdr_server_of_a_finished_task`.
 #[test]
 fn the_server_sweep_spares_a_queued_task_without_an_attempt() {
     let lab = Lab::new("unknown_usage='allow_with_warning'");
@@ -3762,8 +3762,17 @@ fn the_server_sweep_spares_a_queued_task_without_an_attempt() {
     let record = json!({"project":"demo","task":"work","pid":1,"socket":lab.path("lab/never.sock"),"managed_by":"herdr-farm"}).to_string();
     fs::write(dir.join("server.json"), &record).unwrap();
     assert_eq!(lab.state().tasks.iter().find(|t| t.id.as_str() == "work").unwrap().state, TaskState::Queued);
+    let lock = herdr_farm::authority::open_launch_lock(&lab.project).unwrap();
+    lock.try_lock().unwrap();
     lab.run_quiet(4);
     assert!(dir.join("server.json").is_file(), "the queued task's server record was retired: {}", fs::read_to_string(lab.path("root/.ticker.log")).unwrap_or_default());
+    drop(lock);
+    // Preparation is over: queued status alone cannot retain an orphan server.
+    lab.run_passes(4);
+    assert!(!dir.join("server.json").exists());
+    assert_eq!(lab.events("runtime.dedicated_server_retired").len(), 1);
+    lab.run_passes(4);
+    assert_eq!(lab.events("runtime.dedicated_server_retired").len(), 1);
 }
 
 // Real worker and acceptance commands, with the policy changed only after the
@@ -5021,8 +5030,22 @@ fn reserved_snapshot_change_fails_before_worker_creation_without_retries() {
     fs::write(lab.project.join("MEMORY.md"), "A later owner memory decision\n").unwrap();
     let plan = herdr_farm::memory::plan(&lab.project).unwrap();
     herdr_farm::memory::import_plan(&lab.project, &plan).unwrap();
-    // No server: memory authority must fail before any external launch effect.
+    // Record the startup shell's private server, without creating any agent.
+    let sockets = lab.path("run-sockets/rpreagent");
+    fs::create_dir_all(&sockets).unwrap();
+    let socket = sockets.join("s");
+    fs::write(&socket, b"").unwrap();
+    let mut server = Command::new("/usr/bin/python3").args(["-c", "import time; time.sleep(300)", "server"])
+        .env("HERDR_SOCKET_PATH", &socket).spawn().unwrap();
+    let directory = lab.path("root/.herdr-run/demo-work/herdr");
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(directory.join("server.json"), json!({"project":"demo", "task":"work",
+        "pid":server.id(), "socket":socket}).to_string()).unwrap();
     lab.run_until(120, &|| lab.attempt(&attempt).termination_observed);
+    lab.run_until(120, &|| !directory.join("server.json").exists());
+    assert!(!sockets.exists());
+    assert!(server.wait().unwrap().code().is_none(), "the private server was signalled");
+    assert_eq!(lab.events("runtime.dedicated_server_retired").len(), 1);
     let failure = lab.events("attempt.launch_failed");
     assert_eq!(failure.len(), 1);
     assert_eq!(failure[0].payload["reason"], "knowledge_snapshot_stale");
@@ -5031,6 +5054,7 @@ fn reserved_snapshot_change_fails_before_worker_creation_without_retries() {
     assert!(lab.events("runtime.launch_started").is_empty());
     lab.run_passes(4);
     assert_eq!(lab.events("attempt.launch_failed").len(), 1);
+    assert_eq!(lab.events("runtime.dedicated_server_retired").len(), 1);
     assert_eq!(lab.state().inbox.iter().filter(|i| i.content.kind == "attempt.launch_failure").count(), 1);
     assert_eq!(lab.state().control.unwrap().state, herdr_farm::domain::ProjectState::Active);
 }

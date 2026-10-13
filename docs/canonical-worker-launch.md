@@ -1108,6 +1108,17 @@ but not yet reserved an attempt. Relaunch also reuses the persisted live socket 
 runtime directory changed, and refuses to overwrite a live server record until
 the retention fence permits stopping it. Operator-managed servers remain running.
 
+Retirement runs on the next completed ticker pass after those fences clear,
+including for pre-deploy records discovered after restart. This covers launch
+failure before agent creation, proven dedicated-server loss, cancellation,
+relinquishment and queued supersession, including brief authority/readiness
+failures. A live attempt also protects a recorded socket through its current
+binding when the binding's task identity has moved. Each private retirement
+records a typed `runtime.dedicated_server_retired` event (task, PID, socket,
+record incarnation and recorded viewer) in the existing journal before removing
+`server.json`; retries of that identity do not duplicate the event. No store
+migration is needed.
+
 The sweep reads a read-only canonical snapshot without a whole-store integrity
 check. Idle monitoring likewise uses persisted pane observations, leaving pane
 probes and the durable response to unexplained loss to reconciliation. A missing
@@ -1165,9 +1176,10 @@ holds the root for its whole preparation (`launch run` refreshing profile eviden
 runs an agent probe for up to two minutes) made the historical 30 s lease expire
 before the naming intent was recorded, closing the launch as `start_unnamed`
 (LAUNCH-STALL-1). A launch whose ticker really died is still recovered at lease
-expiry, as before. The server sweep leaves the dedicated server of a queued task,
-a task with an active attempt or a pending launch delivery in place; cancelled,
-finished and superseded tasks still have theirs retired.
+expiry, as before. The server sweep retains servers only while an attempt retains
+capacity, launch preparation holds its lock, or a launch delivery is pending,
+claimed or ambiguous. Queued status alone does not retain a server; cancelled,
+finished, superseded and never-reserved launches are eligible once these fences clear.
 
 A long isolated verification or integration check (minutes for a Godot test run)
 holds the shared check lock `.check.lock`, not the root barrier, so termination,

@@ -1175,10 +1175,24 @@ pub fn stop(ctx: &Ctx, slug: &str, task: &str, force: bool) -> Result<Value> {
     let task_id = TaskId::new(task.to_owned()).map_err(anyhow::Error::msg)?;
     let directory = ctx.root.join(".herdr-run").join(format!("{slug}-{task}")).join("herdr");
     let record = directory.join(SERVER_RECORD);
+    if !record.is_file() {
+        return Ok(json!({"task":task,"stopped":false,"reason":"no dedicated Herdr server is recorded for this task"}));
+    }
+    // Fence launch preparation as well as reservation: its server is created
+    // before its attempt exists, and must not be swept mid-launch.
+    let launch_guard = herdr_farm::authority::open_launch_lock(&project)?;
+    launch_guard.try_lock().context("launch preparation or memory adoption is in progress; retry server retirement")?;
+    let _guard = herdr_farm::execution_guard::ProjectGuard::acquire(&project)?;
+    // Read the identity only after fencing preparation: a completed launch
+    // may have replaced the PID, socket or viewer in the previous record.
     let Ok(text) = fs::read_to_string(&record) else {
         return Ok(json!({"task":task,"stopped":false,"reason":"no dedicated Herdr server is recorded for this task"}));
     };
     let record_value: Value = serde_json::from_str(&text).context("server record is unreadable")?;
+    let metadata = fs::metadata(&record)?;
+    // Distinguish later launches even if the OS eventually reuses their PID
+    // and stable socket. This identity remains unchanged across cleanup retries.
+    let record_identity = format!("{}:{}:{}:{}", metadata.dev(), metadata.ino(), metadata.mtime(), metadata.mtime_nsec());
     if let Some(project) = record_value["project"].as_str() {
         ensure!(project == slug && record_value["task"].as_str() == Some(task), "private server record belongs to another project/task");
     }
@@ -1193,18 +1207,21 @@ pub fn stop(ctx: &Ctx, slug: &str, task: &str, force: bool) -> Result<Value> {
             }
         }
     }
-    // Fence launch preparation as well as reservation: its server is created
-    // before its attempt exists, and must not be swept mid-launch.
-    let launch_guard = herdr_farm::authority::open_launch_lock(&project)?;
-    launch_guard.try_lock().context("launch preparation or memory adoption is in progress; retry server retirement")?;
-    let _guard = herdr_farm::execution_guard::ProjectGuard::acquire(&project)?;
     let snapshot = migration::open_active_read_only(&project)?.read_snapshot(None)?;
     let server_socket = record_value["socket"].as_str();
     let held = snapshot.attempts.iter().find(|a| a.retains_capacity() && (a.task == task_id ||
+        snapshot.runtime_bindings.iter().any(|b| b.task.as_ref() == Some(&a.task) && Some(b.identity.socket.as_str()) == server_socket) ||
         snapshot.ownership.iter().any(|o| o.attempt.as_ref() == Some(&a.id) &&
             snapshot.runtime_bindings.iter().any(|b| b.id == o.binding && Some(b.identity.socket.as_str()) == server_socket))));
     if let (Some(attempt), false) = (held, force) {
         bail!("attempt {} of task {task} still holds its worker; stop it first (or pass --force)", attempt.id.as_str());
+    }
+    if !force {
+        ensure!(!snapshot.operations.iter().any(|o| o.kind == "runtime.launch"
+            && o.task.as_ref() == Some(&task_id)
+            && snapshot.deliveries.iter().any(|d| d.operation == o.id && matches!(d.state,
+                herdr_farm::operations::DeliveryState::Pending | herdr_farm::operations::DeliveryState::Claimed | herdr_farm::operations::DeliveryState::Ambiguous))),
+            "task {task} has a pending launch; retry server retirement");
     }
     close_viewer(ctx, &record_value);
     if record_value["managed_by"] == "operator" {
@@ -1242,6 +1259,13 @@ pub fn stop(ctx: &Ctx, slug: &str, task: &str, force: bool) -> Result<Value> {
             migration::open_active(&project)?.reconcile_missing_launch_server(&input.operation,jiff::Timestamp::now().as_millisecond())?;
         }
     }
+    // Persist before removing the recovery record so a failed journal write
+    // is retried next pass, even after the process and socket have disappeared.
+    migration::open_active(&project)?.record_dedicated_server_retirement(
+        &herdr_farm::store::DedicatedServerRetirement {
+            task: task_id, pid, socket: socket.display().to_string(), record_identity,
+            viewer: record_value["viewer"].clone(),
+        })?;
     fs::remove_file(&record)?;
     Ok(json!({"task":task,"stopped":stopped,"socket":socket,"socket_directory_removed":!socket.exists()}))
 }
@@ -1267,15 +1291,14 @@ pub fn sweep_servers(ctx: &Ctx, slug: &str) -> Vec<String> {
         if snapshot.attempts.iter().any(|a| a.task.as_str() == task && a.retains_capacity()) {
             continue;
         }
-        // A launch in flight has a server before it has an attempt: a queued
-        // task or one whose launch delivery is still pending keeps its server.
-        // The task's active-attempt pointer can be stale after an end, so
-        // retention uses attempt state (above) and deliveries, never it.
-        // Cancelled, finished and superseded tasks lose theirs as before.
-        let launching = snapshot.tasks.iter().any(|t| t.id.as_str() == task && t.state == herdr_farm::domain::TaskState::Queued)
-            || snapshot.operations.iter().any(|o| o.kind == "runtime.launch" && o.task.as_ref().is_some_and(|t| t.as_str() == task)
-                && snapshot.deliveries.iter().any(|d| d.operation == o.id && matches!(d.state, herdr_farm::operations::DeliveryState::Pending | herdr_farm::operations::DeliveryState::Claimed | herdr_farm::operations::DeliveryState::Ambiguous)));
-        if launching { continue; }
+        // Avoid noisy retries for ordinary launch work. stop rechecks this
+        // predicate under both guards before making any external change.
+        if snapshot.operations.iter().any(|o| o.kind == "runtime.launch"
+            && o.task.as_ref().is_some_and(|t| t.as_str() == task)
+            && snapshot.deliveries.iter().any(|d| d.operation == o.id && matches!(d.state,
+                herdr_farm::operations::DeliveryState::Pending | herdr_farm::operations::DeliveryState::Claimed | herdr_farm::operations::DeliveryState::Ambiguous))) {
+            continue;
+        }
         match stop(ctx, slug, task, false) {
             Ok(report) if report["stopped"] == true => lines.push(format!("stopped the dedicated Herdr server of finished task {task}")),
             Ok(_) => {}

@@ -674,3 +674,5 @@ pub(crate) fn pin_database_inode(path: &Path) -> std::io::Result<&'static std::f
     pins.push((identity, file));
     Ok(file)
 }
+
+pub use launch_failure::DedicatedServerRetirement;
