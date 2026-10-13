@@ -1119,3 +1119,11 @@ Retiring finished launch history needs a real close/release signal and remains
 follow-up work (LAUNCH-BUDGET-1). This adds no canonical or telemetry schema
 version, tables, backup category or retention category. See
 [conflict inventory bounds](../canonical-worker-launch.md#conflict-inventory-bounds).
+
+Bounded identity inventory expiry carries a typed store Deadline (cancellation:
+Cancelled), wrapped in reader/project/record/byte context. Callers inspect the
+error chain. M92 classifies logged deadlines as `deadline`, retaining the
+existing `expired_inventory` sidecar column, including historical inventory
+expiry. Routine admission retries next pass without a failed admission.
+No schema, retention or backup classification changes are required. See
+[load-driven inventory expiry](../test-tick-timing.md#load-driven-inventory-expiry-maint-io-interrupted-2).

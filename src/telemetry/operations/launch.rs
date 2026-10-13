@@ -39,7 +39,7 @@ pub fn cli_target(
 }
 
 /// One root-wide snapshot per pass, replicated to existing project sidecars.
-/// Saturating fixed counters: lock, inventory, ambiguous, permanent, other.
+/// Saturating fixed counters: lock, deadline (stored as expired_inventory), ambiguous, permanent, other.
 /// Root-wide values must not be summed across projects.
 pub fn ticker_errors(
     project: &Path,

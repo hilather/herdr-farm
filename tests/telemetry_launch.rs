@@ -197,6 +197,10 @@ fn ticker_passes_publish_metadata_and_disabled_collection_stays_unobserved() {
         2
     );
     assert_eq!(m["detail"]["scope"], "ticker_root");
+    for hour in m["value"].as_object().unwrap().values() {
+        assert!(hour["deadline"].is_number(), "{m}");
+        assert!(hour.get("expired_inventory").is_none(), "{m}");
+    }
     let db = f.sidecar();
     let counts:(i64,i64)=db.query_row("SELECT count(*),sum(lock_contention+expired_inventory+ambiguous_outcome+permanent_failure+other) FROM operation_ticker_errors",[],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
     assert!((1..=2).contains(&counts.0));

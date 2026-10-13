@@ -116,24 +116,29 @@ pub(crate) fn read_worktree_operation(project:&Path,operation:&crate::domain::Op
     crate::store::identity_inventory::read_worktree_operation(&project.join(".state/state.db"),&publication,budget,operation)
 }
 pub fn read_routine_execution_hint(project:&Path,budget:&mut Budget,last:Option<&crate::domain::OperationId>,now:i64)->Result<Option<crate::store::controller_hint::RoutineExecutionHint>> {
+    budget.select_reader("routine execution hint",project);
     let(project,publication)=publication(project,budget)?;
     crate::store::controller_hint::read_routine(&project.join(".state/state.db"),&publication,budget,last,now)
 }
 pub fn read_routine_queued(project:&Path,budget:&mut Budget)->Result<bool> {
+    budget.select_reader("routine queue inventory",project);
     let(project,publication)=publication(project,budget)?;
     crate::store::controller_hint::read_routine_queued(&project.join(".state/state.db"),&publication,budget)
 }
 pub fn read_controller_effect_hint(project:&Path,budget:&mut Budget,turn:u64,now:i64)->Result<Option<crate::store::controller_hint::ControllerEffectHint>> {
+    budget.select_reader("controller effect hint",project);
     let(project,publication)=publication(project,budget)?;
     crate::store::controller_hint::read(&project.join(".state/state.db"),&publication,budget,turn,now)
 }
 /// Include already-reserved launch advancement in the bounded controller rotation.
 /// This read-only selection grants no authority to create or resume resources.
 pub fn read_controller_dispatch_hint(project:&Path,budget:&mut Budget,turn:u64,now:i64,include_launches:bool)->Result<Option<crate::store::controller_hint::ControllerEffectHint>> {
+    budget.select_reader("controller dispatch hint",project);
     let(project,publication)=publication(project,budget)?;
     crate::store::controller_hint::read_with_launches(&project.join(".state/state.db"),&publication,budget,turn,now,include_launches)
 }
 pub fn read_observation_head(project:&Path,budget:&mut Budget)->Result<u64> {
+    budget.select_reader("observation head",project);
     let(project,publication)=publication(project,budget)?;
     crate::store::identity_inventory::read_head(&project.join(".state/state.db"),&publication,budget)
 }
@@ -357,7 +362,7 @@ mod tests {
         // cannot interrupt this query. This is only a disposable corrupt fixture.
         db.execute_batch("ALTER TABLE runtime_bindings RENAME TO original_bindings; CREATE VIEW runtime_bindings AS SELECT * FROM original_bindings WHERE (WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<100000000) SELECT sum(x) FROM n)>0;").unwrap();
         let mut budget=Budget::new(50*1024*1024,1024,Instant::now()+Duration::from_millis(100),Default::default()).unwrap();let started=Instant::now();
-        let error=read_identity_inventory(&p,&mut budget).unwrap_err().to_string();assert!(started.elapsed()<Duration::from_secs(2),"{error}");assert!(error.contains("interrupt")||error.contains("expired"),"{error}");
+        let error=read_identity_inventory(&p,&mut budget).unwrap_err();assert!(started.elapsed()<Duration::from_secs(2),"{error:#}");assert!(error.chain().any(|cause|matches!(cause.downcast_ref::<crate::store::StoreError>(),Some(crate::store::StoreError::Deadline|crate::store::StoreError::Cancelled))),"{error:#}");
     }
 
     #[test]

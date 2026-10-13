@@ -340,3 +340,29 @@ delivery read from a separate read-only connection while the writer remains
 alive. These observations distinguish writer-local visibility from visibility
 through a fresh connection at the exact recording boundary. They are disabled
 by default and do not change receipt success or retry decisions.
+
+## Load-driven inventory expiry (MAINT-IO-INTERRUPTED-2)
+
+Observation heads, controller hints and routine admission share an unscaled
+short-read allowance, initially 500 ms. Inventory deadline expiry doubles it
+for subsequent reads up to 2 seconds. Caller deadlines and the 10-second
+inventory ceiling still win; no in-flight budget is renewed. The allowance
+remains monotonic for the process lifetime: a fast cached read does not prove
+that the next cold schema load or scheduling delay will be fast. The cap bounds
+the cost, and ticker restart resets it. This avoids oscillation under mixed
+projects and load.
+
+Inventory expiry and cancellation retain typed Deadline/Cancelled causes with
+reader, project, record and byte context. SQLite progress interrupts retry inside
+the original budget; an unattributed store interrupt is typed Interrupted.
+Routine admission retries without submitting work or entering failure cooldown.
+Observation expiry leaves liveness unknown until a fresh matching head succeeds.
+The existing indexed head query and pass-scoped read-only connection reuse are
+preserved. Public inventory tests exercise expiry, cancellation, in-query
+interruption/recovery and 20 cold reads of an isolated 55,000-event copied store.
+
+On 2026-10-13, the synthetic copy measured 70.424 ms median and 113.533 ms
+maximum during concurrent low-priority compilation (20 fresh head reads).
+After compilation, the final code measured 7.996 ms median and 26.039 ms maximum,
+below the initial 500 ms allowance. These are isolated synthetic-history
+measurements, not reads of an owner's store.

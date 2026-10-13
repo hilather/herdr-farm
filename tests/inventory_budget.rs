@@ -199,3 +199,81 @@ fn root_budget_accepts_more_than_1024_current_bindings() {
     );
     assert!(result.unwrap_err().to_string().contains("another binding"));
 }
+
+#[test]
+fn head_deadlines_are_typed_and_the_next_public_read_recovers() {
+    use herdr_farm::store::StoreError;
+    let root = tempfile::tempdir().unwrap();
+    let current = project(root.path(), "deadline");
+    let expected = migration::read_observation_head(&current, &mut budget(0)).unwrap();
+    let mut expired = budget(0);
+    expired.deadline = Instant::now();
+    let error = migration::read_observation_head(&current, &mut expired).unwrap_err();
+    assert!(error.chain().any(|cause| matches!(cause.downcast_ref::<StoreError>(), Some(StoreError::Deadline))), "{error:#}");
+    assert!(error.to_string().contains("observation head"), "{error:#}");
+    assert!(error.to_string().contains(&current.display().to_string()), "{error:#}");
+    assert!(error.to_string().contains("after 0 records and 0 bytes"), "{error:#}");
+    let mut cancelled = budget(0);
+    cancelled.cancellation.cancel();
+    let error = migration::read_observation_head(&current, &mut cancelled).unwrap_err();
+    assert!(error.chain().any(|cause| matches!(cause.downcast_ref::<StoreError>(), Some(StoreError::Cancelled))), "{error:#}");
+    assert_eq!(migration::read_observation_head(&current, &mut budget(0)).unwrap(), expected);
+    // Admission and controller selection use the same public inventory contract.
+    let mut expired = budget(1024);
+    expired.deadline = Instant::now();
+    let error = migration::read_routine_execution_hint(&current, &mut expired, None, 0).unwrap_err();
+    assert!(error.chain().any(|cause| matches!(cause.downcast_ref::<StoreError>(), Some(StoreError::Deadline))), "{error:#}");
+    assert!(migration::read_routine_execution_hint(&current, &mut budget(1024), None, 0).unwrap().is_none());
+    let mut expired = budget(1024);
+    expired.deadline = Instant::now();
+    let error = migration::read_controller_dispatch_hint(&current, &mut expired, 0, 0, true).unwrap_err();
+    assert!(error.chain().any(|cause| matches!(cause.downcast_ref::<StoreError>(), Some(StoreError::Deadline))), "{error:#}");
+    migration::read_controller_dispatch_hint(&current, &mut budget(1024), 0, 0, true).unwrap();
+
+}
+
+#[test]
+fn large_history_copy_head_reads_stay_within_the_production_allowance() {
+    let root = tempfile::tempdir().unwrap();
+    let original = project(root.path(), "original");
+    let db = rusqlite::Connection::open(original.join(".state/state.db")).unwrap();
+    db.execute_batch("WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<55000) INSERT INTO events(kind,entity,revision,payload_version,payload) SELECT 'lab.history', 'history-'||x, 1, 1, '{}' FROM n").unwrap();
+    drop(db);
+    let expected = migration::read_observation_head(&original, &mut budget(0)).unwrap();
+    // Preserve the publication's project identity while replacing this isolated
+    // lab's database with an offline copy of its large store.
+    let copy = root.path().join("large-copy.db");
+    fs::copy(original.join(".state/state.db"), &copy).unwrap();
+    fs::copy(&copy, original.join(".state/state.db")).unwrap();
+    let mut times = Vec::new();
+    for _ in 0..20 {
+        let allowance = herdr_farm::store::identity_inventory::short_read_timeout();
+        let mut read = Budget::new(2*1024*1024, 0, Instant::now()+allowance, Default::default()).unwrap();
+        let start = Instant::now();
+        assert_eq!(migration::read_observation_head(&original, &mut read).unwrap(), expected);
+        times.push(start.elapsed());
+    }
+    times.sort();
+    eprintln!("55k-event copy head read: median {:?}, max {:?}, adaptive bound {:?}", times[10], times[19], herdr_farm::store::identity_inventory::short_read_timeout());
+}
+
+#[test]
+fn sql_inventory_deadline_interrupts_a_query_and_a_later_read_recovers() {
+    use herdr_farm::store::StoreError;
+    let root = tempfile::tempdir().unwrap();
+    let current = project(root.path(), "sql-deadline");
+    let head = migration::read_observation_head(&current, &mut budget(0)).unwrap();
+    runtime::create_binding(&current, None, None, head, &RuntimeRoute::default()).unwrap();
+    let expected = migration::read_identity_inventory(&current, &mut budget(1024)).unwrap();
+    let db = rusqlite::Connection::open(current.join(".state/state.db")).unwrap();
+    // A disposable local fixture forces SQL work before the first row. No
+    // external service or private reader hook is involved.
+    db.execute_batch("ALTER TABLE runtime_bindings RENAME TO original_bindings; CREATE VIEW runtime_bindings AS SELECT * FROM original_bindings WHERE (WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<100000000) SELECT sum(x) FROM n)>0;").unwrap();
+    let mut read = Budget::new(50*1024*1024, 1024, Instant::now()+Duration::from_secs(1), Default::default()).unwrap();
+    let start = Instant::now();
+    let error = migration::read_identity_inventory(&current, &mut read).unwrap_err();
+    assert!(error.chain().any(|cause| matches!(cause.downcast_ref::<StoreError>(), Some(StoreError::Deadline))), "{error:#}");
+    assert!(start.elapsed() < Duration::from_secs(5));
+    db.execute_batch("DROP VIEW runtime_bindings; ALTER TABLE original_bindings RENAME TO runtime_bindings;").unwrap();
+    assert_eq!(migration::read_identity_inventory(&current, &mut budget(1024)).unwrap(), expected);
+}

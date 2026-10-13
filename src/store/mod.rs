@@ -16,6 +16,7 @@ const MAX_RECORD_BYTES: usize = 1024 * 1024;
 #[derive(Debug)]
 pub enum StoreError {
     Cancelled,
+    Interrupted,
     Deadline,
     Limit(String),
     Conflict,
@@ -51,6 +52,7 @@ impl From<rusqlite::Error> for StoreError {
     fn from(error: rusqlite::Error) -> Self {
         match error.sqlite_error_code() {
             Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => Self::Busy,
+            Some(rusqlite::ErrorCode::OperationInterrupted) => Self::Interrupted,
             Some(rusqlite::ErrorCode::DiskFull) => Self::DiskFull,
             Some(rusqlite::ErrorCode::TooBig) => Self::Limit("SQLite encoded value or row exceeds limit".into()),
             Some(rusqlite::ErrorCode::ConstraintViolation) => Self::Conflict,
