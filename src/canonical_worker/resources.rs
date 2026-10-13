@@ -274,6 +274,39 @@ impl Api<'_> {
     }
 }
 
+/// Only private launch servers change their selected tab automatically. Shared
+/// operator sessions retain the owner's focus. This presentation effect follows
+/// durable resource retention and cannot turn successful creation into failure.
+fn focus_dedicated_target(project: &Path, task: &TaskId, target: &LaunchTarget, api: &Api<'_>) {
+    let focus = || -> Result<()> {
+        use std::os::unix::fs::MetadataExt;
+        let slug = project.file_name().and_then(|s| s.to_str()).context("project slug missing")?;
+        let path = project.parent().context("project root missing")?.join(".herdr-run")
+            .join(format!("{slug}-{}", task.as_str())).join("herdr/server.json");
+        let metadata = std::fs::symlink_metadata(&path)?;
+        ensure!(metadata.is_file() && metadata.uid() == unsafe {libc::geteuid()}
+            && metadata.mode() & 0o022 == 0, "unsafe dedicated server record");
+        let record: Value = serde_json::from_slice(&std::fs::read(path)?)?;
+        ensure!(record["managed_by"] != "operator" && record["pid"].as_i64().is_some_and(|pid| pid > 1)
+            && record["project"] == slug && record["task"] == task.as_str()
+            && record["socket"] == target.route.socket, "target is not on the recorded dedicated server");
+        api.call(target.operation.as_str(), "tab.focus", json!({"tab_id":target.route.tab_id}), || Ok(()))?;
+        Ok(())
+    };
+    if let Err(error) = focus() {
+        use std::io::Write;
+        let message = format!("dedicated worker focus skipped for {}: {error:#}", task.as_str());
+        if let Some(root) = project.parent() {
+            let logged = (|| -> std::io::Result<()> {
+                let mut log = std::fs::OpenOptions::new().create(true).append(true)
+                    .open(root.join(".ticker.log"))?;
+                writeln!(log, "{}", message.replace('\n', " "))
+            })();
+            if logged.is_err() { eprintln!("{message}"); }
+        }
+    }
+}
+
 /// Retire only the recorded, automatically managed server for this exact
 /// launch. A pidfd pins the incarnation before checking its command/environment.
 /// Killing it cancels native creation, including a call whose bridge timed out.
@@ -640,6 +673,7 @@ fn create_resource_inner(
             cancellation.clone(),
         )?;
         db.retain_observed_launch_target(&target, now())?;
+        focus_dedicated_target(&project, &record.inputs.task, &target, &api);
         return Ok(target);
     }
     if direct_root {
@@ -684,6 +718,7 @@ fn create_resource_inner(
             cancellation.clone(),
         )?;
         db.retain_observed_launch_target(&target, now())?;
+        focus_dedicated_target(&project, &record.inputs.task, &target, &api);
         return Ok(target);
     }
     let workspace = if route.workspace_id.is_empty() {
@@ -874,6 +909,7 @@ fn create_resource_inner(
         cancellation.clone(),
     )?;
     db.retain_observed_launch_target(&target, now())?;
+    focus_dedicated_target(&project, &record.inputs.task, &target, &api);
     Ok(target)
 }
 
@@ -1065,6 +1101,7 @@ pub fn reconcile_resource(
         state.head,
         now(),
     )?;
+    focus_dedicated_target(&project, &record.inputs.task, &target, &api);
     Ok(Some(target))
 }
 

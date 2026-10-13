@@ -489,11 +489,32 @@ fn close_viewer(ctx: &Ctx, record: &Value) {
     }
 }
 
+// Select only a retained live worker on this exact server incarnation. A
+// prepare-only viewer has no target yet; resource creation selects it later.
+fn focus_viewed_worker(ctx: &Ctx, project: &Path, task: &str, socket: &Path) -> Result<()> {
+    let snapshot = runtime::snapshot(project)?;
+    let session = herdr_farm::canonical_worker::session_identity(socket)?;
+    for event in snapshot.events.iter().rev().filter(|e| e.kind == "runtime.launch_target") {
+        let target: herdr_farm::domain::LaunchTarget = serde_json::from_value(event.payload.clone())?;
+        if target.route.socket == socket.to_string_lossy() && target.session == session
+            && snapshot.attempts.iter().any(|a| a.id == target.attempt && a.task.as_str() == task && a.retains_capacity()) {
+            crate::herdr::Herdr::new(ctx.env.herdr_bin(), socket, ctx.runner).tab_focus(&target.route.tab_id)?;
+            break;
+        }
+    }
+    Ok(())
+}
+
 fn open_viewer(ctx: &Ctx, project: &Path, directory: &Path, task: &str, socket: &Path, focus: bool) -> Result<Value> {
     let path = directory.join(SERVER_RECORD);
     let mut record: Value = fs::read(&path).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_else(|| json!({"socket":socket,"managed_by":"operator"}));
     let viewer = &record["viewer"];
+    if record["managed_by"] != "operator" && record["socket"] == socket.to_string_lossy().as_ref()
+        && record["pid"].as_i64().and_then(|pid| i32::try_from(pid).ok())
+            .is_some_and(|pid| pid > 1 && is_our_server(pid, socket)) {
+        focus_viewed_worker(ctx, project, task, socket)?;
+    }
     if viewer_matches(ctx, viewer).unwrap_or(false) {
         if focus {
             crate::herdr::Herdr::new(ctx.env.herdr_bin(), viewer["socket"].as_str().context("viewer socket missing")?, ctx.runner)

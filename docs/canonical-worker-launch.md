@@ -338,6 +338,12 @@ downloaded to `/tmp/herdr-canonical-source`. No upstream source was changed.
   Three best-effort visible pane reads share a two-second startup deadline,
   with 64 KiB capture per read. Recognized shell execution errors remove the
   newly created viewer and report it unavailable without failing the worker.
+  Dedicated servers best-effort select the retained worker tab after creation
+  (including creation after viewer attachment); reopening a viewer selects the
+  live retained target on the same socket incarnation. Focus failures never fail
+  worker launch. Failed dedicated focus checks or API calls record their reason
+  in `.ticker.log` without failing launch. Operator-supplied sessions retain
+  owner-selected focus.
   Unsupported reads retain the viewer; this bounded check is not a typed attach
   receipt. The operator-launch CLI lifecycle lab checks exact submitted source,
   persisted ownership, reopen/focus, submission failure, and silent submission
