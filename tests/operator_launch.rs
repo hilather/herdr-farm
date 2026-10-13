@@ -40,7 +40,7 @@ def record_exit(child,root):
  with open(os.path.join(root,'agent-exits.jsonl'),'a') as log:
   log.write(json.dumps({'host_supervisor_pid':child.pid,'exit_status':child.wait()})+'\n');log.flush()
 def serve(path):
- root=os.path.dirname(path);s={};next_tab=0;tabs=[{'tab_id':'owner-tab','label':'Owner'}]
+ root=os.path.dirname(path);s={};next_tab=0;tabs=[{'tab_id':'owner-tab','label':'Owner','workspace_id':'startup'}];focused_workspace='startup';focused_tab='owner-tab';focused_pane='startup:p1'
  server=socket.socket(socket.AF_UNIX);server.bind(path);server.listen()
  while True:
   c,_=server.accept();f=c.makefile('rw');line=f.readline()
@@ -59,19 +59,26 @@ def serve(path):
    child=subprocess.Popen(p['command'],cwd=p['cwd'],stdin=fd,stdout=subprocess.DEVNULL,stderr=open(os.path.join(diagnostics,'agent.log'),'a'),start_new_session=True,env={'PATH':'/usr/bin:/bin'})
    threading.Thread(target=record_exit,args=(child,diagnostics),daemon=True).start()
    s.update(pid=child.pid,argv=p['command'],cwd=p['cwd'],label=p['label'],fifo=fifo,kind='codex' if any(a.endswith('/codex') for a in p['command']) else 'claude')
+   tabs.append({'tab_id':'w1:t1','label':p['label'],'workspace_id':'w1'})
+   if p.get('focus'):focused_workspace='w1';focused_tab='w1:t1';focused_pane='w1:p1'
    res={'type':'workspace_created','workspace':{'workspace_id':'w1','pane_count':1},'root_pane':{'pane_id':'w1:p1'}}
-  elif m=='workspace.list':res={'type':'workspace_list','workspaces':[{'workspace_id':'w1','label':s['label'],'pane_count':1,'tab_count':1}] if live else []}
-  elif m=='tab.list':res={'tabs':tabs}
+  elif m=='workspace.list':res={'type':'workspace_list','workspaces':[{'workspace_id':'startup','label':'Startup shell','focused':focused_workspace=='startup','pane_count':1,'tab_count':1}]+([{'workspace_id':'w1','label':s['label'],'focused':focused_workspace=='w1','pane_count':1,'tab_count':1}] if live else [])}
+  elif m=='tab.list':res={'tabs':[dict(t,focused=t['tab_id']==focused_tab) for t in tabs if not p.get('workspace_id') or t['workspace_id']==p['workspace_id']]}
   elif m=='tab.create':
-   next_tab+=1;tab='viewer-'+str(next_tab);tabs.append({'tab_id':tab,'label':p['label']})
+   next_tab+=1;tab='viewer-'+str(next_tab);tabs.append({'tab_id':tab,'label':p['label'],'workspace_id':p['workspace_id']})
    res={'root_pane':{'workspace_id':p['workspace_id'],'tab_id':tab,'pane_id':tab+':pane'}}
   elif m=='tab.rename':
    for t in tabs:
     if t['tab_id']==p['tab_id']:t['label']=p['label']
    res={'type':'ok'}
   elif m=='tab.close':tabs[:]=[t for t in tabs if t['tab_id']!=p['tab_id']];res={'type':'ok'}
-  elif m in ['tab.focus','pane.run']:res={'type':'ok'}
-  elif m=='pane.list':res={'panes':[pane] if live else []}
+  elif m=='tab.focus':
+   t=next(t for t in tabs if t['tab_id']==p['tab_id']);focused_workspace=t['workspace_id'];focused_tab=t['tab_id'];focused_pane='w1:p1' if focused_tab=='w1:t1' else 'startup:p1'
+   res={'type':'ok'}
+  elif m=='workspace.focus':focused_workspace=p['workspace_id'];res={'type':'ok'}
+  elif m=='pane.focus':focused_pane=p['pane_id'];res={'type':'ok'}
+  elif m=='pane.run':res={'type':'ok'}
+  elif m=='pane.list':res={'panes':[{'pane_id':'startup:p1','workspace_id':'startup','tab_id':'owner-tab','label':'Startup shell','focused':focused_pane=='startup:p1'}]+([dict(pane,label=s['label'],focused=focused_pane=='w1:p1')] if live else [])}
   elif m=='pane.get':res={'pane':dict(pane,agent=kind)}
   elif m=='pane.read':
    viewer=p.get('pane_id','').startswith('viewer-')
@@ -1148,6 +1155,91 @@ impl CoordinatorSession {
     fn calls(&self) -> Vec<Value> {
         fs::read_to_string(&self.calls).unwrap_or_default().split_inclusive('\n').filter(|line| line.ends_with('\n'))
             .map(|line| serde_json::from_str(line).unwrap()).collect()
+    }
+}
+
+/// socket: nested clients observe the dedicated server's worker focus, including
+/// a viewer attached before resource creation and an owner-closed viewer reopened.
+#[test]
+fn canonical_worker_viewer_observes_worker_focus_after_delayed_creation_and_reopen() {
+    use std::io::{BufRead, Write};
+    struct FixtureTicker(std::process::Child);
+    impl Drop for FixtureTicker {
+        fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); }
+    }
+    fn api(socket: &Path, method: &str, params: Value) -> Value {
+        let mut stream = std::os::unix::net::UnixStream::connect(socket).unwrap();
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(15))).unwrap();
+        writeln!(stream, "{}", serde_json::json!({"id":"nested-viewer", "method":method, "params":params})).unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(stream).read_line(&mut line).unwrap();
+        serde_json::from_str::<Value>(&line).unwrap()["result"].clone()
+    }
+    fn observed(socket: &Path) -> Value {
+        let workspaces = api(socket, "workspace.list", serde_json::json!({}));
+        let tabs: Vec<_> = workspaces["workspaces"].as_array().unwrap().iter().map(|w|
+            api(socket, "tab.list", serde_json::json!({"workspace_id":w["workspace_id"]}))).collect();
+        serde_json::json!({"workspaces":workspaces, "tabs":tabs,
+            "panes":api(socket, "pane.list", serde_json::json!({})),
+            "agents":api(socket, "agent.list", serde_json::json!({}))})
+    }
+    fn wait_for(lab: &Lab, socket: &Path, stage: &str) {
+        // Unscaled API/agent execution budgets plus generous loaded-CI margin;
+        // observe state rather than sleeping for a fixed number of ticker passes.
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(90);
+        loop {
+            let state = observed(socket);
+            let focused = state["agents"]["agents"].as_array().unwrap().iter().any(|agent| {
+                state["panes"]["panes"].as_array().unwrap().iter().any(|p|
+                    p["pane_id"] == agent["pane_id"] && p["focused"] == true)
+                && state["workspaces"]["workspaces"].as_array().unwrap().iter().any(|w|
+                    w["workspace_id"] == agent["workspace_id"] && w["focused"] == true)
+                && state["tabs"].as_array().unwrap().iter().any(|list|
+                    list["tabs"].as_array().unwrap().iter().any(|t|
+                        t["tab_id"] == agent["tab_id"] && t["focused"] == true))
+            });
+            if focused { return; }
+            assert!(std::time::Instant::now() < until,
+                "{stage}: dedicated server did not focus the worker agent pane\nobserved: {state:#}\nticker: {}",
+                fs::read_to_string(lab.root.join(".ticker.log")).unwrap_or_default());
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+    for prepare_first in [false, true] {
+        let lab = Lab::new();
+        let owner = CoordinatorSession::start(&lab);
+        lab.verify("codex-sol", "codex");
+        let prompt = lab.home.join("prompt.txt");
+        fs::write(&prompt, "Plan.").unwrap();
+        let args = lab.run_args("focus", "codex-sol", "docs/plan.md", prompt.to_str().unwrap());
+        if prepare_first {
+            let mut prepare = args.clone();
+            prepare.push("--prepare-only");
+            let prepared = lab.ok(&prepare);
+            let state = observed(Path::new(prepared["herdr_socket"].as_str().unwrap()));
+            assert!(state["agents"]["agents"].as_array().unwrap().is_empty(), "{state:#}");
+            assert!(prepared["viewer"]["tab"].is_string(), "{prepared}");
+        }
+        let launched = lab.ok(&args);
+        let socket = Path::new(launched["herdr_socket"].as_str().unwrap());
+        let _ticker = FixtureTicker(Command::new(BIN).env_clear()
+            .env("HERDR_FARM_TEST_TIME_SCALE", include_str!("support/time-scale.txt").trim())
+            .env("HOME", &lab.home).env("HERDR_PROJECTS_OWNER_HOME", &lab.home)
+            .env("PATH", "/usr/bin:/bin").env("HERDR_BIN_PATH", lab.home.join("bin/herdr"))
+            .env("XDG_RUNTIME_DIR", lab.runtime.path())
+            .args(["--root", lab.root.to_str().unwrap(), "ticker", "run"])
+            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap());
+        wait_for(&lab, socket, if prepare_first { "worker created after viewer" } else { "worker launch" });
+        let output = Command::new(lab.home.join("bin/herdr"))
+            .args(["tab", "close", launched["viewer"]["tab"].as_str().unwrap()])
+            .env("HERDR_SOCKET_PATH", &owner.socket)
+            .env("HERDR_FARM_TEST_TIME_SCALE", include_str!("support/time-scale.txt").trim()).output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        // Simulate the last client selecting the startup shell before reopening.
+        api(socket, "tab.focus", serde_json::json!({"tab_id":"owner-tab"}));
+        let reopened = lab.ok(&["launch", "demo", "view", "--task", "focus"]);
+        assert_ne!(reopened["viewer"]["tab"], launched["viewer"]["tab"], "{reopened}");
+        wait_for(&lab, socket, "reopened viewer");
     }
 }
 
