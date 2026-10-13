@@ -293,7 +293,18 @@ fn focus_dedicated_target(project: &Path, task: &TaskId, target: &LaunchTarget, 
         api.call(target.operation.as_str(), "tab.focus", json!({"tab_id":target.route.tab_id}), || Ok(()))?;
         Ok(())
     };
-    let _ = focus();
+    if let Err(error) = focus() {
+        use std::io::Write;
+        let message = format!("dedicated worker focus skipped for {}: {error:#}", task.as_str());
+        if let Some(root) = project.parent() {
+            let logged = (|| -> std::io::Result<()> {
+                let mut log = std::fs::OpenOptions::new().create(true).append(true)
+                    .open(root.join(".ticker.log"))?;
+                writeln!(log, "{}", message.replace('\n', " "))
+            })();
+            if logged.is_err() { eprintln!("{message}"); }
+        }
+    }
 }
 
 /// Retire only the recorded, automatically managed server for this exact
