@@ -138,6 +138,15 @@ migrated sidecar.
   read-only open that reads committed WAL frames through the existing `-shm`;
   otherwise (no connection has the file open) an `immutable` open, because a
   plain read-only open would create `-wal`/`-shm` that only a writer removes.
+  The pre-open lock uses an OFD lock on a pooled descriptor retained for the
+  whole process lifetime. Reader teardown explicitly unlocks and recycles it,
+  never closing it: closing any ordinary descriptor on a database inode drops
+  the process's SQLite POSIX locks, even if that descriptor used OFD locking.
+  The pool grows with peak concurrent readers and distinct database inodes.
+  Capability inode pins likewise remain open for process lifetime; diagnostic
+  identity uses path-based stat. Launch/adoption/retirement guards use
+  `.state/launch.lock`, separate from SQLite and migration locks. Creation
+  closes its exclusive new-file descriptor before connecting SQLite.
   Residual: in the `immutable` case a writer that opens mid-read and
   auto-checkpoints (≥1000 WAL pages) could show one display inconsistent
   pages; the stores are never affected. A sidecar whose schema this binary

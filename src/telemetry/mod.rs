@@ -51,7 +51,7 @@ pub const LANES: [Lane; 10] = [lane!(collectors), lane!(accounting), lane!(quali
 #[derive(Clone)]
 pub(crate) struct ReadOnly {
     db: std::rc::Rc<rusqlite::Connection>,
-    _lock: std::rc::Rc<std::fs::File>,
+    _lock: std::rc::Rc<DatabaseReadLock>,
 }
 
 impl std::ops::Deref for ReadOnly {
@@ -131,11 +131,7 @@ pub(crate) fn read_only_nowait(path: &std::path::Path) -> anyhow::Result<ReadOnl
 fn read_only_bounded(path: &std::path::Path, wait: std::time::Duration) -> anyhow::Result<ReadOnly> {
     use anyhow::Context;
     use rusqlite::OpenFlags;
-    use std::os::unix::fs::OpenOptionsExt;
-    let lock = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(path)
-        .with_context(|| format!("open {}", path.display()))?;
-    anyhow::ensure!(lock.metadata()?.is_file(), "{} is not a regular file", path.display());
-    shared_lock(&lock, wait).with_context(|| format!("lock {}", path.display()))?;
+    let lock = DatabaseReadLock::acquire(path, wait)?;
     let side = |suffix: &str| {
         let mut name = path.as_os_str().to_owned();
         name.push(suffix);
@@ -153,16 +149,64 @@ fn read_only_bounded(path: &std::path::Path, wait: std::time::Duration) -> anyho
     Ok(ReadOnly { db: std::rc::Rc::new(db), _lock: std::rc::Rc::new(lock) })
 }
 
+// The no-side-file reader needs a lock before choosing immutable versus WAL.
+// SQLite cannot supply that lock without potentially creating side files.
+// NEVER close these descriptors: even an OFD-lock descriptor's close releases
+// this process's unrelated SQLite POSIX locks on the same inode. Pool unlocked
+// descriptors by inode, retaining them for the entire process lifetime.
+type ReadLockPool = std::sync::Mutex<Vec<((u64, u64), &'static std::fs::File)>>;
+static READ_LOCK_POOL: ReadLockPool = std::sync::Mutex::new(Vec::new());
+
+struct DatabaseReadLock {
+    identity: (u64, u64),
+    file: &'static std::fs::File,
+}
+impl DatabaseReadLock {
+    fn acquire(path: &std::path::Path, wait: std::time::Duration) -> anyhow::Result<Self> {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        let meta = std::fs::symlink_metadata(path)?;
+        anyhow::ensure!(meta.is_file(), "{} is not a regular file", path.display());
+        let identity = (meta.dev(), meta.ino());
+        let mut pool = READ_LOCK_POOL.lock().unwrap_or_else(|error| error.into_inner());
+        let file = if let Some(index) = pool.iter().position(|(key, _)| *key == identity) {
+            pool.swap_remove(index).1
+        } else {
+            let file = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(path)?;
+            // Retain immediately, including metadata/lock failure paths.
+            Box::leak(Box::new(file))
+        };
+        drop(pool);
+        let meta = file.metadata()?;
+        let guard = Self { identity: (meta.dev(), meta.ino()), file };
+        anyhow::ensure!(meta.is_file() && guard.identity == identity, "database changed while opening reader");
+        shared_lock(file, wait)?;
+        Ok(guard)
+    }
+}
+impl Drop for DatabaseReadLock {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        // Release only our OFD lock; never close the descriptor or release
+        // SQLite's process-owned locks. The connection has already closed.
+        let mut lock: libc::flock = unsafe { std::mem::zeroed() };
+        lock.l_type = libc::F_UNLCK as _;
+        lock.l_whence = libc::SEEK_SET as _;
+        lock.l_start = 0x4000_0002;
+        lock.l_len = 510;
+        // SAFETY: the retained descriptor and initialized lock remain valid.
+        if unsafe { libc::fcntl(self.file.as_raw_fd(), libc::F_OFD_SETLK, &lock) } == 0 {
+            READ_LOCK_POOL.lock().unwrap_or_else(|error| error.into_inner()).push((self.identity, self.file));
+        }
+    }
+}
+
 /// A read lock on SQLite's SHARED range (`PENDING_BYTE + 2`, 510 bytes), as an
-/// open-file-description lock where available so it is released only with this
-/// file, never by another descriptor of the same database closing. Retried
+/// open-file-description lock, released explicitly before pooling its retained
+/// descriptor. Never use a process-owned lock that could unlock SQLite. Retried
 /// within the caller's wait budget while a writer holds EXCLUSIVE.
 fn shared_lock(file: &std::fs::File, wait: std::time::Duration) -> std::io::Result<()> {
     use std::os::fd::AsRawFd;
-    #[cfg(target_os = "linux")]
     const SET_LOCK: libc::c_int = libc::F_OFD_SETLK;
-    #[cfg(not(target_os = "linux"))]
-    const SET_LOCK: libc::c_int = libc::F_SETLK;
     // SAFETY: a zeroed flock is a valid value; every field used is set below.
     let mut lock: libc::flock = unsafe { std::mem::zeroed() };
     lock.l_type = libc::F_RDLCK as _;

@@ -101,7 +101,7 @@ fn inventory(project: &Path, relative: &Path, sources: &mut Vec<Source>, total: 
         let name = rel.to_str().context("non-UTF-8 source path cannot be migrated")?;
         ensure!(safe_relative(name),"unsupported source path");
         if name.starts_with(".state/migration-aborted-") { continue; }
-        if matches!(name,".creating"|".state/migration"|".state/projections"|".state/lock"|".state/effect.lock"|".state/format.json"|".state/state.db"|".state/state.db-wal"|".state/state.db-shm") { continue; }
+        if matches!(name,".creating"|".state/migration"|".state/projections"|".state/lock"|".state/effect.lock"|".state/launch.lock"|".state/format.json"|".state/state.db"|".state/state.db-wal"|".state/state.db-shm") { continue; }
         let meta = entry.file_type()?;
         ensure!(!meta.is_symlink(),"symlink source blocks migration: {name}");
         if meta.is_dir() { inventory(project,&rel,sources,total)?; }

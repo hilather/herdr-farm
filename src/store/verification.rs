@@ -5,7 +5,6 @@ use super::*;
 use crate::verification::{ISOLATION, VerificationReceipt};
 use rusqlite::OptionalExtension;
 use std::{
-    fs::File,
     io::Read,
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
@@ -58,7 +57,7 @@ pub(crate) struct VerifyTarget {
     pub base_oid: String,
     pub repository: String,
     pub write_scopes: Option<Vec<String>>,
-    pin: File,
+    pin: &'static std::fs::File,
 }
 
 pub(crate) struct ExistingRun {
@@ -183,10 +182,7 @@ impl SqliteStore {
                 .ok_or_else(|| invalid("store path missing"))?,
         )
         .map_err(|error| StoreError::Io(error.to_string()))?;
-        let pin = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_PATH | libc::O_NOFOLLOW)
-            .open(&path)
+        let pin = pin_database_inode(&path)
             .map_err(|error| StoreError::Io(error.to_string()))?;
         let meta = pin
             .metadata()
@@ -753,7 +749,7 @@ impl SqliteStore {
                 .ok_or_else(|| invalid("store path missing"))?,
         )
         .map_err(|error| StoreError::Io(error.to_string()))?;
-        let pin = std::fs::File::open(&path).map_err(|error| StoreError::Io(error.to_string()))?;
+        let pin = pin_database_inode(&path).map_err(|error| StoreError::Io(error.to_string()))?;
         let meta = pin
             .metadata()
             .map_err(|error| StoreError::Io(error.to_string()))?;

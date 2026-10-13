@@ -25,7 +25,7 @@ pub(crate) fn retain(project: &Path, herdr: &Path, agent: &Path, home: &Path) ->
     native::apply_evidence(&mut preparation,&evidence).unwrap();
     let source=project.join(".state/state.db").canonicalize().unwrap();
     let metadata=std::fs::metadata(&source).unwrap();
-    let source_file=std::fs::OpenOptions::new().read(true).custom_flags(libc::O_PATH|libc::O_NOFOLLOW).open(&source).unwrap();
+    let source_file=crate::store::pin_database_inode(&source).unwrap();
     let verified=NativePreparation{preparation,evidence,source:(source,metadata.dev(),metadata.ino()),source_file};
     verified.retain(project).unwrap();
     verified.preparation.profile

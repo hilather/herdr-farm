@@ -646,7 +646,7 @@ pub fn run(ctx: &Ctx, slug: &str, mut args: Args) -> Result<Value> {
     let operation_started = Instant::now();
     let project = ctx.root.join(slug).canonicalize().with_context(|| format!("project {slug} not found"))?;
     // File locks do not alter SQLite bytes and span the entire multi-step launch.
-    let memory_launch_guard = fs::File::open(project.join(".state/state.db"))?;
+    let memory_launch_guard = herdr_farm::authority::open_launch_lock(&project)?;
     memory_launch_guard.try_lock_shared().context("memory adoption is in progress; retry launch after it finishes")?;
     if args.work_item.is_some() || args.role.is_some() || args.supersedes.is_some() {
         ensure!(runtime::snapshot(&project)?.schema_version >= 72, "launch lineage requires upgrade-store to schema 72");
@@ -1148,7 +1148,7 @@ pub fn stop(ctx: &Ctx, slug: &str, task: &str, force: bool) -> Result<Value> {
     }
     // Fence launch preparation as well as reservation: its server is created
     // before its attempt exists, and must not be swept mid-launch.
-    let launch_guard = fs::File::open(project.join(".state/state.db"))?;
+    let launch_guard = herdr_farm::authority::open_launch_lock(&project)?;
     launch_guard.try_lock().context("launch preparation or memory adoption is in progress; retry server retirement")?;
     let _guard = herdr_farm::execution_guard::ProjectGuard::acquire(&project)?;
     let snapshot = migration::open_active_read_only(&project)?.read_snapshot(None)?;
