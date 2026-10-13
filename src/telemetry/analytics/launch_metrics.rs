@@ -194,7 +194,7 @@ fn ticker(side: Option<&Connection>, since: Option<i64>) -> Result<Value> {
     }
     let classes = [
         "lock_contention",
-        "expired_inventory",
+        "deadline",
         "ambiguous_outcome",
         "permanent_failure",
         "other",

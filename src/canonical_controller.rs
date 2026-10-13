@@ -178,8 +178,8 @@ fn linux_admission(path:&Path)->(Option<String>,Option<String>) {
             (diagnostic,Some(line))
         }
         Err(error)=>{
-            let reason=error.downcast_ref::<herdr_farm::store::StoreError>().and_then(herdr_farm::watchdog::cause).unwrap_or("error");
-            if let Some(store)=error.downcast_ref::<herdr_farm::store::StoreError>() {
+            let reason=error.chain().find_map(|cause|cause.downcast_ref::<herdr_farm::store::StoreError>()).and_then(herdr_farm::watchdog::cause).unwrap_or("error");
+            if let Some(store)=error.chain().find_map(|cause|cause.downcast_ref::<herdr_farm::store::StoreError>()) {
                 let _=herdr_farm::watchdog::note(path,store);
             }
             let line=herdr_farm::watchdog::admission_log_line_observed(reason,None,u128::from(observation.duration_ms),Some(observation.sql));
@@ -200,7 +200,7 @@ fn process_next_with_launches(ctx:&Ctx,path:&Path,turn:u64,effects:Option<&mut c
 fn dispatch_prepared(ctx:&Ctx,path:&Path,turn:u64,effects:Option<&mut crate::copy_jobs::Queue>,include_launches:bool)->Result<bool> {
     if let Some(effects)=effects{return offer_next(ctx,path,turn,effects,include_launches);}
     use herdr_farm::store::{identity_inventory::Budget,controller_hint::EffectMode};
-    let mut budget=Budget::new(2*1024*1024,1024,std::time::Instant::now()+std::time::Duration::from_millis(100),Default::default())?;
+    let mut budget=Budget::new(2*1024*1024,1024,std::time::Instant::now()+herdr_farm::store::identity_inventory::short_read_timeout(),Default::default())?;
     let Some(hint)=herdr_farm::migration::read_controller_dispatch_hint(path,&mut budget,turn,jiff::Timestamp::now().as_millisecond(),include_launches)? else{return Ok(false);};
     let operation=&hint.operation;
     if effect_held(path,&operation.kind) {return Ok(false);}
@@ -250,7 +250,7 @@ fn effect_held(path:&Path,kind:&str)->bool {
 // claiming or acting; a route hint does not certify provenance or authority.
 fn offer_next(ctx:&Ctx,path:&Path,turn:u64,effects:&mut crate::copy_jobs::Queue,include_launches:bool)->Result<bool> {
     use herdr_farm::store::{identity_inventory::Budget,controller_hint::EffectMode};
-    let mut budget=Budget::new(2*1024*1024,1024,std::time::Instant::now()+std::time::Duration::from_millis(100),Default::default())?;
+    let mut budget=Budget::new(2*1024*1024,1024,std::time::Instant::now()+herdr_farm::store::identity_inventory::short_read_timeout(),Default::default())?;
     let Some(hint)=herdr_farm::migration::read_controller_dispatch_hint(path,&mut budget,turn,jiff::Timestamp::now().as_millisecond(),include_launches)? else{return Ok(false);};
     if effect_held(path,&hint.operation.kind) {return Ok(false);}
     match hint.operation.kind.as_str() {

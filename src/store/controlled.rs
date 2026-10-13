@@ -455,7 +455,7 @@ impl ControlledStore {
     fn error(&self,error:StoreError)->StoreError {
         let latched=self.interrupted.load(Ordering::SeqCst);
         let reason=if latched!=0 {latched}
-            else if matches!(&error,StoreError::Io(message) if message=="interrupted") {self.control.reason()}
+            else if matches!(&error,StoreError::Interrupted) {self.control.reason()}
             else {0};
         match reason {1=>StoreError::Cancelled,2=>StoreError::Deadline,_=>error}
     }
@@ -463,7 +463,7 @@ impl ControlledStore {
         loop {
             self.control.check()?;
             match read(&self.store).map_err(|e|self.error(e)) {
-                Err(StoreError::Io(message)) if message=="interrupted"=>continue,
+                Err(StoreError::Interrupted)=>continue,
                 Ok(value)=>{self.control.check()?;return Ok(value);},
                 Err(error)=>return Err(error),
             }
@@ -538,7 +538,7 @@ impl ControlledStore {
         loop {
             self.control.check()?;
             match self.store.read_snapshot_with_budget(at,Some(&budget)).map_err(|e|self.error(e)) {
-                Err(StoreError::Io(message)) if message=="interrupted"=>continue,
+                Err(StoreError::Interrupted)=>continue,
                 Ok(value)=>{self.control.check()?;return Ok(value);},
                 Err(error)=>return Err(error),
             }
@@ -605,7 +605,7 @@ impl ControlledStore {
         loop {
             self.control.check()?;
             match operation(&mut self.store,&self.work_budget).map_err(|e|self.error(e)) {
-                Err(StoreError::Io(message)) if message=="interrupted"=>continue,
+                Err(StoreError::Interrupted)=>continue,
                 result=>return result,
             }
         }

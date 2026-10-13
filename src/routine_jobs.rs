@@ -103,7 +103,12 @@ impl Queue {
             match self.admit(&path) {
                 Ok(None)=>{}
                 Ok(Some(reason))=>passed.push((path,reason)),
-                Err(error)=>{errors.push(format!("{}: routine admission: {error:#}",path.display()));passed.push((path,"its admission failed"));}
+                Err(error)=>{
+                    if error.chain().any(|cause|matches!(cause.downcast_ref::<herdr_farm::store::StoreError>(),Some(herdr_farm::store::StoreError::Deadline|herdr_farm::store::StoreError::Cancelled))) {
+                        errors.push(format!("{}: routine admission retry: {error:#}",path.display()));
+                        passed.push((path,"its inventory read will retry next pass"));
+                    }else{errors.push(format!("{}: routine admission: {error:#}",path.display()));passed.push((path,"its admission failed"));}
+                }
             }
             if self.pending(){
                 let admitted=self.last_project.clone().unwrap_or_default();
@@ -130,10 +135,10 @@ impl Queue {
             Some(Entry::Cooldown{last,..})=>Some(last.clone()),None=>None,
         };
         ensure!(self.entries.contains_key(&path)||self.entries.len()<128,"routine admission inventory is full");
-        let mut budget=herdr_farm::store::identity_inventory::Budget::new(2*1024*1024,1024,Instant::now()+Duration::from_millis(100),Default::default())?;
+        let mut budget=herdr_farm::store::identity_inventory::Budget::new(2*1024*1024,1024,Instant::now()+herdr_farm::store::identity_inventory::short_read_timeout(),Default::default())?;
         let Some(hint)=herdr_farm::migration::read_routine_execution_hint(&path,&mut budget,last.as_ref(),jiff::Timestamp::now().as_millisecond())? else{
             // Nothing to pass when no routine is queued at all.
-            let mut budget=herdr_farm::store::identity_inventory::Budget::new(2*1024*1024,1024,Instant::now()+Duration::from_millis(100),Default::default())?;
+            let mut budget=herdr_farm::store::identity_inventory::Budget::new(2*1024*1024,1024,Instant::now()+herdr_farm::store::identity_inventory::short_read_timeout(),Default::default())?;
             return Ok(herdr_farm::migration::read_routine_queued(&path,&mut budget)?.then_some("its queued routine is not ready yet"));
         };
         let work=request(&path,&hint.operation,hint.delivery_revision)?;let identity=work.identity.clone();

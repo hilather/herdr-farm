@@ -341,7 +341,7 @@ impl Log {
     fn count_error(&self, text: &str) {
         let lower = text.to_ascii_lowercase();
         let class = if lower.contains("lock contention") || lower.contains("locked") || lower.contains("database is busy") || lower.contains("owns lock") || lower.contains("would block") || lower.contains("acquire") && lower.contains("lock") { 0 }
-            else if lower.contains("inventory") && (lower.contains("expired") || lower.contains("stale")) { 1 }
+            else if lower.contains("deadline") || lower.contains("inventory") && (lower.contains("expired") || lower.contains("stale")) { 1 }
             else if lower.contains("ambiguous") || lower.contains("outcome unknown") { 2 }
             else if lower.contains("permanent") { 3 } else { 4 };
         if let Ok(mut counts) = ERROR_COUNTS.lock() { counts[class] = counts[class].saturating_add(1); }
@@ -658,7 +658,7 @@ pub fn tick(ctx: &Ctx, log: &Log, memory: &mut Memory) -> bool {
                     if let Some(error)=result.operation_error {log.error(&format!("{slug}: canonical operation: {error}"));}
                 }
                 Err(error)=>{
-                    if let Some(store)=error.downcast_ref::<herdr_farm::store::StoreError>() {
+                    if let Some(store)=error.chain().find_map(|cause|cause.downcast_ref::<herdr_farm::store::StoreError>()) {
                         let _=herdr_farm::watchdog::note(&ctx.root.join(slug),store);
                         if let Some(reason)=herdr_farm::watchdog::cause(store) {
                             log.line(&herdr_farm::watchdog::admission_log_line(reason,None,0));
@@ -717,10 +717,9 @@ pub fn tick(ctx: &Ctx, log: &Log, memory: &mut Memory) -> bool {
                 // its own short deadline under contention) is not a failure; the next
                 // pass retries it.
                 let cause = error.root_cause().to_string();
-                if matches!(cause.as_str(), "live copy cancelled" | "identity inventory cancelled or expired")
+                if cause == "live copy cancelled"
                     || error.chain().any(|e| matches!(e.downcast_ref::<herdr_farm::store::StoreError>(),
-                        Some(herdr_farm::store::StoreError::Cancelled)) || matches!(e.downcast_ref::<herdr_farm::store::StoreError>(),
-                        Some(herdr_farm::store::StoreError::Io(message)) if message == "interrupted")) { return; }
+                        Some(herdr_farm::store::StoreError::Cancelled | herdr_farm::store::StoreError::Deadline))) { return; }
                 let slug = std::path::Path::new(&identity.project).file_name().unwrap_or_default().to_string_lossy();
                 let attempt = identity.operation.trim_start_matches("tokens:attempt:");
                 log.error(&format!("{slug}: attempt token {attempt}: {error:#}"));

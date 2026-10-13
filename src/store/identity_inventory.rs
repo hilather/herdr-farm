@@ -8,6 +8,16 @@ use super::runtime::BindingSelection;
 /// Root-wide shared record ceiling; byte and deadline limits remain independent.
 pub const MAX_INVENTORY_RECORDS:usize=16_384;
 
+/// Shared load-adaptive allowance for short ticker inventory reads. Expiry
+/// increases the next pass's allowance, without renewing the current budget.
+pub fn short_read_timeout()->Duration {
+    Duration::from_millis(SHORT_READ_MS.load(std::sync::atomic::Ordering::Relaxed))
+}
+static SHORT_READ_MS:std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(500);
+fn note_deadline() {
+    let _=SHORT_READ_MS.fetch_update(std::sync::atomic::Ordering::Relaxed,std::sync::atomic::Ordering::Relaxed,|ms|Some((ms*2).min(2000)));
+}
+
 pub struct Budget {pub deadline:Instant,pub cancellation:Cancellation,remaining:usize,records:usize,record_limit:usize,used:usize,reader:String,
     #[cfg(test)] pub(crate) sql_steps:Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
 }
@@ -16,7 +26,11 @@ impl Budget {
         ensure!(bytes<=50*1024*1024&&records<=MAX_INVENTORY_RECORDS,"identity budget exceeds supported bounds");
         let budget=Self{deadline:deadline.min(Instant::now()+Duration::from_secs(10)),cancellation,remaining:bytes,records,record_limit:records,used:0,reader:String::from("identity inventory"),#[cfg(test)] sql_steps:None};budget.check()?;Ok(budget)
     }
-    pub fn check(&self)->Result<()> {ensure!(!self.cancellation.is_cancelled()&&Instant::now()<self.deadline,"{} cancelled or expired after {} records and {} bytes",self.reader,self.record_limit-self.records,self.used);Ok(())}
+    pub fn check(&self)->Result<()> {
+        if self.cancellation.is_cancelled(){return Err(anyhow::Error::from(StoreError::Cancelled).context(format!("{} cancelled after {} records and {} bytes",self.reader,self.record_limit-self.records,self.used)));}
+        if Instant::now()>=self.deadline{note_deadline();return Err(anyhow::Error::from(StoreError::Deadline).context(format!("{} expired after {} records and {} bytes",self.reader,self.record_limit-self.records,self.used)));}
+        Ok(())
+    }
     /// Labels subsequent budget errors without resetting any root-wide limits.
     pub fn select_reader(&mut self,name:&str,project:&Path) {self.reader=format!("{name} project {}",project.display());}
     pub(crate) fn reader(&mut self,name:&str,path:&Path) {self.select_reader(name,path.parent().and_then(Path::parent).unwrap_or(path));}
@@ -90,10 +104,9 @@ pub(super) fn read_published<T>(path:&Path,publication:&Publication,budget:&mut 
         })();
         match result {
             Err(error) if error.chain().any(|cause|
-                matches!(cause.downcast_ref::<StoreError>(),Some(StoreError::Io(message)) if message=="interrupted")
+                matches!(cause.downcast_ref::<StoreError>(),Some(StoreError::Interrupted))
                 || cause.downcast_ref::<rusqlite::Error>().is_some_and(|e|e.sqlite_error_code()==Some(rusqlite::ErrorCode::OperationInterrupted)))=>{
-                if budget.cancellation.is_cancelled() {return Err(StoreError::Cancelled.into());}
-                if Instant::now()>=budget.deadline {return Err(StoreError::Deadline.into());}
+                budget.check()?;
             },
             result=>break result?,
         }

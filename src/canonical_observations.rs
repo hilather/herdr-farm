@@ -8,14 +8,6 @@ use herdr_farm::{runtime,migration,execution_guard::ProjectGuard,reconcile::Reso
 const JOB:&str="\0herdr-projects-canonical-observation";
 const BUDGET:Duration=Duration::from_secs(15);
 const LIMIT:usize=1024*1024;
-/// Wall-clock bound on one observation-head read (fresh read-only connection,
-/// schema load, one row). The ticker must not stall on a slow store, so an
-/// overrun is an `unknown` poll, retried next pass. Unit tests share 12 cores
-/// with every other test in the binary and assert rotation and fencing, not
-/// read latency: an oversubscribed runner can deschedule the reading thread
-/// past 100 ms (SQLITE_INTERRUPT, "interrupted"), and the queue-rotation test
-/// makes 3,096 such reads. Tests therefore bound the read by the budget cap.
-const HEAD_READ:Duration=if cfg!(test){Duration::from_secs(10)}else{Duration::from_millis(100)};
 
 fn sql_control(control:&Control)->herdr_farm::store::controlled::ReadControl {herdr_farm::store::controlled::ReadControl::new(control.deadline,control.cancellation.clone())}
 fn repair_publication(path:&Path)->Result<bool> {
@@ -24,7 +16,7 @@ fn repair_publication(path:&Path)->Result<bool> {
     migration::repair_control_publication(path,&guard,&control)
 }
 fn observation_head(path:&Path)->Result<u64> {
-    let mut budget=herdr_farm::store::identity_inventory::Budget::new(2*1024*1024,0,Instant::now()+HEAD_READ,Default::default())?;
+    let mut budget=herdr_farm::store::identity_inventory::Budget::new(2*1024*1024,0,Instant::now()+herdr_farm::store::identity_inventory::short_read_timeout(),Default::default())?;
     migration::read_observation_head(path,&mut budget)
 }
 
@@ -95,7 +87,7 @@ fn collect_with(input:&Input,control:&Control,observe:impl FnOnce(&Input,&Contro
         let db=migration::open_active_scoped(&input.project,sql_control(control))?;control.check()?;
         let state=db.project_control()?.context("canonical control missing")?;
         let active=state.state==herdr_farm::domain::ProjectState::Active&&!state.reconciliation_required;
-        let mut budget=herdr_farm::store::identity_inventory::Budget::new(2*1024*1024,0,control.deadline.min(Instant::now()+HEAD_READ),control.cancellation.clone())?;
+        let mut budget=herdr_farm::store::identity_inventory::Budget::new(2*1024*1024,0,control.deadline.min(Instant::now()+herdr_farm::store::identity_inventory::short_read_timeout()),control.cancellation.clone())?;
         let head=migration::read_observation_head(&input.project,&mut budget)?;input.current(control)?;Ok((head,active))
     })();
     let head=match head {Ok((head,active))=>{if scheduled_work==Some(true)&&!active{scheduled_work=Some(false);}Some(head)},Err(error)=>{errors.push(format!("maintenance result: {error:#}"));None}};
@@ -188,7 +180,13 @@ impl Reads {
                 Err(error)=>Err(error),
             }
         })();
-        let head=match head {Ok(head)=>head,Err(error)=>{self.unknown=true;return Err(error);}};
+        let head=match head {Ok(head)=>head,Err(error)=>{
+            self.unknown=true;
+            if error.chain().any(|cause|matches!(cause.downcast_ref::<herdr_farm::store::StoreError>(),Some(herdr_farm::store::StoreError::Deadline|herdr_farm::store::StoreError::Cancelled))) {
+                return Ok(Poll::Failed(format!("observation head retry: {error:#}")));
+            }
+            return Err(error);
+        }};
         let text=serde_json::to_string(&input)?;ensure!(text.len()<=64*1024,"canonical observation input exceeds bounds");
         let fingerprint=crate::thread::sha256_hex(text.as_bytes());let key=(input.project.display().to_string(),"canonical-observation".into());
         if !self.rotation.contains_key(&key)&&self.rotation.len()>=ROTATION_LIMIT {self.unknown=true;anyhow::bail!("canonical planning registry exceeds 1024 project paths; restart ticker after reducing inventory");}
