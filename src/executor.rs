@@ -149,6 +149,7 @@ fn worker(shared:Arc<Shared>,runner:Arc<dyn Runner+Send+Sync>,lane:usize) {
         }else{Ok(Output{timed_out:true,..Output::default()})};
         let identity=job.request.identity;let completion=Completion{identity:identity.clone(),started_at:started,queue_delay:started.duration_since(job.queued),elapsed:started.elapsed(),runner_entered,result};
         {let mut state=shared.state.lock().unwrap();state.running.remove(&(identity.project.clone(),identity.operation.clone()));state.admitted[lane]-=1;state.metrics.completed[lane]=state.metrics.completed[lane].saturating_add(1);state.metrics.max_queue_delay=state.metrics.max_queue_delay.max(completion.queue_delay);shared.wake.notify_all();}
+        if let Err(error)=&completion.result {crate::ticker::executor_failure(&identity,error);}
         let _=job.reply.send(completion);
     }
 }

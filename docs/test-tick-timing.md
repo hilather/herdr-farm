@@ -261,7 +261,18 @@ workflow also confirms a helper that reads the request to EOF, and requires a
 helper stalled after effect recording to become ambiguous within 30 seconds and
 before its captured claim expiry. These are regression checks for the existing
 10-second command cap and cleanup allowance, not evidence that the intermittent
-CI delivery hang has been diagnosed or fixed.
+CI delivery stall can be reproduced in this sandbox. Outcome persistence retries
+busy and I/O failures without repeating delivery, retaining ownership within the
+claim lease and worker control deadline. The public store/dispatch E2E workflow
+in `tests/operation_recording.rs` holds a competing SQLite writer beyond one busy
+attempt and checks both successful recording and the original control deadline
+after delivery. Queue drain forwards runner errors, but depends on a later ticker
+pass, and log writes previously ignored errors. Neither explains the original CI
+log gap conclusively. Failed completions are now logged at executor completion as
+well as queue drain; log write failures go to stderr.
+Failure dumps include operation events and delivery/executor samples at `sent`
+and two seconds later. Lock probes release each guard before the next probe, and
+success waits fail explicitly on ambiguous outcomes or expired claims.
 Unix socket restrictions prevent exercising this fixture past socket creation in
 the sandbox.
 

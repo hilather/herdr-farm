@@ -50,6 +50,8 @@ impl<'a,'b> DeliveryAdapter for Adapter<'a,'b> {
     }
 }
 impl PreparedDelivery for Prepared<'_,'_> {
+    fn recording_deadline(&self)->Option<std::time::Instant>{Some(self.adapter.control.deadline)}
+    fn recording_allowed(&self)->Result<()>{self.adapter.control.check()}
     fn revalidate(&mut self,operation:&Operation)->Result<()>{self.adapter.validate(operation,&self.notification)}
     fn deliver(&mut self,operation:&Operation,claim:&Claim)->Result<Outcome> {
         let a=&self.adapter;a.validate(operation,&self.notification)?;
@@ -76,7 +78,7 @@ fn execute(input:&Input,control:&Control)->Result<()> {
     input.current(&ctx,&guard,control)?;let mut db=migration::open_active_unchecked(&input.project)?;
     let mut adapter=Adapter{input,ctx:&ctx,control,guard:&guard,locks:&locks};
     let result=dispatch::dispatch_one(&mut db,DispatchRequest{operation:&input.operation,expected_revision:input.revision,owner:"ticker.notification",lease_ms:60_000},&mut adapter,||jiff::Timestamp::now().as_millisecond())?;
-    match result {DispatchResult::Recorded(_)=>Ok(()),DispatchResult::Unrecorded{..}=>anyhow::bail!("canonical notification outcome unrecorded; inspect operation after claim expiry")}
+    match result {DispatchResult::Recorded(_)=>Ok(()),DispatchResult::Unrecorded{error,..}=>anyhow::bail!("canonical notification outcome unrecorded; inspect operation after claim expiry: {error}")}
 }
 pub struct JobRunner {pub inner:Arc<dyn Runner+Send+Sync>}
 impl Runner for JobRunner {

@@ -1825,7 +1825,7 @@ pub fn run(#[cfg(feature="state-store")] capture: &mut crate::cli_invocation::Ca
                     let id=herdr_farm::domain::OperationId::new(id).map_err(anyhow::Error::msg)?;
                     match crate::finalization_delivery::deliver(&ctx,&dir,&id,expected_revision)? {
                         herdr_farm::operations::dispatch::DispatchResult::Recorded(delivery)=>println!("{}",serde_json::to_string_pretty(&delivery)?),
-                        herdr_farm::operations::dispatch::DispatchResult::Unrecorded{claim,..}=>anyhow::bail!("finalization outcome was not recorded; operation {} claim epoch {} requires receipt observation",claim.operation.as_str(),claim.epoch),
+                        herdr_farm::operations::dispatch::DispatchResult::Unrecorded{claim,error}=>anyhow::bail!("finalization outcome was not recorded; operation {} claim epoch {} requires receipt observation: {error}",claim.operation.as_str(),claim.epoch),
                     }
                 },
                 OperationsCommand::ObserveFinalization{id,expected_revision,expected_head}=>println!("{}",serde_json::to_string_pretty(&crate::finalization_delivery::observe(&ctx,&dir,&herdr_farm::domain::OperationId::new(id).map_err(anyhow::Error::msg)?,expected_revision,expected_head)?)?),
@@ -1837,7 +1837,7 @@ pub fn run(#[cfg(feature="state-store")] capture: &mut crate::cli_invocation::Ca
                     let id=herdr_farm::domain::OperationId::new(id).map_err(anyhow::Error::msg)?;
                     match crate::notification_delivery::deliver(&ctx,&dir,&id,expected_revision)? {
                         herdr_farm::operations::dispatch::DispatchResult::Recorded(delivery)=>println!("{}",serde_json::to_string_pretty(&delivery)?),
-                        herdr_farm::operations::dispatch::DispatchResult::Unrecorded{claim,..}=>anyhow::bail!("notification outcome was not recorded; operation {} claim epoch {} requires observation; do not retry",claim.operation.as_str(),claim.epoch),
+                        herdr_farm::operations::dispatch::DispatchResult::Unrecorded{claim,error}=>anyhow::bail!("notification outcome was not recorded; operation {} claim epoch {} requires observation; do not retry: {error}",claim.operation.as_str(),claim.epoch),
                     }
                 },
                 OperationsCommand::Retire{id,reason,expected_revision,expected_head}=>println!("{}",serde_json::to_string_pretty(&herdr_farm::runtime::retire_operation(&dir,&herdr_farm::domain::OperationId::new(id).map_err(anyhow::Error::msg)?,expected_revision,expected_head,&reason)?)?),

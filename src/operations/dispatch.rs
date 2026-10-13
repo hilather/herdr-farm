@@ -14,6 +14,9 @@ pub trait DeliveryAdapter {
 pub trait PreparedDelivery {
     /// Recheck policy/liveness after durable claim. Must not perform the effect.
     fn revalidate(&mut self, operation: &Operation) -> Result<()>;
+    /// Bound receipt persistence by the same control deadline as delivery.
+    fn recording_allowed(&self) -> Result<()> { Ok(()) }
+    fn recording_deadline(&self) -> Option<std::time::Instant> { None }
     /// Runs outside a SQLite transaction. A bare error is always ambiguous.
     /// Retryable requires proof of no effect; success requires a receipt/identity.
     /// Adapter timeout must fit the remaining lease. Keep ownership until dropped.
@@ -56,9 +59,26 @@ pub fn dispatch_one<A: DeliveryAdapter>(
         prepared.deliver(&operation, &claim).unwrap_or_else(|_|
             Outcome::Ambiguous { observation_required: "adapter failed after delivery began; observe effect before retry (details withheld)".into() })
     };
-    let result = match store.finish_operation(&claim, outcome, clock()) {
-        Ok(delivery) => DispatchResult::Recorded(delivery),
-        Err(error) => DispatchResult::Unrecorded { claim, error: error.to_string() },
+    // Retry persistence only: never repeat the external effect. Keep ownership
+    // while a competing SQLite writer finishes, bounded by lease and control.
+    let lease_deadline = std::time::Instant::now()
+        + std::time::Duration::from_millis(claim.lease_until_ms.saturating_sub(clock()).max(0) as u64);
+    let recording_deadline = prepared.recording_deadline().map_or(lease_deadline, |deadline| deadline.min(lease_deadline));
+    let result = loop {
+        if let Err(error) = prepared.recording_allowed() {
+            break DispatchResult::Unrecorded { claim, error: format!("outcome recording control: {error:#}") };
+        }
+        let now = clock();
+        match store.finish_operation_before(&claim, outcome.clone(), now, recording_deadline) {
+            Ok(delivery) => break DispatchResult::Recorded(delivery),
+            Err(error) => {
+                let transient = matches!(error, crate::store::StoreError::Busy | crate::store::StoreError::Io(_));
+                if !transient || now >= claim.lease_until_ms || std::time::Instant::now() >= recording_deadline {
+                    break DispatchResult::Unrecorded { claim, error: error.to_string() };
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20).min(recording_deadline.saturating_duration_since(std::time::Instant::now())));
+            }
+        }
     };
     // Keep the adapter's resource guard alive through receipt persistence.
     drop(prepared);

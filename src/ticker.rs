@@ -351,12 +351,13 @@ impl Log {
         self.line(text);
     }
     pub fn line(&self, text: &str) {
-        let Ok(mut file) = File::options().create(true).append(true).open(&self.path) else {
-            return;
-        };
-        let _ = writeln!(file, "{} {}", project::now(), text.replace('\n', " "));
+        let result = (|| -> std::io::Result<()> {
+            let mut file = File::options().create(true).append(true).open(&self.path)?;
+            writeln!(file, "{} {}", project::now(), text.replace('\n', " "))
+        })();
+        if let Err(error) = result { eprintln!("ticker log write failed: {error}; {text}"); }
         // Size cap: keep the newer half.
-        if file.metadata().map(|m| m.len()).unwrap_or(0) > LOG_CAP
+        if std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0) > LOG_CAP
             && let Ok(mut reader) = File::open(&self.path)
         {
             let mut tail = Vec::new();
@@ -1497,6 +1498,15 @@ fn tick_slow(ctx: &Ctx, project: &Project, seen: &Seen, memory: &mut Memory) -> 
         errors.extend(steps::save_state(project, &state).err());
     }
     errors
+}
+
+// Record at completion even when the controller cannot reach its next drain.
+pub(crate) fn executor_failure(identity:&crate::executor::Identity,error:&anyhow::Error) {
+    let project=Path::new(&identity.project);
+    if !project.is_absolute() {return;}
+    if let Some(root)=project.parent() {
+        Log{path:root.join(".ticker.log")}.error(&format!("{} {}: executor completion: {error:#}",identity.project,identity.operation));
+    }
 }
 
 #[cfg(test)]

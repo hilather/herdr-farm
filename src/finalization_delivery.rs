@@ -90,6 +90,8 @@ impl Prepared<'_,'_> {
     fn validate_current(&self,op:&Operation)->Result<()> {self.control.check()?;self.payload.validate_rows(op,&migration::open_active_unchecked(&self.path)?.finalization_rows(op,&self.payload.binding,None)?,&crate::notification_delivery::config(self.ctx,&self.path)?)?;self.control.check()}
 }
 impl PreparedDelivery for Prepared<'_,'_> {
+    fn recording_deadline(&self)->Option<std::time::Instant>{Some(self.control.deadline)}
+    fn recording_allowed(&self)->Result<()>{self.control.check()}
     fn revalidate(&mut self,op:&Operation)->Result<()> {self.validate_current(op)}
     fn deliver(&mut self,op:&Operation,claim:&Claim)->Result<Outcome> {
         let authorize=||{ensure!(claim.lease_until_ms>jiff::Timestamp::now().as_millisecond(),"finalization claim lease elapsed");self.validate_current(op)};

@@ -1299,6 +1299,14 @@ stage('reply flushed')
         struct Child(std::process::Child);impl Drop for Child{fn drop(&mut self){let _=self.0.kill();let _=self.0.wait();}}
         let spawn=||Child(Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME",home.path()).env("PATH","/usr/bin:/bin").env("HERDR_BIN_PATH",&helper).args(["--root",r,"ticker","run"]).stdout(Stdio::null()).stderr(Stdio::from(fs::OpenOptions::new().create(true).append(true).open(home.path().join("ticker-stderr")).unwrap())).spawn().unwrap());
         let read=||runtime::snapshot(&project).unwrap().deliveries.into_iter().find(|d|d.operation==op.id).unwrap();
+        let captured = std::cell::RefCell::new(Vec::<String>::new());
+        let capture = |phase:&str| {
+            let snapshot=runtime::snapshot(&project);
+            captured.borrow_mut().push(format!("{phase}: events={:?}; delivery={:?}; metrics={}",
+                snapshot.as_ref().map(|snapshot|snapshot.events.iter().filter(|event|event.entity==op.id.as_str()).collect::<Vec<_>>()),
+                snapshot.as_ref().map(|snapshot|snapshot.deliveries.iter().find(|delivery|delivery.operation==op.id)),
+                fs::read_to_string(root.join(".ticker-metrics.json")).unwrap_or_else(|error|error.to_string())));
+        };
         let diagnostic = || {
             // These are public runtime/store reads, not copies of fixture values.
             // Keep failures in the dump: a failed read can explain missing admission.
@@ -1314,10 +1322,14 @@ stage('reply flushed')
                 2 * 1024 * 1024, 1024, Instant::now() + Duration::from_secs(2), Default::default()).unwrap();
             let hint = migration::read_controller_dispatch_hint(&project, &mut budget, 0, now, true)
                 .map(|hint| hint.map(|hint| (hint.operation.id, hint.delivery_revision, hint.notification_socket)));
-            format!("mode={mode}; now_ms={now}\noperations inspect ({status}):\n{stdout}\n{stderr}\nruntime: {state:#?}\nnotification validation: {validation:?}\ncontroller hint: {hint:?}\neffect pause: {pause:?}\nroot available: {root_available}; project available: {project_available}\nmetrics: {metrics}\nticker log: {log}\nticker stderr: {ticker_stderr}\nhelper calls: {calls}\nhelper stages: {stages}\nhelper errors: {errors}\nwrong lock: {wrong}",
-                status=inspected.status, stdout=String::from_utf8_lossy(&inspected.stdout), stderr=String::from_utf8_lossy(&inspected.stderr),
+            let root_available=RootGuard::exclusive(&root).is_ok();
+            let project_available=ProjectGuard::acquire(&project).is_ok();
+            let events=migration::open_active(&project).and_then(|mut store| store.read_snapshot(None).map_err(Into::into))
+                .map(|snapshot| snapshot.events.into_iter().filter(|event| event.entity==op.id.as_str()).collect::<Vec<_>>());
+            format!("captured: {:?}\noperation events: {events:?}\nmode={mode}; now_ms={now}\noperations inspect ({status}):\n{stdout}\n{stderr}\nruntime: {state:#?}\nnotification validation: {validation:?}\ncontroller hint: {hint:?}\neffect pause: {pause:?}\nroot available: {root_available}; project available: {project_available}\nmetrics: {metrics}\nticker log: {log}\nticker stderr: {ticker_stderr}\nhelper calls: {calls}\nhelper stages: {stages}\nhelper errors: {errors}\nwrong lock: {wrong}",
+                captured.borrow(), status=inspected.status, stdout=String::from_utf8_lossy(&inspected.stdout), stderr=String::from_utf8_lossy(&inspected.stderr),
                 pause=herdr_farm::watchdog::effects_paused(&project),
-                root_available=RootGuard::exclusive(&root).is_ok(), project_available=ProjectGuard::acquire(&project).is_ok(),
+                root_available=root_available, project_available=project_available,
                 metrics=fs::read_to_string(root.join(".ticker-metrics.json")).unwrap_or_else(|error| error.to_string()),
                 log=fs::read_to_string(root.join(".ticker.log")).unwrap_or_default(),
                 ticker_stderr=fs::read_to_string(home.path().join("ticker-stderr")).unwrap_or_default(),
@@ -1330,16 +1342,30 @@ stage('reply flushed')
         let stop=|child:&mut Child|{fs::write(root.join(".ticker.stop"),b"").unwrap();let end=Instant::now()+wait_budget;while child.0.try_wait().unwrap().is_none(){assert!(Instant::now()<end);std::thread::sleep(Duration::from_millis(10));}fs::remove_file(root.join(".ticker.stop")).unwrap();};
         let mut child=spawn();wait(&mut child,"native notification send",&||home.path().join("sent").exists());
         let effect_started=Instant::now();
+        capture("sent");
+        if mode!="death" {
+            let until=Instant::now()+Duration::from_secs(2);
+            while Instant::now()<until {std::thread::sleep(Duration::from_millis(10));}
+            capture("sent +2s");
+        }
         let effect_lease=if mode=="blocked"{read().lease_until_ms}else{None};
         if mode=="death" {
-            child.0.kill().unwrap();child.0.wait().unwrap();assert!(RootGuard::exclusive(&root).is_err());assert!(ProjectGuard::acquire(&project).is_err());
+            child.0.kill().unwrap();child.0.wait().unwrap();
+            std::thread::sleep(Duration::from_secs(2));capture("sent +2s (owner killed)");
+            assert!(RootGuard::exclusive(&root).is_err());assert!(ProjectGuard::acquire(&project).is_err());
             let routine=fs::OpenOptions::new().write(true).open(root.join(".routine-execution.lock")).unwrap();assert!(routine.try_lock().is_err());
             let end=Instant::now()+Duration::from_secs(14);loop{if let Ok(guard)=RootGuard::exclusive(&root){drop(guard);break;}assert!(Instant::now()<end);std::thread::sleep(Duration::from_millis(10));}
             routine.try_lock().unwrap();routine.unlock().unwrap();assert!(ProjectGuard::acquire(&project).is_ok());assert_eq!(read().state,DeliveryState::Claimed);
             let until=read().lease_until_ms.unwrap();assert_eq!(migration::open_active(&project).unwrap().expire_claims(until).unwrap(),1);assert_eq!(read().state,DeliveryState::Ambiguous);
             std::thread::sleep(Duration::from_secs(6));assert!(!home.path().join("escaped").exists());
         }else{
-            wait(&mut child,"delivery outcome",&||read().state==if matches!(mode,"ok"|"eof"){DeliveryState::Confirmed}else{DeliveryState::Ambiguous});
+            wait(&mut child,"delivery outcome",&||{
+                let delivery=read();
+                if matches!(mode,"ok"|"eof") {
+                    assert!(delivery.state!=DeliveryState::Ambiguous && delivery.lease_until_ms.is_none_or(|until|jiff::Timestamp::now().as_millisecond()<until),"notification became ambiguous or its claim expired: {delivery:?}\n{}",diagnostic());
+                }
+                delivery.state==if matches!(mode,"ok"|"eof"){DeliveryState::Confirmed}else{DeliveryState::Ambiguous}
+            });
             if mode=="blocked" {
                 assert!(effect_started.elapsed()<Duration::from_secs(30),"bridge deadline exceeded cleanup margin\n{}",diagnostic());
                 assert!(jiff::Timestamp::now().as_millisecond()<effect_lease.unwrap(),"bridge timeout was not recorded within its lease\n{}",diagnostic());

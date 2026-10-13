@@ -87,7 +87,8 @@ pub(super) fn update_outcome(tx:&Connection,old:&Delivery,outcome:&Outcome,now:i
     if state=="pending" && old.attempts>=32 { state="permanent_failure";outcome=Outcome::PermanentFailure{diagnostic:format!("retry budget exhausted after confirmed no effect: {}",outcome.evidence())}; }
     let due=now+crate::timing::delivery_backoff(old.attempts).as_millis() as i64;
     let revision=increment(old.revision)?;
-    tx.execute("UPDATE operation_delivery SET revision=?2,state=?3,owner=NULL,lease_until_ms=NULL,next_due_ms=?4,last_outcome=?5 WHERE operation_id=?1",params![old.operation.as_str(),integer(revision)?,state,due,serde_json::to_string(&outcome).map_err(|e|StoreError::Invalid(e.to_string()))?])?;
+    let changed=tx.execute("UPDATE operation_delivery SET revision=?2,state=?3,owner=NULL,lease_until_ms=NULL,next_due_ms=?4,last_outcome=?5 WHERE operation_id=?1",params![old.operation.as_str(),integer(revision)?,state,due,serde_json::to_string(&outcome).map_err(|e|StoreError::Invalid(e.to_string()))?])?;
+    if changed!=1 {return Err(StoreError::Conflict);}
     log(tx,&old.operation,revision,"operation.outcome",serde_json::json!({"actor":actor,"outcome":outcome,"epoch":old.epoch}))?;
     if state == "permanent_failure" {
         let op = super::read_operation(tx, &old.operation)?;
@@ -219,12 +220,24 @@ impl SqliteStore {
     }
     /// Rechecks owner, epoch, revision and lease in the outcome transaction.
     pub fn finish_operation(&mut self,claim:&Claim,outcome:Outcome,now:i64)->Result<Delivery> {
-        now_check(now)?;text(outcome.evidence())?;
+        self.finish_operation_inner(claim,outcome,now,None)
+    }
+    /// Receipt-only retry ingress: SQLite contention cannot outlive the caller's
+    /// original worker/lease deadline, and an expired transaction cannot commit.
+    pub fn finish_operation_before(&mut self,claim:&Claim,outcome:Outcome,now:i64,deadline:std::time::Instant)->Result<Delivery> {
+        self.connection.busy_timeout(BUSY_RETRY_BOUND.min(deadline.saturating_duration_since(std::time::Instant::now())))?;
+        let result=self.finish_operation_inner(claim,outcome,now,Some(deadline));
+        self.connection.busy_timeout(BUSY_RETRY_BOUND)?;
+        result
+    }
+    fn finish_operation_inner(&mut self,claim:&Claim,outcome:Outcome,now:i64,deadline:Option<std::time::Instant>)->Result<Delivery> {
+        let check=||if deadline.is_some_and(|deadline|std::time::Instant::now()>=deadline) {Err(StoreError::Deadline)} else {Ok(())};
+        check()?;now_check(now)?;text(outcome.evidence())?;
         let tx=self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;check_schema(&tx)?;
         let old=delivery(&tx,&claim.operation)?;
         if old.state!=DeliveryState::Claimed || old.revision!=claim.revision || old.epoch!=claim.epoch || old.owner.as_deref()!=Some(&claim.owner) || old.lease_until_ms!=Some(claim.lease_until_ms) || now>=claim.lease_until_ms {return Err(StoreError::Conflict);}
         if !binding_current(&tx,&claim.operation,false)? {return Err(StoreError::Conflict);}
-        let result=update_outcome(&tx,&old,&outcome,now,&claim.owner)?;tx.commit()?;Ok(result)
+        let result=update_outcome(&tx,&old,&outcome,now,&claim.owner)?;check()?;tx.commit()?;Ok(result)
     }
     pub fn expire_claims(&mut self,now:i64)->Result<usize> {
         now_check(now)?;
