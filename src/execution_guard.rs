@@ -8,7 +8,7 @@
 //! the root shared, and `RootGuard::exclusive` takes it exclusively right
 //! after the root. Maintenance and cleanup therefore stay refused while a
 //! check runs, while the staged effects of `RootGuard::exclusive_by` (launch,
-//! brief, termination) proceed beside it. Every acquisition is a try-lock.
+//! brief, termination) proceed beside it. Acquisitions retry only within explicit bounded windows.
 //! One acquisition runs the other way: `CheckGuard::widen` retakes the shared
 //! root while still holding the check lock shared. The only exclusive holder
 //! of the check lock also owns the root exclusively, so widening's bounded
@@ -118,7 +118,7 @@ fn exclusive_file_until(path:&Path,until:std::time::Instant,cancelled:&dyn Fn()-
     loop {
         match file.try_lock() {
             Ok(())=>return Ok(held(file)),
-            Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now()<until&&!cancelled()=>std::thread::sleep(EXCLUSIVE_POLL),
+            Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now()<until&&!cancelled()=>std::thread::sleep(crate::timing::retry(EXCLUSIVE_POLL)),
             Err(error)=>return Err(error).with_context(|| format!("another operation owns lock {}; retry", path.display())),
         }
     }
@@ -163,7 +163,7 @@ fn bounded_wait<T>(mut acquire: impl FnMut() -> Result<T>) -> Result<T> {
     // An explicit override is taken literally; the 30 s default is scaled in
     // test labs like every other product wait.
     let bound = std::env::var("HERDR_FARM_LOCK_WAIT_SECS").ok().and_then(|value| value.parse::<u64>().ok())
-        .map_or_else(|| crate::timing::retry(std::time::Duration::from_secs(30)), std::time::Duration::from_secs);
+        .map_or_else(|| crate::timing::retry(std::time::Duration::from_secs(30)).max(std::time::Duration::from_millis(250)), std::time::Duration::from_secs);
     let started = std::time::Instant::now();
     let poll = crate::timing::retry(std::time::Duration::from_millis(100));
     let mut notified = false;
@@ -199,6 +199,30 @@ fn shared_file(path:&Path,busy:&'static str)->Result<LockFile> {
     let file=lock_file(path)?;
     file.try_lock_shared().with_context(|| format!("{busy}: {}", path.display()))?;
     Ok(held(file))
+}
+
+/// Best-effort Linux lock diagnostics; never execution authority. Unknown
+/// evidence stays unknown, and no PID or unrelated lock data is persisted.
+#[cfg(target_os="linux")]
+pub fn root_holder_kind(root:&Path)->String {
+    let evidence=(||->Option<Vec<String>> {
+        let metadata=std::fs::metadata(root.join(".execution.lock")).ok()?;
+        let locks=std::fs::read_to_string("/proc/locks").ok()?;
+        let mut kinds=std::collections::BTreeSet::new();
+        for line in locks.lines() {
+            let fields:Vec<_>=line.split_ascii_whitespace().collect();
+            if fields.len()<8 || fields[1]!="FLOCK" {continue;}
+            let device:Vec<_>=fields[5].split(':').collect();
+            if device.len()!=3 || device[2].parse::<u64>().ok()!=Some(metadata.ino())
+                || u32::from_str_radix(device[0],16).ok()!=Some(libc::major(metadata.dev()))
+                || u32::from_str_radix(device[1],16).ok()!=Some(libc::minor(metadata.dev())) {continue;}
+            let owner=if fields[4].parse::<u32>().ok()==Some(std::process::id()) {"same-process"} else {"external-process"};
+            let kind=if fields[3]=="READ" {"shared project effect/observation"} else {"exclusive root maintenance/external operation"};
+            kinds.insert(format!("{owner} {kind}"));
+        }
+        if kinds.is_empty() {None} else {Some(kinds.into_iter().collect())}
+    })();
+    evidence.map(|kinds|kinds.join(", ")).unwrap_or_else(||"unknown root execution holder".into())
 }
 
 /// Held shared by every running isolated check (verification, integration) and
@@ -239,6 +263,15 @@ impl RootGuard {
         let until=deadline.min(std::time::Instant::now()+EXCLUSIVE_WAIT);
         // Hold a writer turn while draining existing shared holders. New
         // status/start probes cannot repeatedly overtake this queued effect.
+        let _turn=exclusive_file_until(&root.join(".execution-turn.lock"),until,&|| cancellation.is_cancelled())?;
+        let file=exclusive_file_until(&root.join(".execution.lock"),until,&|| cancellation.is_cancelled())?;
+        Ok(Self{_file:file,_check:None})
+    }
+    /// An observed exit gets a bounded 30 second window, with the same root
+    /// fence and cancellation policy as other staged effects.
+    pub fn exit_recording_by(root:&Path,deadline:std::time::Instant,cancellation:&crate::runner::Cancellation)->Result<Self> {
+        let wait=crate::timing::retry(std::time::Duration::from_secs(30)).max(std::time::Duration::from_millis(250));
+        let until=deadline.min(std::time::Instant::now()+wait);
         let _turn=exclusive_file_until(&root.join(".execution-turn.lock"),until,&|| cancellation.is_cancelled())?;
         let file=exclusive_file_until(&root.join(".execution.lock"),until,&|| cancellation.is_cancelled())?;
         Ok(Self{_file:file,_check:None})

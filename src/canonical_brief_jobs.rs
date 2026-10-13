@@ -76,7 +76,7 @@ fn request_inner(project:&Path,operation:&Operation,revision:u64,launch_advance:
     Ok(Request {
         identity: Identity {
             operation: format!("{}:{}", if launch_advance {"canonical-launch"} else if input.resource_recovery {"canonical-worker:recover"}
-                else if input.termination.is_some() && operation.payload["stop_requested"].as_bool()==Some(false) {"canonical-worker:monitor"}
+                else if input.termination.is_some() && operation.payload["stop_requested"].as_bool()==Some(false) {"canonical-worker:worker-exit-watch"}
                 else {"canonical-worker"}, operation.id.as_str()),
             revision,
             project: project.display().to_string(),
@@ -177,14 +177,14 @@ impl Runner for JobRunner {
                 ) {
                     Ok(Some(_)) => return Ok(Output {
                         code: Some(0), elapsed: entered.elapsed(),
-                        stdout: format!("{} attempt {}: termination recording succeeded", input.project.display(), attempt.as_str()),
+                        stdout: format!("{} attempt {}: worker exit recording succeeded; elapsed_ms={}", input.project.display(), attempt.as_str(), entered.elapsed().as_millis()),
                         ..Output::default()
                     }),
                     Ok(None) => {},
                     Err(error) => {
                         let contended = error.chain().any(|cause| matches!(cause.downcast_ref::<std::fs::TryLockError>(), Some(std::fs::TryLockError::WouldBlock)));
                         if contended {
-                            return Err(error.context(format!("attempt {}: termination recording deferred by contention; retry", attempt.as_str())));
+                            return Err(error.context(format!("attempt {}: worker exit recording deferred by contention; retry", attempt.as_str())));
                         }
                         return Err(error);
                     }

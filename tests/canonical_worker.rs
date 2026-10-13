@@ -3339,7 +3339,7 @@ fn wall_budget_termination(contended: bool, change_definition: bool) {
         let started: LaunchStartedReceipt = serde_json::from_value(lab.events("runtime.launch_started")[0].payload.clone()).unwrap();
         lab.wait(&mut ticker, 60, &|| {
             let log = fs::read_to_string(lab.path("root/.ticker.log")).unwrap_or_default();
-            log.lines().filter(|line| line.contains("termination recording deferred by contention") && line.contains(attempt.as_str())).count() >= 2
+            log.lines().filter(|line| line.contains("worker exit recording deferred by contention") && line.contains(attempt.as_str())).count() >= 2
                 && herdr_farm::worker_supervision::SupervisorObservation::recover_exited(started.supervisor.as_ref().unwrap()).unwrap()
         });
         assert!(!lab.attempt(&attempt).termination_observed);
@@ -3358,7 +3358,7 @@ fn wall_budget_termination(contended: bool, change_definition: bool) {
     let notices = lab.ok(&["inbox", "list", "demo"]);
     assert_eq!(notices.as_array().unwrap().iter().filter(|item| item["content"]["kind"] == "attempt.ended_without_submission").count(), 1, "{notices}");
     let log = fs::read_to_string(lab.path("root/.ticker.log")).unwrap();
-    assert!(log.lines().any(|line| line.contains("termination recording succeeded") && line.contains(attempt.as_str())), "{log}");
+    assert!(log.lines().any(|line| line.contains("worker exit recording succeeded") && line.contains(attempt.as_str())), "{log}");
 }
 
 // ---- Termination beside a long isolated check (TERM-RECORD-1, SILENT-DEATH-1) ----
@@ -3557,7 +3557,7 @@ fn termination_beside_a_foreign_check(submits: bool) {
     assert!(!ended.retains_capacity(), "{ended:?}");
     let events = lab.events("runtime.worker_terminated");
     assert_eq!((events.len(), &events[0].payload["cause"]), (1, &json!("process_exit")));
-    assert!(lab.log_lines(&attempt, "termination recording succeeded") >= 1);
+    assert!(lab.log_lines(&attempt, "worker exit recording succeeded") >= 1);
     assert_ne!(ended.state, AttemptState::Cancelled);
     let notices = lab.ok(&["inbox", "list", "demo"]);
     let ended_without_submission = notices.as_array().unwrap().iter().filter(|item| item["content"]["kind"] == "attempt.ended_without_submission").count();
@@ -3615,7 +3615,7 @@ fn a_worker_that_exits_during_its_own_verification_ends_after_the_verdict_withou
         assert!(!lab.attempt(&attempt).termination_observed, "terminated under its own running check");
         std::thread::sleep(Duration::from_millis(200));
     }
-    assert_eq!(lab.log_lines(&attempt, "termination recording deferred by contention"), 0, "{}", fs::read_to_string(lab.path("root/.ticker.log")).unwrap_or_default());
+    assert_eq!(lab.log_lines(&attempt, "worker exit recording deferred by contention"), 0, "{}", fs::read_to_string(lab.path("root/.ticker.log")).unwrap_or_default());
     held.release();
     lab.wait_for(&mut ticker, "the verdict", &attempt, 120, &|| lab.state().inbox.iter().any(|i| i.content.kind == "verification.accepted"));
     lab.wait_for(&mut ticker, "termination after the verdict", &attempt, 60, &|| lab.attempt(&attempt).termination_observed);
@@ -3627,8 +3627,8 @@ fn a_worker_that_exits_during_its_own_verification_ends_after_the_verdict_withou
     let events = lab.events("runtime.worker_terminated");
     assert_eq!(events.len(), 1);
     assert!(matches!(events[0].payload["cause"].as_str(), Some("process_exit" | "completion")), "{}", events[0].payload);
-    assert_eq!(lab.log_lines(&attempt, "termination recording deferred by contention"), 0);
-    assert!(lab.log_lines(&attempt, "termination recording succeeded") >= 1);
+    assert_eq!(lab.log_lines(&attempt, "worker exit recording deferred by contention"), 0);
+    assert!(lab.log_lines(&attempt, "worker exit recording succeeded") >= 1);
 }
 
 // ---- Launch stall and automatic pause recovery (LAUNCH-STALL-1, PAUSE-RECOVERY-1) ----
@@ -4685,4 +4685,76 @@ fn cancelled_running_attempt_offers_termination_without_a_passive_monitor_hint()
         std::thread::sleep(Duration::from_millis(20));
     }
     fs::remove_file(stop).unwrap();
+}
+
+// TERMINATION-CONTENTION-2: real exit watches through ticker ingress.
+#[test]
+fn exit_watch_ignores_maintenance_while_live_then_records_after_long_bursts() {
+    exit_watch_maintenance(false);
+}
+
+#[test]
+fn an_exited_worker_under_permanent_maintenance_escalates_once() {
+    exit_watch_maintenance(true);
+}
+
+fn exit_watch_maintenance(permanent: bool) {
+    let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+    lab.write_agent(EDIT_THEN_DIE_AGENT, &[]);
+    let (_, attempt) = lab.reserve("Exit watch contention lab");
+    let worktree = lab.planned_worktree(&attempt);
+    lab.serve();
+    let mut ticker = lab.spawn();
+    lab.wait(&mut ticker, 20, &|| worktree.join("work.txt").exists() && lab.attempt(&attempt).state == AttemptState::Running);
+    // Keep retained exit-watch work in this ticker; a fresh inventory cannot
+    // be populated while maintenance owns the root.
+    std::thread::sleep(Duration::from_millis(800));
+    let acquire_deadline = Instant::now() + Duration::from_secs(5);
+    let guard = loop {
+        if let Ok(guard) = herdr_farm::execution_guard::RootGuard::exclusive(&lab.path("root")) { break guard; }
+        assert!(Instant::now() < acquire_deadline, "maintenance acquisition exceeded lab bound");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    // A finite set of real passes while the worker lives must never report an
+    // exit-recording deferral or create an escalation notice.
+    let metrics = lab.path("root/.ticker-metrics.json");
+    let mut previous = fs::metadata(&metrics).unwrap().ino();
+    for _ in 0..5 {
+        lab.wait(&mut ticker, 10, &|| fs::metadata(&metrics).is_ok_and(|m|m.ino()!=previous));
+        previous = fs::metadata(&metrics).unwrap().ino();
+    }
+    assert_eq!(lab.log_lines(&attempt, "worker exit recording deferred by contention"), 0);
+    assert!(runtime::worker_exit_notices(&lab.project).unwrap().is_empty());
+    fs::write(worktree.join("die"), "").unwrap();
+    let started = Instant::now();
+    if permanent {
+        lab.wait(&mut ticker, 15, &|| !runtime::worker_exit_notices(&lab.project).unwrap().is_empty());
+        let notices = runtime::worker_exit_notices(&lab.project).unwrap();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].subject, attempt.as_str());
+        assert!(notices[0].summary.contains("deferrals") && notices[0].summary.contains("root maintenance or exclusive external operation"));
+        let health = lab.ok(&["telemetry", "demo", "health", "--json"]);
+        assert_eq!(health["worker_exit_contention"].as_array().unwrap().len(), 1);
+        let view = lab.ok(&["telemetry", "demo", "attempts"]);
+        assert_eq!(view["attempts"].as_array().unwrap().iter().find(|row|row["attempt_id"]==attempt.as_str()).unwrap()["worker_exit_contention"].as_array().unwrap().len(), 1);
+        assert!(!lab.attempt(&attempt).termination_observed);
+    } else {
+        lab.wait(&mut ticker, 15, &|| lab.log_lines(&attempt, "worker exit recording deferred by contention") >= 1);
+    }
+    drop(guard);
+    // Repeated maintenance bursts must leave a fair turn for the pending exit.
+    if !permanent {
+        for _ in 0..3 {
+            if lab.attempt(&attempt).termination_observed {break;}
+            if let Ok(burst)=herdr_farm::execution_guard::RootGuard::exclusive(&lab.path("root")) {
+                std::thread::sleep(Duration::from_millis(100));
+                drop(burst);
+            }
+        }
+    }
+    lab.wait(&mut ticker, 15, &|| lab.attempt(&attempt).termination_observed);
+    assert!(started.elapsed() < Duration::from_secs(20));
+    assert_eq!(lab.events("runtime.worker_terminated").len(), 1);
+    if permanent {assert_eq!(runtime::worker_exit_notices(&lab.project).unwrap().len(), 1);}
+    lab.stop(ticker);
 }

@@ -366,3 +366,27 @@ maximum during concurrent low-priority compilation (20 fresh head reads).
 After compilation, the final code measured 7.996 ms median and 26.039 ms maximum,
 below the initial 500 ms allowance. These are isolated synthetic-history
 measurements, not reads of an owner's store.
+
+TERMINATION-CONTENTION-2: exit-recording lock waits are 30 seconds in production,
+scaled with a 250 ms floor in labs; poll intervals have the usual 20 ms scaled
+floor. Live exit watches and contention retries use the existing 15-second
+recovery cadence. Escalation is three deferrals or two minutes (scaled), with a
+stable persisted notice and volatile counters. New coverage in
+`tests/canonical_worker.rs` holds the root barrier across live observations,
+actual process exit and repeated maintenance bursts, and checks escalation in
+inbox, health and attempt views. `tests/termination_contention.rs` is socket-free:
+a real `inbox done` waits through a 350 ms maintenance hold and an unrelated
+store event, then persists exactly the requested acknowledgement. Its explicit
+three-second lock-wait override is literal; every CLI process still uses the
+shared lab scale. Existing transfer fences and ROOT-LOCK-FAIRNESS maintenance scheduling remain.
+Exit-watch labs retain their ticker across the held lock so inventory is already
+available, and use 10–20 second safety deadlines with scaled product waits.
+
+Sandbox validation: lib 529 passed, 84 socket-only failures, 13 ignored;
+canonical-worker 13 passed and 67 socket-only failures; ticker 1 passed and
+4 socket-only failures; ticker-jobs 11 socket-only failures; ticker-timing
+5 passed. The socket-free acknowledgement passed with a measured 362 ms
+maintenance hold and 392 ms total acknowledgement latency. The new exit-watch
+assertions require the steward's outside-sandbox run; fixture socket creation
+was denied before those assertions. Clippy completed with no warnings in
+changed lines; existing warnings elsewhere remain.

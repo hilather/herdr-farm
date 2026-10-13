@@ -1526,3 +1526,57 @@ budget decisions, and a short remaining lease alone never proves a hung server.
 The pending-stop workflow keeps its ticker alive through persisted termination
 and the next launch after removing the journal failure fixture. Completed passes
 can precede background commits; stopping then can interrupt the newly admitted launch.
+## Exit watch and execution-lock contention
+
+Passive worker observations are named
+`canonical-worker:worker-exit-watch:terminate-<attempt>`. Requested stops retain
+their existing safety-job identity and priority.
+A read-only retained selection and pidfd exit poll precede root ownership: a live
+worker without cancellation, completion, wall expiry or launch-lease recovery
+returns without `.execution.lock`. Live staged gates also poll without ownership
+while their original launch authority remains usable.
+An exited worker awaiting its own verification verdict also avoids that lock.
+Observations, including contended retries, cool down for 15 seconds (scaled in
+isolated labs). The stored `runtime.worker_termination` hint remains compatible.
+
+An actual exit recording or requested stop waits at most 30 seconds for the
+exclusive root, never past the original 45-second job deadline or cancellation.
+The existing OS-backed `.execution-turn.lock` writer turn drains current
+holders and prevents new phases from overtaking the recorder. Existing
+ROOT-LOCK-FAIRNESS safety admission, requested-stop priority and maintenance
+batch scheduling remain in place. Exit selection is read again after acquisition;
+all existing identity, revision, receipt and lock-order fences remain.
+
+The old card's process-local priority reservation, copy-phase yielding and
+service-priority changes were dropped: current main already provides fairness
+across processes and schedules safety work before launch advancement. No
+additional live-copy hold reduction was needed or measured by this change.
+
+After three exhausted acquisition windows or two minutes since the first
+deferral (whichever comes first), the worker writes one stable advisory inbox
+notice `telemetry-health-worker-exit-<attempt>`. It names the attempt, count and
+holder kind from best-effort Linux lock evidence: same-process or external-process,
+shared project effect/observation or exclusive root maintenance/external operation.
+Unavailable evidence is explicitly unknown; no PID or unrelated lock data is
+persisted. The notice also records the last acquisition wait in milliseconds. Counts and elapsed time are ticker memory and
+reset on restart; the notice survives restart and is deduplicated even after
+acknowledgement. Advisory intake uses the existing active-store publication
+checks and atomic inbox transaction independently of the effect barrier, so a
+permanently held execution lock cannot suppress its own warning. Execution state
+is untouched. A failure to persist the notice is reported and retried.
+
+Successful exit-watch log lines include total `elapsed_ms` (read, wait and recording).
+
+`telemetry PROJECT health --json` exposes `worker_exit_contention`; health text
+prints the notice summary. Each `telemetry PROJECT attempts` row exposes its
+matching notice in `worker_exit_contention`. These retained diagnostics do not
+by themselves mean recording is still blocked: inspect the current attempt.
+No canonical or sidecar schema changed.
+
+`inbox done` uses a monotonic exact-ID acknowledgement: acquire ownership with
+the existing bounded foreground wait (30 seconds), then read the current event
+head and retry up to eight unrelated head conflicts. It only handles the chosen
+IDs; `--all` selects the unfinished IDs shown before the wait. The strict
+`runtime::update_inbox`/store API still checks the supplied head. Task edits and
+cancel-attempt already use the foreground wait and retain their explicit head
+and entity revision fences; a changed task or attempt must still be reviewed.

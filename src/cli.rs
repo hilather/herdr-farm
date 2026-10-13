@@ -2047,7 +2047,7 @@ pub fn run(#[cfg(feature="state-store")] capture: &mut crate::cli_invocation::Ca
                     if project::ensure_legacy(&dir).is_err() {
                         let snapshot=herdr_farm::runtime::snapshot(&dir)?;
                         let ids=if all {snapshot.inbox.iter().filter(|i|!i.done).map(|i|i.content.id.clone()).collect()}else{ids};
-                        println!("{} inbox item(s) marked done",herdr_farm::runtime::update_inbox(&dir,snapshot.head,&ids,true)?);
+                        println!("{} inbox item(s) marked done",herdr_farm::runtime::acknowledge_inbox(&dir,&ids)?);
                         return Ok(());
                     }
                 }

@@ -10,7 +10,8 @@ fn retention()->Duration {crate::timing::queue_retention()}
 fn failure_delay(identity:&Identity)->Duration {
     // Launch retries observe durable boundaries under the original 30s lease.
     // Generic backoff would consume that entire lease after one lost reply.
-    if identity.operation.starts_with("canonical-launch:") {crate::timing::launch_retry()}
+    if identity.operation.starts_with("canonical-worker:worker-exit-watch:") {crate::timing::worker_recovery_retry()}
+    else if identity.operation.starts_with("canonical-launch:") {crate::timing::launch_retry()}
     // A brief, preparation or termination that lost a lock race or hit a
     // transient failure is retried soon; the claim it serves is short-lived.
     else if identity.operation.starts_with("canonical-worker:") {crate::timing::worker_retry()}
@@ -21,7 +22,7 @@ fn safety_work(operation:&str)->bool {
         "canonical-worker:prepare-brief-", "canonical-worker:brief-"].iter().any(|prefix| operation.starts_with(prefix))
 }
 fn termination_job(operation:&str)->bool {
-    operation.starts_with("canonical-worker:terminate-") || operation.starts_with("canonical-worker:monitor:terminate-")
+    operation.starts_with("canonical-worker:terminate-") || operation.starts_with("canonical-worker:worker-exit-watch:terminate-")
 }
 struct Entry {work:Option<Request>,resources:Vec<Resource>,not_before:Instant,touched:Instant,last:u64,needed:bool,waiting_since:Instant,losses:u32}
 struct Pending {key:Key,identity:Identity,work:Request,ticket:crate::executor::Ticket,resources:Vec<Resource>}
