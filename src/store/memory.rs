@@ -73,6 +73,54 @@ fn entry_bytes(db:&Connection,fact:&crate::domain::ActiveFact,role:&str)->Result
     Ok(size +
     serde_json::json!({"id":fact.record.id.as_str(),"key":fact.record.record_key,"revision":fact.revision.revision,"kind":fact.record.kind.as_str(),"body":fact.revision.body_hash.as_str(),"role":role}).to_string().len() as u64)
 }
+fn worker_entry_bytes(db: &Connection, fact: &crate::domain::ActiveFact) -> Result<u64> {
+    let size:u64=db.query_row("SELECT size FROM objects WHERE hash=?1",[fact.revision.body_hash.as_str()],|r|r.get(0))?;
+    Ok(size + format!("\n## {}\n\n",fact.record.record_key).len() as u64 + 1)
+}
+type WorkerMemoryEntry = (crate::domain::ActiveFact, &'static str, &'static str);
+
+fn worker_memory_entries(db: &Connection, request: &crate::domain::SnapshotRequest, facts: &[crate::domain::ActiveFact], budget: u64) -> Result<(Vec<WorkerMemoryEntry>, u64)> {
+    use crate::domain::{MemoryKind, selection_score};
+    let objects=Path::new(db.path().ok_or_else(||invalid("store path missing"))?).parent().ok_or_else(||invalid("store parent missing"))?.join("objects");
+    let hard=|f: &crate::domain::ActiveFact| f.record.is_hard || matches!(f.record.kind,MemoryKind::Constraint|MemoryKind::HardMemory) || request.pinned_keys.contains(&f.record.record_key);
+    let pins=request.pinned_keys.iter().filter_map(|key|facts.iter().find(|f|&f.record.record_key==key).map(|f|f.record.id.as_str().to_owned())).collect::<Vec<_>>();
+    let distances=hops_from_pins(db,&pins)?;
+    let mut eligible=facts.iter().filter(|f|f.record.kind!=MemoryKind::TaskLocal || f.record.scope_id==format!("task:{}",request.task_id))
+        .filter(|f|hard(f) || f.record.scope_id=="project" || distances.contains_key(f.record.id.as_str()) || crate::domain::scope_matches(request,&f.revision.applicability)).collect::<Vec<_>>();
+    eligible.sort_by_key(|f|(!hard(f),std::cmp::Reverse(selection_score(request,f,distances.get(f.record.id.as_str()).copied())),std::cmp::Reverse(f.revision.promoted_seq),f.record.id.as_str()));
+    let mut entries=Vec::new();
+    let mut used=0;
+    let mut optional=Vec::new();
+    let mut names=Vec::new();
+    for fact in eligible {
+        if hard(fact) {
+            used+=worker_entry_bytes(db,fact)?;
+            names.push(fact.record.id.as_str().to_owned());
+            entries.push((fact.clone(),"mandatory",if fact.record.is_hard {"hard"} else if fact.record.kind==MemoryKind::Constraint {"constraint"} else {"pinned"}));
+        } else {
+            let body=crate::memory::read_object(&objects,&fact.revision.body_hash).map_err(|e|invalid(&e.to_string()))?;
+            let body=std::str::from_utf8(&body).map_err(|_|invalid("memory body is not UTF-8"))?;
+            let summary=crate::memory::worker_brief::memory_summary(&fact.record.record_key,fact.record.id.as_str(),body);
+            optional.push((fact,summary.len() as u64,worker_entry_bytes(db,fact)?));
+        }
+    }
+    if used>budget {return Err(StoreError::PromptTooLarge {part:"hard_memory".into(),required_bytes:used,budget_bytes:budget,records:names});}
+    // Reserve excerpts before upgrading the most relevant facts to full text.
+    let mut retained=Vec::new();
+    let mut omitted=0;
+    for (fact,summary,full) in optional {
+        let minimum=summary.min(full);
+        if used+minimum>budget {omitted+=1;continue;}
+        used+=minimum;
+        retained.push((fact,minimum,full));
+    }
+    for (fact,minimum,full) in retained {
+        let reason=if used+full-minimum<=budget {used+=full-minimum;"ranked"} else {"summary"};
+        entries.push((fact.clone(),"optional",reason));
+    }
+    Ok((entries,omitted))
+}
+
 pub(crate) fn apply_memory_revision_in_tx(tx:&rusqlite::Transaction,next:&crate::domain::NewRevision)->Result<(MemoryHead,u64)> {
     next.applicability.validate().map_err(|s|invalid(&s))?;
     if next.record_key.is_empty()||next.record_key.len()>512||next.record_key.chars().any(char::is_control) {return Err(invalid("invalid memory record_key"));}
@@ -149,9 +197,28 @@ impl SqliteStore {
         let tx=self.connection.transaction()?;schema(&tx)?;
         let facts=load_active_facts(&tx,now)?;tx.commit()?;Ok(facts)
     }
+    /// Read-only selection using the same bounded policy as worker snapshots.
+    pub fn preview_worker_memory(&mut self,request:&crate::domain::SnapshotRequest,budget:u64,now:i64)->Result<String> {
+        let facts=self.active_facts(now)?;
+        let (entries,_)=worker_memory_entries(&self.connection,request,&facts,budget)?;
+        let objects=Path::new(self.connection.path().ok_or_else(||invalid("store path missing"))?).parent().ok_or_else(||invalid("store parent missing"))?.join("objects");
+        let mut text=String::new();
+        for (fact,_,reason) in entries {
+            let body=crate::memory::read_object(&objects,&fact.revision.body_hash).map_err(|e|invalid(&e.to_string()))?;
+            let body=std::str::from_utf8(&body).map_err(|_|invalid("memory body is not UTF-8"))?;
+            if reason=="summary" {text.push_str(&crate::memory::worker_brief::memory_summary(&fact.record.record_key,fact.record.id.as_str(),body));}
+            else {text.push_str(&format!("\n## {}\n\n{body}\n",fact.record.record_key));}
+        }
+        Ok(text)
+    }
     pub fn create_memory_snapshot(&mut self,plan:crate::domain::SnapshotPlan)->Result<crate::domain::MemorySnapshot> {
+        self.create_memory_snapshot_with_memory_budget(plan, 8192)
+    }
+    /// Worker memory has its own byte allowance, independent of the task brief.
+    pub fn create_memory_snapshot_with_memory_budget(&mut self,plan:crate::domain::SnapshotPlan,memory_budget:u64)->Result<crate::domain::MemorySnapshot> {
         use crate::domain::{selection_score, SELECTION_POLICY_VERSION, SnapshotId};
         if plan.profile_digest.len()!=64 {return Err(invalid("invalid profile digest"));}
+        if plan.estimator==crate::memory::WORKER_BRIEF_ESTIMATOR && plan.request.task_id=="coordinator" {return Err(invalid("task_id coordinator is reserved"));}
         let tx=super::mutation_transaction(&mut self.connection)?;
         let version:u32=tx.query_row("PRAGMA user_version",[],|r|r.get(0))?;
         if version<23 {return Err(StoreError::UnsupportedSchema(version));}
@@ -202,19 +269,42 @@ impl SqliteStore {
         let mut required=plan.instructions.chars().count() as u64 + request_json.chars().count() as u64 + task_text.chars().count() as u64 + 128;
         if plan.estimator == crate::memory::WORKER_BRIEF_ESTIMATOR {
             if plan.coordinator {return Err(invalid("worker brief estimator cannot select coordinator knowledge"));}
+            required=plan.instructions.len() as u64 + task_text.len() as u64 + "# Project instructions\n\n\n\n# Task\n\n\n\n# Memory\n".len() as u64;
             required=required.saturating_add(crate::memory::worker_brief_framing_chars(tx.path().ok_or_else(||invalid("worker snapshot store path missing"))?).map_err(|_|invalid("worker brief framing unavailable"))?);
         }
         let mut entries=Vec::new();
+        let mut memory_used=0u64;
         for fact in &mandatory {
-            required=required.saturating_add(entry_bytes(&tx,fact,"mandatory")?);
+            let size=if plan.estimator==crate::memory::WORKER_BRIEF_ESTIMATOR {worker_entry_bytes(&tx,fact)?} else {entry_bytes(&tx,fact,"mandatory")?};
+            memory_used+=size;
+            required=required.saturating_add(size);
             entries.push(((*fact).clone(),"mandatory", if fact.record.is_hard {"hard"} else if fact.record.kind==crate::domain::MemoryKind::Constraint {"constraint"} else {"pinned"}));
         }
+        if plan.estimator == crate::memory::WORKER_BRIEF_ESTIMATOR && memory_used > memory_budget {
+            return Err(StoreError::PromptTooLarge { part: "hard_memory".into(), required_bytes: memory_used, budget_bytes: memory_budget, records: mandatory.iter().map(|f|f.record.id.as_str().to_owned()).collect() });
+        }
         if required>plan.budget_chars {
+            if plan.estimator == crate::memory::WORKER_BRIEF_ESTIMATOR {
+                return Err(StoreError::PromptTooLarge {part:"brief".into(),required_bytes:required,budget_bytes:plan.budget_chars,records:vec![]});
+            }
             return Err(StoreError::Limit(format!("required {required} budget {}",plan.budget_chars)));
         }
         let mut optional_bytes=0u64;
         let mut omitted=0u64;
-        if !plan.coordinator {
+        if plan.estimator == crate::memory::WORKER_BRIEF_ESTIMATOR {
+            let (packed,missing)=worker_memory_entries(&tx,&plan.request,&facts,memory_budget.min(plan.budget_chars.saturating_sub(required).saturating_add(memory_used)))?;
+            entries=packed;
+            omitted=missing;
+            let objects=Path::new(tx.path().ok_or_else(||invalid("store path missing"))?).parent().ok_or_else(||invalid("store parent missing"))?.join("objects");
+            for (fact,role,reason) in &entries {
+                if *role=="mandatory" {continue;}
+                optional_bytes+=if *reason=="summary" {
+                    let body=crate::memory::read_object(&objects,&fact.revision.body_hash).map_err(|e|invalid(&e.to_string()))?;
+                    crate::memory::worker_brief::memory_summary(&fact.record.record_key,fact.record.id.as_str(),std::str::from_utf8(&body).map_err(|_|invalid("memory body is not UTF-8"))?).len() as u64
+                } else {worker_entry_bytes(&tx,fact)?};
+            }
+            if required+optional_bytes>plan.budget_chars {return Err(StoreError::PromptTooLarge {part:"brief".into(),required_bytes:required+optional_bytes,budget_bytes:plan.budget_chars,records:vec![]});}
+        } else if !plan.coordinator {
             let dist=hops_from_pins(&tx,&plan.request.pinned_keys.iter().filter_map(|k| by_key.get(k).map(|f|f.record.id.as_str().to_string())).collect::<Vec<_>>())?;
             let mut optional:Vec<_>=facts.iter().filter(|f| {
                 if seen.contains(f.record.id.as_str()) || matches!(f.record.kind,crate::domain::MemoryKind::Constraint|crate::domain::MemoryKind::HardMemory) {return false;}

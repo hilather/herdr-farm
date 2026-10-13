@@ -21,7 +21,7 @@ impl ErrorClass {
             if let Some(error) = cause.downcast_ref::<crate::store::StoreError>() {
                 return match error {
                     crate::store::StoreError::Busy => Self::StoreBusy,
-                    crate::store::StoreError::Invalid(_) | crate::store::StoreError::Conflict | crate::store::StoreError::StalePlanParent(_) => Self::Precondition,
+                    crate::store::StoreError::PromptTooLarge { .. } | crate::store::StoreError::Invalid(_) | crate::store::StoreError::Conflict | crate::store::StoreError::StalePlanParent(_) => Self::Precondition,
                     _ => Self::Internal,
                 };
             }

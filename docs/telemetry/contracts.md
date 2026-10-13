@@ -1127,3 +1127,7 @@ existing `expired_inventory` sidecar column, including historical inventory
 expiry. Routine admission retries next pass without a failed admission.
 No schema, retention or backup classification changes are required. See
 [load-driven inventory expiry](../test-tick-timing.md#load-driven-inventory-expiry-maint-io-interrupted-2).
+
+LAUNCH-OVERHEAD-GROWTH-1: M95 result metadata includes the byte partition of
+retained worker prompts (see contracts-analytics.md). This uses existing sealed
+inputs, snapshot entries and object retention; no schema version changes.

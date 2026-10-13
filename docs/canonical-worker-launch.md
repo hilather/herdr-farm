@@ -1595,3 +1595,41 @@ IDs; `--all` selects the unfinished IDs shown before the wait. The strict
 `runtime::update_inbox`/store API still checks the supplied head. Task edits and
 cancel-attempt already use the foreground wait and retain their explicit head
 and entity revision fences; a changed task or attempt must still be reviewed.
+
+### Prompt growth and launch size preflight
+
+`launch PROJECT run` checks the prompt's UTF-8 byte envelope before signing
+preflight and profile readiness/interaction probes. Previously snapshot creation
+ran after profile preparation, so a readiness refusal could hide an oversized
+prompt. `prompt_too_large` now identifies the growing part and reports bytes and
+limit. The final retained rendering also enforces the byte limit; the legacy
+`prompt_chars` and `budget_chars` names remain for compatibility.
+
+`memory PROJECT attempt-brief --attempt ID` includes `prompt_bytes`: framing,
+memory, guidance, brief, fixed_overhead, total, and limit. These parts partition
+the complete outbound prompt. Framing includes product instructions, identity
+and section delimiters; guidance includes protocol, submission instructions,
+outputs, worktree guidance and the command card. Brief includes task title and
+explicit task/review instructions. `fixed_overhead = total - brief`. The launch
+report's draft step contains the same breakdown. These report fields are derived
+from retained text and do not enter approval or configuration fingerprints.
+Retry preflight measures an existing attempt from sealed bytes without requiring
+its old owner configuration to remain current; launch authority still checks
+current configuration and fresh worker identity evidence.
+
+Worker memory defaults to an 8192-byte share. Set `[launch]
+memory_budget_bytes = 8192` in the pinned owner configuration to change the launch
+allowance (1–32000 bytes). Hard rules and pinned requirements are selected first;
+optional facts follow applicability/relevance ranking, then promotion recency.
+Oversized optional facts use deterministic one-line excerpts and record IDs.
+`memory PROJECT attempt-fact --attempt ID --record RECORD` fetches the full
+retained revision through the same attempt checks as attempt-input, including
+worker spool isolation. An excerpt never rewrites the canonical record.
+The launch knowledge step lists `summarized_for_budget` keys separately from
+`omitted_for_budget` keys whose excerpts cannot fit.
+Hard memory that exceeds its allowance produces a typed `prompt_too_large`
+refusal naming the records, rather than silently dropping rules.
+
+Keep owner memory facts short: they are delivered to every worker. No canonical
+or telemetry schema migration is required; summary selection is retained in
+existing snapshot entries, and full objects keep their existing retention rules.

@@ -857,6 +857,7 @@ pub fn commands(root: &Path, slug: &str) -> Result<String> {
     Ok(format!(
         "\nCanonical commands (replace uppercase values with retained IDs/paths):\n\
 {p} context {slug}\n\
+Keep owner memory facts short: they are delivered to every worker.\n\
 Record explicit owner decisions after adoption: {p} memory {slug} record --title TITLE --provenance USER_INSTRUCTION --body-file FILE\n\
 {p} task {slug} list\n\
 {p} task {slug} show TASK\n\

@@ -127,7 +127,7 @@ mod tests {
         let plain=memory.create_task_snapshot(request(&["ui"],&[]),"implementation",&digest(),None,32000,"Required instructions",1000,None).unwrap();
         let worker=memory.create_worker_snapshot(request(&["ui"],&[]),"implementation",&digest(),None,32000,"Required instructions",1000,None).unwrap();
         assert_ne!(plain.id,worker.id);
-        assert_eq!(worker.required_bytes,plain.required_bytes+crate::memory::worker_brief_framing_chars(_root.path().join("state.db").to_str().unwrap()).unwrap());
+        assert_eq!(worker.required_bytes, "Required instructions".len() as u64 + "ui".len() as u64 + "# Project instructions\n\n\n\n# Task\n\n\n\n# Memory\n".len() as u64 + crate::memory::worker_brief_framing_chars(_root.path().join("state.db").to_str().unwrap()).unwrap());
         assert_eq!(worker.estimator,crate::memory::WORKER_BRIEF_ESTIMATOR);
         assert!(memory.create_worker_snapshot(request(&["ui"],&[]),"implementation",&digest(),None,worker.required_bytes-1,"Required instructions",1000,None).is_err());
         let exact=memory.create_worker_snapshot(request(&["ui"],&[]),"implementation",&digest(),None,worker.required_bytes,"Required instructions",1000,None).unwrap();

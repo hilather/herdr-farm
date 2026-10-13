@@ -249,6 +249,8 @@ enum MemoryCommand {
     ReviewImport { document:PathBuf, signature:PathBuf, #[arg(long)] expected_head:u64 },
     SnapshotInput { #[arg(long)] id:String },
     AttemptInput { #[arg(long)] attempt:String },
+    /// Read the full revision of a fact retained for this attempt
+    AttemptFact { #[arg(long)] attempt:String, #[arg(long)] record:String },
     /// Render the complete budgeted canonical worker prompt without sending it
     AttemptBrief { #[arg(long)] attempt:String },
     Deliveries,
@@ -1308,6 +1310,7 @@ pub fn run(#[cfg(feature="state-store")] capture: &mut crate::cli_invocation::Ca
                 MemoryCommand::Candidate{id}=>herdr_farm::memory::import_candidate_preview(&dir,&id)?,
                 MemoryCommand::ReviewImport{document,signature,expected_head}=>serde_json::to_value(herdr_farm::authority::review_memory_import(&dir,&document,&signature,expected_head)?)?,
                 MemoryCommand::AttemptInput{attempt}=>herdr_farm::memory::render_attempt_knowledge(&dir,&attempt)?,
+                MemoryCommand::AttemptFact{attempt,record}=>herdr_farm::memory::read_attempt_fact(&dir,&attempt,&record)?,
                 MemoryCommand::AttemptBrief{attempt}=>serde_json::to_value(herdr_farm::memory::render_attempt_brief(&dir,&attempt)?)?,
                 MemoryCommand::SnapshotInput{id}=>herdr_farm::memory::render_knowledge_snapshot(&dir,&id)?,
                 MemoryCommand::Preview{file}=>serde_json::to_value(herdr_farm::memory::preview(&dir,&file)?)?,

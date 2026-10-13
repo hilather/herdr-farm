@@ -452,7 +452,7 @@ pub fn prepare(
                 .as_ref()
                 .context("worktree launch profile missing")?,
             &project,
-            brief.prompt_chars,
+            brief.prompt_bytes.total,
             git.deadline,
             &git.cancellation,
         )?;

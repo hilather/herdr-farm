@@ -43,9 +43,9 @@ pub(crate) fn now() -> i64 {
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn validate_preparation_inputs(profile:&FrozenProfile,project:&Path,prompt_chars:u64,deadline:Instant,cancellation:&Cancellation)->Result<()> {
+pub(crate) fn validate_preparation_inputs(profile:&FrozenProfile,project:&Path,prompt_bytes:u64,deadline:Instant,cancellation:&Cancellation)->Result<()> {
     profile.validate_for_launch().map_err(anyhow::Error::msg)?;
-    crate::profile_config::frozen_definition(profile)?.validate_gated_preparation(prompt_chars)?;
+    crate::profile_config::frozen_definition(profile)?.validate_gated_preparation(prompt_bytes)?;
     resources::validate_execution_home(profile,project)?;
     executable(&profile.agent,deadline,cancellation)?;
     executable(&profile.herdr,deadline,cancellation)

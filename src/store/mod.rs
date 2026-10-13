@@ -19,6 +19,7 @@ pub enum StoreError {
     Interrupted,
     Deadline,
     Limit(String),
+    PromptTooLarge { part: String, required_bytes: u64, budget_bytes: u64, records: Vec<String> },
     Conflict,
     BriefAuthorityStale,
     /// Expected plan parent is not the current revision. The value is that revision.
@@ -38,6 +39,9 @@ pub mod integrity;
 pub(crate) mod read_budget;
 impl fmt::Display for StoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Self::PromptTooLarge { part, required_bytes, budget_bytes, records }=self {
+            return write!(f,"prompt_too_large: part={part} required={required_bytes} limit={budget_bytes} records={}",records.join(","));
+        }
         if matches!(self,Self::Deadline) {
             return f.write_str("state store: Deadline (operation budget expired)");
         }

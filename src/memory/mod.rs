@@ -75,7 +75,10 @@ pub enum MemoryError {
     Storage(StoreError),
 }
 impl std::fmt::Display for MemoryError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "{self:?}") }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Self::Storage(error @ StoreError::PromptTooLarge { .. })=self { write!(f,"{error}") }
+        else { write!(f, "{self:?}") }
+    }
 }
 impl std::error::Error for MemoryError {}
 impl From<StoreError> for MemoryError {
@@ -95,7 +98,7 @@ mod snapshot;
 mod import;
 mod checkpoint;
 mod delivery;
-mod worker_brief;
+pub mod worker_brief;
 pub use worker_brief::{WorkerBrief, render_attempt_brief, enqueue_attempt_brief};
 pub(crate) use worker_brief::preview_worker_brief;
 pub(crate) use import::{render_knowledge_snapshot_held, render_attempt_knowledge_budgeted, render_knowledge_snapshot_budgeted};
