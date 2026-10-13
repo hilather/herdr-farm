@@ -330,3 +330,20 @@ attempt state indicates whether recording subsequently succeeded. This is an
 advisory runtime diagnostic using existing inbox retention/backup classification,
 not a new sidecar alert rule or migration. Counters are volatile; stable notice
 identity deduplicates across ticker restarts.
+
+
+### Automatic notification regression coverage
+
+The unchanged main-branch
+`ticker_health_evaluates_by_default_obeys_interval_and_never_notifies`
+workflow retains exact evaluation counts, occurrences, interval and per-pass
+inbox assertions. Its warn-only collector alert stays quiet under the default
+critical policy.
+
+`ticker_notifies_critical_launch_stalled_episode_once` separately exercises a
+paused canonical project through the ticker and telemetry CLI: opening delivery,
+inbox-commit/receipt-loss recovery, resolution, cooldown suppression, off/critical/warn
+policy, one suppressed-flap summary, and quiet never-notified rollout history.
+It waits for the persisted health evaluation before stopping each ticker and
+checks exact evaluation increments and notice counts. The manual quota notice
+workflow checks the complete deterministic summary, including its evidence.
