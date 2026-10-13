@@ -255,6 +255,13 @@ records each helper invocation and dumps public operation inspection, the runtim
 snapshot, notification authority validation, the controller dispatch hint, effect
 pause reason, lock availability and executor metrics on a failed wait. The dump
 includes the wall clock so persisted due and lease times can be compared directly.
+Helper stage timestamps distinguish request reads, nonblocking lock checks,
+SQLite claim reads, effect recording and reply buffering/flushing. The same CLI
+workflow also confirms a helper that reads the request to EOF, and requires a
+helper stalled after effect recording to become ambiguous within 30 seconds and
+before its captured claim expiry. These are regression checks for the existing
+10-second command cap and cleanup allowance, not evidence that the intermittent
+CI delivery hang has been diagnosed or fixed.
 Unix socket restrictions prevent exercising this fixture past socket creation in
 the sandbox.
 

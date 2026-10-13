@@ -1241,7 +1241,7 @@ fn ticker_canonical_notification_confirms_or_retains_ambiguity_after_owner_death
     // Marker/state waits include unscaled native probes and slow runner scheduling.
     // Keep the owner-death lock and escaped-helper deadlines independent.
     let wait_budget = Duration::from_secs(60);
-    for mode in ["ok","lost","death"] {
+    for mode in ["ok","eof","blocked","lost","death"] {
         let home=tempfile::tempdir().unwrap();let root=home.path().join("root");let r=root.to_str().unwrap();for action in ["new","pause"]{assert!(hp(home.path(),&["--root",r,action,"demo"]).status.success());}
         let project=root.join("demo");fs::write(project.join("inbox/message.md"),"+++\nid='message'\nsummary='private text'\n+++\n").unwrap();let plan=migration::inspect(&project).unwrap();migration::apply(&project,&plan,true).unwrap();
         let task=TaskId::new("notification").unwrap();let head=runtime::add_task(&project,task.clone(),"notification".into(),runtime::snapshot(&project).unwrap().head).unwrap();let socket=home.path().join("notification.sock");let _listener=UnixListener::bind(&socket).unwrap();runtime::create_binding(&project,None,None,head,&RuntimeRoute{socket:socket.display().to_string(),workspace_id:"w".into(),tab_id:"t".into(),pane_id:"p".into(),cwd:project.display().to_string(),..Default::default()}).unwrap();
@@ -1255,6 +1255,8 @@ def failure(kind,value,tb):
   traceback.print_exception(kind,value,tb,file=f)
  sys.__excepthook__(kind,value,tb)
 sys.excepthook=failure
+def stage(value):
+ with open(root/'helper-stages','a') as f:f.write(str(time.time())+' '+value+'\n')
 # Keep this recorded session reachable through the accelerated idle deadline.
 if sys.argv[1:]==['--version']:print('herdr 0.9.1');sys.exit(0)
 if sys.argv[1:] in [['pane','list'],['agent','list']]:
@@ -1262,19 +1264,27 @@ if sys.argv[1:] in [['pane','list'],['agent','list']]:
  print(json.dumps({{'result':{{'panes':[p]}} if sys.argv[1:]==['pane','list'] else {{'agents':[dict(p,agent='fixture',name='coordinator',agent_status='working')]}}}}));sys.exit(0)
 if sys.argv[1:]==['remote-api-bridge','--check']:print('herdr-api-bridge-v1');sys.exit(0)
 assert sys.argv[1:]==['remote-api-bridge']
-request=json.loads(sys.stdin.readline());assert request['method']=='notification.show'
+stage('request read begin')
+request=json.loads(sys.stdin.read() if mode=='eof' else sys.stdin.readline());assert request['method']=='notification.show'
+stage('request read complete')
 for lock in [project.parent/'.execution.lock',project/'.state'/'effect.lock',project.parent/'.routine-execution.lock']:
  with open(lock,'r+') as f:
   try:fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)
   except BlockingIOError:pass
   else:(root/'WRONG_LOCK').write_text(str(lock));sys.exit(5)
+stage('lock checks complete')
 db=sqlite3.connect(project/'.state'/'state.db');assert db.execute("select count(*) from operation_delivery where state='claimed'").fetchone()[0]==1
+stage('claimed row read complete')
 if mode=='death' and os.fork()==0:
  os.setsid();os.closerange(3,1024);time.sleep(15);(root/'escaped').write_text('bad');os._exit(0)
 with open(root/'sent','a') as f:f.write('send\n')
-if mode=='death':time.sleep(60)
+stage('effect recorded')
+if mode in ['death','blocked']:time.sleep(60)
 if mode=='lost':sys.exit(0)
 print(json.dumps({{'id':request['id'],'result':{{'type':'notification_show','shown':True,'reason':'shown'}}}}))
+stage('reply buffered')
+sys.stdout.flush()
+stage('reply flushed')
 "#,home=home.path().display().to_string(),project=project.display().to_string())).unwrap();fs::set_permissions(&helper,fs::Permissions::from_mode(0o700)).unwrap();
         let command = |args: &[&str]| Command::new(BIN).env_clear()
             .env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim())
@@ -1304,7 +1314,7 @@ print(json.dumps({{'id':request['id'],'result':{{'type':'notification_show','sho
                 2 * 1024 * 1024, 1024, Instant::now() + Duration::from_secs(2), Default::default()).unwrap();
             let hint = migration::read_controller_dispatch_hint(&project, &mut budget, 0, now, true)
                 .map(|hint| hint.map(|hint| (hint.operation.id, hint.delivery_revision, hint.notification_socket)));
-            format!("mode={mode}; now_ms={now}\noperations inspect ({status}):\n{stdout}\n{stderr}\nruntime: {state:#?}\nnotification validation: {validation:?}\ncontroller hint: {hint:?}\neffect pause: {pause:?}\nroot available: {root_available}; project available: {project_available}\nmetrics: {metrics}\nticker log: {log}\nticker stderr: {ticker_stderr}\nhelper calls: {calls}\nhelper errors: {errors}\nwrong lock: {wrong}",
+            format!("mode={mode}; now_ms={now}\noperations inspect ({status}):\n{stdout}\n{stderr}\nruntime: {state:#?}\nnotification validation: {validation:?}\ncontroller hint: {hint:?}\neffect pause: {pause:?}\nroot available: {root_available}; project available: {project_available}\nmetrics: {metrics}\nticker log: {log}\nticker stderr: {ticker_stderr}\nhelper calls: {calls}\nhelper stages: {stages}\nhelper errors: {errors}\nwrong lock: {wrong}",
                 status=inspected.status, stdout=String::from_utf8_lossy(&inspected.stdout), stderr=String::from_utf8_lossy(&inspected.stderr),
                 pause=herdr_farm::watchdog::effects_paused(&project),
                 root_available=RootGuard::exclusive(&root).is_ok(), project_available=ProjectGuard::acquire(&project).is_ok(),
@@ -1312,12 +1322,15 @@ print(json.dumps({{'id':request['id'],'result':{{'type':'notification_show','sho
                 log=fs::read_to_string(root.join(".ticker.log")).unwrap_or_default(),
                 ticker_stderr=fs::read_to_string(home.path().join("ticker-stderr")).unwrap_or_default(),
                 calls=fs::read_to_string(home.path().join("helper-calls")).unwrap_or_default(),
+                stages=fs::read_to_string(home.path().join("helper-stages")).unwrap_or_default(),
                 errors=fs::read_to_string(home.path().join("helper-errors")).unwrap_or_default(),
                 wrong=fs::read_to_string(home.path().join("WRONG_LOCK")).unwrap_or_default())
         };
         let wait=|child:&mut Child,phase:&str,predicate:&dyn Fn()->bool|{let end=Instant::now()+wait_budget;while !predicate(){assert!(child.0.try_wait().unwrap().is_none(),"phase={phase}\n{}",diagnostic());assert!(Instant::now()<end,"phase={phase}\n{}",diagnostic());std::thread::sleep(Duration::from_millis(10));}};
         let stop=|child:&mut Child|{fs::write(root.join(".ticker.stop"),b"").unwrap();let end=Instant::now()+wait_budget;while child.0.try_wait().unwrap().is_none(){assert!(Instant::now()<end);std::thread::sleep(Duration::from_millis(10));}fs::remove_file(root.join(".ticker.stop")).unwrap();};
         let mut child=spawn();wait(&mut child,"native notification send",&||home.path().join("sent").exists());
+        let effect_started=Instant::now();
+        let effect_lease=if mode=="blocked"{read().lease_until_ms}else{None};
         if mode=="death" {
             child.0.kill().unwrap();child.0.wait().unwrap();assert!(RootGuard::exclusive(&root).is_err());assert!(ProjectGuard::acquire(&project).is_err());
             let routine=fs::OpenOptions::new().write(true).open(root.join(".routine-execution.lock")).unwrap();assert!(routine.try_lock().is_err());
@@ -1325,7 +1338,14 @@ print(json.dumps({{'id':request['id'],'result':{{'type':'notification_show','sho
             routine.try_lock().unwrap();routine.unlock().unwrap();assert!(ProjectGuard::acquire(&project).is_ok());assert_eq!(read().state,DeliveryState::Claimed);
             let until=read().lease_until_ms.unwrap();assert_eq!(migration::open_active(&project).unwrap().expire_claims(until).unwrap(),1);assert_eq!(read().state,DeliveryState::Ambiguous);
             std::thread::sleep(Duration::from_secs(6));assert!(!home.path().join("escaped").exists());
-        }else{wait(&mut child,"delivery outcome",&||read().state==if mode=="ok"{DeliveryState::Confirmed}else{DeliveryState::Ambiguous});stop(&mut child);}
+        }else{
+            wait(&mut child,"delivery outcome",&||read().state==if matches!(mode,"ok"|"eof"){DeliveryState::Confirmed}else{DeliveryState::Ambiguous});
+            if mode=="blocked" {
+                assert!(effect_started.elapsed()<Duration::from_secs(30),"bridge deadline exceeded cleanup margin\n{}",diagnostic());
+                assert!(jiff::Timestamp::now().as_millisecond()<effect_lease.unwrap(),"bridge timeout was not recorded within its lease\n{}",diagnostic());
+            }
+            stop(&mut child);
+        }
         assert!(!home.path().join("WRONG_LOCK").exists());
         // A later pass refreshes the observation time (no event when unchanged) and must not resend.
         let seen=runtime::snapshot(&project).unwrap().observations.iter().map(|o|o.observed_unix_ms).max().unwrap_or(0);
