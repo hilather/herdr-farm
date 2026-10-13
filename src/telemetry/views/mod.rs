@@ -106,7 +106,7 @@ pub(crate) fn telemetry_switch(config_dir: &Path, key: &str) -> Result<bool> {
     match telemetry_setting(config_dir, key)? {
         None => Ok(true),
         Some(toml::Value::Boolean(on)) => Ok(on),
-        Some(_) => bail!("[telemetry] {key} must be true or false"),
+        Some(_) => bail!("[telemetry] {key} in {} must be true or false", config_dir.join("config.toml").display()),
     }
 }
 
