@@ -392,15 +392,21 @@ fn deliver_brief_once(
     expected_revision: u64,
     deadline: Instant,
     cancellation: Cancellation,
+    held_guard: Option<&crate::execution_guard::RootGuard>,
 ) -> Result<crate::operations::Delivery> {
     let deadline = deadline.min(Instant::now() + Duration::from_secs(45));
     check(deadline, &cancellation)?;
     let project = project.canonicalize()?;
-    let guard = crate::execution_guard::RootGuard::exclusive_by(
-        project.parent().context("project root missing")?,
-        deadline,
-        &cancellation,
-    )?;
+    let acquired_guard;
+    let guard = match held_guard {
+        Some(guard) => guard,
+        None => {
+            acquired_guard = crate::execution_guard::RootGuard::exclusive_by(
+                project.parent().context("project root missing")?, deadline, &cancellation,
+            )?;
+            &acquired_guard
+        }
+    };
     let control = crate::store::controlled::ReadControl::new(deadline, cancellation.clone());
     let mut db = crate::migration::open_active_scoped(&project, control)?;
     let (intent,input,start) = db.worker_brief_selection(operation,expected_revision)?;
@@ -900,8 +906,7 @@ pub fn recover_brief(project: &Path, operation: &OperationId, revision: u64, exp
     native.ready(&format!("{}:recover-ready", operation.as_str()))?;
     let delivery = db.retry_worker_brief(operation, revision, expected_head, now())?;
     drop(db);
-    drop(guard);
-    deliver_brief(project, operation, delivery.revision, deadline, cancellation)
+    deliver_brief_guarded(project, operation, delivery.revision, deadline, cancellation, Some(&guard))
 }
 
 /// Recover the durable start-to-brief handoff without sending any terminal input.
@@ -939,6 +944,9 @@ fn brief_failure_phase(error: &anyhow::Error) -> Option<&'static str> {
 fn notify_brief_conflict(project: &Path, attempt: &AttemptId, phase: &str, error: &anyhow::Error) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(5);
     let _guard = crate::execution_guard::RootGuard::exclusive_by(project.parent().context("project root missing")?,deadline,&Default::default())?;
+    record_brief_conflict(project, attempt, phase, error, deadline)
+}
+fn record_brief_conflict(project: &Path, attempt: &AttemptId, phase: &str, error: &anyhow::Error, deadline: Instant) -> Result<()> {
     let db=crate::migration::open_active_scoped(project,crate::store::controlled::ReadControl::new(deadline,Default::default()))?;
     let operation=db.attempt_launch_operation(attempt)?;
     drop(db);
@@ -970,16 +978,28 @@ pub fn prepare_brief(project: &Path, attempt: &AttemptId, mut revision: u64, dea
     }
     unreachable!()
 }
-pub fn deliver_brief(project: &Path, operation: &OperationId, mut revision: u64, deadline: Instant, cancellation: Cancellation) -> Result<crate::operations::Delivery> {
+pub fn deliver_brief(project: &Path, operation: &OperationId, revision: u64, deadline: Instant, cancellation: Cancellation) -> Result<crate::operations::Delivery> {
+    deliver_brief_guarded(project, operation, revision, deadline, cancellation, None)
+}
+// Recovery keeps its operator turn, including inherited native descriptors,
+// through delivery and failure recording. Never reopen the same root gate.
+fn deliver_brief_guarded(project: &Path, operation: &OperationId, mut revision: u64, deadline: Instant, cancellation: Cancellation, held_guard: Option<&crate::execution_guard::RootGuard>) -> Result<crate::operations::Delivery> {
+    let notify = |attempt: &AttemptId, phase: &str, error: &anyhow::Error| {
+        if held_guard.is_some() {
+            record_brief_conflict(project, attempt, phase, error, deadline)
+        } else {
+            notify_brief_conflict(project, attempt, phase, error)
+        }
+    };
     for pass in 0..3 {
-        match deliver_brief_once(project, operation, revision, deadline, cancellation.clone()) {
+        match deliver_brief_once(project, operation, revision, deadline, cancellation.clone(), held_guard) {
             Ok(value) => return Ok(value),
             Err(error) if brief_failure_phase(&error).is_some() => {
                 check(deadline, &cancellation)?;
                 let db=crate::migration::open_active_scoped(project,crate::store::controlled::ReadControl::new(deadline,cancellation.clone()))?;
                 let attempt=db.brief_attempt(operation)?;
                 drop(db);
-                notify_brief_conflict(project, &attempt, brief_failure_phase(&error).unwrap(), &error)?;
+                notify(&attempt, brief_failure_phase(&error).unwrap(), &error)?;
                 return Err(error);
             }
             Err(error) if brief_conflict(&error) => {
@@ -992,7 +1012,7 @@ pub fn deliver_brief(project: &Path, operation: &OperationId, mut revision: u64,
                 if pass == 2 {
                     let attempt=db.brief_attempt(operation)?;
                     drop(db);
-                    notify_brief_conflict(project, &attempt, "brief delivery", &error)?;
+                    notify(&attempt, "brief delivery", &error)?;
                     return Err(error);
                 }
                 check(deadline, &cancellation)?;
