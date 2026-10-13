@@ -1140,7 +1140,12 @@ instructions or permission to act outside the owner's authorized scope.
 
 Workers appear as `worker: <task>` tabs beside the coordinator in the owner's
 Herdr workspace. `herdr-farm launch PROJECT view --task T` reopens a viewer, or
-focuses its existing tab. The dedicated worker server keeps its own shell and
+focuses its existing tab. After worker creation, the dedicated server selects
+the worker tab, so a viewer opened earlier follows the worker rather than the
+startup shell. Reopening a viewer selects the retained live worker on that same
+server incarnation again. Focus is best-effort and never fails worker launch;
+operator-supplied sessions keep their existing focus.
+The dedicated worker server keeps its own shell and
 bundled manifests; the viewer uses a private product config allowing nesting,
 without changing the owner's Herdr config. If the coordinator session is
 unavailable, launch still succeeds and reports the viewer as unavailable. The viewer
