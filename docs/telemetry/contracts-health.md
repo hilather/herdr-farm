@@ -10,8 +10,8 @@ Health states and alerts **report**; they never enforce. Nothing here grants
 launch, changes a budget, a worker profile or model access, accepts a result
 or changes an acceptance gate. Rules read only through the TM4.1 query
 service ([contracts-analytics.md](contracts-analytics.md) §2) and lane read
-paths. `health evaluate` and the ticker write only the sidecar `health`
-stream; the one `state.db` write of the lane is `health notify` (inbox
+paths. `health evaluate` writes only the sidecar `health`
+stream; automatic ticker notification and `health notify` write `state.db` (inbox
 notices, §6), on explicit operator command.
 
 ## 1. Commands
@@ -153,7 +153,7 @@ immediate sidecar transaction. Without a sidecar `health evaluate` records
 nothing (`recorded: unavailable collection_not_run`) and creates none.
 **Ticker:** the lane `tick` hook evaluates by default when the sidecar and
 health tables exist, including when no evaluation rows remain after maintenance.
-It evaluates at most once per 300 s and never notifies. Owners can opt out with
+It evaluates at most once per 300 s and applies the inbox notification policy on that cadence. Owners can opt out with
 `[telemetry] health_evaluation = false` in owner `config.toml`; manual evaluation
 remains available. The lane adds no `telemetry report` keys. The L4 measurements
 in [certificate-scale.md](certificate-scale.md) include approximately 227 MB for
@@ -222,8 +222,8 @@ view's M50 row reads `n/a (per_recommendation)`.
 as one canonical inbox item through the store's stable-id delivery
 (`SqliteStore::deliver_telemetry_notice`, the memory-review reminder path):
 kind `telemetry-health`, id `telemetry-health-<alert_id>-<opened_unix_ms>`,
-subject the rule, empty body, one-line summary of labels and reason codes
-only, e.g.
+subject the rule, empty body, one-line summary of labels and reason codes,
+followed by bounded reason evidence and the supported next step, e.g.
 
 ```
 telemetry health warn: quota_headroom [services service=codex] headroom_low; advisory — `herdr-farm telemetry demo health alerts`
@@ -234,7 +234,28 @@ retry after a crash (the store answers `already_delivered`) or a
 deduplicated re-evaluation writes nothing. A new episode (after the
 cooldown) is a new alert and gets its own notice. `inbox done` acknowledges
 the notice only; the condition re-alerts after its cooldown if still true.
-The ticker never notifies.
+The ticker shares this delivery path. Owner `config.toml` makes the policy explicit:
+
+```toml
+[telemetry]
+health_evaluation = true
+health_notify = "critical" # default; "warn" includes warnings; "off" disables automatic notices
+```
+
+Each qualifying episode gets one opening notice and, if notified, one resolution
+notice with the opening id plus `-resolved`. After resolution delivery `notice_id`
+records that resolution id; `notified_unix_ms` retains the opening delivery time.
+The opening `notice_id` is retained as an intent before delivery, with a null
+`notified_unix_ms` until delivery succeeds. This preserves retries across
+resolution without replaying historical episodes that were never notified.
+Stable canonical ids make retries crash-safe without a schema change. Errors are
+logged by the deferred telemetry lane and retried at the next health cadence;
+they cannot fail a controller pass. No second full health scan is performed.
+Critical opening notices join the existing retained coordinator wake queue,
+including its ownership, idle, retry and uncertain-delivery fences.
+Cooldown suppresses repeated reopens; later notices summarize the cumulative
+suppressed observations for that rule. Launch notices include the supported
+`relaunch / cancel-attempt` next step; every notice links to health evidence.
 
 **External (optional integration contract).** `health notify --external`
 uses the deployment's own setting `<config_dir>/telemetry-alerts.toml`,

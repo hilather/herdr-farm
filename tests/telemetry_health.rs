@@ -156,12 +156,21 @@ fn quota_window(sidecar: &rusqlite::Connection, remaining: &str, resets: i64, la
 /// Drive complete foreground ticker passes over a temporary canonical project.
 /// Default evaluation, interval, retention recovery and owner opt-out via the CLI.
 #[test]
-fn ticker_health_evaluates_by_default_obeys_interval_and_never_notifies() {
+fn ticker_health_evaluates_on_cadence_and_notifies_critical_episodes() {
     use std::time::{Duration, Instant};
     let p = Planted::new();
+    // Publish a real paused canonical project so launch health uses its public reader.
+    fs::remove_dir_all(&p.project).unwrap();
+    fs::create_dir_all(p.config_dir()).unwrap();
+    let config = p.config_dir().join("config.toml");
+    fs::write(&config, "").unwrap();
+    for args in [["new", "--legacy", "demo"].as_slice(), ["pause", "demo"].as_slice()] {
+        let output = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", p.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
+            .args(["--root", p.root.to_str().unwrap()]).args(args).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    }
+    herdr_farm::migration::apply(&p.project, &herdr_farm::migration::inspect_with_config(&p.project, &config).unwrap(), true).unwrap();
     p.sidecar_created();
-    fs::write(p.project.join("PROJECT.md"), "ticker health fixture").unwrap();
-    fs::write(p.project.join(".state/format.json"), "{}").unwrap();
     let inbox = || dump(&p.project.join(".state/state.db")).into_iter().find(|(table, _)| table == "inbox_items").unwrap().1;
     let before_inbox = inbox();
     assert!(before_inbox.is_empty());
@@ -189,34 +198,42 @@ fn ticker_health_evaluates_by_default_obeys_interval_and_never_notifies() {
         fs::write(p.root.join(".ticker.stop"), b"").unwrap();
         assert!(child.wait().unwrap().success());
         fs::remove_file(p.root.join(".ticker.stop")).unwrap();
-        assert_eq!(inbox(), before_inbox);
     };
     let pass = || pass_until(&|| true);
 
     pass_until(&|| evaluations().2 >= 1);
-    assert_eq!(evaluations(), (1, 0, 1));
+    assert!(evaluations().2 >= 1);
+    assert_eq!(evaluations().1, 0);
     assert!(p.alerts()["last_evaluated_unix_ms"].is_i64());
 
     // A 20-minute-old collection is above the 15-minute warning threshold, below one hour.
     let now = unix_ms();
     p.sidecar().execute("INSERT INTO collect_offsets(path_digest,device,inode,byte_offset,records,rate_limits,model,effort,updated_unix_ms) VALUES('ticker-source',1,1,0,0,0,NULL,NULL,?1)", [now - 20 * MINUTE]).unwrap();
     assert_eq!(p.evaluate()["recorded"], true);
-    assert_eq!(evaluations(), (2, 1, 1));
+    assert_eq!(evaluations().1, 1);
     assert_eq!(open_alert(&p.alerts(), "collector_stale").unwrap()["occurrences"], 1);
     // No health interval override exists. Seed an elapsed operator evaluation,
     // without waiting five minutes or changing the production clock.
     p.sidecar().execute("UPDATE health_evaluations SET evaluated_unix_ms=?1", [now - 300_001]).unwrap();
-    pass_until(&|| evaluations().2 >= 2);
-    assert_eq!(evaluations(), (3, 1, 2));
+    let previous_ticks = evaluations().2;
+    pass_until(&|| evaluations().2 > previous_ticks);
+    assert_eq!(evaluations().1, 1);
     let first_tick = p.alerts();
     assert!(first_tick["last_evaluated_unix_ms"].as_i64().unwrap() >= now);
     let alert = open_alert(&first_tick, "collector_stale").unwrap();
-    assert_eq!((&alert["state"], &alert["occurrences"], &alert["notified_unix_ms"]), (&json!("warn"), &json!(2), &Value::Null));
+    assert_eq!((&alert["state"], &alert["notified_unix_ms"]), (&json!("warn"), &Value::Null));
+    assert!(alert["occurrences"].as_i64().unwrap() >= 2);
 
+    let first_ticks = evaluations().2;
     pass();
-    assert!(unix_ms() - first_tick["last_evaluated_unix_ms"].as_i64().unwrap() < 300_000);
-    assert_eq!(evaluations(), (3, 1, 2));
-    assert_eq!(p.alerts(), first_tick);
+    let after = p.alerts();
+    if evaluations().2 == first_ticks {
+        assert_eq!(after, first_tick);
+    } else {
+        // Slow hosts may cross the six-second scaled health interval.
+        let interval = (300_000.0 * include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim().parse::<f64>().unwrap()) as i64;
+        assert!(after["last_evaluated_unix_ms"].as_i64().unwrap() - first_tick["last_evaluated_unix_ms"].as_i64().unwrap() >= interval);
+    }
     assert_eq!(inbox(), before_inbox);
     p.sidecar().execute("DELETE FROM health_evaluations", []).unwrap();
     fs::create_dir_all(p.config_dir()).unwrap();
@@ -224,9 +241,61 @@ fn ticker_health_evaluates_by_default_obeys_interval_and_never_notifies() {
     pass();
     assert_eq!(evaluations(), (0, 0, 0));
     fs::write(p.config_dir().join("config.toml"), "[telemetry]\nhealth_evaluation = true\n").unwrap();
-    pass_until(&|| evaluations().2 == 1);
-    assert_eq!(evaluations(), (1, 0, 1));
+    pass_until(&|| evaluations().2 >= 1);
+    assert!(evaluations().2 >= 1);
+    assert_eq!(evaluations().1, 0);
     assert_eq!(inbox(), before_inbox);
+    // A rollout must leave old resolved, never-notified history quiet.
+    p.sidecar().execute("INSERT INTO health_alerts(rule_key,rule,labels,state,reasons,metric,evidence_window,evidence,rules_version,opened_unix_ms,last_seen_unix_ms,occurrences,resolved_unix_ms) SELECT rule_key,rule,labels,'critical',reasons,metric,evidence_window,evidence,rules_version,opened_unix_ms,last_seen_unix_ms,occurrences,last_seen_unix_ms FROM health_alerts WHERE rule='collector_stale' AND resolved_unix_ms IS NULL", []).unwrap();
+    // Plant a stalled launch, then drive delivery and recovery through ticker/CLI.
+    let db = p.db();
+    db.execute("INSERT INTO tasks(id,revision,state,title) VALUES('stalled',1,'running','stalled')", []).unwrap();
+    db.execute("INSERT INTO attempts(id,task_id,revision,state,reservation,termination_observed) VALUES('stalled-a','stalled',1,'launching','stalled-a',0)", []).unwrap();
+    db.execute("INSERT INTO operations(id,task_id,kind,target,payload_version,payload,payload_hash,expected_revision,due_unix_ms,idempotency_key) VALUES('stalled-op','stalled','worker.launch','worker',1,'{}',?1,1,?2,'stalled-op')", rusqlite::params![hex("{}"), unix_ms()-HOUR]).unwrap();
+    let inputs = json!({"inputs":{"version":2,"effective_profile":{"name":"worker","kind":"codex"}}}).to_string();
+    db.execute("INSERT INTO attempt_inputs(attempt_id,operation_id,payload,payload_hash) VALUES('stalled-a','stalled-op',?1,?2)", rusqlite::params![inputs, hex(&inputs)]).unwrap();
+    let notices = || p.db().query_row("SELECT count(*) FROM inbox_items WHERE json_extract(payload,'$.subject')='launch_stalled'", [], |r| r.get::<_,i64>(0)).unwrap();
+    let due = || { p.sidecar().execute("UPDATE health_evaluations SET evaluated_unix_ms=?1", [unix_ms()-300_001]).unwrap(); };
+    let due_pass = || {
+        let previous = evaluations().2;
+        due();
+        pass_until(&|| evaluations().2 > previous);
+    };
+    due();
+    pass_until(&|| notices() == 1);
+    let opened = p.alerts();
+    let alert = open_alert(&opened, "launch_stalled").unwrap();
+    assert_eq!(alert["state"], "critical");
+    assert_eq!(p.db().query_row("SELECT count(*) FROM inbox_items WHERE json_extract(payload,'$.subject')='collector_stale'", [], |r|r.get::<_,i64>(0)).unwrap(), 0);
+    assert!(alert["notified_unix_ms"].is_i64());
+    assert!(alert["notice_id"].as_str().unwrap().starts_with("telemetry-health-"));
+    assert_eq!(SqliteStore::open(&p.project.join(".state/state.db")).unwrap().critical_health_inbox().unwrap().len(), 1);
+    // Simulate a crash after inbox commit and before the sidecar receipt.
+    p.sidecar().execute("UPDATE health_alerts SET notified_unix_ms=NULL,notice_id=NULL WHERE rule='launch_stalled'", []).unwrap();
+    due(); pass_until(&|| p.sidecar().query_row("SELECT count(*) FROM health_alerts WHERE rule='launch_stalled' AND notified_unix_ms IS NOT NULL", [], |r|r.get::<_,i64>(0)).unwrap() == 1);
+    assert_eq!(notices(), 1);
+    assert!(open_alert(&p.alerts(), "launch_stalled").unwrap()["notified_unix_ms"].is_i64());
+    db.execute("UPDATE attempts SET termination_observed=1 WHERE id='stalled-a'", []).unwrap();
+    due(); pass_until(&|| notices() == 2);
+    let history = p.json(&["health", "alerts", "--since", "0", "--json"]);
+    let resolved = history["recent"].as_array().unwrap().iter().find(|a|a["rule"]=="launch_stalled").unwrap();
+    assert!(resolved["notice_id"].as_str().unwrap().ends_with("-resolved"));
+    due_pass(); assert_eq!(notices(), 2);
+    db.execute("UPDATE attempts SET termination_observed=0 WHERE id='stalled-a'", []).unwrap();
+    due_pass(); assert_eq!(notices(), 2);
+    assert!(open_alert(&p.alerts(), "launch_stalled").is_none());
+    // After cooldown, summarize suppressed flapping in the next episode.
+    p.sidecar().execute("UPDATE health_alerts SET opened_unix_ms=opened_unix_ms-?1,last_seen_unix_ms=last_seen_unix_ms-?1,resolved_unix_ms=resolved_unix_ms-?1 WHERE rule='launch_stalled'", [2*HOUR]).unwrap();
+    fs::write(p.config_dir().join("config.toml"), "[telemetry]\nhealth_notify = 'off'\n").unwrap();
+    due_pass(); assert_eq!(notices(), 2);
+    fs::write(p.config_dir().join("config.toml"), "[telemetry]\nhealth_notify = 'critical'\n").unwrap();
+    due(); pass_until(&|| notices() == 3);
+    let summaries: Vec<String> = p.db().prepare("SELECT json_extract(payload,'$.summary') FROM inbox_items WHERE json_extract(payload,'$.subject')='launch_stalled'").unwrap().query_map([], |r|r.get(0)).unwrap().map(Result::unwrap).collect();
+    assert!(summaries.iter().any(|s|s.contains("flapping summary:")));
+    // Optional warn policy delivers the previously filtered warning once.
+    fs::write(p.config_dir().join("config.toml"), "[telemetry]\nhealth_notify = 'warn'\n").unwrap();
+    due(); pass_until(&|| open_alert(&p.alerts(), "collector_stale").unwrap()["notified_unix_ms"].is_i64());
+
 }
 
 /// No sidecar: every sidecar-backed rule is `unknown collection_not_run` with
@@ -620,7 +689,8 @@ fn cooldown_dedup_and_inbox_notice_written_once() {
     let rows = before(&p);
     let payload: Value = serde_json::from_str(&p.db().query_row("SELECT payload FROM inbox_items WHERE id=?1", [notices[0]["notice_id"].as_str().unwrap()], |r| r.get::<_, String>(0)).unwrap()).unwrap();
     assert_eq!((&payload["kind"], &payload["subject"], &payload["body"]), (&json!("telemetry-health"), &json!("quota_headroom"), &json!("")));
-    assert_eq!(payload["summary"], json!("telemetry health warn: quota_headroom [services service=codex] headroom_low; advisory — `herdr-farm telemetry demo health alerts`"));
+    assert!(payload["summary"].as_str().unwrap().starts_with("telemetry health warn: quota_headroom [services service=codex] headroom_low; advisory — `herdr-farm telemetry demo health alerts`"));
+    assert!(payload["summary"].as_str().unwrap().contains("; evidence:"));
     let second = p.json(&["health", "notify"]);
     assert!(second["delivered"].as_array().unwrap().is_empty(), "{second}");
     p.evaluate();

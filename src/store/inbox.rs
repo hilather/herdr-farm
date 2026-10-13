@@ -89,6 +89,14 @@ impl SqliteStore {
         Ok(items.into_values().collect())
     }
 
+    /// Critical health notices share the retained coordinator wake queue.
+    pub fn critical_health_inbox(&self) -> Result<Vec<InboxItem>> {
+        check_schema(&self.connection)?;
+        Ok(read_matching(&self.connection,"WHERE done=0 AND id GLOB 'telemetry-health-*'",None)?.into_iter()
+            .filter(|i| !i.content.id.ends_with("-resolved") && i.content.summary.starts_with("telemetry health critical:"))
+            .collect())
+    }
+
     /// Prefix-indexed unfinished result evidence, independent of SEEN.
     pub fn worker_result_inbox(&self) -> Result<Vec<InboxItem>> {
         check_schema(&self.connection)?;

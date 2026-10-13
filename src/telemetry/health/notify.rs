@@ -1,12 +1,4 @@
-//! Alert notices (docs/telemetry/contracts-health.md §6). Local: each open
-//! alert becomes one inbox notice through the canonical inbox's stable-id
-//! delivery (`SqliteStore::deliver_telemetry_notice`, the memory-review
-//! reminder path), so a retry or a second run never duplicates it; the
-//! alert records its notice id. This is the only `state.db` write of the
-//! telemetry health lane and happens only on the explicit `health notify`
-//! command, never from the ticker. External: the deployment's
-//! `<config_dir>/telemetry-alerts.toml` (disabled by default, the export
-//! destination contract: a local directory or stdout, no network client).
+//! Stable inbox delivery shared by the CLI and automatic health cadence.
 use super::store::{ALERT_COLUMNS, alert_json, slug, tables};
 use crate::telemetry::export::external::{self, Destination, Setting};
 use anyhow::{Result, bail};
@@ -37,16 +29,53 @@ fn summary(project: &str, alert: &Value) -> String {
 
 /// `health notify`: one inbox notice per open alert not yet noticed.
 pub fn inbox(project: &Path) -> Result<Value> {
-    let Some(alerts) = open_alerts(project)? else { return Ok(json!({"status": "unavailable", "reason": "collection_not_run"})) };
+    deliver(project, None)
+}
+
+/// Owner policy: critical by default, warn optionally, or off.
+pub fn automatic(project: &Path, config_dir: &Path) -> Result<Value> {
+    let setting = crate::telemetry::views::telemetry_setting(config_dir, "health_notify")?;
+    let threshold = setting.as_ref().and_then(toml::Value::as_str).unwrap_or("critical");
+    anyhow::ensure!(setting.is_none() || matches!(&setting, Some(toml::Value::String(_))), "[telemetry] health_notify must be critical, warn or off");
+    anyhow::ensure!(matches!(threshold, "critical" | "warn" | "off"), "[telemetry] health_notify must be critical, warn or off");
+    if threshold == "off" { return Ok(json!({"disabled": true})); }
+    deliver(project, Some(threshold))
+}
+
+fn deliver(project: &Path, threshold: Option<&str>) -> Result<Value> {
+    let Some(mut alerts) = open_alerts(project)? else { return Ok(json!({"status": "unavailable", "reason": "collection_not_run"})) };
+    if threshold.is_some() {
+        let Some(db) = crate::telemetry::sidecar::read(project)? else { return Ok(json!({"status": "unavailable", "reason": "collection_not_run"})); };
+        if tables(&db)? {
+            alerts.extend(db.prepare(&format!("SELECT {ALERT_COLUMNS} FROM health_alerts WHERE resolved_unix_ms IS NOT NULL AND notice_id IS NOT NULL AND notice_id NOT LIKE '%-resolved' ORDER BY alert_id"))?
+                .query_map([], alert_json)?.collect::<rusqlite::Result<Vec<_>>>()?);
+        }
+    }
     let slug = slug(project);
     let (mut delivered, mut already) = (Vec::new(), 0usize);
     for alert in alerts {
-        if !alert["notified_unix_ms"].is_null() { already += 1; continue; }
+        let resolved = !alert["resolved_unix_ms"].is_null() && !alert["notified_unix_ms"].is_null();
+        if !resolved && threshold.is_some_and(|t| alert["state"] != "critical" && !(t == "warn" && alert["state"] == "warn")) { continue; }
+        if !resolved && !alert["notified_unix_ms"].is_null() { already += 1; continue; }
         let (id, opened) = (alert["alert_id"].as_i64().unwrap_or_default(), alert["opened_unix_ms"].as_i64().unwrap_or_default());
-        let notice = format!("{KIND}-{id}-{opened}");
+        let notice = format!("{KIND}-{id}-{opened}{}", if resolved { "-resolved" } else { "" });
+        let mut text = summary(&slug, &alert);
+        if resolved { text = format!("resolved: {text}"); }
+        let evidence = serde_json::to_string(&alert["reasons"])?;
+        text += &format!("; evidence: {}", evidence.chars().take(512).collect::<String>());
+        if alert["rule"] == "launch_stalled" { text += "; next step: inspect launch progress, then relaunch / cancel-attempt"; }
+        if let Some(db) = crate::telemetry::sidecar::read(project)? {
+            let suppressed: i64 = db.query_row("SELECT coalesce(sum(suppressed),0) FROM health_rule_states WHERE rule_key=?1", [alert["labels"].to_string()], |r| r.get(0))?;
+            if suppressed > 0 { text += &format!("; flapping summary: {suppressed} reopen observations suppressed by cooldown"); }
+        }
         let content = crate::domain::InboxContent { id: notice.clone(), kind: KIND.into(), subject: alert["rule"].as_str().unwrap_or("health").into(),
-            created: String::new(), summary: summary(&slug, &alert), body: String::new() };
-        let mut store = crate::store::SqliteStore::open(&project.join(".state/state.db"))?;
+            created: String::new(), summary: text, body: String::new() };
+        // Retain an opening intent before canonical delivery. This permits retries
+        // after resolution without replaying old, never-notified history.
+        if !resolved && let Some(db) = crate::telemetry::sidecar::open(project, false)? {
+            db.execute("UPDATE health_alerts SET notice_id=?2 WHERE alert_id=?1 AND notice_id IS NULL", params![id, notice])?;
+        }
+        let mut store = crate::store::SqliteStore::open_scoped(&project.join(".state/state.db"))?;
         let mut outcome = None;
         for _ in 0..3 {
             let now = jiff::Timestamp::now().as_millisecond();
@@ -60,7 +89,7 @@ pub fn inbox(project: &Path) -> Result<Value> {
         drop(store);
         let now = jiff::Timestamp::now().as_millisecond();
         if let Some(db) = crate::telemetry::sidecar::open(project, false)? {
-            db.execute("UPDATE health_alerts SET notified_unix_ms=?2,notice_id=?3 WHERE alert_id=?1 AND notified_unix_ms IS NULL", params![id, now, notice])?;
+            db.execute("UPDATE health_alerts SET notified_unix_ms=coalesce(notified_unix_ms,?2),notice_id=?3 WHERE alert_id=?1", params![id, now, notice])?;
         }
         delivered.push(json!({"alert_id": id, "notice_id": notice, "outcome": if outcome == crate::domain::ReminderOutcome::Delivered { "delivered" } else { "already_delivered" }, "summary": content.summary}));
     }

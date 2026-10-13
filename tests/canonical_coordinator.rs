@@ -820,6 +820,16 @@ fn canonical_toast_backoff_and_live_nudge_policy_survive_context_reads() {
     assert_eq!(l.state()["prompts"].as_array().unwrap().len(),initial+1,"enabling nudge prompts an already toasted unfinished result");
     l.ok(&["inbox","done","demo",&id]);
     assert_eq!(wake_history(&l)["waiting_items"],0);
+    // A critical health notice uses the same idle wake and retained claim.
+    let mut store=migration::open_active(&l.project).unwrap();
+    let notice=herdr_farm::domain::InboxContent {id:"telemetry-health-1-1".into(),kind:"telemetry-health".into(),subject:"launch_stalled".into(),created:String::new(),summary:"telemetry health critical: launch_stalled; inspect launch progress, then relaunch / cancel-attempt".into(),body:String::new()};
+    store.deliver_telemetry_notice(store.current_head().unwrap(),&notice,jiff::Timestamp::now().as_millisecond()).unwrap();
+    drop(store);
+    wake_passes(&l,"8");
+    assert_eq!(l.state()["prompts"].as_array().unwrap().len(),initial+2);
+    assert_eq!(wake_history(&l)["wake"]["claim"]["phase"],"confirmed");
+    wake_passes(&l,"8");
+    assert_eq!(l.state()["prompts"].as_array().unwrap().len(),initial+2);
 }
 #[test]
 fn canonical_wake_lost_reply_fences_replay_until_done_and_releases_new_results() {
