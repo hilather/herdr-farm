@@ -250,8 +250,31 @@ working agent, adopts the coordinator through the public CLI, then records fresh
 post-adoption identity evidence before activation. An unrecorded route provides
 no reachable session to refresh the accelerated ticker idle-exit deadline; a
 present route without adoption cannot authorize activation. Helper exceptions,
-ticker stderr and ticker logs remain in failed-wait diagnostics. Unix socket
-restrictions prevent exercising this fixture past socket creation in the sandbox.
+ticker stderr and ticker logs remain in failed-wait diagnostics. The fixture also
+records each helper invocation and dumps public operation inspection, the runtime
+snapshot, notification authority validation, the controller dispatch hint, effect
+pause reason, lock availability and executor metrics on a failed wait. The dump
+includes the wall clock so persisted due and lease times can be compared directly.
+Helper stage timestamps distinguish request reads, nonblocking lock checks,
+SQLite claim reads, effect recording and reply buffering/flushing. The same CLI
+workflow also confirms a helper that reads the request to EOF, and requires a
+helper stalled after effect recording to become ambiguous within 30 seconds and
+before its captured claim expiry. These are regression checks for the existing
+10-second command cap and cleanup allowance, not evidence that the intermittent
+CI delivery stall can be reproduced in this sandbox. Outcome persistence retries
+busy and I/O failures without repeating delivery, retaining ownership within the
+claim lease and worker control deadline. The public store/dispatch E2E workflow
+in `tests/operation_recording.rs` holds a competing SQLite writer beyond one busy
+attempt and checks both successful recording and the original control deadline
+after delivery. Queue drain forwards runner errors, but depends on a later ticker
+pass, and log writes previously ignored errors. Neither explains the original CI
+log gap conclusively. Failed completions are now logged at executor completion as
+well as queue drain; log write failures go to stderr.
+Failure dumps include operation events and delivery/executor samples at `sent`
+and two seconds later. Lock probes release each guard before the next probe, and
+success waits fail explicitly on ambiguous outcomes or expired claims.
+Unix socket restrictions prevent exercising this fixture past socket creation in
+the sandbox.
 
 Root safety work (recovery, termination and briefs) precedes launch advancement
 across projects, including while safety work backs off. Queue fairness promotes
@@ -289,3 +312,31 @@ LAB-REQUESTS-TORN-1: canonical worker, operator viewer, and replay request-log
 readers only parse newline-terminated JSON records. Polling during an append
 ignores the unfinished final record until its newline arrives; malformed complete
 records still fail the harness. Product behavior and workflow assertions are unchanged.
+
+The owner-death fixture enables temporary stderr diagnostics with
+`HERDR_FARM_TRACE_DELIVERY=1`. They show prepare, claim, delivery budgets and
+command completion, each receipt attempt, the dispatch result, and executor
+completion/reply delivery. Tracing is off by default. Cancellation permits one
+receipt attempt bounded to 20 ms and the original control/claim deadline, so an
+in-flight cancelled effect can persist Ambiguous. Receipt retries check
+cancellation before each attempt and stop immediately after a failed attempt
+when cancellation is active; they never repeat the external effect.
+
+The public-store E2E
+`recorded_delivery_is_visible_to_independent_connections_before_writer_drops`
+records a claimed delivery with the same 20 ms receipt deadline, then checks
+the outcome from an already-open reader and a fresh connection before dropping
+the writer. It also checks the persisted outcome event and reopening after
+writer shutdown. The test passes locally; it does not establish the cause of
+the CI owner-death fixture's stale Claimed reads. The record path uses an
+immediate transaction and commits before returning; runtime snapshots open a
+fresh connection. The Python helper performs a SELECT without an explicit
+BEGIN or a write, so keeping that connection open alone does not pin a read
+transaction across delivery.
+
+With delivery tracing enabled, outcome recording also reports the SQLite
+version, database path and device/inode, autocommit state after commit, and a
+delivery read from a separate read-only connection while the writer remains
+alive. These observations distinguish writer-local visibility from visibility
+through a fresh connection at the exact recording boundary. They are disabled
+by default and do not change receipt success or retry decisions.

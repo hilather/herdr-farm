@@ -112,6 +112,8 @@ impl SqliteStore {
         let file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)
             .map_err(|e| StoreError::Io(e.to_string()))?;
         file.sync_all().map_err(|e| StoreError::Io(e.to_string()))?;
+        // Close the exclusive creation descriptor before SQLite owns any locks.
+        drop(file);
         let mut connection = connect(path)?;
         {
             let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -644,3 +646,25 @@ pub use worker_termination::service_project_result_completions;
 mod result_memory;
 pub use result_memory::ResultMemoryCandidate;
 pub(crate) use result_memory::DELEGATION as MEMORY_COORDINATOR_DELEGATION;
+
+// Capability proofs must pin the original inode against unlink/reuse. Retain
+// O_PATH pins for process lifetime, never closing a database descriptor behind
+// SQLite. Pure diagnostic identity reads must use path-based metadata instead.
+pub(crate) fn pin_database_inode(path: &Path) -> std::io::Result<&'static std::fs::File> {
+    use std::os::unix::fs::MetadataExt;
+    type Pins = std::sync::Mutex<Vec<((u64, u64), &'static std::fs::File)>>;
+    static PINS: Pins = std::sync::Mutex::new(Vec::new());
+    let meta = std::fs::symlink_metadata(path)?;
+    if !meta.is_file() { return Err(std::io::Error::other("database must be a regular file")); }
+    let identity = (meta.dev(), meta.ino());
+    let mut pins = PINS.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some((_, file)) = pins.iter().find(|(key, _)| *key == identity) { return Ok(*file); }
+    let file = OpenOptions::new().read(true).custom_flags(libc::O_PATH | libc::O_NOFOLLOW).open(path)?;
+    let file = Box::leak(Box::new(file));
+    let opened = file.metadata()?;
+    if !opened.is_file() || (opened.dev(), opened.ino()) != identity {
+        return Err(std::io::Error::other("database changed while pinning inode"));
+    }
+    pins.push((identity, file));
+    Ok(file)
+}

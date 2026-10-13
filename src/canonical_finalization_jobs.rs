@@ -63,6 +63,8 @@ impl<'a,'b> DeliveryAdapter for Adapter<'a,'b> {
     }
 }
 impl PreparedDelivery for Prepared<'_,'_> {
+    fn recording_deadline(&self)->Option<std::time::Instant>{Some(self.adapter.control.deadline)}
+    fn recording_allowed(&self)->Result<()>{self.adapter.control.check()}
     fn revalidate(&mut self,operation:&Operation)->Result<()>{self.adapter.validate(operation,&self.payload)?;Ok(())}
     fn deliver(&mut self,operation:&Operation,claim:&Claim)->Result<Outcome> {
         let a=&self.adapter;let project=receipt::project(&a.input.project)?;let authorize=||a.claim(operation,&self.payload,claim);authorize()?;
@@ -101,7 +103,7 @@ fn execute(input:&Input,control:&Control)->Result<()> {
         db.observe_finalization(&input.operation,input.revision,head,&retained,jiff::Timestamp::now().as_millisecond())?;return Ok(());
     }
     let result=dispatch::dispatch_one(&mut db,DispatchRequest{operation:&input.operation,expected_revision:input.revision,owner:"ticker.finalization",lease_ms:300_000},&mut adapter,||jiff::Timestamp::now().as_millisecond())?;
-    match result {DispatchResult::Recorded(_)=>Ok(()),DispatchResult::Unrecorded{..}=>anyhow::bail!("canonical finalization outcome unrecorded; retain claim and observe after expiry")}
+    match result {DispatchResult::Recorded(_)=>Ok(()),DispatchResult::Unrecorded{error,..}=>anyhow::bail!("canonical finalization outcome unrecorded; retain claim and observe after expiry: {error}")}
 }
 pub struct JobRunner {pub inner:Arc<dyn Runner+Send+Sync>}
 impl Runner for JobRunner {

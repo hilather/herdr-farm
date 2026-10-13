@@ -238,7 +238,7 @@ fn dispatch_prepared(ctx:&Ctx,path:&Path,turn:u64,effects:Option<&mut crate::cop
     };
     match result {
         DispatchResult::Recorded(_)=>Ok(true),
-        DispatchResult::Unrecorded{..}=>anyhow::bail!("external operation outcome was not committed; retain claim until expiry and inspect receipts"),
+        DispatchResult::Unrecorded{error,..}=>anyhow::bail!("external operation outcome was not committed; retain claim until expiry and inspect receipts: {error}"),
     }
 }
 

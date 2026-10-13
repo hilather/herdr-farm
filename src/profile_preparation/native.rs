@@ -29,7 +29,7 @@ pub struct NativePreparation {
     // O_PATH pins the inode without opening it for I/O or interfering with
     // SQLite's POSIX advisory locks when this descriptor closes.
     #[serde(skip)]
-    pub(super) source_file: fs::File,
+    pub(super) source_file: &'static fs::File,
 }
 
 impl NativePreparation {
@@ -394,8 +394,7 @@ fn verify_prepared(
         project.parent().context("project root missing")?,
     )?;
     let store_path = project.join(".state/state.db").canonicalize()?;
-    let source_file = fs::OpenOptions::new().read(true)
-        .custom_flags(libc::O_PATH | libc::O_NOFOLLOW).open(&store_path)?;
+    let source_file = crate::store::pin_database_inode(&store_path)?;
     let store_metadata = source_file.metadata()?;
     ensure!(store_metadata.is_file(), "native probe store must be a regular file");
     let source = (store_path, store_metadata.dev(), store_metadata.ino());

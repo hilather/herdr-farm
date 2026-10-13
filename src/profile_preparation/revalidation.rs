@@ -36,7 +36,7 @@ pub struct RevalidatedProfile {
     #[serde(skip)]
     source: (PathBuf, u64, u64),
     #[serde(skip)]
-    source_file: fs::File,
+    source_file: &'static fs::File,
     #[serde(skip)]
     home_file: fs::File,
     #[serde(skip)]
@@ -157,8 +157,7 @@ pub fn revalidate(
     let guard = RootGuard::exclusive(project.parent().context("project root missing")?)?;
     let path = project.join(".state/state.db");
     ensure!(path.canonicalize()? == path, "project store must be canonical");
-    let source_file = fs::OpenOptions::new().read(true)
-        .custom_flags(libc::O_PATH | libc::O_NOFOLLOW).open(&path)?;
+    let source_file = crate::store::pin_database_inode(&path)?;
     let metadata = source_file.metadata()?;
     ensure!(metadata.is_file(), "project store must be a regular file");
     let source = (path.clone(), metadata.dev(), metadata.ino());

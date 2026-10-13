@@ -54,7 +54,7 @@ pub struct VerificationReceipt {
     store_inode: i64,
     // Keeps the store inode pinned for the accept transaction.
     #[serde(skip)]
-    source_file: fs::File,
+    source_file: &'static fs::File,
 }
 
 impl VerificationReceipt {
@@ -812,12 +812,9 @@ fn issue_receipt(
     commit: &str,
     tree: &str,
 ) -> Result<VerificationReceipt> {
-    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    use std::os::unix::fs::MetadataExt;
     let path = Path::new(&target.project_store);
-    let source_file = fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_PATH | libc::O_NOFOLLOW)
-        .open(path)
+    let source_file = crate::store::pin_database_inode(path)
         .context("project store could not be pinned")?;
     let meta = source_file
         .metadata()

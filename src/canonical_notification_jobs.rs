@@ -50,17 +50,19 @@ impl<'a,'b> DeliveryAdapter for Adapter<'a,'b> {
     }
 }
 impl PreparedDelivery for Prepared<'_,'_> {
+    fn recording_deadline(&self)->Option<std::time::Instant>{Some(self.adapter.control.deadline)}
+    fn recording_allowed(&self)->Result<()>{self.adapter.control.check()}
     fn revalidate(&mut self,operation:&Operation)->Result<()>{self.adapter.validate(operation,&self.notification)}
     fn deliver(&mut self,operation:&Operation,claim:&Claim)->Result<Outcome> {
         let a=&self.adapter;a.validate(operation,&self.notification)?;
-        let now=jiff::Timestamp::now().as_millisecond();let reserve=crate::herdr::CALL_TIMEOUT+Duration::from_secs(2);
+        let now=jiff::Timestamp::now().as_millisecond();dispatch::trace_delivery("notification budgets", (claim.lease_until_ms,now,a.control.deadline.saturating_duration_since(Instant::now()),a.control.cancellation.is_cancelled()));let reserve=crate::herdr::CALL_TIMEOUT+Duration::from_secs(2);
         if claim.lease_until_ms-now<reserve.as_millis() as i64||a.control.deadline.saturating_duration_since(Instant::now())<reserve {
             return Ok(Outcome::Retryable{no_effect_evidence:"notification was not called: insufficient remaining worker or claim budget".into()});
         }
         let id=format!("canonical-notification-{}-{}",operation.id.as_str(),claim.epoch);
         let frame=serde_json::to_string(&serde_json::json!({"id":id,"method":"notification.show","params":{"title":self.notification.title,"body":self.notification.body}}))?+"\n";ensure!(frame.len()<=64*1024,"notification frame exceeds bounds");
         let h=crate::herdr::Herdr::new(&a.input.bin,&a.input.socket,&crate::runner::RealRunner);
-        let output=a.run(h.cmd(crate::herdr::CALL_TIMEOUT).arg("remote-api-bridge").stdin(frame))?;a.control.check()?;ensure!(output.success(),"canonical notification command failed");
+        dispatch::trace_delivery("notification command begin", &operation.id);let output=a.run(h.cmd(crate::herdr::CALL_TIMEOUT).arg("remote-api-bridge").stdin(frame))?;dispatch::trace_delivery("notification command complete", (output.code,output.cancelled,output.timed_out));a.control.check()?;ensure!(output.success(),"canonical notification command failed");
         let reply:serde_json::Value=serde_json::from_str(&output.stdout)?;ensure!(reply["id"].as_str()==Some(&id)&&reply.get("error").is_none()&&reply["result"]["type"].as_str()==Some("notification_show"),"canonical notification acknowledgement mismatch");
         a.validate(operation,&self.notification)?;
         match (reply["result"]["shown"].as_bool(),reply["result"]["reason"].as_str()) {
@@ -76,7 +78,8 @@ fn execute(input:&Input,control:&Control)->Result<()> {
     input.current(&ctx,&guard,control)?;let mut db=migration::open_active_unchecked(&input.project)?;
     let mut adapter=Adapter{input,ctx:&ctx,control,guard:&guard,locks:&locks};
     let result=dispatch::dispatch_one(&mut db,DispatchRequest{operation:&input.operation,expected_revision:input.revision,owner:"ticker.notification",lease_ms:60_000},&mut adapter,||jiff::Timestamp::now().as_millisecond())?;
-    match result {DispatchResult::Recorded(_)=>Ok(()),DispatchResult::Unrecorded{..}=>anyhow::bail!("canonical notification outcome unrecorded; inspect operation after claim expiry")}
+    dispatch::trace_delivery("notification dispatch complete", &result);
+    match result {DispatchResult::Recorded(_)=>Ok(()),DispatchResult::Unrecorded{error,..}=>anyhow::bail!("canonical notification outcome unrecorded; inspect operation after claim expiry: {error}")}
 }
 pub struct JobRunner {pub inner:Arc<dyn Runner+Send+Sync>}
 impl Runner for JobRunner {

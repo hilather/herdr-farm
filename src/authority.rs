@@ -713,7 +713,7 @@ pub fn initialize_memory(project: &Path, mut sign: impl FnMut(&[u8]) -> Result<V
 }
 
 fn adopt_memory_held(project: &Path, expected: &crate::memory::AdoptPlan, mut sign: impl FnMut(&[u8]) -> Result<Vec<u8>>) -> Result<crate::memory::MemoryJournal> {
-    let launch_guard = fs::File::open(project.join(".state/state.db"))?;
+    let launch_guard = open_launch_lock(project)?;
     launch_guard.try_lock().context("adopt refused: a worker is mid-launch")?;
     if let Some(journal) = recover_memory_adopt_held(project)? { return Ok(journal); }
     let current = crate::memory::adopt_plan(project)?;
@@ -809,7 +809,7 @@ fn recover_memory_adopt_held(project: &Path) -> Result<Option<crate::memory::Mem
 
 pub fn recover_memory_adopt(project: &Path) -> Result<()> {
     let _guard = migration::maintenance(project)?;
-    let launch_guard = fs::File::open(project.join(".state/state.db"))?;
+    let launch_guard = open_launch_lock(project)?;
     launch_guard.try_lock().context("adopt refused: a worker is mid-launch")?;
     let state = migration::open_active(project)?.read_snapshot(None)?;
     ensure!(!state.attempts.iter().any(|a| a.retains_capacity()), "adopt refused: a worker is mid-launch or retains execution capacity");
@@ -1335,4 +1335,11 @@ pub fn promote_memory_proposal(project:&Path,proposal:&str,decision:&str)->Resul
     })();
     if let Err(error)=&result {record_cli_denial(project,"memory","promote",None,error);}
     result
+}
+
+/// Open the shared launch/adoption fence, separate from SQLite and migration locks.
+pub fn open_launch_lock(project: &Path) -> Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    Ok(fs::OpenOptions::new().read(true).write(true).create(true).truncate(false)
+        .mode(0o600).custom_flags(libc::O_NOFOLLOW).open(project.join(".state/launch.lock"))?)
 }

@@ -477,8 +477,7 @@ mod tests {
         preparation.reference = preparation.profile.reference().unwrap();
         let path = f.project.join(".state/state.db").canonicalize().unwrap();
         let metadata = fs::metadata(&path).unwrap();
-        let source_file = fs::OpenOptions::new().read(true)
-            .custom_flags(libc::O_PATH | libc::O_NOFOLLOW).open(&path).unwrap();
+        let source_file = crate::store::pin_database_inode(&path).unwrap();
         NativePreparation { preparation, evidence, source: (path, metadata.dev(), metadata.ino()), source_file }
     }
 

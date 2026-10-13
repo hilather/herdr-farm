@@ -149,7 +149,14 @@ fn worker(shared:Arc<Shared>,runner:Arc<dyn Runner+Send+Sync>,lane:usize) {
         }else{Ok(Output{timed_out:true,..Output::default()})};
         let identity=job.request.identity;let completion=Completion{identity:identity.clone(),started_at:started,queue_delay:started.duration_since(job.queued),elapsed:started.elapsed(),runner_entered,result};
         {let mut state=shared.state.lock().unwrap();state.running.remove(&(identity.project.clone(),identity.operation.clone()));state.admitted[lane]-=1;state.metrics.completed[lane]=state.metrics.completed[lane].saturating_add(1);state.metrics.max_queue_delay=state.metrics.max_queue_delay.max(completion.queue_delay);shared.wake.notify_all();}
-        let _=job.reply.send(completion);
+        if let Err(error)=&completion.result {crate::ticker::executor_failure(&identity,error);}
+        if identity.operation.starts_with("canonical-notification:") {
+            herdr_farm::operations::dispatch::trace_delivery("executor completion", (&identity,runner_entered,&completion.result));
+        }
+        let sent=job.reply.send(completion);
+        if identity.operation.starts_with("canonical-notification:") {
+            herdr_farm::operations::dispatch::trace_delivery("executor reply sent", sent.is_ok());
+        }
     }
 }
 #[cfg(test)]

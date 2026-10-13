@@ -9,6 +9,75 @@ use std::process::{Command, Output};
 
 const BIN: &str = env!("CARGO_BIN_EXE_herdr-farm");
 
+#[test]
+fn recorded_delivery_is_visible_to_independent_connections_before_writer_drops() {
+    use herdr_farm::{domain::{Commit, Mutation, Operation, OperationId, Task, TaskId, TaskState},
+        operations::{DeliveryState, Outcome}, store::SqliteStore};
+    let lab = tempfile::tempdir().unwrap();
+    std::fs::create_dir(lab.path().join(".state")).unwrap();
+    let path = lab.path().join(".state/state.db");
+    let mut writer = SqliteStore::create(&path).unwrap();
+    let task = Task { id: TaskId::new("delivery-task").unwrap(), revision: 1,
+        state: TaskState::Ready, title: "Delivery durability".into(), active_attempt: None };
+    let id = OperationId::new("delivery-durability").unwrap();
+    writer.commit(Commit { expected_head: 0, mutations: vec![
+        Mutation::Task { expected: None, next: task.clone() },
+        Mutation::Enqueue(Operation { id: id.clone(), task: Some(task.id), kind: "fixture.delivery".into(),
+            target: "local".into(), payload_version: 1, payload: serde_json::json!({}),
+            expected_revision: 1, due_unix_ms: 0, idempotency_key: "delivery-durability".into() }),
+    ] }).unwrap();
+    let mut reader = SqliteStore::open(&path).unwrap();
+    let claim = writer.claim_operation(&id, 1, "delivery-worker", 100, 60_000).unwrap();
+    assert_eq!(reader.deliveries().unwrap()[0].state, DeliveryState::Claimed);
+    // Public telemetry reads run in the same process as the live store writer.
+    // Repeated teardown must not release the writer's SQLite advisory locks.
+    herdr_farm::telemetry::sidecar::open(lab.path(), true).unwrap();
+    let probe_lock = || {
+        Command::new("/usr/bin/python3").env_clear().env("PATH", "/usr/bin:/bin")
+            .args(["-c", r#"
+import errno, fcntl, os, sys
+fd = os.open(sys.argv[1], os.O_RDWR)
+try:
+    fcntl.lockf(fd, fcntl.LOCK_EX | fcntl.LOCK_NB, 510, 0x40000002)
+except OSError as error:
+    if error.errno in (errno.EAGAIN, errno.EACCES):
+        sys.exit(0)
+    raise
+sys.exit(1)
+"#]).arg(&path).output().unwrap()
+    };
+    for _ in 0..3 {
+        let launch = herdr_farm::authority::open_launch_lock(lab.path()).unwrap();
+        launch.try_lock_shared().unwrap();
+        let adoption = herdr_farm::authority::open_launch_lock(lab.path()).unwrap();
+        assert!(adoption.try_lock().is_err());
+        drop(launch);
+        adoption.try_lock().unwrap();
+        drop(adoption);
+        herdr_farm::telemetry::metrics::report(lab.path(), None).unwrap();
+        let probe = probe_lock();
+        assert!(probe.status.success(), "live writer lost SQLite locks: {}", String::from_utf8_lossy(&probe.stderr));
+    }
+    let outcome = Outcome::Confirmed { observed_identity: "local-receipt".into() };
+    let recorded = writer.finish_operation_before(&claim, outcome.clone(), 101,
+        std::time::Instant::now() + std::time::Duration::from_millis(20)).unwrap();
+    assert_eq!(recorded.state, DeliveryState::Confirmed);
+    assert_eq!(recorded.revision, claim.revision + 1);
+    assert_eq!(recorded.last_outcome, Some(outcome));
+    assert_eq!(reader.deliveries().unwrap().as_slice(), std::slice::from_ref(&recorded));
+    let mut fresh = SqliteStore::open(&path).unwrap();
+    assert_eq!(fresh.deliveries().unwrap().as_slice(), std::slice::from_ref(&recorded));
+    let snapshot = fresh.read_snapshot(None).unwrap();
+    assert!(snapshot.events.iter().any(|event| event.entity == id.as_str()
+        && event.kind == "operation.outcome" && event.revision == recorded.revision));
+    drop(reader);
+    drop(fresh);
+    drop(writer);
+    assert_eq!(SqliteStore::open(&path).unwrap().deliveries().unwrap(), [recorded]);
+    // Retained telemetry descriptors must be unlocked after readers close.
+    assert_eq!(probe_lock().status.code(), Some(1));
+}
+
 struct Project { home: tempfile::TempDir }
 
 impl Project {
