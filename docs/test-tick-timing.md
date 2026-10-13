@@ -321,3 +321,22 @@ receipt attempt bounded to 20 ms and the original control/claim deadline, so an
 in-flight cancelled effect can persist Ambiguous. Receipt retries check
 cancellation before each attempt and stop immediately after a failed attempt
 when cancellation is active; they never repeat the external effect.
+
+The public-store E2E
+`recorded_delivery_is_visible_to_independent_connections_before_writer_drops`
+records a claimed delivery with the same 20 ms receipt deadline, then checks
+the outcome from an already-open reader and a fresh connection before dropping
+the writer. It also checks the persisted outcome event and reopening after
+writer shutdown. The test passes locally; it does not establish the cause of
+the CI owner-death fixture's stale Claimed reads. The record path uses an
+immediate transaction and commits before returning; runtime snapshots open a
+fresh connection. The Python helper performs a SELECT without an explicit
+BEGIN or a write, so keeping that connection open alone does not pin a read
+transaction across delivery.
+
+With delivery tracing enabled, outcome recording also reports the SQLite
+version, database path and device/inode, autocommit state after commit, and a
+delivery read from a separate read-only connection while the writer remains
+alive. These observations distinguish writer-local visibility from visibility
+through a fresh connection at the exact recording boundary. They are disabled
+by default and do not change receipt success or retry decisions.

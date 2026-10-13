@@ -237,7 +237,23 @@ impl SqliteStore {
         let old=delivery(&tx,&claim.operation)?;
         if old.state!=DeliveryState::Claimed || old.revision!=claim.revision || old.epoch!=claim.epoch || old.owner.as_deref()!=Some(&claim.owner) || old.lease_until_ms!=Some(claim.lease_until_ms) || now>=claim.lease_until_ms {return Err(StoreError::Conflict);}
         if !binding_current(&tx,&claim.operation,false)? {return Err(StoreError::Conflict);}
-        let result=update_outcome(&tx,&old,&outcome,now,&claim.owner)?;check()?;tx.commit()?;Ok(result)
+        let result=update_outcome(&tx,&old,&outcome,now,&claim.owner)?;check()?;tx.commit()?;
+        if std::env::var_os("HERDR_FARM_TRACE_DELIVERY").as_deref()==Some(std::ffi::OsStr::new("1")) {
+            // Read through a new connection while the writer remains alive.
+            // This distinguishes a committed receipt from connection-local
+            // visibility without changing the default recording path.
+            let path=self.connection.path();
+            crate::operations::dispatch::trace_delivery("record connection", (path,self.connection.is_autocommit(),rusqlite::version()));
+            if let Some(path)=path {
+                use std::os::unix::fs::MetadataExt;
+                crate::operations::dispatch::trace_delivery("record database identity",
+                    std::fs::metadata(path).map(|m|(m.dev(),m.ino(),m.len())));
+                let observed=Connection::open_with_flags(path,OpenFlags::SQLITE_OPEN_READ_ONLY)
+                    .map_err(StoreError::from).and_then(|reader|delivery(&reader,&claim.operation));
+                crate::operations::dispatch::trace_delivery("record independent read", observed);
+            }
+        }
+        Ok(result)
     }
     pub fn expire_claims(&mut self,now:i64)->Result<usize> {
         now_check(now)?;

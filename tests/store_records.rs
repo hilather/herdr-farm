@@ -9,6 +9,41 @@ use std::process::{Command, Output};
 
 const BIN: &str = env!("CARGO_BIN_EXE_herdr-farm");
 
+#[test]
+fn recorded_delivery_is_visible_to_independent_connections_before_writer_drops() {
+    use herdr_farm::{domain::{Commit, Mutation, Operation, OperationId, Task, TaskId, TaskState},
+        operations::{DeliveryState, Outcome}, store::SqliteStore};
+    let lab = tempfile::tempdir().unwrap();
+    let path = lab.path().join("state.db");
+    let mut writer = SqliteStore::create(&path).unwrap();
+    let task = Task { id: TaskId::new("delivery-task").unwrap(), revision: 1,
+        state: TaskState::Ready, title: "Delivery durability".into(), active_attempt: None };
+    let id = OperationId::new("delivery-durability").unwrap();
+    writer.commit(Commit { expected_head: 0, mutations: vec![
+        Mutation::Task { expected: None, next: task.clone() },
+        Mutation::Enqueue(Operation { id: id.clone(), task: Some(task.id), kind: "fixture.delivery".into(),
+            target: "local".into(), payload_version: 1, payload: serde_json::json!({}),
+            expected_revision: 1, due_unix_ms: 0, idempotency_key: "delivery-durability".into() }),
+    ] }).unwrap();
+    let mut reader = SqliteStore::open(&path).unwrap();
+    let claim = writer.claim_operation(&id, 1, "delivery-worker", 100, 60_000).unwrap();
+    assert_eq!(reader.deliveries().unwrap()[0].state, DeliveryState::Claimed);
+    let outcome = Outcome::Confirmed { observed_identity: "local-receipt".into() };
+    let recorded = writer.finish_operation_before(&claim, outcome.clone(), 101,
+        std::time::Instant::now() + std::time::Duration::from_millis(20)).unwrap();
+    assert_eq!(recorded.state, DeliveryState::Confirmed);
+    assert_eq!(recorded.revision, claim.revision + 1);
+    assert_eq!(recorded.last_outcome, Some(outcome));
+    assert_eq!(reader.deliveries().unwrap().as_slice(), std::slice::from_ref(&recorded));
+    let mut fresh = SqliteStore::open(&path).unwrap();
+    assert_eq!(fresh.deliveries().unwrap().as_slice(), std::slice::from_ref(&recorded));
+    let snapshot = fresh.read_snapshot(None).unwrap();
+    assert!(snapshot.events.iter().any(|event| event.entity == id.as_str()
+        && event.kind == "operation.outcome" && event.revision == recorded.revision));
+    drop(writer);
+    assert_eq!(SqliteStore::open(&path).unwrap().deliveries().unwrap(), [recorded]);
+}
+
 struct Project { home: tempfile::TempDir }
 
 impl Project {
