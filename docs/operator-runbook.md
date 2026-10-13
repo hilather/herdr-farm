@@ -187,6 +187,11 @@ verification and integration remain separate. For older retained submissions use
 herdr-farm operations PROJECT recover-brief BRIEF --expected-revision R --expected-head H
 ```
 
+Recovery waits for a root writer turn for up to 30 seconds (configured with
+`HERDR_FARM_LOCK_WAIT_SECS`, within its 45-second overall deadline). If that
+budget expires, `OperatorLockContention` advises waiting for the active operation
+or ticker drain to finish and retrying with fresh revision and head.
+
 Without submission evidence, inspect the worker and add `--retry-idle` to that
 command. It rechecks the exact live worker and visible idle prompt, and permits
 one recovery send. A swallowed recovery remains ambiguous and cannot be retried

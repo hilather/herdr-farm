@@ -883,7 +883,7 @@ fn preserve_terminated_repositories(project:&Path,events:&[Event],record:&Attemp
 pub fn recover_brief(project: &Path, operation: &OperationId, revision: u64, expected_head: u64, retry_idle: bool) -> Result<crate::operations::Delivery> {
     let deadline = Instant::now() + Duration::from_secs(45);
     let cancellation = Cancellation::default();
-    let guard = crate::execution_guard::RootGuard::exclusive_by(project.parent().context("project root missing")?, deadline, &cancellation)?;
+    let guard = crate::execution_guard::RootGuard::operator_by(project.parent().context("project root missing")?, deadline, &cancellation)?;
     let mut db = crate::migration::open_active(project)?;
     if let Some(delivery) = db.observe_worker_brief_submission(operation, revision, expected_head, now())? { return Ok(delivery); }
     ensure!(retry_idle, "no submission proves brief delivery; inspect the worker, then recover-brief --retry-idle to authorize one exact idle retry");

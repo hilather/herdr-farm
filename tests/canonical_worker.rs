@@ -378,6 +378,22 @@ sys.stdout.buffer.write(json.dumps({'result':json.loads(reply)['result']}).encod
         }
         fs::remove_file(&stop).unwrap();
     }
+    /// Ticker exit can precede the last supervised descendant releasing its
+    /// inherited root lock. Observe ownership release before operator recovery.
+    fn wait_for_root_release(&self) {
+        let file = fs::OpenOptions::new().read(true).write(true).open(self.path("root/.execution.lock")).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            match file.try_lock() {
+                Ok(()) => { file.unlock().unwrap(); return; }
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    assert!(Instant::now() < deadline, "ticker descendants did not release the root lock; ticker log:\n{}", fs::read_to_string(self.path("root/.ticker.log")).unwrap_or_default());
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("root release observation failed: {error}"),
+            }
+        }
+    }
     fn bounded_passes(&self, passes: u32) {
         let output = Command::new(BIN).env_clear().env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin")
             .env("HERDR_BIN_PATH", &self.herdr)
@@ -4778,6 +4794,32 @@ fn exit_watch_maintenance(permanent: bool) {
 }
 
 #[test]
+fn brief_recovery_lock_budget_exhaustion_is_actionable_and_preserves_state() {
+    let lab = Lab::new("unknown_usage='allow_with_warning'");
+    let head = lab.head().to_string();
+    let args = ["operations", "demo", "recover-brief", "missing-brief", "--expected-revision", "1", "--expected-head", &head];
+    let before = lab.state();
+    // The same request reaches the store when there is no root contention.
+    let baseline = lab.cli(&args);
+    assert!(!baseline.status.success(), "{}", String::from_utf8_lossy(&baseline.stderr));
+    let guard = herdr_farm::execution_guard::RootGuard::exclusive(&lab.path("root")).unwrap();
+    let out = Command::new(BIN).env_clear()
+        .env("HERDR_FARM_TEST_TIME_SCALE", include_str!("support/time-scale.txt").trim())
+        .env("HERDR_FARM_LOCK_WAIT_SECS", "0")
+        .env("HOME", lab.home.path()).env("PATH", "/usr/bin:/bin")
+        .args(["--root", lab.path("root").to_str().unwrap()]).args(args).output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{stderr}");
+    assert!(stderr.contains("operator root lock wait expired") && stderr.contains("retry with fresh revision and head"), "{stderr}");
+    drop(guard);
+    assert_eq!(lab.state(), before, "contention must not mutate recovery state");
+    let released = lab.cli(&args);
+    assert!(!released.status.success(), "{}", String::from_utf8_lossy(&released.stderr));
+    assert_eq!(released.stderr, baseline.stderr, "released recovery must reach the store");
+    assert_eq!(lab.state(), before);
+}
+
+#[test]
 fn ambiguous_brief_recovery_requires_exact_idle_worker_and_sends_only_once() {
     for absent in [false, true] {
         let mut lab = Lab::new("unknown_usage='allow_with_warning'");
@@ -4785,6 +4827,7 @@ fn ambiguous_brief_recovery_requires_exact_idle_worker_and_sends_only_once() {
         fs::write(lab.path("lab/swallow-prompts"), "99").unwrap();
         lab.serve();
         lab.run_until(120, &|| lab.state().deliveries.iter().any(|d| d.state == DeliveryState::Ambiguous));
+        lab.wait_for_root_release();
         let state = lab.state();
         let brief = state.operations.iter().find(|o| o.kind == "runtime.worker_brief").unwrap();
         let delivery = state.deliveries.iter().find(|d| d.operation == brief.id).unwrap();
@@ -4796,7 +4839,7 @@ fn ambiguous_brief_recovery_requires_exact_idle_worker_and_sends_only_once() {
         let args = ["operations", "demo", "recover-brief", brief.id.as_str(), "--expected-revision", &delivery.revision.to_string(), "--expected-head", &state.head.to_string(), "--retry-idle"];
         let out = lab.cli(&args);
         if absent {
-            assert!(!out.status.success());
+            assert!(!out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
             assert_eq!(lab.count("agent.prompt"), 3);
             assert_eq!(lab.attempt(&attempt).state, AttemptState::Launching);
             assert_eq!(lab.state().deliveries.iter().find(|d| d.operation == brief.id).unwrap().state, DeliveryState::Ambiguous);
@@ -4806,7 +4849,8 @@ fn ambiguous_brief_recovery_requires_exact_idle_worker_and_sends_only_once() {
             assert_eq!(lab.attempt(&attempt).state, AttemptState::Running);
             assert_eq!(lab.count("agent.prompt"), 4);
             assert_eq!(lab.events("runtime.worker_brief_retry").len(), 1);
-            assert!(!lab.cli(&args).status.success());
+            let refused = lab.cli(&args);
+            assert!(!refused.status.success(), "{}", String::from_utf8_lossy(&refused.stderr));
             lab.run_passes(4);
             assert_eq!(lab.count("agent.prompt"), 4);
         }
@@ -4928,11 +4972,14 @@ fn ambiguous_idle_brief_can_have_only_one_explicit_recovery_send() {
     fs::write(lab.path("lab/swallow-prompts"), "99").unwrap();
     lab.serve();
     lab.run_until(120, &|| lab.state().deliveries.iter().any(|d| d.state == DeliveryState::Ambiguous));
+    lab.wait_for_root_release();
     let state = lab.state();
     let brief = state.operations.iter().find(|o| o.kind == "runtime.worker_brief").unwrap();
     let delivery = state.deliveries.iter().find(|d| d.operation == brief.id).unwrap();
     let out = lab.cli(&["operations", "demo", "recover-brief", brief.id.as_str(), "--expected-revision", &delivery.revision.to_string(), "--expected-head", &state.head.to_string(), "--retry-idle"]);
-    assert!(!out.status.success(), "swallowed retry must remain uncertain");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "swallowed retry must remain uncertain: {stderr}");
+    assert!(stderr.contains("the brief was sent 1 times but the agent never left its idle prompt"), "recovery must reach the uncertain send: {stderr}");
     assert_eq!(lab.count("agent.prompt"), 4);
     let state = lab.state();
     let delivery = state.deliveries.iter().find(|d| d.operation == brief.id).unwrap();
@@ -4940,7 +4987,7 @@ fn ambiguous_idle_brief_can_have_only_one_explicit_recovery_send() {
     assert_eq!(delivery.attempts, 2);
     assert_eq!(lab.attempt(&attempt).state, AttemptState::Launching);
     let refused = lab.cli(&["operations", "demo", "recover-brief", brief.id.as_str(), "--expected-revision", &delivery.revision.to_string(), "--expected-head", &state.head.to_string(), "--retry-idle"]);
-    assert!(!refused.status.success());
+    assert!(!refused.status.success(), "{}", String::from_utf8_lossy(&refused.stderr));
     lab.run_passes(4);
     assert_eq!(lab.count("agent.prompt"), 4);
     assert_eq!(lab.events("runtime.worker_brief_retry").len(), 1);

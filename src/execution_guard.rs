@@ -155,6 +155,21 @@ pub(crate) fn foreground_acquire<T>(acquire: impl FnMut() -> Result<T>) -> Resul
     if !FOREGROUND.get() || ACQUIRING.get() || owns_lock { let mut acquire = acquire; return acquire(); }
     bounded_wait(acquire)
 }
+fn operator_wait_budget() -> std::time::Duration {
+    std::env::var("HERDR_FARM_LOCK_WAIT_SECS").ok().and_then(|value| value.parse::<u64>().ok())
+        .map_or_else(|| crate::timing::retry(std::time::Duration::from_secs(30)).max(std::time::Duration::from_millis(250)), std::time::Duration::from_secs)
+}
+
+/// A bounded operator write could not obtain its root execution turn.
+#[derive(Debug)]
+pub struct OperatorLockContention { pub root: std::path::PathBuf }
+impl std::fmt::Display for OperatorLockContention {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "operator root lock wait expired at {}; wait for the active operation or ticker drain to finish, then retry with fresh revision and head", self.root.display())
+    }
+}
+impl std::error::Error for OperatorLockContention {}
+
 fn bounded_wait<T>(mut acquire: impl FnMut() -> Result<T>) -> Result<T> {
     struct Acquisition;
     impl Drop for Acquisition { fn drop(&mut self) { ACQUIRING.set(false); } }
@@ -162,8 +177,7 @@ fn bounded_wait<T>(mut acquire: impl FnMut() -> Result<T>) -> Result<T> {
     let _acquisition = Acquisition;
     // An explicit override is taken literally; the 30 s default is scaled in
     // test labs like every other product wait.
-    let bound = std::env::var("HERDR_FARM_LOCK_WAIT_SECS").ok().and_then(|value| value.parse::<u64>().ok())
-        .map_or_else(|| crate::timing::retry(std::time::Duration::from_secs(30)).max(std::time::Duration::from_millis(250)), std::time::Duration::from_secs);
+    let bound = operator_wait_budget();
     let started = std::time::Instant::now();
     let poll = crate::timing::retry(std::time::Duration::from_millis(100));
     let mut notified = false;
@@ -266,6 +280,21 @@ impl RootGuard {
         let _turn=exclusive_file_until(&root.join(".execution-turn.lock"),until,&|| cancellation.is_cancelled())?;
         let file=exclusive_file_until(&root.join(".execution.lock"),until,&|| cancellation.is_cancelled())?;
         Ok(Self{_file:file,_check:None})
+    }
+    /// Short operator writes queue a writer turn for the foreground lock
+    /// budget (30 seconds by default), bounded by their overall deadline.
+    pub fn operator_by(root:&Path,deadline:std::time::Instant,cancellation:&crate::runner::Cancellation)->Result<Self> {
+        let until=deadline.min(std::time::Instant::now()+operator_wait_budget());
+        let acquire=|| -> Result<Self> {
+            let _turn=exclusive_file_until(&root.join(".execution-turn.lock"),until,&|| cancellation.is_cancelled())?;
+            let file=exclusive_file_until(&root.join(".execution.lock"),until,&|| cancellation.is_cancelled())?;
+            Ok(Self{_file:file,_check:None})
+        };
+        acquire().map_err(|error| {
+            if !cancellation.is_cancelled() && error.chain().any(|cause| matches!(cause.downcast_ref::<std::fs::TryLockError>(),Some(std::fs::TryLockError::WouldBlock))) {
+                error.context(OperatorLockContention{root:root.to_path_buf()})
+            } else { error }
+        })
     }
     /// An observed exit gets a bounded 30 second window, with the same root
     /// fence and cancellation policy as other staged effects.
