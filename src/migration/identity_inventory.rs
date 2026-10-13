@@ -363,6 +363,7 @@ mod tests {
         db.execute_batch("ALTER TABLE runtime_bindings RENAME TO original_bindings; CREATE VIEW runtime_bindings AS SELECT * FROM original_bindings WHERE (WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<100000000) SELECT sum(x) FROM n)>0;").unwrap();
         let mut budget=Budget::new(50*1024*1024,1024,Instant::now()+Duration::from_millis(100),Default::default()).unwrap();let started=Instant::now();
         let error=read_identity_inventory(&p,&mut budget).unwrap_err();assert!(started.elapsed()<Duration::from_secs(2),"{error:#}");assert!(error.chain().any(|cause|matches!(cause.downcast_ref::<crate::store::StoreError>(),Some(crate::store::StoreError::Deadline|crate::store::StoreError::Cancelled))),"{error:#}");
+        let rendered=format!("{error:#}");assert!(rendered.contains("interrupt")||rendered.contains("expired"),"{rendered}");
     }
 
     #[test]
