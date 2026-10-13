@@ -65,7 +65,10 @@ fn defer_busy(state: &mut State, hash: String) {
         + crate::timing::retry(Duration::from_secs(seconds)).as_millis() as i64);
 }
 fn items(dir: &Path) -> Result<Vec<String>> {
-    Ok(runtime::worker_result_inbox(dir)?
+    let mut notices = runtime::worker_result_inbox(dir)?;
+    notices.extend(migration::open_active_read_only(dir)?.critical_health_inbox()?);
+    notices.sort_by(|a,b| a.content.id.cmp(&b.content.id));
+    Ok(notices
         .into_iter()
         .map(|i| i.content.id)
         .collect())
@@ -271,7 +274,7 @@ fn run_inner(ctx: &Ctx, dir: &Path) -> Result<()> {
     let payload = serde_json::to_string(&if mode == Mode::Nudge {
         json!({"target":journal.route.pane_id,"text":crate::steps::NUDGE_TEXT})
     } else {
-        json!({"title":format!("herdr-farm: {}",dir.file_name().unwrap_or_default().to_string_lossy()),"body":format!("{} worker-result inbox item(s) waiting on coordinator. Run context.",batch.ids.len())})
+        json!({"title":format!("herdr-farm: {}",dir.file_name().unwrap_or_default().to_string_lossy()),"body":format!("{} result or critical health inbox item(s) waiting on coordinator. Run context.",batch.ids.len())})
     })?;
     state.sequence = state
         .sequence

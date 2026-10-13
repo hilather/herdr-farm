@@ -6,7 +6,7 @@
 //! registered centrally in `super::LANES`; migrations under
 //! `migrations/telemetry/health/` only. Contract:
 //! docs/telemetry/contracts-health.md. Never grants launch, changes budgets,
-//! profiles or model access, or accepts results; only `health notify` writes
+//! profiles or model access, or accepts results; health notifications write
 //! `state.db`, and only inbox notices.
 use anyhow::Result;
 use serde_json::{Value, json};
@@ -158,5 +158,5 @@ pub fn run_recommend(project: &Path, args: &recommend::Args) -> Result<String> {
 pub fn metrics(_project: &Path, _since: Option<i64>) -> Result<BTreeMap<String, Value>> { Ok(BTreeMap::new()) }
 
 /// Ticker telemetry pass: evaluate at most once per `store::TICK_INTERVAL_MS`,
-/// enabled by default unless the owner disables health_evaluation. Never notifies.
+/// enabled by default unless the owner disables health_evaluation. Notifies according to the owner policy.
 pub fn tick(project: &Path, _budget: super::codex::Budget) -> Result<()> { store::tick(project) }

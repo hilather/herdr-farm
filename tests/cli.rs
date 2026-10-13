@@ -58,7 +58,9 @@ fn launch_exec_consumes_one_private_digest_bound_spec_and_execs_the_supervisor()
 fn ticker_canonical_observations_commit_cancel_and_restart_in_the_shared_pool() {
     use std::{fs,os::unix::{fs::PermissionsExt,net::UnixListener},process::Stdio,time::{Duration,Instant}};
     use herdr_farm::{migration,runtime,domain::RuntimeRoute,reconcile::ResourceState};
-    let home=tempfile::tempdir().unwrap();let root=home.path().join("root");let r=root.to_str().unwrap();
+    let home=tempfile::tempdir().unwrap();
+    disable_automatic_health_notices(home.path());
+    let root=home.path().join("root");let r=root.to_str().unwrap();
     for action in ["new","pause"]{assert!(hp(home.path(),&["--root",r,action,"demo"]).status.success());}
     let project=root.join("demo");let plan=migration::inspect(&project).unwrap();migration::apply(&project,&plan,true).unwrap();
     let socket=home.path().join("canonical.sock");let _listener=UnixListener::bind(&socket).unwrap();
@@ -413,6 +415,13 @@ fn profile_resolve_prints_envelope_without_argv_and_selects_unique_kind() {
     assert!(!home.path().join(".herdr-farm").exists());
 }
 
+// Ticker labs asserting exact events/inbox/prompt sets opt out through owner policy.
+fn disable_automatic_health_notices(home: &Path) {
+    let config = home.join(".config/herdr-farm/config.toml");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(config, "[telemetry]\nhealth_notify = 'off'\n").unwrap();
+}
+
 // Historical workflows below deliberately start from a legacy project.
 fn hp(home: &Path, args: &[&str]) -> std::process::Output {
     let mut legacy_args = args.to_vec();
@@ -602,7 +611,9 @@ fn ticker_start_without_projects_creates_nothing() {
 fn ticker_run_outlasts_a_transient_lock_probe_and_names_a_real_holder() {
     use std::{fs,io::Write,time::{Duration,Instant},process::Stdio};
     struct Child(std::process::Child);impl Drop for Child{fn drop(&mut self){let _=self.0.kill();let _=self.0.wait();}}
-    let home=tempfile::tempdir().unwrap();let root=home.path().join("root");let r=root.to_str().unwrap();
+    let home=tempfile::tempdir().unwrap();
+    disable_automatic_health_notices(home.path());
+    let root=home.path().join("root");let r=root.to_str().unwrap();
     assert!(hp(home.path(),&["--root",r,"new","demo"]).status.success());
     let spawn=||Child(Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME",home.path()).env("PATH","/usr/bin:/bin").env("HERDR_BIN_PATH","/bin/false").args(["--root",r,"ticker","run"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
     let open=||fs::File::options().read(true).write(true).create(true).truncate(false).open(root.join(".ticker.lock")).unwrap();
@@ -1242,7 +1253,9 @@ fn ticker_canonical_notification_confirms_or_retains_ambiguity_after_owner_death
     // Keep the owner-death lock and escaped-helper deadlines independent.
     let wait_budget = Duration::from_secs(60);
     for mode in ["ok","eof","blocked","lost","death"] {
-        let home=tempfile::tempdir().unwrap();let root=home.path().join("root");let r=root.to_str().unwrap();for action in ["new","pause"]{assert!(hp(home.path(),&["--root",r,action,"demo"]).status.success());}
+        let home=tempfile::tempdir().unwrap();
+        disable_automatic_health_notices(home.path());
+        let root=home.path().join("root");let r=root.to_str().unwrap();for action in ["new","pause"]{assert!(hp(home.path(),&["--root",r,action,"demo"]).status.success());}
         let project=root.join("demo");fs::write(project.join("inbox/message.md"),"+++\nid='message'\nsummary='private text'\n+++\n").unwrap();let plan=migration::inspect(&project).unwrap();migration::apply(&project,&plan,true).unwrap();
         let task=TaskId::new("notification").unwrap();let head=runtime::add_task(&project,task.clone(),"notification".into(),runtime::snapshot(&project).unwrap().head).unwrap();let socket=home.path().join("notification.sock");let _listener=UnixListener::bind(&socket).unwrap();runtime::create_binding(&project,None,None,head,&RuntimeRoute{socket:socket.display().to_string(),workspace_id:"w".into(),tab_id:"t".into(),pane_id:"p".into(),cwd:project.display().to_string(),..Default::default()}).unwrap();
         let helper=home.path().join("herdr");fs::write(&helper,format!(r#"#!/usr/bin/python3
@@ -1455,7 +1468,9 @@ fn cancellation_cli_audits_request_without_releasing_an_unproven_worker() {
 fn ticker_native_copy_publishes_announces_and_does_not_recopy_after_restart() {
     use std::{fs,time::{Duration,Instant},process::Stdio,os::unix::fs::PermissionsExt};
     use sha2::{Digest,Sha256};
-    let home=tempfile::tempdir().unwrap();let root=home.path().join("root");let r=root.to_str().unwrap();
+    let home=tempfile::tempdir().unwrap();
+    disable_automatic_health_notices(home.path());
+    let root=home.path().join("root");let r=root.to_str().unwrap();
     assert!(hp(home.path(),&["--root",r,"new","demo"]).status.success());let project=root.join("demo");
     let source=home.path().join("source '$λ");fs::create_dir_all(source.join("library/empty")).unwrap();
     fs::write(source.join("report.md"),b"new report\0\xff").unwrap();fs::write(source.join("library/item"),b"binary\0\xff").unwrap();
@@ -1530,14 +1545,16 @@ fn native_report_hash_is_bounded_binary_and_configuration_independent() {
 fn native_ticker_claims_legacy_routine_and_restart_delivers_without_rerun() {
     use std::{fs,time::{Duration,Instant},process::Stdio,os::unix::fs::PermissionsExt};
     use sha2::{Digest,Sha256};
-    let home=tempfile::tempdir().unwrap();let root=home.path().join("root");let r=root.to_str().unwrap();
+    let home=tempfile::tempdir().unwrap();
+    disable_automatic_health_notices(home.path());
+    let root=home.path().join("root");let r=root.to_str().unwrap();
     assert!(hp(home.path(),&["--root",r,"new","demo"]).status.success());let project=root.join("demo");
     let socket=home.path().join("session.sock");let _listener=std::os::unix::net::UnixListener::bind(&socket).unwrap();
     fs::write(project.join(".state/coordinator.json"),serde_json::to_vec(&serde_json::json!({"socket":socket,"workspace_id":"w1","tab_id":"w1:t1","pane_id":"w1:p1","agent_name":"coordinator","cwd":project})).unwrap()).unwrap();
     let command="printf run >> executions; printf routine-result";
     fs::write(project.join("routines/check.md"),format!("+++\nschedule = \"every 24h\"\ncommand = {}\n+++\nInspect output.\n",serde_json::to_string(command).unwrap())).unwrap();
     let cfg=home.path().join(".config/herdr-farm");fs::create_dir_all(&cfg).unwrap();
-    fs::write(cfg.join("config.toml"),format!("[safety.\"{}\"]\nroutine_commands = true\n",project.display())).unwrap();
+    fs::write(cfg.join("config.toml"),format!("[telemetry]\nhealth_notify = 'off'\n[safety.\"{}\"]\nroutine_commands = true\n",project.display())).unwrap();
     fs::write(cfg.join("approved-routines.json"),serde_json::to_vec(&serde_json::json!([{"project":project,"routine":"check","command_sha256":format!("{:x}",Sha256::digest(command.as_bytes())),"approved":"fixture"}])).unwrap()).unwrap();
     let state=project.join(".state/ticker.json");fs::write(&state,b"{\"routines\":{\"check\":{\"last_run\":\"2026-01-01T00:00:00Z\"}}}").unwrap();
     let fake=home.path().join("herdr");fs::write(&fake,b"#!/bin/sh\ncase \"$1 $2\" in\n'agent list') echo '{\"result\":{\"agents\":[]}}';;\n'pane list') echo '{\"result\":{\"panes\":[]}}';;\n*) echo '{\"result\":{\"shown\":true}}';;\nesac\n").unwrap();fs::set_permissions(&fake,fs::Permissions::from_mode(0o700)).unwrap();
@@ -1566,7 +1583,9 @@ fn native_ticker_claims_legacy_routine_and_restart_delivers_without_rerun() {
 fn ticker_native_merged_finalization_resolves_and_replays_notice_after_restart() {
     use std::{fs,time::{Duration,Instant},process::Stdio,os::unix::fs::PermissionsExt};
     use sha2::{Digest,Sha256};
-    let home=tempfile::tempdir().unwrap();let root=home.path().join("root");let r=root.to_str().unwrap();
+    let home=tempfile::tempdir().unwrap();
+    disable_automatic_health_notices(home.path());
+    let root=home.path().join("root");let r=root.to_str().unwrap();
     assert!(hp(home.path(),&["--root",r,"new","demo"]).status.success());let project=root.join("demo");
     let source=home.path().join("source '$λ");fs::create_dir_all(source.join("library/empty")).unwrap();
     fs::write(source.join("report.md"),b"PR: https://github.com/example/repo/pull/1\ncomplete\n").unwrap();fs::write(source.join("library/item"),b"binary\0\xff").unwrap();
@@ -1613,7 +1632,9 @@ fn ticker_native_briefs_confirm_or_recover_uncertainty_without_replay() {
     mod inventory_history { include!("support/inventory_history.rs"); }
     use std::{fs,time::{Duration,Instant},process::Stdio,os::unix::{fs::PermissionsExt,net::UnixListener}};
     for outcome in ["confirmed","lost"] {
-        let home=tempfile::tempdir().unwrap();let root=home.path().join("root");let r=root.to_str().unwrap();
+        let home=tempfile::tempdir().unwrap();
+        disable_automatic_health_notices(home.path());
+        let root=home.path().join("root");let r=root.to_str().unwrap();
         assert!(hp(home.path(),&["--root",r,"new","demo"]).status.success());let project=root.join("demo");
         #[cfg(feature="state-store")]
         {
@@ -1655,7 +1676,9 @@ fn ticker_native_briefs_confirm_or_recover_uncertainty_without_replay() {
 fn ticker_remote_briefs_confirm_or_recover_uncertainty_without_replay() {
     use std::{fs,time::{Duration,Instant},process::Stdio,os::unix::{fs::PermissionsExt,net::UnixListener}};
     for outcome in ["confirmed","lost"] {
-        let home=tempfile::tempdir().unwrap();let root=home.path().join("root");let r=root.to_str().unwrap();
+        let home=tempfile::tempdir().unwrap();
+        disable_automatic_health_notices(home.path());
+        let root=home.path().join("root");let r=root.to_str().unwrap();
         assert!(hp(home.path(),&["--root",r,"new","demo"]).status.success());let project=root.join("demo");
         let socket=home.path().join("session.sock");let _listener=UnixListener::bind(&socket).unwrap();
         fs::write(project.join(".state/coordinator.json"),serde_json::json!({"socket":socket}).to_string()).unwrap();
@@ -1724,7 +1747,9 @@ fn ticker_local_and_remote_launches_acknowledge_once_and_recover_lost_replies() 
     for outcome in ["confirmed","lost"] {
     for case in ["claude", "codex", "network", "explicit", "empty", "empty-bound", "other"] {
         if is_remote && case != "claude" { continue; }
-        let home=tempfile::tempdir().unwrap();let root=home.path().join("root");let r=root.to_str().unwrap();
+        let home=tempfile::tempdir().unwrap();
+        disable_automatic_health_notices(home.path());
+        let root=home.path().join("root");let r=root.to_str().unwrap();
         assert!(hp(home.path(),&["--root",r,"new","demo"]).status.success());let project=root.join("demo");
         let socket=home.path().join("session.sock");let _listener=UnixListener::bind(&socket).unwrap();
         fs::write(project.join(".state/coordinator.json"),serde_json::json!({"socket":socket}).to_string()).unwrap();
@@ -1751,7 +1776,7 @@ fn ticker_local_and_remote_launches_acknowledge_once_and_recover_lost_replies() 
         };
         let config=home.path().join(".config/herdr-farm");fs::create_dir_all(&config).unwrap();
         let setting=match case {"network"=>"thread_network=true", "explicit"=>"thread_agent_args=['--custom']\nthread_agent_args_kind='codex'\nthread_network=true", "empty"=>"thread_agent_args=[]", "empty-bound"=>"thread_agent_args=[]\nthread_agent_args_kind='codex'", _=>""};
-        fs::write(config.join("config.toml"),format!("[safety.{:?}]\n{setting}\n",project.to_str().unwrap())).unwrap();
+        fs::write(config.join("config.toml"),format!("[telemetry]\nhealth_notify = 'off'\n[safety.{:?}]\n{setting}\n",project.to_str().unwrap())).unwrap();
         fs::write(home.path().join("expected.json"),serde_json::json!({"name":"worker","kind":kind,"pane_id":"p","args":expected,"timeout_ms":20000}).to_string()).unwrap();
         let agent=serde_json::json!({"workspace_id":"w","tab_id":"tab","pane_id":"p","cwd":source,"name":"worker","agent":kind,"agent_status":"blocked","terminal_id":"terminal","launch_pending":true});
         let record=project.join("threads/t-0001.toml");fs::write(&record,toml::to_string(&serde_json::json!({"id":"t-0001","status":"open","kind":"adopted","prompt_pending":true,"machine":if is_remote{"saved"}else{""},"thread_dir":source,"cwd":source,"workspace_id":"w","tab_id":"tab","pane_id":"p","agent":kind,"agent_name":"worker","created":jiff::Timestamp::now().to_string()})).unwrap()).unwrap();
@@ -1823,7 +1848,9 @@ sys.exit(subprocess.call(sys.argv[-1],shell=True))
 fn ticker_coordinator_prime_confirms_or_recovers_once_across_restart() {
     use std::{fs,time::{Duration,Instant},process::Stdio,os::unix::{fs::PermissionsExt,net::UnixListener}};
     for outcome in ["confirmed","lost"] {
-        let home=tempfile::tempdir().unwrap();let root=home.path().join("root");let r=root.to_str().unwrap();
+        let home=tempfile::tempdir().unwrap();
+        disable_automatic_health_notices(home.path());
+        let root=home.path().join("root");let r=root.to_str().unwrap();
         assert!(hp(home.path(),&["--root",r,"new","demo"]).status.success());let project=root.join("demo");
         let socket=home.path().join("session.sock");let _listener=UnixListener::bind(&socket).unwrap();
         let record=project.join(".state/coordinator.json");
@@ -1864,7 +1891,9 @@ else:print('{"result":{"shown":true}}')
 fn ticker_coordinator_start_then_prime_recover_without_replaying_start() {
     use std::{fs,time::{Duration,Instant},process::Stdio,os::unix::{fs::PermissionsExt,net::UnixListener}};
     for outcome in ["confirmed","lost"] {
-        let home=tempfile::tempdir().unwrap();let root=home.path().join("root");let r=root.to_str().unwrap();
+        let home=tempfile::tempdir().unwrap();
+        disable_automatic_health_notices(home.path());
+        let root=home.path().join("root");let r=root.to_str().unwrap();
         assert!(hp(home.path(),&["--root",r,"new","demo"]).status.success());let project=root.join("demo");
         let socket=home.path().join("session.sock");let _listener=UnixListener::bind(&socket).unwrap();
         let record=project.join(".state/coordinator.json");
@@ -1915,7 +1944,9 @@ else:print('{"result":{"shown":true}}')
 fn ticker_notifications_recover_across_restart_and_reconcile_through_cli() {
     use std::{fs,time::{Duration,Instant},process::Stdio,os::unix::{fs::PermissionsExt,net::UnixListener}};
     for nudge in [false,true] {for outcome in ["confirmed","lost"] {
-        let home=tempfile::tempdir().unwrap();let root=home.path().join("root");let r=root.to_str().unwrap();assert!(hp(home.path(),&["--root",r,"new","demo"]).status.success());let p=root.join("demo");
+        let home=tempfile::tempdir().unwrap();
+        disable_automatic_health_notices(home.path());
+        let root=home.path().join("root");let r=root.to_str().unwrap();assert!(hp(home.path(),&["--root",r,"new","demo"]).status.success());let p=root.join("demo");
         if nudge {let path=p.join("PROJECT.md");fs::write(&path,fs::read_to_string(&path).unwrap().replace("nudge = false","nudge = true")).unwrap();}
         let socket=home.path().join("session.sock");let _listener=UnixListener::bind(&socket).unwrap();fs::write(p.join(".state/coordinator.json"),serde_json::json!({"socket":socket,"workspace_id":"w","tab_id":"tab","pane_id":"p","cwd":p,"agent_name":"coordinator"}).to_string()).unwrap();
         let item=|id:&str|fs::write(p.join(format!("inbox/{id}.md")),format!("+++\nid='{id}'\nkind='test'\nsummary='Fixture'\n+++\n")).unwrap();item("item-a");
@@ -1975,7 +2006,9 @@ else:print('{"result":{"shown":true}}')
 fn ticker_tokens_use_supervised_local_remote_and_coordinator_refreshes_after_restart() {
     use std::{fs,time::{Duration,Instant},process::Stdio,os::unix::{fs::PermissionsExt,net::UnixListener}};
     for mode in ["local","remote","coordinator"] {
-        let home=tempfile::tempdir().unwrap();let root=home.path().join("root");let r=root.to_str().unwrap();assert!(hp(home.path(),&["--root",r,"new","demo"]).status.success());let p=root.join("demo");
+        let home=tempfile::tempdir().unwrap();
+        disable_automatic_health_notices(home.path());
+        let root=home.path().join("root");let r=root.to_str().unwrap();assert!(hp(home.path(),&["--root",r,"new","demo"]).status.success());let p=root.join("demo");
         let socket=home.path().join("session.sock");let _listener=UnixListener::bind(&socket).unwrap();let source=home.path().join("source");fs::create_dir(&source).unwrap();
         let a=serde_json::json!({"workspace_id":"w","tab_id":"tab","pane_id":"p","terminal_id":"terminal","cwd":source,"name":"worker","agent":"claude","agent_status":"working"});fs::write(home.path().join("agent.json"),a.to_string()).unwrap();fs::write(home.path().join("mode"),mode).unwrap();
         let mut c=serde_json::json!({"socket":socket});
@@ -2028,7 +2061,9 @@ fn ticker_canonical_finalization_preserves_once_and_recovers_receipt_after_resta
     use std::{fs,process::Stdio,time::{Duration,Instant}};
     use herdr_farm::{migration,runtime,operations::DeliveryState,domain::TaskState};
     for interrupted in [false,true] {
-        let home=tempfile::tempdir().unwrap();let root=home.path().join("root");let r=root.to_str().unwrap();
+        let home=tempfile::tempdir().unwrap();
+        disable_automatic_health_notices(home.path());
+        let root=home.path().join("root");let r=root.to_str().unwrap();
         for action in ["new","pause"] {assert!(hp(home.path(),&["--root",r,action,"demo"]).status.success());}
         let project=root.join("demo");let source=home.path().join("source");fs::create_dir_all(source.join("library")).unwrap();fs::write(source.join("report.md"),"report for review\n").unwrap();fs::write(source.join("library/result"),b"preserved bytes").unwrap();
         let original=format!("id='t-0001'\nstatus='resolved'\nthread_dir={}\n",serde_json::to_string(source.to_str().unwrap()).unwrap());fs::write(project.join("threads/t-0001.toml"),&original).unwrap();let plan=migration::inspect(&project).unwrap();migration::apply(&project,&plan,true).unwrap();
@@ -2061,9 +2096,11 @@ fn ticker_canonical_routine_admits_from_hint_and_restart_keeps_one_execution() {
     use std::{fs,process::Stdio,time::{Duration,Instant}};
     use herdr_farm::{domain::*,authority,migration,runtime,operations::DeliveryState};
     use sha2::{Digest,Sha256};
-    let home=tempfile::tempdir().unwrap();let root=home.path().join("root");let r=root.to_str().unwrap();for action in ["new","pause"]{assert!(hp(home.path(),&["--root",r,action,"demo"]).status.success());}
+    let home=tempfile::tempdir().unwrap();
+    disable_automatic_health_notices(home.path());
+    let root=home.path().join("root");let r=root.to_str().unwrap();for action in ["new","pause"]{assert!(hp(home.path(),&["--root",r,action,"demo"]).status.success());}
     let key=home.path().join("owner");assert!(Command::new("/usr/bin/ssh-keygen").args(["-q","-t","ed25519","-N","","-f"]).arg(&key).output().unwrap().status.success());
-    let public=fs::read_to_string(key.with_extension("pub")).unwrap().split_whitespace().take(2).collect::<Vec<_>>().join(" ");let project=root.join("demo");let config=home.path().join(".config/herdr-farm/config.toml");fs::create_dir_all(config.parent().unwrap()).unwrap();fs::write(&config,format!("[authority]\nversion=1\nrevision=1\napproval_public_key={public:?}\n[safety.{:?}]\nroutine_commands=true\n",project.display().to_string())).unwrap();
+    let public=fs::read_to_string(key.with_extension("pub")).unwrap().split_whitespace().take(2).collect::<Vec<_>>().join(" ");let project=root.join("demo");let config=home.path().join(".config/herdr-farm/config.toml");fs::create_dir_all(config.parent().unwrap()).unwrap();fs::write(&config,format!("[telemetry]\nhealth_notify = 'off'\n[authority]\nversion=1\nrevision=1\napproval_public_key={public:?}\n[safety.{:?}]\nroutine_commands=true\n",project.display().to_string())).unwrap();
     let plan=migration::inspect_with_config(&project,&config).unwrap();migration::apply(&project,&plan,true).unwrap();let s=runtime::snapshot(&project).unwrap();runtime::set_state(&project,s.head,s.control.unwrap().revision,ProjectState::Active,&config).unwrap();
     let script=project.join("check.sh");let bytes=b"printf once >> ROUTINE_MARKER\n";fs::write(&script,bytes).unwrap();
     let definition=RoutineDefinition{version:1,name:"check".into(),revision:1,project_store:project.join(".state/state.db").canonicalize().unwrap().display().to_string(),authority:authority::policy_reference(&project).unwrap(),config:migration::config_reference(&config).unwrap(),enabled:true,schedule:"every 1h".into(),timezone:"UTC".into(),start_unix_ms:jiff::Timestamp::now().as_millisecond()-1000,missed:MissedRunPolicy::CoalesceLatest,overlap:OverlapPolicy::Skip,script:script.display().to_string(),script_sha256:format!("{:x}",Sha256::digest(bytes)),cwd:project.display().to_string(),deadline_ms:1000,output_cap_bytes:4000};
@@ -2104,7 +2141,7 @@ impl VerifyFixture {
         let key=home.path().join("owner");assert!(Command::new("/usr/bin/ssh-keygen").args(["-q","-t","ed25519","-N","","-f"]).arg(&key).output().unwrap().status.success());
         let public=fs::read_to_string(key.with_extension("pub")).unwrap().split_whitespace().take(2).collect::<Vec<_>>().join(" ");
         let project=root.join("demo");let config=home.path().join(".config/herdr-farm/config.toml");fs::create_dir_all(config.parent().unwrap()).unwrap();
-        fs::write(&config,format!("[authority]\nversion=1\nrevision=1\napproval_public_key={public:?}\n[profiles.worker]\n{worker}")).unwrap();
+        fs::write(&config,format!("[telemetry]\nhealth_notify = 'off'\n[authority]\nversion=1\nrevision=1\napproval_public_key={public:?}\n[profiles.worker]\n{worker}")).unwrap();
         let plan=migration::inspect_with_config(&project,&config).unwrap();migration::apply(&project,&plan,true).unwrap();
         let s=runtime::snapshot(&project).unwrap();runtime::set_state(&project,s.head,s.control.unwrap().revision,ProjectState::Active,&config).unwrap();
         let store=project.join(".state/state.db").canonicalize().unwrap().display().to_string();
@@ -4944,6 +4981,7 @@ fn hot_paths_skip_the_whole_store_check_and_the_ticker_checks_off_its_pass_then_
     use std::{fs, io::{Seek, SeekFrom, Write}, os::unix::{fs::PermissionsExt, net::UnixListener}, process::Stdio, time::{Duration, Instant}};
     use herdr_farm::{domain::{ProjectState, RuntimeRoute, TaskId}, migration, runtime};
     let home = tempfile::tempdir().unwrap();
+    disable_automatic_health_notices(home.path());
     let root = home.path().join("root");
     let r = root.to_str().unwrap();
     let h = home.path();
@@ -5295,6 +5333,7 @@ fn memory_review_remind_without_the_state_store_prints_due_reviews_and_records_n
 fn ticker_delivers_one_memory_review_row_and_a_crash_retry_neither_duplicates_nor_double_counts() {
     use std::{fs, process::Stdio, time::{Duration, Instant}};
     let home = tempfile::tempdir().unwrap();
+    disable_automatic_health_notices(home.path());
     let root = home.path().join("root");
     let r = root.to_str().unwrap();
     let h = home.path();
@@ -5934,6 +5973,7 @@ fn cli_self_observation_records_only_metadata_and_skips_busy_or_absent_sidecars(
     use herdr_farm::{migration, telemetry::sidecar};
     use serde_json::{Value, json};
     let home = tempfile::tempdir().unwrap();
+    disable_automatic_health_notices(home.path());
     let root = home.path().join("root");
     let r = root.to_str().unwrap();
     for action in ["new", "pause"] { assert!(hp(home.path(), &["--root",r,action,"demo"]).status.success()); }

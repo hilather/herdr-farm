@@ -142,7 +142,12 @@ pub fn tick(project: &Path) -> Result<()> {
     let now = jiff::Timestamp::now().as_millisecond();
     let interval = crate::timing::pass(std::time::Duration::from_millis(TICK_INTERVAL_MS as u64)).as_millis() as i64;
     if last.is_none_or(|at| now - at >= interval) {
-        evaluate(project, "tick", now).map(drop)
+        evaluate(project, "tick", now)?;
+        if let Some(home) = std::env::var_os("HOME") {
+            let config_dir = crate::product_environment::config_dir_for_home(Path::new(&home));
+            super::notify::automatic(project, &config_dir)?;
+        }
+        Ok(())
     } else {
         Ok(())
     }

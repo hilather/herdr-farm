@@ -103,12 +103,20 @@ pub fn enabled(config_dir: &Path) -> Result<bool> {
 }
 
 pub(crate) fn telemetry_switch(config_dir: &Path, key: &str) -> Result<bool> {
+    match telemetry_setting(config_dir, key)? {
+        None => Ok(true),
+        Some(toml::Value::Boolean(on)) => Ok(on),
+        Some(_) => bail!("[telemetry] {key} in {} must be true or false", config_dir.join("config.toml").display()),
+    }
+}
+
+pub(crate) fn telemetry_setting(config_dir: &Path, key: &str) -> Result<Option<toml::Value>> {
     use std::io::Read;
     use std::os::unix::fs::OpenOptionsExt;
     let path = config_dir.join("config.toml");
     let file = match std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(&path) {
         Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error).with_context(|| format!("cannot read {}", path.display())),
     };
     anyhow::ensure!(file.metadata()?.is_file(), "{} is not a regular file", path.display());
@@ -117,11 +125,7 @@ pub(crate) fn telemetry_switch(config_dir: &Path, key: &str) -> Result<bool> {
     anyhow::ensure!(bytes.len() as u64 <= CONFIG_LIMIT, "{} exceeds its {CONFIG_LIMIT}-byte limit", path.display());
     let text = String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("{} is not UTF-8 (contents withheld)", path.display()))?;
     let table: toml::Table = toml::from_str(&text).map_err(|_| anyhow::anyhow!("{} does not parse (contents withheld)", path.display()))?;
-    match table.get("telemetry").and_then(|t| t.get(key)) {
-        None => Ok(true),
-        Some(toml::Value::Boolean(on)) => Ok(*on),
-        Some(_) => bail!("[telemetry] {key} in {} must be true or false", path.display()),
-    }
+    Ok(table.get("telemetry").and_then(|t| t.get(key)).cloned())
 }
 
 /// The message both surfaces print when the switch is off.

@@ -394,3 +394,12 @@ maintenance hold and 392 ms total acknowledgement latency. The new exit-watch
 assertions require the steward's outside-sandbox run; fixture socket creation
 was denied before those assertions. Clippy completed with no warnings in
 changed lines; existing warnings elsewhere remain.
+
+## Automatic health delivery isolation
+
+Ticker labs whose workflows assert exact event, inbox or prompt sets set
+`[telemetry] health_notify = 'off'` in their temporary owner's config. This avoids
+health evaluation timing injecting unrelated notices; assertions remain exact.
+The telemetry health episode and coordinator critical-notice wake workflows
+retain the default policy. See `telemetry/contracts-health.md` for deployment
+triggers and the no-bound-usage coverage caveat.
