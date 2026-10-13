@@ -34,6 +34,19 @@ Every thread works from `<its working directory>/.herdr-project/<project>-<id>/`
 
 `PROJECT.md` settings: `name`, `goal`, `repos` (`path`, optional `machine`), `coordinator_agent`, `thread_agent` (default `claude`), `max_parallel_threads` (3), `auto_resolve_days` (7), `nudge` (`false`), and optional `integration_target` (a Git ref for guarded legacy resolution).
 
+For canonical projects, `max_parallel_threads` is advisory; the scheduler's
+`max_active_workers` is the enforced cap. `new`, `context`, `doctor`, and
+`launch run` show a warning when they differ, including the exact revision/head
+checked `scheduler PROJECT policy` command to align the cap, or the PROJECT.md
+edit to keep it. Context shows the effective cap and active attempts retaining
+capacity (including reservations and unfinished stops), plus available slots.
+Submit launches through admission; coordinator count checks cannot reserve slots.
+Admission continues to refuse concurrent launches beyond the cap atomically.
+Existing scheduler policies survive deployment and subsequent `launch run` calls;
+only an untouched initial policy gets the owner launch default (4 unless configured).
+An explicit `scheduler policy` change wins, including a zero cap; an explicit
+`launch run --max-active-workers N` remains an owner request to change the cap.
+
 ## Commands
 
 | Command | What it does |
@@ -985,7 +998,8 @@ A durable `stop_journal` records each submitted action. If interrupted, rerun
 the same command. An ambiguous shutdown or close is observed rather than blindly
 repeated; reconcile the terminal if verification still fails. `stopping` remains
 visible as an unfinished stop and reserves capacity; completed `stopped` threads
-appear under Stopped and do not use `max_parallel_threads`. Ticker launch, copy
+appear under Stopped and do not use the legacy `max_parallel_threads` count.
+Canonical capacity follows the scheduler policy described above. Ticker launch, copy
 and auto-resolution eligibility exclude these states. `cleanup_resolved` never
 cleans a stopped thread. `thread restart` reopens the same worktree and branch,
 sends its brief again and preserves uncommitted changes. Owners can still resolve

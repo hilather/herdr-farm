@@ -1411,7 +1411,11 @@ fn automatic_signer_reserves_and_defaults_to_owner_capacity() {
     lab.plant_launchable("codex-sol","codex","gpt-6.1-sol");
     let socket=lab.socket_inode_once("auto.socket");
     let args=["launch","demo","run","--task","auto","--profile","codex-sol","--repository",lab.repo.to_str().unwrap(),"--plan-output","docs/auto.md","--herdr-socket",socket.to_str().unwrap()];
-    let report=lab.ok(&args);
+    let out = lab.cli(&args);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("Capacity warning: PROJECT.md max_parallel_threads=3"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("Canonical capacity: max_active_workers=4"));
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert!(report["attempt"].is_string(),"{report}");
     assert_eq!(report["viewer"]["status"], "unavailable");
     assert_eq!(report["viewer"]["reason"], "workers run in the operator-supplied Herdr session");
@@ -1422,6 +1426,52 @@ fn automatic_signer_reserves_and_defaults_to_owner_capacity() {
     let automation=herdr_farm::migration::open_active(&lab.project).unwrap().result_automation().unwrap();
     assert!(automation.verify);
     assert!(!automation.integrate);
+    let before = herdr_farm::runtime::snapshot(&lab.project).unwrap();
+    let policy = before.scheduler.unwrap().policy;
+    lab.ok(&["scheduler", "demo", "policy", "--max-active-workers", "3", "--max-attempts-per-task", &policy.max_attempts_per_task.to_string(), "--expected-revision", &policy.revision.to_string(), "--expected-head", &before.head.to_string()]);
+    let policy = herdr_farm::runtime::snapshot(&lab.project).unwrap().scheduler.unwrap().policy;
+    lab.ok(&args);
+    assert_eq!(herdr_farm::runtime::snapshot(&lab.project).unwrap().scheduler.unwrap().policy, policy);
+
+    let launch = |task: &str, prepare_only: bool| {
+        let output = format!("docs/{task}.md");
+        let mut args = vec!["launch", "demo", "run", "--task", task, "--profile", "codex-sol", "--repository", lab.repo.to_str().unwrap(), "--plan-output", &output, "--herdr-socket", socket.to_str().unwrap()];
+        if prepare_only { args.push("--prepare-only"); }
+        lab.cli(&args)
+    };
+    for task in ["second", "third"] {
+        let out = launch(task, false);
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    }
+    let context = lab.cli(&["context", "demo", "--peek"]);
+    assert!(context.status.success(), "{}", String::from_utf8_lossy(&context.stderr));
+    assert!(String::from_utf8_lossy(&context.stdout).contains("Canonical capacity: max_active_workers=3 active=3 available_slots=0"));
+    for task in ["fourth", "fifth"] {
+        let out = launch(task, true);
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    }
+    std::thread::scope(|scope| {
+        let attempts: Vec<_> = ["fourth", "fifth"].into_iter().map(|task| scope.spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+            loop {
+                let out = launch(task, false);
+                if !String::from_utf8_lossy(&out.stderr).contains("lock acquisition failed") {
+                    return out;
+                }
+                assert!(std::time::Instant::now() < deadline, "{}", String::from_utf8_lossy(&out.stderr));
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        })).collect();
+        for attempt in attempts {
+            let out = attempt.join().unwrap();
+            assert!(!out.status.success());
+            assert!(String::from_utf8_lossy(&out.stderr).contains("project worker capacity is full"), "{}", String::from_utf8_lossy(&out.stderr));
+        }
+    });
+    let after = herdr_farm::runtime::snapshot(&lab.project).unwrap();
+    assert_eq!(after.attempts.iter().filter(|a| a.retains_capacity()).count(), 3);
+    assert_eq!(after.scheduler.unwrap().policy, policy);
+
 }
 
 /// socket: a configuration digest change is repaired without a separate command.

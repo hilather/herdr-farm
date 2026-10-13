@@ -6344,3 +6344,40 @@ fn ticker_deleted_or_replaced_image_pauses_verification_without_rejection() {
         assert_eq!(notices.iter().filter(|i| i.content.subject == "ticker-binary").count(), 1);
     }
 }
+
+#[cfg(feature="state-store")]
+#[test]
+fn canonical_capacity_reports_default_and_preserves_explicit_policy() {
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().join("root");
+    let r = root.to_str().unwrap();
+    let run = |args: &[&str]| Command::new(BIN).env_clear()
+        .env("HERDR_FARM_TEST_TIME_SCALE", include_str!("support/time-scale.txt").trim())
+        .env("HOME", home.path()).env("PATH", "/usr/bin:/bin")
+        .args(args).output().unwrap();
+    let created = run(&["--root", r, "new", "demo"]);
+    assert!(created.status.success(), "{}", String::from_utf8_lossy(&created.stderr));
+    assert!(String::from_utf8_lossy(&created.stdout).contains("Capacity warning: PROJECT.md max_parallel_threads=3"));
+    for cap in [0, 4, 3] {
+        let inspect = run(&["--root", r, "scheduler", "demo", "inspect"]);
+        assert!(inspect.status.success());
+        let mut report: serde_json::Value = serde_json::from_slice(&inspect.stdout).unwrap();
+        if cap != 0 {
+            let changed = run(&["--root", r, "scheduler", "demo", "policy", "--max-active-workers", &cap.to_string(), "--max-attempts-per-task", &report["policy"]["max_attempts_per_task"].to_string(), "--expected-revision", &report["policy"]["revision"].to_string(), "--expected-head", &report["head"].to_string()]);
+            assert!(changed.status.success(), "{}", String::from_utf8_lossy(&changed.stderr));
+            report = serde_json::from_slice(&run(&["--root", r, "scheduler", "demo", "inspect"]).stdout).unwrap();
+        }
+        assert_eq!(report["policy"]["max_active_workers"], cap);
+        assert_eq!(report["retained_attempts"], 0);
+        for args in [vec!["--root", r, "context", "demo", "--peek"], vec!["--root", r, "doctor"]] {
+            let out = run(&args);
+            let text = String::from_utf8_lossy(&out.stdout);
+            assert!(text.contains(&format!("Canonical capacity: max_active_workers={cap} active=0")), "{text}");
+            assert_eq!(text.contains("Capacity warning: PROJECT.md"), cap != 3, "{text}");
+            if cap != 3 { assert!(text.contains("scheduler demo policy --max-active-workers 3 --max-attempts-per-task"), "{text}"); }
+        }
+        let after: serde_json::Value = serde_json::from_slice(&run(&["--root", r, "scheduler", "demo", "inspect"]).stdout).unwrap();
+        assert_eq!(after["policy"], report["policy"]);
+        assert_eq!(after["head"], report["head"]);
+    }
+}

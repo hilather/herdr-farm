@@ -157,3 +157,6 @@ mod runtime_ownership;
 
 #[cfg(feature="state-store")]
 mod owner_requests;
+
+#[cfg(feature="state-store")]
+mod capacity;
