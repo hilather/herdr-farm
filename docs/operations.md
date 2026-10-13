@@ -1159,6 +1159,14 @@ Stopping a dedicated server with `launch PROJECT stop --task T`, or the ticker
 sweep after worker termination, closes only its recorded viewer tab if its ID
 and label still match. A closed viewer or unreachable owner session is harmless.
 
+Each completed ticker pass discovers persisted server records, including old
+leaks after deploy or restart. Once no attempt retains capacity and no launch
+preparation or pending launch delivery remains, it removes the private socket
+directory and record and emits `runtime.dedicated_server_retired`. Queued status
+alone does not keep a server alive: pre-agent failures, cancellations and
+superseded queued tasks receive the same cleanup. Live attempts and uncertain
+termination still fence retirement, including bindings moved to another task.
+
 `launch run` pauses observed terminal-worker relaunches with the automatic
 `project.launch_run_paused` control event before relinquishing and rebinding.
 The same run reconciles and activates this pause; explicit owner pauses retain

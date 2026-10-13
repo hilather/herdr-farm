@@ -430,3 +430,29 @@ impl SqliteStore {
         Ok(false)
     }
 }
+
+/// Persisted identity of a retired private server, independent of task lineage.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct DedicatedServerRetirement {
+    pub task: crate::domain::TaskId,
+    pub pid: i32,
+    pub record_identity: String,
+    pub socket: String,
+    pub viewer: serde_json::Value,
+}
+
+impl SqliteStore {
+    /// Retry-safe audit of the external retirement, using the existing journal.
+    pub fn record_dedicated_server_retirement(&mut self, retirement: &DedicatedServerRetirement) -> Result<()> {
+        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let payload = serde_json::to_string(retirement).map_err(|e| StoreError::Invalid(e.to_string()))?;
+        let recorded: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM events WHERE kind='runtime.dedicated_server_retired' AND entity=?1 AND payload=?2)",
+            params![retirement.task.as_str(), payload], |row| row.get(0))?;
+        if !recorded {
+            tx.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES('runtime.dedicated_server_retired',?1,1,1,?2)",
+                params![retirement.task.as_str(), payload])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+}

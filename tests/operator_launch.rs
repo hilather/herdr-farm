@@ -2136,3 +2136,78 @@ fn oversized_brief_is_refused_before_profile_probe() {
     let store=herdr_farm::migration::open_active(&lab.project).unwrap().read_snapshot(None).unwrap();
     assert!(!store.tasks.iter().any(|t|t.id.as_str()=="oversized"));
 }
+
+/// Real launch preparation creates private servers and owner viewers; a fresh
+/// ticker must discover each ended launch from disk without operator cleanup.
+#[test]
+fn ticker_retires_pre_agent_failure_cancelled_and_superseded_queued_servers() {
+    struct FixtureTicker(std::process::Child);
+    impl Drop for FixtureTicker {
+        fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); }
+    }
+    for path in ["failure", "cancelled", "superseded"] {
+        let lab = Lab::new();
+        let owner = CoordinatorSession::start(&lab);
+        lab.plant_launchable("codex-sol", "codex", "gpt-6.1-sol");
+        let prompt = lab.home.join("prompt.txt");
+        fs::write(&prompt, "Plan.\n").unwrap();
+        let mut args = lab.run_args("ended", "codex-sol", "docs/plan.md", prompt.to_str().unwrap());
+        if path == "superseded" { args.push("--prepare-only"); }
+        let launched = lab.ok(&args);
+        let socket = PathBuf::from(launched["herdr_socket"].as_str().unwrap());
+        let record = lab.root.join(".herdr-run/demo-ended/herdr/server.json");
+        let identity: Value = serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
+        let pid = identity["pid"].as_i64().unwrap();
+        assert!(PathBuf::from(format!("/proc/{pid}")).exists());
+        match path {
+            "failure" => {
+                fs::write(lab.project.join("MEMORY.md"), "Later owner knowledge\n").unwrap();
+                let plan = herdr_farm::memory::plan(&lab.project).unwrap();
+                herdr_farm::memory::import_plan(&lab.project, &plan).unwrap();
+            }
+            "cancelled" => {
+                let state = herdr_farm::runtime::snapshot(&lab.project).unwrap();
+                let attempt = state.attempts.iter().find(|a| a.id.as_str() == launched["attempt"].as_str().unwrap()).unwrap();
+                let cancelled = lab.ok(&["task", "demo", "cancel-attempt", attempt.id.as_str(),
+                    "--expected-revision", &attempt.revision.to_string(), "--expected-head", &state.head.to_string(), "--reason", "stop before creation"]);
+                assert_eq!(cancelled["released"], true);
+            }
+            _ => {
+                let mut replacement = lab.run_args("replacement", "codex-sol", "docs/next.md", prompt.to_str().unwrap());
+                replacement.extend(["--prepare-only", "--work-item", "ended", "--supersedes", "ended"]);
+                lab.ok(&replacement);
+            }
+        }
+        let mut ticker = FixtureTicker(Command::new(BIN).env_clear()
+            .env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim())
+            .env("HOME", &lab.home).env("HERDR_PROJECTS_OWNER_HOME", &lab.home).env("PATH", "/usr/bin:/bin")
+            .env("HERDR_BIN_PATH", lab.home.join("bin/herdr")).env("XDG_RUNTIME_DIR", lab.runtime.path())
+            .env("TMPDIR", std::env::var_os("TMPDIR").unwrap())
+            .args(["--root", lab.root.to_str().unwrap(), "ticker", "run"])
+            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap());
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        loop {
+            let state = herdr_farm::runtime::snapshot(&lab.project).unwrap();
+            let retired = state.events.iter().filter(|e| e.kind == "runtime.dedicated_server_retired" && e.entity == "ended").count();
+            let closed = owner.calls().iter().any(|c| c["method"] == "tab.close" && c["params"]["tab_id"] == launched["viewer"]["tab"]);
+            if !record.exists() && !socket.parent().unwrap().exists() && closed && retired == 1 {
+                if path == "failure" {
+                    assert!(state.events.iter().any(|e| e.kind == "attempt.launch_failed" && e.payload["reason"] == "knowledge_snapshot_stale"));
+                    assert!(!state.events.iter().any(|e| e.kind == "runtime.launch_creation"));
+                }
+                assert!(state.attempts.iter().filter(|a| a.task.as_str() == "ended").all(|a| !a.retains_capacity()));
+                break;
+            }
+            assert!(std::time::Instant::now() < until, "{path} retirement timed out: {}", fs::read_to_string(lab.root.join(".ticker.log")).unwrap_or_default());
+            assert!(ticker.0.try_wait().unwrap().is_none());
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        ticker.0.kill().unwrap(); ticker.0.wait().unwrap();
+        lab.ok(&["launch", "demo", "stop", "--task", "ended"]);
+        let state = herdr_farm::runtime::snapshot(&lab.project).unwrap();
+        assert_eq!(state.events.iter().filter(|e| e.kind == "runtime.dedicated_server_retired" && e.entity == "ended").count(), 1);
+        assert_eq!(owner.calls().iter().filter(|c| c["method"] == "tab.close" && c["params"]["tab_id"] == launched["viewer"]["tab"]).count(), 1);
+        assert!(!fs::read(format!("/proc/{pid}/environ")).unwrap_or_default().split(|b| *b == 0)
+            .any(|e| e == format!("HERDR_SOCKET_PATH={}", socket.display()).as_bytes()));
+    }
+}
