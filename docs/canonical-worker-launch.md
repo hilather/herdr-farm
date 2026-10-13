@@ -1538,6 +1538,9 @@ while their original launch authority remains usable.
 An exited worker awaiting its own verification verdict also avoids that lock.
 Observations, including contended retries, cool down for 15 seconds (scaled in
 isolated labs). The stored `runtime.worker_termination` hint remains compatible.
+In labs, the 3.6-second queue retention prunes retained requests between advisory
+windows; the lock-free hint re-offers them each pass, so exit observations may
+follow the 15.5-second advisory cadence.
 
 An actual exit recording or requested stop waits at most 30 seconds for the
 exclusive root, never past the original 45-second job deadline or cancellation.

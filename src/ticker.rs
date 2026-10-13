@@ -445,6 +445,10 @@ pub fn run_passes(ctx: &Ctx, passes: Option<u64>) -> Result<()> {
             return drain_executor(root, &log, &mut memory);
         }
         let wake=entered+next_tick_delay(&memory);
+        let delay = wake.duration_since(entered);
+        if delay >= Duration::from_secs(5) && herdr_farm::timing::scale().is_some() {
+            log.line(&format!("advisory quiet window: next pass in {} ms", delay.as_millis()));
+        }
         // Sleep in short slices so a stop request is honoured promptly.
         while Instant::now() < wake {
             if stop_path(root).exists() {

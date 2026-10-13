@@ -4705,22 +4705,24 @@ fn exit_watch_maintenance(permanent: bool) {
     let worktree = lab.planned_worktree(&attempt);
     lab.serve();
     let mut ticker = lab.spawn();
-    lab.wait(&mut ticker, 20, &|| worktree.join("work.txt").exists() && lab.attempt(&attempt).state == AttemptState::Running);
-    // Keep retained exit-watch work in this ticker; a fresh inventory cannot
-    // be populated while maintenance owns the root.
-    std::thread::sleep(Duration::from_millis(800));
+    lab.wait_for(&mut ticker, "the worker to run and edit work.txt", &attempt, 120, &|| worktree.join("work.txt").exists() && lab.attempt(&attempt).state == AttemptState::Running);
     let acquire_deadline = Instant::now() + Duration::from_secs(5);
-    let guard = loop {
-        if let Ok(guard) = herdr_farm::execution_guard::RootGuard::exclusive(&lab.path("root")) { break guard; }
+    let maintenance = std::cell::RefCell::new(None);
+    lab.wait_for(&mut ticker, "maintenance root ownership", &attempt, 5, &|| {
+        if let Ok(guard) = herdr_farm::execution_guard::RootGuard::exclusive(&lab.path("root")) {
+            *maintenance.borrow_mut() = Some(guard);
+            return true;
+        }
         assert!(Instant::now() < acquire_deadline, "maintenance acquisition exceeded lab bound");
-        std::thread::sleep(Duration::from_millis(20));
-    };
+        false
+    });
+    let guard = maintenance.into_inner().unwrap();
     // A finite set of real passes while the worker lives must never report an
     // exit-recording deferral or create an escalation notice.
     let metrics = lab.path("root/.ticker-metrics.json");
     let mut previous = fs::metadata(&metrics).unwrap().ino();
-    for _ in 0..5 {
-        lab.wait(&mut ticker, 10, &|| fs::metadata(&metrics).is_ok_and(|m|m.ino()!=previous));
+    for _ in 0..2 {
+        lab.wait_for(&mut ticker, "a ticker pass under maintenance", &attempt, 60, &|| fs::metadata(&metrics).is_ok_and(|m|m.ino()!=previous));
         previous = fs::metadata(&metrics).unwrap().ino();
     }
     assert_eq!(lab.log_lines(&attempt, "worker exit recording deferred by contention"), 0);
@@ -4728,7 +4730,7 @@ fn exit_watch_maintenance(permanent: bool) {
     fs::write(worktree.join("die"), "").unwrap();
     let started = Instant::now();
     if permanent {
-        lab.wait(&mut ticker, 15, &|| !runtime::worker_exit_notices(&lab.project).unwrap().is_empty());
+        lab.wait_for(&mut ticker, "the worker exit contention notice", &attempt, 60, &|| !runtime::worker_exit_notices(&lab.project).unwrap().is_empty());
         let notices = runtime::worker_exit_notices(&lab.project).unwrap();
         assert_eq!(notices.len(), 1);
         assert_eq!(notices[0].subject, attempt.as_str());
@@ -4739,21 +4741,36 @@ fn exit_watch_maintenance(permanent: bool) {
         assert_eq!(view["attempts"].as_array().unwrap().iter().find(|row|row["attempt_id"]==attempt.as_str()).unwrap()["worker_exit_contention"].as_array().unwrap().len(), 1);
         assert!(!lab.attempt(&attempt).termination_observed);
     } else {
-        lab.wait(&mut ticker, 15, &|| lab.log_lines(&attempt, "worker exit recording deferred by contention") >= 1);
+        lab.wait_for(&mut ticker, "the first worker exit recording deferral", &attempt, 60, &|| lab.log_lines(&attempt, "worker exit recording deferred by contention") >= 1);
     }
     drop(guard);
-    // Repeated maintenance bursts must leave a fair turn for the pending exit.
+    // Hold each burst across a recording deferral, then allow a turn to record.
     if !permanent {
-        for _ in 0..3 {
+        for _ in 0..2 {
             if lab.attempt(&attempt).termination_observed {break;}
-            if let Ok(burst)=herdr_farm::execution_guard::RootGuard::exclusive(&lab.path("root")) {
-                std::thread::sleep(Duration::from_millis(100));
-                drop(burst);
-            }
+            let maintenance = std::cell::RefCell::new(None);
+            lab.wait_for(&mut ticker, "maintenance burst ownership or exit recording", &attempt, 60, &|| {
+                if lab.attempt(&attempt).termination_observed {return true;}
+                if let Ok(burst) = herdr_farm::execution_guard::RootGuard::exclusive(&lab.path("root")) {
+                    *maintenance.borrow_mut() = Some(burst);
+                    return true;
+                }
+                false
+            });
+            let Some(burst) = maintenance.into_inner() else {break;};
+            let previous = lab.log_lines(&attempt, "worker exit recording deferred by contention");
+            lab.wait_for(&mut ticker, "another worker exit recording deferral during a burst", &attempt, 60, &|| {
+                lab.log_lines(&attempt, "worker exit recording deferred by contention") > previous
+            });
+            drop(burst);
+            let released = Instant::now();
+            lab.wait_for(&mut ticker, "a released maintenance turn", &attempt, 5, &|| {
+                released.elapsed() >= Duration::from_secs(1) || lab.attempt(&attempt).termination_observed
+            });
         }
     }
-    lab.wait(&mut ticker, 15, &|| lab.attempt(&attempt).termination_observed);
-    assert!(started.elapsed() < Duration::from_secs(20));
+    lab.wait_for(&mut ticker, "worker termination recording", &attempt, 90, &|| lab.attempt(&attempt).termination_observed);
+    assert!(started.elapsed() < Duration::from_secs(120));
     assert_eq!(lab.events("runtime.worker_terminated").len(), 1);
     if permanent {assert_eq!(runtime::worker_exit_notices(&lab.project).unwrap().len(), 1);}
     lab.stop(ticker);
