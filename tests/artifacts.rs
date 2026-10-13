@@ -452,3 +452,29 @@ fn a_brief_waits_for_a_pending_live_copy() {
     assert_eq!(lab.record("demo")["copy_receipt"]["report_hash"].as_str(), Some(sha(b"report\0\xff").as_str()));
     assert_eq!(fs::read(link.join("artifact")).unwrap(), b"version A");
 }
+
+#[path="support/control_publication.rs"]
+mod control_publication_fixture;
+
+#[test]
+fn live_stream_survives_slow_interrupted_artifact_read() {
+    let lab=Lab::new();
+    let source=lab.path("slow-source");fs::create_dir_all(source.join("library")).unwrap();
+    let artifact=source.join("library/result.txt");
+    fs::write(&artifact,b"complete result despite interruption").unwrap();
+    fs::write(source.join("report.md"),b"ready for review").unwrap();
+    let shim=control_publication_fixture::slow_read();
+    let marker=lab.path("interruption-injected");
+    let output=lab.command().env("LD_PRELOAD",shim).env("CONTROL_COPY_SOURCE",&artifact)
+        .env("CONTROL_COPY_INJECTED",&marker).args(["artifact-stream","--live","--path"])
+        .arg(&source).output().unwrap();
+    assert!(marker.exists(),"fixture did not interrupt the selected read");
+    assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
+    assert_eq!(&output.stdout[..8],b"HPLV\x01\0\0\0");
+    let length=u32::from_be_bytes(output.stdout[8..12].try_into().unwrap()) as usize;
+    let manifest:Value=serde_json::from_slice(&output.stdout[12..12+length]).unwrap();
+    assert_eq!(manifest["omissions"],json!([]));
+    let file=manifest["library"].as_array().unwrap().iter().find(|entry|entry["path"]=="library/result.txt").unwrap();
+    assert_eq!(file["sha256"],json!(sha(b"complete result despite interruption")));
+    assert_eq!(&output.stdout[12+length..],b"ready for reviewcomplete result despite interruption");
+}

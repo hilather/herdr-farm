@@ -41,12 +41,26 @@ fn cancellation_after_observation_commit_preserves_db_and_recovery_repairs_marke
     assert!(error.to_string().contains("observations committed"));assert!(matches!(error.downcast_ref::<StoreError>(),Some(StoreError::Cancelled)));
     assert!(snapshot(&p).is_err());let stored=SqliteStore::open(&p.join(".state/state.db")).unwrap().read_snapshot(None).unwrap();assert_eq!(stored.observations,batch.observations);
     drop(guard);migration::recover(&p,true).unwrap();assert_eq!(snapshot(&p).unwrap(),stored);
+    // Explicit recovery preserves the exact state; the next retry also drains
+    // retained publication/expiry intent without changing that state.
+    assert!(control_publication_age_ms(&p).unwrap().is_some());
+    let guard=ProjectGuard::acquire(&p).unwrap();
+    finish_pending_control_publication(&p,&guard,&control()).unwrap();
+    assert_eq!(snapshot(&p).unwrap(),stored);
+    assert_eq!(control_publication_age_ms(&p).unwrap(),None);
 }
 #[test]
 fn expiry_sql_is_interrupted_without_undoing_published_observations() {
-    let(_root,p,batch)=fixture();let guard=ProjectGuard::acquire(&p).unwrap();let c=ReadControl::new(Instant::now()+Duration::from_millis(300),Default::default());
+    let(_root,p,batch)=fixture();let guard=ProjectGuard::acquire(&p).unwrap();
     let raw=rusqlite::Connection::open(p.join(".state/state.db")).unwrap();
     raw.execute_batch("ALTER TABLE operation_delivery RENAME TO original_delivery; CREATE VIEW operation_delivery AS SELECT 'fake' operation_id,'claimed' state,0 lease_until_ms WHERE (WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<100000000) SELECT sum(x) FROM n)>0;").unwrap();
+    // Fixture schema setup is outside the measured caller execution budget.
+    let c=ReadControl::new(Instant::now()+Duration::from_millis(300),Default::default());
     let start=Instant::now();let error=record_controller_observations_controlled(&p,&batch,&guard,&c).unwrap_err();assert!(start.elapsed()<Duration::from_secs(2));assert!(error.to_string().contains("claim expiry incomplete"),"{error:#}");assert!(matches!(error.downcast_ref::<StoreError>(),Some(StoreError::Deadline)));
     assert_eq!(raw.query_row("SELECT count(*) FROM runtime_observations",[],|r|r.get::<_,usize>(0)).unwrap(),batch.observations.len());
+    assert!(control_publication_age_ms(&p).unwrap().is_some());
+    raw.execute_batch("DROP VIEW operation_delivery; ALTER TABLE original_delivery RENAME TO operation_delivery;").unwrap();
+    finish_pending_control_publication(&p,&guard,&control()).unwrap();
+    assert_eq!(snapshot(&p).unwrap().observations,batch.observations);
+    assert_eq!(control_publication_age_ms(&p).unwrap(),None);
 }

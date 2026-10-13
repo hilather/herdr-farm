@@ -52,11 +52,13 @@ fn visit(parent:&Directory,name:&OsStr,path:&Path,entries:&mut Vec<Entry>,notes:
         },
     }
 }
-fn scan(root:&Directory)->Result<Source> {
+#[cfg(test)]
+fn scan(root:&Directory)->Result<Source> {scan_controlled(root,&Control::default())}
+fn scan_controlled(root:&Directory,control:&Control)->Result<Source> {
     let mut source=Source{schema:1,report:None,library:Vec::new(),omissions:Vec::new()};
     if let Some(kind)=root.kind(OsStr::new("report.md"))? {
         if kind==NodeKind::File {
-            let (bytes,sha256)=digest(root.child(OsStr::new("report.md"))?,&mut Budget::new(),None)?;
+            let (bytes,sha256)=digest(root.child(OsStr::new("report.md"))?,&mut control.budget(),None)?;
             source.report=Some(Entry{path:"report.md".into(),directory:false,bytes,sha256});
         }else {omit(&mut source.omissions,"report.md",if kind==NodeKind::Link {Reason::SymbolicLink}else{Reason::UnsupportedEntry})?;}
     }
@@ -65,7 +67,7 @@ fn scan(root:&Directory)->Result<Source> {
         omit(&mut source.omissions,"library",if kind==NodeKind::Link {Reason::SymbolicLink}else{Reason::UnsupportedEntry})?;return Ok(source);
     }
     let mut notes=source.omissions.clone();
-    match visit(root,OsStr::new("library"),Path::new("library"),&mut source.library,&mut notes,&mut Budget::new(),0) {
+    match visit(root,OsStr::new("library"),Path::new("library"),&mut source.library,&mut notes,&mut control.budget(),0) {
         Ok(())=>source.omissions=notes,
         Err(error) if error.downcast_ref::<Limit>().is_some() || error.downcast_ref::<OmissionLimit>().is_some()=>{
             source.library.clear();omit(&mut source.omissions,"library",Reason::LibraryLimit)?;
@@ -109,19 +111,20 @@ fn validate(source:&Source)->Result<()> {
 }
 
 pub fn export(path:&Path,writer:&mut impl Write)->Result<()> {
-    let root=Directory::open(path)?;let source=scan(&root)?;validate(&source)?;
+    let control=Control::default();
+    let root=Directory::open(path)?;let source=scan_controlled(&root,&control)?;validate(&source)?;
     let json=serde_json::to_vec(&source)?;ensure!(json.len()<=MANIFEST_LIMIT,"live manifest exceeds bounds");
     writer.write_all(MAGIC)?;writer.write_all(&(json.len() as u32).to_be_bytes())?;writer.write_all(&json)?;
     let mut report_budget=None;let mut library_budget=None;
     for entry in entries(&source).filter(|e|!e.directory) {
-        let budget=if entry.path=="report.md" {&mut report_budget}else{&mut library_budget}.get_or_insert_with(Budget::new);
+        let budget=if entry.path=="report.md" {&mut report_budget}else{&mut library_budget}.get_or_insert_with(||control.budget());
         let mut file=root.file(Path::new(&entry.path))?;budget.size(&file)?;let before=file.metadata()?;
         let mut count=0u64;let mut hash=Sha256::new();let mut buffer=[0;64*1024];
         loop {let n=budget.read(&mut file,&mut buffer)?;if n==0{break;}count+=n as u64;ensure!(count<=entry.bytes,"live source grew while streaming");hash.update(&buffer[..n]);writer.write_all(&buffer[..n])?;}
         crate::source_tree::unchanged(&file,&before)?;
         ensure!(count==entry.bytes&&format!("{:x}",hash.finalize())==entry.sha256,"live source changed while streaming");
     }
-    ensure!(scan(&root)?==source,"live artifact source changed while streaming");root.matches_path(path)?;writer.flush()?;Ok(())
+    ensure!(scan_controlled(&root,&control)?==source,"live artifact source changed while streaming");root.matches_path(path)?;writer.flush()?;Ok(())
 }
 
 // The transfer adapter will consume this private staging type. It deliberately

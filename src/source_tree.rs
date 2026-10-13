@@ -27,7 +27,9 @@ impl Control {
         ensure!(Instant::now()<self.deadline,"live copy deadline elapsed");Ok(())
     }
     pub fn budget(&self)->Budget {
-        let mut budget=Budget::new();budget.deadline=budget.deadline.min(self.deadline);
+        // A copy phase receives the remaining admitted copy budget, rather than
+        // an unrelated ten-second source-read cap that restarts every pass.
+        let mut budget=Budget::new();budget.deadline=self.deadline;
         budget.cancellation=self.cancellation.clone();budget
     }
     /// Live staging adds its root, optional report and manifest to a library
@@ -51,7 +53,13 @@ impl Budget {
     pub fn read(&mut self,file:&mut File,buffer:&mut [u8])->Result<usize> {
         self.check()?;
         let limit=buffer.len().min(self.remaining.saturating_add(1) as usize);
-        let n=file.read(&mut buffer[..limit])?;
+        let n=loop {
+            self.check()?;
+            match file.read(&mut buffer[..limit]) {
+                Err(error) if error.kind()==io::ErrorKind::Interrupted=>continue,
+                result=>break result?,
+            }
+        };
         self.remaining=self.remaining.checked_sub(n as u64).ok_or(Limit::Bytes)?;
         self.check()?;Ok(n)
     }

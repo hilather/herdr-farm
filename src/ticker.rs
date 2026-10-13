@@ -659,7 +659,17 @@ pub fn tick(ctx: &Ctx, log: &Log, memory: &mut Memory) -> bool {
                         if entry.0.elapsed()>=Duration::from_secs(60) {log.line(&format!("{slug}: canonical service contention: {error} (count={})",entry.1));entry.0=Instant::now();entry.1=0;}
                     }
                     for notice in &result.notices {log.line(&format!("{slug}: {notice}"));}
-                    if let Some(error)=result.operation_error {log.error(&format!("{slug}: canonical operation: {error}"));}
+                    if let Some(error)=result.operation_error {
+                        if error.contains("control publication incomplete")||error.contains("claim expiry incomplete")||error.contains("maintenance result:") {
+                            log.count_error(&error);
+                            let entry=memory.service_contention_logs.entry((slug.clone(),"publication-maintenance".into())).or_insert_with(||(Instant::now()-Duration::from_secs(300),0));
+                            entry.1=entry.1.saturating_add(1);
+                            if entry.0.elapsed()>=Duration::from_secs(300) {
+                                log.line(&format!("{slug}: canonical publication/maintenance summary (count={}): {error}",entry.1));
+                                entry.0=Instant::now();entry.1=0;
+                            }
+                        } else {log.error(&format!("{slug}: canonical operation: {error}"));}
+                    }
                 }
                 Err(error)=>{
                     if let Some(store)=error.chain().find_map(|cause|cause.downcast_ref::<herdr_farm::store::StoreError>()) {
@@ -668,7 +678,17 @@ pub fn tick(ctx: &Ctx, log: &Log, memory: &mut Memory) -> bool {
                             log.line(&herdr_farm::watchdog::admission_log_line(reason,None,0));
                         }
                     }
-                    memory.canonical_effects_unknown=true;log.error(&format!("{slug}: canonical controller: {error:#}"));
+                    memory.canonical_effects_unknown=true;
+                    let diagnostic=format!("{error:#}");
+                    if diagnostic.contains("control publication incomplete")||diagnostic.contains("claim expiry incomplete") {
+                        log.count_error(&diagnostic);
+                        let entry=memory.service_contention_logs.entry((slug.clone(),"publication-maintenance".into())).or_insert_with(||(Instant::now()-Duration::from_secs(300),0));
+                        entry.1=entry.1.saturating_add(1);
+                        if entry.0.elapsed()>=Duration::from_secs(300) {
+                            log.line(&format!("{slug}: canonical publication/maintenance summary (count={}): {diagnostic}",entry.1));
+                            entry.0=Instant::now();entry.1=0;
+                        }
+                    } else {log.error(&format!("{slug}: canonical controller: {diagnostic}"));}
                 }
             }
             // Isolated workers submit through their attempt's spool: ingest

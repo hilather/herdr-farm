@@ -229,15 +229,20 @@ pub fn record_controller_observations_controlled(project:&Path,batch:&crate::rec
 pub fn record_controller_controlled(project:&Path,batch:&crate::reconcile::ObservationBatch,guard:&crate::execution_guard::ProjectGuard,control:&crate::store::controlled::ReadControl,after_record:impl FnOnce())->Result<()> {
     control.check()?;guard.check_project(project)?;
     ensure!(!batch.dispatch_allowed,"observations cannot authorize dispatch");
+    finish_pending_control_publication(project,guard,control)?;
     let _record=crate::execution_guard::exclusive_file(&project.join(".state/lock"))?;
     let mut db=migration::open_active_scoped(project,control.clone())?;
     guard.check_project(project)?;
+    // Retain intent before commit so cancellation or process loss cannot hide
+    // publication/expiry work. A failed commit leaves a harmless retry.
+    retain_publication(project)?;
     db.record_observations(batch.expected_head,&batch.observations)?;
     after_record();
     guard.check_project(project).context("observations committed; project identity changed before publication")?;
     migration::publish_control_marker_controlled(project,&db,control).context("observations committed; control publication incomplete")?;
     guard.check_project(project).context("observations published; project identity changed before expiry")?;
     db.expire_claims(jiff::Timestamp::now().as_millisecond()).context("observations published; claim expiry incomplete")?;
+    clear_publication(project)?;
     Ok(())
 }
 /// Caller retains exclusive root ownership, or project ownership with the shared
@@ -435,4 +440,46 @@ pub fn worker_result_inbox(project: &Path) -> Result<Vec<crate::domain::InboxIte
 /// for diagnosis; the current attempt state determines whether action remains.
 pub fn worker_exit_notices(project:&Path)->Result<Vec<crate::domain::InboxContent>> {
     Ok(migration::open_active_read_only(project)?.worker_exit_notices()?)
+}
+
+const PUBLICATION_PENDING:&str="control-publication.json";
+/// Age of durable controller publication/expiry work, advisory rather than a
+/// lifecycle transition. No canonical schema or project state is changed.
+pub fn control_publication_age_ms(project:&Path)->Result<Option<i64>> {
+    let directory=crate::source_tree::Directory::open(&project.join(".state"))?;
+    let Some(file)=directory.optional(std::ffi::OsStr::new(PUBLICATION_PENDING))? else {return Ok(None)};
+    use std::io::Read;
+    let mut bytes=Vec::new();file.take(513).read_to_end(&mut bytes)?;
+    ensure!(bytes.len()<=512,"control publication retry record exceeds bounds");
+    let since:i64=serde_json::from_slice(&bytes)?;
+    Ok(Some(jiff::Timestamp::now().as_millisecond().saturating_sub(since).max(0)))
+}
+fn retain_publication(project:&Path)->Result<()> {
+    if control_publication_age_ms(project)?.is_some(){return Ok(());}
+    let directory=crate::source_tree::Directory::open(&project.join(".state"))?;
+    directory.write_atomic(std::ffi::OsStr::new(PUBLICATION_PENDING),|file|{
+        use std::io::Write;
+        file.write_all(&serde_json::to_vec(&jiff::Timestamp::now().as_millisecond())?)?;Ok(())
+    })
+}
+fn clear_publication(project:&Path)->Result<()> {
+    std::fs::remove_file(project.join(".state").join(PUBLICATION_PENDING))?;
+    std::fs::File::open(project.join(".state"))?.sync_all()?;Ok(())
+}
+/// Retry retained publication/expiry under the caller's bounded control. A later
+/// ticker pass supplies a new budget; the original observation call never does.
+pub fn finish_pending_control_publication(project:&Path,guard:&crate::execution_guard::ProjectGuard,control:&crate::store::controlled::ReadControl)->Result<()> {
+    control.check()?;guard.check_project(project)?;
+    if control_publication_age_ms(project)?.is_none(){return Ok(());}
+    migration::repair_control_publication(project,guard,control)
+        .context("control publication incomplete; retry pending")?;
+    let _record=crate::execution_guard::exclusive_file(&project.join(".state/lock"))?;
+    guard.check_project(project)?;
+    let mut db=migration::open_active_scoped(project,control.clone())?;
+    migration::publish_control_marker_controlled(project,&db,control)
+        .context("control publication incomplete; retry pending")?;
+    db.expire_claims(jiff::Timestamp::now().as_millisecond())
+        .context("claim expiry incomplete; retry pending")?;
+    control.check()?;guard.check_project(project)?;
+    clear_publication(project)
 }

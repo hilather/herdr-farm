@@ -595,3 +595,47 @@ fn schema_72_records_new_event_times_without_inventing_history() {
     assert!(raw.execute("UPDATE event_times SET recorded_unix_ms=0",[]).is_err());
     assert!(raw.execute("DELETE FROM event_times",[]).is_err());
 }
+
+/// Simulate process loss after a public-store observation commit, before its
+/// derived marker is published. The real ticker must repair before collecting
+/// further evidence, including when its ordinary head read refuses the mismatch.
+#[test]
+fn ticker_repairs_committed_observations_and_doctor_reports_publication_age() {
+    use herdr_farm::{store::SqliteStore,reconcile::{RuntimeObservation,ResourceState}};
+    let p=Project::new("pause");p.write(".state/coordinator.json",b"{}");
+    let plan=p.plan();p.ok(&["migration","demo","apply","--plan",&plan,"--writers-stopped"]);
+    p.ok(&["migration","demo","upgrade-store"]);
+    let mut db=SqliteStore::open(&p.project.join(".state/state.db")).unwrap();
+    let before=db.read_snapshot(None).unwrap();
+    let observations:Vec<_>=before.runtime_bindings.iter().map(|binding|RuntimeObservation{
+        binding:binding.id.clone(),binding_revision:binding.revision,task_revision:None,
+        observed_unix_ms:jiff::Timestamp::now().as_millisecond(),pane:ResourceState::Unrecorded,
+        worktree:ResourceState::Unrecorded,agent_present:false,collector:"herdr-git-v2".into(),
+        config_digest:None,diagnostic:"committed before process loss".into(),session_identity:None,
+        worktree_identity:None,agent_identity:None,
+    }).collect();
+    assert!(!observations.is_empty());
+    let head=db.record_observations(before.head,&observations).unwrap();
+    db.set_project_state(head,before.control.unwrap().revision,ProjectState::Active,jiff::Timestamp::now().as_millisecond(),None).unwrap();
+    let committed=db.read_snapshot(None).unwrap();drop(db);
+    // Retained pre-commit intent survives process loss. Age is deliberately old
+    // so doctor must show it rather than replacing it with a new pass timestamp.
+    let since=jiff::Timestamp::now().as_millisecond()-120_000;
+    p.write(".state/control-publication.json",serde_json::to_vec(&since).unwrap());
+    let doctor=p.cli(&["doctor"]);
+    let doctor=String::from_utf8_lossy(&doctor.stdout);
+    assert!(doctor.contains("publication lagging: age"),"{doctor}");
+    assert!(herdr_farm::runtime::snapshot(&p.project).is_err(),"fixture must have an unpublished control transition");
+    p.ok(&["ticker","run","--passes","8"]);
+    assert!(!p.project.join(".state/control-publication.json").exists());
+    let after=herdr_farm::runtime::snapshot(&p.project).unwrap();
+    assert_eq!(after.control,committed.control,"publication must not pause or adopt the project");
+    let marker:Value=serde_json::from_slice(&p.read(".state/format.json")).unwrap();
+    assert_eq!(marker["reconciliation_required"],json!(after.control.unwrap().reconciliation_required));
+    // Original commit remains persisted even if later controller observations
+    // refresh its current rows; the audit event proves that evidence survived.
+    assert!(after.head>=committed.head);
+    assert!(after.events.iter().any(|event|event.kind=="runtime.observed" && event.payload["diagnostic"]=="committed before process loss"));
+    assert!(!p.project.join(".state/admission-paused.json").exists());
+    assert!(!String::from_utf8_lossy(&p.cli(&["doctor"]).stdout).contains("publication lagging: age"));
+}
