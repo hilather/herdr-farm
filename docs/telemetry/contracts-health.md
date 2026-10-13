@@ -347,3 +347,50 @@ policy, one suppressed-flap summary, and quiet never-notified rollout history.
 It waits for the persisted health evaluation before stopping each ticker and
 checks exact evaluation increments and notice counts. The manual quota notice
 workflow checks the complete deterministic summary, including its evidence.
+
+### Default delivery deployment and test isolation (HEALTH-NOTIFY-AUTO-1d)
+
+On the first eligible health evaluation after deployment, existing open critical
+alerts without a notice are eligible for automatic delivery. A delivered critical
+notice enters the coordinator wake workflow; prompting still depends on idle
+admission, nudge policy and retained wake claims. Collection running does not
+imply complete historical usage coverage.
+
+The usual missing-usage case can produce `usage_coverage / coverage_loss`:
+M13 includes terminated Codex attempts that ran, and counts attempts without
+bound sources as `not_bound` (`src/telemetry/metrics.rs:236–246`). Below 50%
+complete coverage is critical (`src/telemetry/health/rules.rs:115–117`);
+the generic coverage evaluator emits `coverage_loss` (`rules.rs:362–374`).
+Thus a collected lab or new project with eligible terminated attempts and no
+bound usage is structurally critical (0/N), even if usage was never collected.
+It does not establish that previously collected coverage was lost. An empty
+eligible population is OK; no collection is unknown. Thresholds are unchanged.
+
+Other critical rules require additional evidence; missing session usage alone
+does not imply they fire:
+
+- `launch_stalled`: reserved/launching progress older than 15 minutes, or
+  stopped recovery retaining capacity (immediately critical).
+- `result_waiting_on_coordinator`: unfinished worker results at least 10 minutes old.
+- `collector_stale`: last collection at least one hour old; a current collector
+  prevents this, while no recorded collection is unknown.
+- `cost_coverage`: fewer than 50% of valued usage entries priced; absent usage
+  does not by itself make a nonempty unpriced population.
+- `accounting_conflict`: at least one open conflict disposition (unresolved
+  dispositions alone warn).
+- `budget_exposure`: shadow policy would block; unknown usage can contribute
+  under the project's budget policy, but no budget policy is unknown.
+- `fix_reopened` / `integration_reverted`: at least three qualifying events in
+  the last 30 days.
+- `latency_shift` / `attempt_cost_shift`: respectively at least 4× / 2× the
+  prior seven-day window, with at least five samples in each window.
+- `service_throttled`: certified throttled share at least 10%; uncertified
+  observation is unknown.
+- `quota_headroom`: trusted current quota remaining below 5%.
+- `waiting_on_you`: observed human-routed open wait at least 30 minutes.
+
+Non-health ticker labs disable only automatic delivery with owner configuration
+`[telemetry] health_notify = 'off'`. Shared worker, operator, replay and coordinator
+fixtures and CLI ticker labs retain their exact event, inbox and prompt assertions.
+Health episode tests and the coordinator critical-notice wake workflow retain
+the default delivery policy. Evaluation remains enabled in isolated labs.

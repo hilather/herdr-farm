@@ -35,12 +35,16 @@ impl Lab {
             project,
             herdr,
         };
+        // Exact inbox and prompt workflows are independent of automatic health delivery.
+        let config = lab.home.path().join(".config/herdr-farm/config.toml");
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        fs::write(&config, "[telemetry]\nhealth_notify = 'off'\n").unwrap();
         lab.ok(&["new", "demo"]);
         lab.ok(&["pause", "demo"]);
         let plan = if defaults {
             let config = lab.home.path().join(".config/herdr-farm/config.toml");
             fs::create_dir_all(config.parent().unwrap()).unwrap();
-            fs::write(&config, format!("[verification.defaults.{:?}]\naccept=['godot:./tools/run-tests.sh', 'shell:./tools/check.sh --fast']\n", lab.project.canonicalize().unwrap().to_string_lossy())).unwrap();
+            fs::write(&config, format!("[telemetry]\nhealth_notify = 'off'\n[verification.defaults.{:?}]\naccept=['godot:./tools/run-tests.sh', 'shell:./tools/check.sh --fast']\n", lab.project.canonicalize().unwrap().to_string_lossy())).unwrap();
             migration::inspect_with_config(&lab.project, &config).unwrap()
         } else {
             migration::inspect(&lab.project).unwrap()
@@ -184,7 +188,7 @@ fn socket_open_primes_owned_coordinator_retries_swallowed_prompt_and_recreates_c
     fs::write(
         &config,
         format!(
-            "[safety.{:?}]\ncoordinator_agent_args=['--fixture-safe']\ncoordinator_agent_args_kind='claude'\n",
+            "[telemetry]\nhealth_notify = 'off'\n[safety.{:?}]\ncoordinator_agent_args=['--fixture-safe']\ncoordinator_agent_args_kind='claude'\n",
             l.project.to_string_lossy()
         ),
     )
@@ -424,7 +428,7 @@ fn socket_coordinator_remote_manifest_and_explicit_local_override_policy() {
             if mode != "local" && mode != "remote-shadow" { continue; }
             let config = l.home.path().join(".config/herdr-farm/config.toml");
             fs::create_dir_all(config.parent().unwrap()).unwrap();
-            fs::write(config, "[coordinator]\nallow_local_manifest_override = true\n").unwrap();
+            fs::write(config, "[telemetry]\nhealth_notify = 'off'\n[coordinator]\nallow_local_manifest_override = true\n").unwrap();
             l.ok(&["open", "demo", "--reprime"]);
         } else {
             assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
@@ -478,7 +482,7 @@ fn owner_settings_arguments_are_refused_before_coordinator_effects() {
         let l = Lab::new();
         let config = l.home.path().join(".config/herdr-farm/config.toml");
         fs::create_dir_all(config.parent().unwrap()).unwrap();
-        fs::write(&config, format!("[safety.{:?}]\ncoordinator_agent_args=[{argument:?}]\ncoordinator_agent_args_kind='claude'\n", l.project.to_string_lossy())).unwrap();
+        fs::write(&config, format!("[telemetry]\nhealth_notify = 'off'\n[safety.{:?}]\ncoordinator_agent_args=[{argument:?}]\ncoordinator_agent_args_kind='claude'\n", l.project.to_string_lossy())).unwrap();
         let out = l.cli(&["open", "demo"]);
         assert!(!out.status.success());
         assert!(String::from_utf8_lossy(&out.stderr).contains("must not contain --settings"));
@@ -795,6 +799,8 @@ fn wake_history(lab:&Lab)->Value {
 #[test]
 fn canonical_toast_backoff_and_live_nudge_policy_survive_context_reads() {
     let l=Lab::new();
+    // This health-notice wake workflow deliberately retains the default policy.
+    fs::write(l.home.path().join(".config/herdr-farm/config.toml"), "").unwrap();
     let _listener=UnixListener::bind(l.home.path().join("s")).expect("socket fixture: sandbox may deny Unix sockets");
     l.ok(&["open","demo"]);l.stop();
     let initial=l.state()["prompts"].as_array().unwrap().len();

@@ -235,8 +235,9 @@ impl Lab {
         let config = home.join(".config/herdr-farm/config.toml");
         fs::create_dir_all(config.parent().unwrap()).unwrap();
         let budget = "max_wall_seconds=600\nunknown_usage='allow_with_warning'\n";
+        // Launch workflows do not test automatic health delivery.
         fs::write(&config, format!(
-            "[authority]\nversion=1\nrevision=1\napproval_public_key={public:?}\n\
+            "[telemetry]\nhealth_notify='off'\n[authority]\nversion=1\nrevision=1\napproval_public_key={public:?}\n\
 [worker_isolation.login]\nclaude_token_file={token:?}\n\
 [profiles.codex-sol]\nkind='codex'\npermission_policy='interactive'\nmodel='gpt-6.1-sol'\nreasoning_effort='low'\n[profiles.codex-sol.budget]\n{budget}\
 [profiles.claude-sonnet]\nkind='claude'\npermission_policy='interactive'\nmodel='claude-sonnet-5-5'\nreasoning_effort='low'\n[profiles.claude-sonnet.budget]\n{budget}")).unwrap();

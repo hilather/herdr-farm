@@ -141,7 +141,8 @@ impl Lab {
         if let Some(root) = root {
             fs::copy(root.parent().unwrap().join(".config/herdr-farm/config.toml"), &config).unwrap();
         } else {
-            fs::write(&config, format!("[authority]\nversion=1\nrevision=1\napproval_public_key={public:?}\n[profiles.worker]\nkind='{kind}'\npermission_policy='interactive'\n[profiles.worker.budget]\nmax_wall_seconds=600\n{budget}\n")).unwrap();
+            // Keep unrelated health episodes out of exact event/inbox workflows.
+            fs::write(&config, format!("[telemetry]\nhealth_notify='off'\n[authority]\nversion=1\nrevision=1\napproval_public_key={public:?}\n[profiles.worker]\nkind='{kind}'\npermission_policy='interactive'\n[profiles.worker.budget]\nmax_wall_seconds=600\n{budget}\n")).unwrap();
         }
         for dir in ["repo", "bin", "agent-home", "lab"] { fs::create_dir(home.path().join(dir)).unwrap(); }
         let mut lab = Lab { slug, project: root.map_or_else(|| home.path().join("root"), std::path::Path::to_owned).join(slug), key, repo: home.path().join("repo"), herdr: home.path().join("bin/herdr"),
