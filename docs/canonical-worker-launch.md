@@ -1551,7 +1551,13 @@ the single queue ticket and take the exclusive root fence before recording.
 Failed attempts bypass the live-worker early return and reach supervised stop,
 including workers whose brief approval expired after launch.
 Exit selection is read again after acquisition;
-all existing identity, revision, receipt and lock-order fences remain.
+all existing identity, revision, receipt and lock-order fences remain. A conflicted
+selection or commit refreshes the attempt revision and retries up to three times
+within the job deadline with backoff. The queue retains failed termination
+observations, including unchanged-revision SQLite refusals, for later retries
+without relying on a fresh maintenance-blocked inventory. Repeated recording
+conflicts use the same advisory escalation; its counter clears only after
+termination is recorded.
 
 The old card's process-local priority reservation, copy-phase yielding and
 service-priority changes were dropped: current main already provides fairness

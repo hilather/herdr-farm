@@ -531,7 +531,7 @@ fn note_exit_contention(project:&Path,attempt:&AttemptId,wait:Duration)->Result<
     let content=crate::domain::InboxContent {
         id:format!("telemetry-health-worker-exit-{}",attempt.as_str()),
         kind:"telemetry-health".into(),subject:attempt.as_str().into(),
-        summary:format!("Worker exit recording blocked for attempt {}: {} deferrals; lock holder kind: {}; root maintenance or exclusive external operation; last_wait_ms={}",attempt.as_str(),count,crate::execution_guard::root_holder_kind(project.parent().context("project root missing")?),wait.as_millis()),
+        summary:format!("Worker exit recording blocked for attempt {}: {} deferrals; lock holder kind: {}; root maintenance or exclusive external operation, or conflicted store commit; last_wait_ms={}",attempt.as_str(),count,crate::execution_guard::root_holder_kind(project.parent().context("project root missing")?),wait.as_millis()),
         ..Default::default()
     };
     for _ in 0..8 {
@@ -555,6 +555,46 @@ pub fn reconcile_termination(
     expected_revision: u64,
     deadline: Instant,
     cancellation: Cancellation,
+) -> Result<Option<Attempt>> {
+    let deadline = deadline.min(Instant::now() + Duration::from_secs(45));
+    let mut revision = expected_revision;
+    for pass in 0..3 {
+        let mut recording = false;
+        match reconcile_termination_once(project, attempt, revision, deadline, cancellation.clone(), &mut recording) {
+            Ok(value) => {
+                if value.is_some() { clear_exit_contention(&project.canonicalize()?, attempt); }
+                return Ok(value);
+            }
+            Err(error) if brief_conflict(&error) => {
+                check(deadline, &cancellation)?;
+                let db = crate::migration::open_active_scoped(project,
+                    crate::store::controlled::ReadControl::new(deadline, cancellation.clone()))?;
+                revision = db.current_attempt_revision(attempt)?;
+                drop(db);
+                // SQLite refusal triggers also map to Conflict. Retain the
+                // observation even when the revision did not move, but back off
+                // instead of spinning on an unchanged refused transaction.
+                if pass == 2 {
+                    if recording { note_exit_contention(&project.canonicalize()?, attempt, Duration::ZERO)?; }
+                    return Err(error);
+                }
+                std::thread::sleep(crate::timing::worker_recovery_retry().min(Duration::from_millis(100)));
+                check(deadline, &cancellation)?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!()
+}
+
+#[cfg(target_os = "linux")]
+fn reconcile_termination_once(
+    project: &Path,
+    attempt: &AttemptId,
+    expected_revision: u64,
+    deadline: Instant,
+    cancellation: Cancellation,
+    recording: &mut bool,
 ) -> Result<Option<Attempt>> {
     use crate::worker_supervision::SupervisorObservation;
     let deadline = deadline.min(Instant::now() + Duration::from_secs(45));
@@ -592,6 +632,7 @@ pub fn reconcile_termination(
     drop(selected);
     drop(db);
     let root=project.parent().context("project root missing")?;
+    *recording = true;
     let wait_started=Instant::now();
     let guard=crate::execution_guard::RootGuard::exit_recording_by(root,deadline,&cancellation);
     let _guard=match guard {
@@ -604,7 +645,6 @@ pub fn reconcile_termination(
             return Err(error);
         }
     };
-    clear_exit_contention(&project,attempt);
     check(deadline,&cancellation)?;
     let stop_deadline=deadline.min(Instant::now()+Duration::from_secs(10));
     let mut db=crate::migration::open_active_scoped(&project,control)?;

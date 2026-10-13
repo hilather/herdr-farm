@@ -223,7 +223,7 @@ impl Queue {
             matches!(cause.downcast_ref::<herdr_farm::store::StoreError>(), Some(herdr_farm::store::StoreError::Conflict | herdr_farm::store::StoreError::Invalid(_)))));
         #[cfg(not(feature="state-store"))]
         let stale=false;
-        if !stale && (termination_job(&pending.identity.operation) || pending.identity.operation.starts_with("canonical-worker:recover:"))
+        if (termination_job(&pending.identity.operation) || (!stale && pending.identity.operation.starts_with("canonical-worker:recover:")))
             && (result.is_err() || result.as_ref().is_ok_and(String::is_empty))
             && let Some(entry) = self.entries.get_mut(&pending.key)
         {
