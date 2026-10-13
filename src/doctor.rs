@@ -293,6 +293,10 @@ fn report(
                 check(&mut out, Some(true), &label, format!("store runtime={runtime} memory={memory}; legacy thread/inbox files are pre-cutover originals"));
                 #[cfg(feature="state-store")]
                 {
+                    match crate::capacity::report(&dir, &slug) {
+                        Ok((text, mismatch)) => check(&mut out, if mismatch { None } else { Some(true) }, &label, text),
+                        Err(error) => check(&mut out, None, &label, format!("capacity unavailable: {error:#}")),
+                    }
                     if let Some(warning) = herdr_farm::memory::legacy_owner_memory_warning(&dir) { check(&mut out, None, &label, warning); }
                     match crate::canonical_coordinator::doctor_manifest(env, config_dir, &dir, runner) {
                         Ok(lines) => for line in lines { check(&mut out, None, &label, line); },

@@ -88,6 +88,7 @@ struct Run<'a> {
     preflight_elapsed_ms: u128,
     budget_seconds: u64,
     prompt_bytes: Value,
+    capacity_explicit: bool,
 }
 
 impl Run<'_> {
@@ -666,7 +667,9 @@ fn profile_plan(ctx: &Ctx, project: &Path, args: &Args, observe: bool) -> Result
 
 pub fn run(ctx: &Ctx, slug: &str, mut args: Args) -> Result<Value> {
     let operation_started = Instant::now();
+    let capacity_explicit = args.max_active_workers.is_some();
     let project = ctx.root.join(slug).canonicalize().with_context(|| format!("project {slug} not found"))?;
+    eprintln!("{}", crate::capacity::report(&project, slug)?.0);
     // File locks do not alter SQLite bytes and span the entire multi-step launch.
     let memory_launch_guard = herdr_farm::authority::open_launch_lock(&project)?;
     memory_launch_guard.try_lock_shared().context("memory adoption is in progress; retry launch after it finishes")?;
@@ -747,7 +750,15 @@ pub fn run(ctx: &Ctx, slug: &str, mut args: Args) -> Result<Value> {
     eprintln!("launch run: prompt_bytes {}",serde_json::to_string(&preview.prompt_bytes)?);
     let cap = config.get("launch").and_then(|v| v.get("max_workers")).map(|v| v.as_integer().context("launch.max_workers must be an integer")).transpose()?.unwrap_or(4);
     ensure!((1..=64).contains(&cap), "launch.max_workers must be in 1..64");
-    args.max_active_workers = Some(args.max_active_workers.unwrap_or(cap as u32));
+    let current_policy = runtime::queue_report(&project)?.policy;
+    // Only an untouched initial policy gets the launch default. Explicit policy
+    // changes (including disabling admission with zero) survive later launches.
+    let capacity_default = if current_policy.revision == 1 && current_policy.max_active_workers == 0 {
+        cap as u32
+    } else {
+        current_policy.max_active_workers
+    };
+    args.max_active_workers = Some(args.max_active_workers.unwrap_or(capacity_default));
     let mut problems = Vec::new();
     if args.max_active_workers.unwrap() == 0 || args.max_active_workers.unwrap() > cap as u32 { problems.push("owner cap: --max-active-workers must be at least one and cannot exceed launch.max_workers".into()); }
     if config.get("profiles").and_then(|v|v.get(&args.profile)).is_none() { problems.push("owner profiles: profile is absent from current owner configuration".into()); }
@@ -852,7 +863,7 @@ pub fn run(ctx: &Ctx, slug: &str, mut args: Args) -> Result<Value> {
     let preflight_elapsed_ms = operation_started.elapsed().as_millis();
     eprintln!("launch run: preflight: completed ({preflight_elapsed_ms} ms; admission budget {} s)", args.budget_seconds);
     ensure!(problems.is_empty(), "launch run preflight refused after {preflight_elapsed_ms} ms (admission budget {} s):\n{}", args.budget_seconds, problems.join("\n"));
-    let mut run = Run { ctx, project: project.clone(), slug: slug.to_owned(), steps: Vec::new(), step_started: Instant::now(), active_step: "profile_evidence", deadline: operation_started + Duration::from_secs(args.budget_seconds), preflight_elapsed_ms, budget_seconds: args.budget_seconds, prompt_bytes: serde_json::to_value(&preview.prompt_bytes)? };
+    let mut run = Run { capacity_explicit, ctx, project: project.clone(), slug: slug.to_owned(), steps: Vec::new(), step_started: Instant::now(), active_step: "profile_evidence", deadline: operation_started + Duration::from_secs(args.budget_seconds), preflight_elapsed_ms, budget_seconds: args.budget_seconds, prompt_bytes: serde_json::to_value(&preview.prompt_bytes)? };
     match steps(&mut run, &args, plan.context("profile evidence preflight failed")?) {
         Ok(report) => Ok(report),
         Err(error) => {
@@ -950,7 +961,7 @@ fn steps(run: &mut Run, args: &Args, plan: ProfilePlan) -> Result<Value> {
     // 4. Capacity, queue and the integration target.
     let snapshot = runtime::snapshot(&project)?;
     run.begin("queue");
-    let scheduler = snapshot.scheduler.as_ref().context("project has no scheduler state: migrate it first")?;
+    snapshot.scheduler.as_ref().context("project has no scheduler state: migrate it first")?;
     if snapshot.scheduler.as_ref().is_some_and(|s| s.queue.iter().any(|q| q.task == task_id) && snapshot.tasks.iter().any(|t| t.id == task_id && (t.state == herdr_farm::domain::TaskState::Queued || t.active_attempt.is_some()))) {
         run.skipped("queue", json!({"task":args.task}));
     } else {
@@ -963,17 +974,20 @@ fn steps(run: &mut Run, args: &Args, plan: ProfilePlan) -> Result<Value> {
         run.done("queue", json!({"head":head}));
     }
     run.begin("scheduler_capacity");
-    let scheduler_policy = &scheduler.policy;
-    if scheduler_policy.max_active_workers == args.max_active_workers.unwrap() {
+    let scheduler_policy = runtime::queue_report(&project)?.policy;
+    if scheduler_policy.max_active_workers == args.max_active_workers.unwrap()
+        || (!run.capacity_explicit && scheduler_policy.revision > 1) {
         run.skipped("scheduler_capacity", json!({"max_active_workers":scheduler_policy.max_active_workers}));
     } else {
         let head = retry(|| {
             let fresh = runtime::snapshot(&project)?;
             let policy = fresh.scheduler.context("scheduler missing")?.policy;
+            if !run.capacity_explicit && policy.revision > 1 { return Ok(fresh.head); }
             runtime::scheduler_policy(&project, fresh.head, policy.revision, args.max_active_workers.unwrap(), policy.max_attempts_per_task.max(1))
         })?;
         run.done("scheduler_capacity", json!({"max_active_workers":args.max_active_workers,"head":head}));
     }
+    eprintln!("{}", crate::capacity::report(&project, &run.slug)?.0);
     retry(|| herdr_farm::store::set_project_result_automation(&project, run.head()?, Some(true), None))?;
     run.begin("integration_target");
     if let Some(reference) = &args.integration_ref {

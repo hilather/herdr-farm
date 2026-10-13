@@ -1934,6 +1934,8 @@ pub fn run(#[cfg(feature="state-store")] capture: &mut crate::cli_invocation::Ca
                 project::create_canonical(&ctx.root, &ctx.config_dir, &name, &goal, repos)?
             };
             println!("created `{}` at {}", project.slug, project.dir().display());
+            #[cfg(feature="state-store")]
+            if !legacy { println!("{}", crate::capacity::report(&project.dir(), &project.slug)?.0); }
             println!("next: {} open {}", coordinator::current_prefix(&ctx.root)?, project.slug);
             Ok(())
         }
@@ -1992,6 +1994,7 @@ pub fn run(#[cfg(feature="state-store")] capture: &mut crate::cli_invocation::Ca
                     if profile.is_none() && session.is_none() && !has_planner {
                         let (text, head, unseen)=herdr_farm::runtime::context_snapshot_configured(&dir,Some(&config))?;
                         print!("{text}");
+                        println!("{}", crate::capacity::report(&dir, &slug)?.0);
                         println!("{}", crate::canonical_coordinator::surface(&ctx, &slug)?);
                         if !peek && !unseen.is_empty() { herdr_farm::runtime::mark_context_seen(&dir,head,&unseen,seen_deadline)?; }
                         return Ok(());
@@ -2014,6 +2017,7 @@ pub fn run(#[cfg(feature="state-store")] capture: &mut crate::cli_invocation::Ca
                     let result=herdr_farm::runtime::coordinator_context(&dir,&herdr_session,&profile,&instructions)
                         .context("legacy runtime is disabled; migrated context could not be read")?;
                     println!("{}",result.text);
+                    println!("{}", crate::capacity::report(&dir, &slug)?.0);
                     println!("{}",crate::canonical_coordinator::surface(&ctx,&slug)?);
                     // TM4.8 (doc 15 §5): the bounded, advisory fleet section after the checkpointed context.
                     if let Some(section)=herdr_farm::telemetry::workspace::context_section(&dir,&slug,&ctx.config_dir) {print!("\n{section}");}

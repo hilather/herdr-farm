@@ -251,6 +251,12 @@ fn every_unterminated_attempt_holds_capacity_and_a_lower_cap_revokes_nothing() {
     assert_eq!((&queue["retained_attempts"], &queue["available_slots"]), (&json!(3), &json!(0)), "{queue}");
     assert!(f.blockers("next").contains(&"capacity_full".to_owned()));
     assert_eq!(f.attempts(), attempts);
+    let context = f.cli(&["context", "demo", "--peek"]);
+    assert!(context.status.success(), "{}", String::from_utf8_lossy(&context.stderr));
+    let text = String::from_utf8_lossy(&context.stdout);
+    assert!(text.contains("Canonical capacity: max_active_workers=2 active=3 available_slots=0"), "{text}");
+    assert!(text.contains("Capacity warning: PROJECT.md max_parallel_threads=3"), "{text}");
+
     let refused = f.refused(&strs(&f.queue_args("busy", 0, json!([]))));
     assert!(!refused.is_empty());
 }
