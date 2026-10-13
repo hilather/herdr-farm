@@ -293,3 +293,19 @@ rule uses the existing health alert stream and adds no tables or migrations.
 Worktree readiness and the launch creation boundary append progress timestamps
 in the existing canonical event journal; older attempts without these timestamps
 fall back to their reservation time. Error observations never refresh progress.
+
+### Worker exit recording contention
+
+The live `telemetry PROJECT health` response additionally includes
+`worker_exit_contention`, an array of canonical `InboxContent` diagnostics.
+Health text prints their summaries. They are stable notices under
+`telemetry-health-worker-exit-<attempt>`, kind `telemetry-health`, subject the
+attempt ID, reporting the deferral count and root-lock holder class. The exit
+recorder emits one after three bounded lock waits or two minutes of deferral;
+it does not emit for normal live-worker polling. Acknowledgement retains the
+notice. The attempt projection includes the matching array on each row, empty
+when the attempt has no contention notice; current
+attempt state indicates whether recording subsequently succeeded. This is an
+advisory runtime diagnostic using existing inbox retention/backup classification,
+not a new sidecar alert rule or migration. Counters are volatile; stable notice
+identity deduplicates across ticker restarts.

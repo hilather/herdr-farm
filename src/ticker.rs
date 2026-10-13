@@ -445,6 +445,10 @@ pub fn run_passes(ctx: &Ctx, passes: Option<u64>) -> Result<()> {
             return drain_executor(root, &log, &mut memory);
         }
         let wake=entered+next_tick_delay(&memory);
+        let delay = wake.duration_since(entered);
+        if delay >= Duration::from_secs(5) && herdr_farm::timing::scale().is_some() {
+            log.line(&format!("advisory quiet window: next pass in {} ms", delay.as_millis()));
+        }
         // Sleep in short slices so a stop request is honoured promptly.
         while Instant::now() < wake {
             if stop_path(root).exists() {
@@ -985,7 +989,12 @@ fn admit_effects(log:&Log,memory:&mut Memory)->bool {
     let Some(queue)=memory.copy_jobs.as_mut()else{return false;};
     #[cfg(feature="state-store")]
     let errors=queue.admit_matching(|identity|{
-        if crate::copy_jobs::exclusive_root(identity) {
+        if identity.operation.starts_with("canonical-worker:worker-exit-watch:") {
+            // Exit watches read retained identity without root ownership. Their
+            // recording phase takes its own bounded exclusive fence, so a
+            // maintenance observation batch must not prevent the poll itself.
+            true
+        }else if crate::copy_jobs::exclusive_root(identity) {
             !memory.canonical_maintenance_turn&&!memory.canonical_observations.as_ref().is_some_and(|reads|reads.pending())
         }else{!memory.canonical_observations.as_ref().is_some_and(|reads|reads.pending_project(&identity.project))}
     });

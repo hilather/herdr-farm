@@ -205,6 +205,13 @@ impl SqliteStore {
         }
         unreachable!()
     }
+    /// Selected advisory rows, without materializing tasks or worker history.
+    pub fn worker_exit_notices(&self)->Result<Vec<InboxContent>> {
+        Self::read_worker_exit_notices(&self.connection)
+    }
+    pub(crate) fn read_worker_exit_notices(db:&Connection)->Result<Vec<InboxContent>> {
+        Ok(read_matching(db,"WHERE id GLOB 'telemetry-health-worker-exit-*'",None)?.into_iter().map(|item|item.content).collect())
+    }
     /// Update only items actually shown to the caller at this event head.
     pub fn update_inbox(&mut self,expected_head:u64,ids:&[String],done:bool)->Result<usize> {
         let tx=self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;check_schema(&tx)?;

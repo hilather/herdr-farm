@@ -59,6 +59,14 @@ pub enum Command {
     Status,
 }
 
+// Use telemetry's no-side-file reader, including for stores without an active
+// runtime publication. Diagnostics never grant runtime mutation authority.
+pub(crate) fn exit_contention(project:&Path)->Result<Vec<crate::domain::InboxContent>> {
+    let db=super::read_only(&project.join(".state/state.db"))?;
+    crate::store::check_schema(&db)?;
+    Ok(crate::store::SqliteStore::read_worker_exit_notices(&db)?)
+}
+
 /// `health` without a subcommand: every rule evaluated live (read-only) and the recorded open alerts.
 pub fn current(project: &Path) -> Result<Value> {
     let now = jiff::Timestamp::now().as_millisecond();
@@ -68,6 +76,7 @@ pub fn current(project: &Path) -> Result<Value> {
     for o in &outcomes { *summary.entry(o.state.as_str()).or_default() += 1; }
     let alerts = store::alerts(project, None)?;
     Ok(json!({"schema_version": 1, "contract": CONTRACT, "rules_version": rules::VERSION, "project": slug, "evaluated_unix_ms": now,
+        "worker_exit_contention": exit_contention(project)?,
         "mode": "live_read_only", "summary": summary, "states": outcomes.iter().map(|o| o.json(&slug)).collect::<Vec<_>>(),
         "alerts": if alerts["status"] == "unavailable" { alerts } else { json!({"open": alerts["open"], "last_evaluated_unix_ms": alerts["last_evaluated_unix_ms"]}) },
         "advisory": "health states and alerts report; the canonical admission and budget paths still decide"}))
@@ -91,6 +100,9 @@ fn alert_line(a: &Value) -> String {
 /// Text form of `current`: one line per rule state, then the open alerts.
 pub fn text(v: &Value) -> String {
     let mut out = format!("{} · health · {} · {}\n", word(&v["project"]), word(&v["rules_version"]), word(&v["mode"]));
+    for notice in v["worker_exit_contention"].as_array().into_iter().flatten() {
+        out += &format!("  worker_exit_contention: {}\n",word(&notice["summary"]));
+    }
     for s in v["states"].as_array().into_iter().flatten() {
         let waiting=if s["rule"]=="result_waiting_on_coordinator" && s["evidence"]["waiting_items"].as_u64().is_some_and(|n|n>0) {
             format!("; result waiting on coordinator for {} min",word(&s["evidence"]["waiting_minutes"]))

@@ -44,6 +44,10 @@ fn project_attempts(project: &Path, selected: Option<&std::collections::BTreeSet
     };
     // Contracts §4/§5 `usage`: the sidecar's bound, certified sums or its reason.
     let mut records = records;
+    let notices=super::health::exit_contention(project)?;
+    for record in &mut records {
+        record["worker_exit_contention"]=json!(notices.iter().filter(|notice|Some(notice.subject.as_str())==record["attempt_id"].as_str()).collect::<Vec<_>>());
+    }
     if let Some(sidecar) = super::sidecar::read(project)? {
         let children = super::sidecar::child_index(&sidecar)?;
         for record in &mut records { record["session"] = super::worker_sessions::attempt(&sidecar, &store, record)?; }

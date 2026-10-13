@@ -506,6 +506,44 @@ fn deliver_brief_once(
     Ok(db.record_worker_brief(&claim, &receipt, now())?)
 }
 
+#[cfg(target_os = "linux")]
+type ExitDeferrals=std::collections::BTreeMap<(std::path::PathBuf,String),(u32,Instant)>;
+#[cfg(target_os = "linux")]
+static EXIT_DEFERRALS:std::sync::LazyLock<std::sync::Mutex<ExitDeferrals>> = std::sync::LazyLock::new(||std::sync::Mutex::new(Default::default()));
+#[cfg(target_os = "linux")]
+fn clear_exit_contention(project:&Path,attempt:&AttemptId) {
+    EXIT_DEFERRALS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&(project.to_path_buf(),attempt.as_str().to_owned()));
+}
+
+#[cfg(target_os = "linux")]
+fn note_exit_contention(project:&Path,attempt:&AttemptId,wait:Duration)->Result<()> {
+    let (count,elapsed)={
+        let mut counts=EXIT_DEFERRALS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let value=counts.entry((project.to_path_buf(),attempt.as_str().to_owned())).or_insert((0,Instant::now()-wait));
+        value.0=value.0.saturating_add(1);
+        (value.0,value.1.elapsed())
+    };
+    if count<3 && elapsed<crate::timing::retry(Duration::from_secs(120)) {return Ok(());}
+    // Advisory inbox intake is a SQLite transaction, independent of the root
+    // effect barrier. Otherwise a permanently held barrier could hide itself.
+    // It validates active publication and never changes execution authority.
+    let mut db=crate::migration::open_active_unchecked(project)?;
+    let content=crate::domain::InboxContent {
+        id:format!("telemetry-health-worker-exit-{}",attempt.as_str()),
+        kind:"telemetry-health".into(),subject:attempt.as_str().into(),
+        summary:format!("Worker exit recording blocked for attempt {}: {} deferrals; lock holder kind: {}; root maintenance or exclusive external operation, or conflicted store commit; last_wait_ms={}",attempt.as_str(),count,crate::execution_guard::root_holder_kind(project.parent().context("project root missing")?),wait.as_millis()),
+        ..Default::default()
+    };
+    for _ in 0..8 {
+        let head=db.current_head()?;
+        match db.deliver_telemetry_notice(head,&content,now()) {
+            Err(crate::store::StoreError::Conflict)=>continue,
+            result=>{result?;return Ok(());}
+        }
+    }
+    Err(crate::store::StoreError::Conflict.into())
+}
+
 /// Fulfill desired cancellation or completion, or reconcile a naturally exited worker. Stop
 /// remains available while paused/revoked because it narrows existing execution.
 /// Unknown or inaccessible process identity retains capacity. Files, worktrees,
@@ -518,17 +556,97 @@ pub fn reconcile_termination(
     deadline: Instant,
     cancellation: Cancellation,
 ) -> Result<Option<Attempt>> {
+    let deadline = deadline.min(Instant::now() + Duration::from_secs(45));
+    let mut revision = expected_revision;
+    for pass in 0..3 {
+        let mut recording = false;
+        match reconcile_termination_once(project, attempt, revision, deadline, cancellation.clone(), &mut recording) {
+            Ok(value) => {
+                if value.is_some() { clear_exit_contention(&project.canonicalize()?, attempt); }
+                return Ok(value);
+            }
+            Err(error) if brief_conflict(&error) => {
+                check(deadline, &cancellation)?;
+                let db = crate::migration::open_active_scoped(project,
+                    crate::store::controlled::ReadControl::new(deadline, cancellation.clone()))?;
+                revision = db.current_attempt_revision(attempt)?;
+                drop(db);
+                // SQLite refusal triggers also map to Conflict. Retain the
+                // observation even when the revision did not move, but back off
+                // instead of spinning on an unchanged refused transaction.
+                if pass == 2 {
+                    if recording { note_exit_contention(&project.canonicalize()?, attempt, Duration::ZERO)?; }
+                    return Err(error);
+                }
+                std::thread::sleep(crate::timing::worker_recovery_retry().min(Duration::from_millis(100)));
+                check(deadline, &cancellation)?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!()
+}
+
+#[cfg(target_os = "linux")]
+fn reconcile_termination_once(
+    project: &Path,
+    attempt: &AttemptId,
+    expected_revision: u64,
+    deadline: Instant,
+    cancellation: Cancellation,
+    recording: &mut bool,
+) -> Result<Option<Attempt>> {
     use crate::worker_supervision::SupervisorObservation;
     let deadline = deadline.min(Instant::now() + Duration::from_secs(45));
-    let stop_deadline=deadline.min(Instant::now()+Duration::from_secs(10));
     check(deadline, &cancellation)?;
     let project = project.canonicalize()?;
-    let _guard = crate::execution_guard::RootGuard::exclusive_by(
-        project.parent().context("project root missing")?,
-        deadline,
-        &cancellation,
-    )?;
+    // Read-only exit watch: do not acquire the root barrier for a live worker.
+    // This selection is only a scheduling hint; all fences are checked again
+    // after exclusive ownership is acquired.
     let control=crate::store::controlled::ReadControl::new(deadline,cancellation.clone());
+    let mut db=crate::migration::open_active_scoped(&project,control.clone())?;
+    let selected=db.termination_selection(attempt,expected_revision)?;
+    if selected.attempt.termination_observed {clear_exit_contention(&project,attempt);return Ok(Some(selected.attempt));}
+    if let Some(state)=selected.worker.as_ref()
+        && selected.attempt.state != AttemptState::Failed
+        && !state.cancelled && !state.completion && !state.wall_expired {
+            let started=state.events.iter().find(|event|event.kind=="runtime.launch_started");
+            // A live gate with expired/ambiguous launch authority still needs
+            // the existing fenced lease-recovery stop. Never poll past it.
+            let launch_recovery=state.delivery.state==crate::operations::DeliveryState::Ambiguous
+                || (state.delivery.state==crate::operations::DeliveryState::Claimed
+                    && state.delivery.lease_until_ms.is_some_and(|until|until<=now()))
+                || state.events.iter().any(|event|event.kind=="runtime.launch_recovery_error"
+                    && event.payload["terminal"]==true && event.payload["reason"]=="launch_lease_expired");
+            let event=started.or_else(|| (!launch_recovery).then(||state.events.iter()
+                .find(|event|event.kind=="runtime.launch_target")).flatten());
+            if let Some(event)=event {
+                let identity=if event.kind=="runtime.launch_started" {
+                    serde_json::from_value::<LaunchStartedReceipt>(event.payload.clone())?.supervisor
+                } else {
+                    serde_json::from_value::<LaunchTarget>(event.payload.clone())?.supervisor
+                }.context("worker exit watch supervisor missing")?;
+                if !SupervisorObservation::recover_exited(&identity)? || state.verdict_pending {return Ok(None);}
+            }
+    }
+    drop(selected);
+    drop(db);
+    let root=project.parent().context("project root missing")?;
+    *recording = true;
+    let wait_started=Instant::now();
+    let guard=crate::execution_guard::RootGuard::exit_recording_by(root,deadline,&cancellation);
+    let _guard=match guard {
+        Ok(guard)=>guard,
+        Err(error)=>{
+            if !cancellation.is_cancelled()
+                && error.chain().any(|cause| matches!(cause.downcast_ref::<std::fs::TryLockError>(),Some(std::fs::TryLockError::WouldBlock))) {
+                note_exit_contention(&project,attempt,wait_started.elapsed()).context("worker exit contention escalation could not be persisted; retry")?;
+            }
+            return Err(error);
+        }
+    };
+    check(deadline,&cancellation)?;
+    let stop_deadline=deadline.min(Instant::now()+Duration::from_secs(10));
     let mut db=crate::migration::open_active_scoped(&project,control)?;
     let mut selected=db.termination_selection(attempt,expected_revision)?;
     let current=&selected.attempt;

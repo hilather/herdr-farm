@@ -3472,6 +3472,7 @@ fn outcome_success_path() {
     assert!(observed>0,"{report}");
     assert_eq!(report,serde_json::json!({"attempts":[{
         "accepted":true,
+        "worker_exit_contention": [],
         "active_ms":marks[3].2-marks[2].2,
         "agent_kind":"claude","model":null,"profile":"worker","reasoning_effort":null,
         "attempt_id":attempt,

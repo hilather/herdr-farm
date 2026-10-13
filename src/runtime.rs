@@ -158,6 +158,21 @@ pub fn update_inbox(project:&Path,expected_head:u64,ids:&[String],done:bool)->Re
     let _maintenance=migration::runtime_mutation(project)?;
     Ok(migration::open_active(project)?.update_inbox(expected_head,ids,done)?)
 }
+/// Monotonic acknowledgement of exact inbox IDs, refreshing the head after
+/// bounded foreground acquisition. The strict optimistic API remains above.
+pub fn acknowledge_inbox(project:&Path,ids:&[String])->Result<usize> {
+    let _wait=crate::execution_guard::ForegroundWait::enter();
+    let _maintenance=migration::runtime_mutation(project)?;
+    let mut db=migration::open_active(project)?;
+    for _ in 0..8 {
+        let head=db.current_head()?;
+        match db.update_inbox(head,ids,true) {
+            Err(crate::store::StoreError::Conflict)=>continue,
+            result=>return result.map_err(Into::into),
+        }
+    }
+    Err(crate::store::StoreError::Conflict.into())
+}
 
 /// Mark only notices rendered by context, preserving concurrent arrivals and DONE.
 /// Retry the head fence under project ownership, without repeating context output.
@@ -414,4 +429,10 @@ pub fn wake_inbox(project: &Path) -> Result<Vec<crate::domain::InboxItem>> {
 /// Unfinished worker-result rows through the inbox primary-key prefix index.
 pub fn worker_result_inbox(project: &Path) -> Result<Vec<crate::domain::InboxItem>> {
     Ok(migration::open_active_read_only(project)?.worker_result_inbox()?)
+}
+
+/// Durable advisory exit-contention notices. Acknowledged rows remain visible
+/// for diagnosis; the current attempt state determines whether action remains.
+pub fn worker_exit_notices(project:&Path)->Result<Vec<crate::domain::InboxContent>> {
+    Ok(migration::open_active_read_only(project)?.worker_exit_notices()?)
 }

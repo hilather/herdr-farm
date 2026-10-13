@@ -1379,6 +1379,7 @@ fn cancelled_before_launch_is_censored_not_zero() {
     let report = telemetry_attempts(&project);
     assert_eq!(report, serde_json::json!({"attempts": [{
         "accepted": false,
+        "worker_exit_contention": [],
         "active_ms": {"reason": "not_running", "status": "unavailable"},
         "agent_kind": "codex", "model": null, "profile": "sim", "reasoning_effort": null,
         "attempt_id": attempt,
