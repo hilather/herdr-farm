@@ -179,10 +179,42 @@ herdr-farm result PROJECT submit-captured ATTEMPT   # capture + build + record t
 (`result capture ATTEMPT` alone only commits the worktree and prints the candidate; it
 is not evidence.) Repeating either command is safe.
 
-If the brief is shown as `ambiguous` in `operations PROJECT inspect`, the agent never
-accepted it after three deliveries (a startup banner or dialog ate the text, or the
-pane is not at its prompt): look at the pane, then retire the brief or stop the attempt
-(`task cancel-attempt`); it is never reported as delivered.
+An `ambiguous` worker brief means delivery is uncertain. A submission bound to
+that attempt confirms receipt and advances `launching` to `running` atomically;
+verification and integration remain separate. For older retained submissions use:
+
+```sh
+herdr-farm operations PROJECT recover-brief BRIEF --expected-revision R --expected-head H
+```
+
+Recovery waits for a root writer turn for up to 30 seconds (configured with
+`HERDR_FARM_LOCK_WAIT_SECS`, within its 45-second overall deadline). If that
+budget expires, `OperatorLockContention` advises waiting for the active operation
+or ticker drain to finish and retrying with fresh revision and head.
+
+Without submission evidence, inspect the worker and add `--retry-idle` to that
+command. It rechecks the exact live worker and visible idle prompt, and permits
+one recovery send. A swallowed recovery remains ambiguous and cannot be retried
+again. Missing, busy or changed agents retain ambiguity. `reconcile PROJECT
+--plan` names the brief and its resolving command. Retiring the brief or stopping
+the attempt remains available when safe delivery cannot be established.
+
+Write project memory before reserving attempts. Memory writes between reservation
+and briefing invalidate the exact signed snapshot: `knowledge_snapshot_stale`
+fails once, sends one coordinator notice and supervises worker termination.
+Expired or changed approvals fail as `brief_approval_expired`. Unready workers
+fail as `brief_not_ready` before expiry, with a margin of the smaller of two
+minutes and one quarter of the approval window (scaled in isolated test labs).
+Capacity remains held until termination is proven. Relaunch with fresh snapshot
+and approval using `launch PROJECT run`; do not retry a permanent brief error.
+
+For an older task left `blocked` after proven termination, `task PROJECT complete
+TASK --expected-revision R` can recover the latest ended attempt using accepted,
+integrated evidence under the current contract. Held/seeded candidates, stale
+integrated output checks and unresolved memory obligations refuse recovery.
+The command appends `attempt.completion_recovered` naming the submission and
+prior state, marks the attempt completed and task succeeded, and preserves all
+original termination and failure events. Repeated completion is idempotent.
 
 ## 4. Clean up
 

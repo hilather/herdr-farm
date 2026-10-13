@@ -247,6 +247,8 @@ these prefixes are not worktree confinement. Codex's sandbox needs no extensions
 Explicit `thread_agent_args` replaces defaults and config extensions, including `[]`;
 active project grants are appended for Claude.
 nonempty arrays must be bound to the requested kind. Other kinds have no defaults.
+Record project memory before reserving canonical attempts. A memory write while an attempt is reserved or launching but not yet briefed invalidates its signed knowledge snapshot. It fails once as `knowledge_snapshot_stale`; wait for proven termination and released capacity, then use `launch <slug> run` with a fresh approval. Do not keep retrying the old approval.
+
 Workers receive instructions and memory in their start/restart brief; existing
 workers do not automatically receive later memory edits or acknowledge them.
 

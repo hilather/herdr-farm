@@ -963,6 +963,8 @@ enum SchedulerCommand {
 #[cfg(feature="state-store")]
 #[derive(Subcommand)]
 enum OperationsCommand { Inspect,
+    /// Confirm an ambiguous worker brief from submission evidence, or retry once after observing exact idle readiness
+    RecoverBrief { id:String, #[arg(long)] expected_revision:u64, #[arg(long)] expected_head:u64, #[arg(long)] retry_idle:bool },
     /// Preserve a recorded local artifact source; cancelled tasks remain cancelled
     Finalize { binding:String, #[arg(long)] reason:String, #[arg(long)] expected_head:u64 },
     DeliverFinalization { id:String, #[arg(long)] expected_revision:u64 },
@@ -1844,6 +1846,7 @@ pub fn run(#[cfg(feature="state-store")] capture: &mut crate::cli_invocation::Ca
                     }
                 },
                 OperationsCommand::Retire{id,reason,expected_revision,expected_head}=>println!("{}",serde_json::to_string_pretty(&herdr_farm::runtime::retire_operation(&dir,&herdr_farm::domain::OperationId::new(id).map_err(anyhow::Error::msg)?,expected_revision,expected_head,&reason)?)?),
+                OperationsCommand::RecoverBrief{id,expected_revision,expected_head,retry_idle}=>println!("{}",serde_json::to_string_pretty(&herdr_farm::canonical_worker::recover_brief(&dir,&herdr_farm::domain::OperationId::new(id).map_err(anyhow::Error::msg)?,expected_revision,expected_head,retry_idle)?)?),
                 OperationsCommand::Inspect=>println!("{}",serde_json::to_string_pretty(&herdr_farm::migration::open_active(&dir)?.deliveries()?)?),
                 OperationsCommand::ReceiptPlan=>println!("{}",serde_json::to_string_pretty(&herdr_farm::runtime::observe_imported_receipts(&dir,None)?)?),
                 OperationsCommand::ObserveImported{expected_head}=>println!("{}",serde_json::to_string_pretty(&herdr_farm::runtime::observe_imported_receipts(&dir,Some(expected_head))?)?),

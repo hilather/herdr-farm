@@ -206,7 +206,7 @@ impl ControlledStore {
         let budget=Some(&self.work_budget);
         let selected=(|| {
             let delivery=super::delivery::delivery_with_budget(db,id,budget)?;
-            if delivery.revision!=expected || delivery.state!=crate::operations::DeliveryState::Pending || delivery.attempts!=0 || delivery.epoch!=0 {return Err(StoreError::Invalid("brief delivery is stale or was already claimed".into()));}
+            if delivery.revision!=expected || delivery.state!=crate::operations::DeliveryState::Pending || (delivery.attempts!=0 || delivery.epoch!=0) && !super::worker_brief::retry_authorized(db,&delivery)? {return Err(StoreError::Invalid("brief delivery is stale or was already claimed".into()));}
             super::worker_brief::check_with_budget(db,id,jiff::Timestamp::now().as_millisecond(),budget)?;
             let operation=read_operation_with_budget(db,id,budget)?;
             let intent:WorkerBriefIntent=serde_json::from_value(operation.payload).map_err(|e|StoreError::Corrupt(e.to_string()))?;
@@ -217,6 +217,11 @@ impl ControlledStore {
             Ok((intent,record,start))
         })();
         selected.map_err(|e|self.error(e))
+    }
+    pub(crate) fn worker_brief_is_retry(&self, id: &OperationId) -> Result<bool> {
+        self.control.check()?;
+        let delivery=super::delivery::delivery_with_budget(&self.store.connection,id,Some(&self.work_budget))?;
+        super::worker_brief::retry_authorized(&self.store.connection,&delivery)
     }
     /// See [`SqliteStore::replay_source_repository`].
     pub(crate) fn replay_source_repository(&mut self,task:&str)->Result<Option<String>> {

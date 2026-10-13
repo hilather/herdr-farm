@@ -224,3 +224,17 @@ registration and files remain evidence; attempt launch inputs retain its identit
 The new attempt uses its own worktree path and branch. This resets a finished
 binding rather than adopting its old pane or reusing its old worktree. No schema
 or retention classification changes are needed.
+
+For an ambiguous `runtime.worker_brief`, `reconcile PROJECT --plan` names the
+operation and `operations PROJECT recover-brief ID --expected-revision R
+--expected-head H`. Submission evidence confirms receipt without sending. Only
+explicit `--retry-idle` permits one recovery send after fresh exact worker and
+visible prompt observation; absence or busy state never grants a retry. All
+revision, head, ownership and approval fences are rechecked before the effect.
+
+Recovery holds one bounded operator root execution turn from submission
+observation through readiness, retry authorization, delivery and failure recording.
+Native helpers inherit that same lock; delivery never reacquires it through a new
+file description while the recovery process or its helpers retain ownership.
+The usual revision-conflict retries and the single explicit recovery-send limit
+remain in force.

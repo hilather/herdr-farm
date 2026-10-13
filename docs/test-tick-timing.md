@@ -116,6 +116,12 @@ shape changes are required; retention/backup classifications are unchanged.
 - Owner-signed approval validity, launch reservation/authority deadlines, budget
   wall limits, routine schedules, persisted owner-specified deadlines, token
   metadata TTL sent to Herdr, and worker receipt validation freshness.
+  Brief readiness uses a retry-scaled two-minute safety margin, capped at one
+  quarter of the original signed approval window. The approval expiry itself
+  remains unscaled. An unready worker observed inside that margin fails once as
+  `brief_not_ready`; an already expired approval keeps `brief_approval_expired`.
+  Readiness labs therefore use an explicit short signed validity (60 seconds),
+  not an assumed scaled approval lifetime.
 - Owner outage/integrity intervals and integrity execution budgets, SQLite busy
   waits, telemetry writer budgets/jitter, maintenance retention and backup ages,
   inbox done retention, reminder cooldowns, and interactive watch refresh periods.

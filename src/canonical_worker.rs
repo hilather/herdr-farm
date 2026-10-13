@@ -392,18 +392,25 @@ fn deliver_brief_once(
     expected_revision: u64,
     deadline: Instant,
     cancellation: Cancellation,
+    held_guard: Option<&crate::execution_guard::RootGuard>,
 ) -> Result<crate::operations::Delivery> {
     let deadline = deadline.min(Instant::now() + Duration::from_secs(45));
     check(deadline, &cancellation)?;
     let project = project.canonicalize()?;
-    let guard = crate::execution_guard::RootGuard::exclusive_by(
-        project.parent().context("project root missing")?,
-        deadline,
-        &cancellation,
-    )?;
+    let acquired_guard;
+    let guard = match held_guard {
+        Some(guard) => guard,
+        None => {
+            acquired_guard = crate::execution_guard::RootGuard::exclusive_by(
+                project.parent().context("project root missing")?, deadline, &cancellation,
+            )?;
+            &acquired_guard
+        }
+    };
     let control = crate::store::controlled::ReadControl::new(deadline, cancellation.clone());
     let mut db = crate::migration::open_active_scoped(&project, control)?;
     let (intent,input,start) = db.worker_brief_selection(operation,expected_revision)?;
+    let retry = db.worker_brief_is_retry(operation)?;
     let profile = input
         .inputs
         .effective_profile
@@ -441,7 +448,15 @@ fn deliver_brief_once(
         cancellation: cancellation.clone(),
         locks: guard.inherit()?,
     };
-    native.ready(&format!("{}:ready", operation.as_str()))?;
+    if let Err(error) = native.ready(&format!("{}:ready", operation.as_str())) {
+        if error.chain().any(|e| e.to_string() == "worker is not ready for its brief") {
+            let store = crate::migration::open_active(&project)?;
+            if store.worker_brief_readiness_expired(&input, now())? {
+                return Err(crate::store::StoreError::Invalid("worker brief readiness deadline exceeded".into()).into());
+            }
+        }
+        return Err(error);
+    }
     // Readiness failures precede the claim. Any subsequent preflight failure
     // retains this one-use claim rather than reopening prompt submission.
     let claim = db.claim_worker_brief(operation, expected_revision, now())?;
@@ -471,7 +486,7 @@ fn deliver_brief_once(
     // still idle at its empty prompt.
     let mut delivered = 1;
     while !native.await_acceptance(operation.as_str(), delivered)? {
-        if delivered >= BRIEF_DELIVERIES {
+        if delivered >= if retry { 1 } else { BRIEF_DELIVERIES } {
             let evidence = format!("the brief was sent {delivered} times but the agent never left its idle prompt; it may not have received it: observe the worker, then retire this brief or stop the attempt");
             db.record_worker_brief_unaccepted(&claim, evidence.clone(), now())?;
             anyhow::bail!("{evidence}");
@@ -869,6 +884,31 @@ fn preserve_terminated_repositories(project:&Path,events:&[Event],record:&Attemp
     }
 }
 
+/// Resolve an uncertain brief from a retained submission, or explicitly permit
+/// one new send after fresh exact native readiness under the root gate.
+pub fn recover_brief(project: &Path, operation: &OperationId, revision: u64, expected_head: u64, retry_idle: bool) -> Result<crate::operations::Delivery> {
+    let deadline = Instant::now() + Duration::from_secs(45);
+    let cancellation = Cancellation::default();
+    let guard = crate::execution_guard::RootGuard::operator_by(project.parent().context("project root missing")?, deadline, &cancellation)?;
+    let mut db = crate::migration::open_active(project)?;
+    if let Some(delivery) = db.observe_worker_brief_submission(operation, revision, expected_head, now())? { return Ok(delivery); }
+    ensure!(retry_idle, "no submission proves brief delivery; inspect the worker, then recover-brief --retry-idle to authorize one exact idle retry");
+    let snapshot = db.read_snapshot(None)?;
+    let op = snapshot.operations.iter().find(|o| &o.id == operation).context("brief missing")?;
+    let intent: WorkerBriefIntent = serde_json::from_value(op.payload.clone())?;
+    let input = snapshot.attempt_inputs.iter().find(|i| i.attempt == intent.attempt).context("brief attempt inputs missing")?;
+    let profile = input.inputs.effective_profile.as_ref().context("brief frozen profile missing")?;
+    let event = snapshot.events.iter().find(|e| e.kind == "runtime.launch_started" && e.entity == intent.launch.as_str()).context("worker launch receipt missing")?;
+    let start: LaunchStartedReceipt = serde_json::from_value(event.payload.clone())?;
+    inventory::check(project, &intent.binding, &start.route, deadline, cancellation.clone())?;
+    executable(&profile.agent, deadline, &cancellation)?;
+    let native = Native { executable: &profile.herdr, start: &start, deadline, cancellation: cancellation.clone(), locks: guard.inherit()? };
+    native.ready(&format!("{}:recover-ready", operation.as_str()))?;
+    let delivery = db.retry_worker_brief(operation, revision, expected_head, now())?;
+    drop(db);
+    deliver_brief_guarded(project, operation, delivery.revision, deadline, cancellation, Some(&guard))
+}
+
 /// Recover the durable start-to-brief handoff without sending any terminal input.
 /// The head check fences changes between observation and retained-memory rendering.
 fn prepare_brief_once(
@@ -891,7 +931,9 @@ fn brief_conflict(error: &anyhow::Error) -> bool {
 fn brief_failure_phase(error: &anyhow::Error) -> Option<&'static str> {
     error.chain().find_map(|error| match error.downcast_ref::<crate::store::StoreError>() {
         Some(crate::store::StoreError::BriefAuthorityStale) => Some("brief_authority_stale"),
-        Some(crate::store::StoreError::Invalid(message)) if message == "worker brief approval expired or changed" => Some("brief_approval_expired"),
+        Some(crate::store::StoreError::Invalid(message)) if matches!(message.as_str(), "worker brief approval expired or changed" | "worker brief lacks active consumed launch approval") => Some("brief_approval_expired"),
+        Some(crate::store::StoreError::Invalid(message)) if message.starts_with("memory changed after knowledge selection") => Some("knowledge_snapshot_stale"),
+        Some(crate::store::StoreError::Invalid(message)) if message == "worker brief readiness deadline exceeded" => Some("brief_not_ready"),
         // A queued hint can lose its delivery revision to another dispatcher.
         // That observation does not revoke the worker's authority.
         Some(crate::store::StoreError::Invalid(message)) if message == "brief delivery is stale or was already claimed" => None,
@@ -902,6 +944,9 @@ fn brief_failure_phase(error: &anyhow::Error) -> Option<&'static str> {
 fn notify_brief_conflict(project: &Path, attempt: &AttemptId, phase: &str, error: &anyhow::Error) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(5);
     let _guard = crate::execution_guard::RootGuard::exclusive_by(project.parent().context("project root missing")?,deadline,&Default::default())?;
+    record_brief_conflict(project, attempt, phase, error, deadline)
+}
+fn record_brief_conflict(project: &Path, attempt: &AttemptId, phase: &str, error: &anyhow::Error, deadline: Instant) -> Result<()> {
     let db=crate::migration::open_active_scoped(project,crate::store::controlled::ReadControl::new(deadline,Default::default()))?;
     let operation=db.attempt_launch_operation(attempt)?;
     drop(db);
@@ -933,16 +978,28 @@ pub fn prepare_brief(project: &Path, attempt: &AttemptId, mut revision: u64, dea
     }
     unreachable!()
 }
-pub fn deliver_brief(project: &Path, operation: &OperationId, mut revision: u64, deadline: Instant, cancellation: Cancellation) -> Result<crate::operations::Delivery> {
+pub fn deliver_brief(project: &Path, operation: &OperationId, revision: u64, deadline: Instant, cancellation: Cancellation) -> Result<crate::operations::Delivery> {
+    deliver_brief_guarded(project, operation, revision, deadline, cancellation, None)
+}
+// Recovery keeps its operator turn, including inherited native descriptors,
+// through delivery and failure recording. Never reopen the same root gate.
+fn deliver_brief_guarded(project: &Path, operation: &OperationId, mut revision: u64, deadline: Instant, cancellation: Cancellation, held_guard: Option<&crate::execution_guard::RootGuard>) -> Result<crate::operations::Delivery> {
+    let notify = |attempt: &AttemptId, phase: &str, error: &anyhow::Error| {
+        if held_guard.is_some() {
+            record_brief_conflict(project, attempt, phase, error, deadline)
+        } else {
+            notify_brief_conflict(project, attempt, phase, error)
+        }
+    };
     for pass in 0..3 {
-        match deliver_brief_once(project, operation, revision, deadline, cancellation.clone()) {
+        match deliver_brief_once(project, operation, revision, deadline, cancellation.clone(), held_guard) {
             Ok(value) => return Ok(value),
             Err(error) if brief_failure_phase(&error).is_some() => {
                 check(deadline, &cancellation)?;
                 let db=crate::migration::open_active_scoped(project,crate::store::controlled::ReadControl::new(deadline,cancellation.clone()))?;
                 let attempt=db.brief_attempt(operation)?;
                 drop(db);
-                notify_brief_conflict(project, &attempt, brief_failure_phase(&error).unwrap(), &error)?;
+                notify(&attempt, brief_failure_phase(&error).unwrap(), &error)?;
                 return Err(error);
             }
             Err(error) if brief_conflict(&error) => {
@@ -955,7 +1012,7 @@ pub fn deliver_brief(project: &Path, operation: &OperationId, mut revision: u64,
                 if pass == 2 {
                     let attempt=db.brief_attempt(operation)?;
                     drop(db);
-                    notify_brief_conflict(project, &attempt, "brief delivery", &error)?;
+                    notify(&attempt, "brief delivery", &error)?;
                     return Err(error);
                 }
                 check(deadline, &cancellation)?;

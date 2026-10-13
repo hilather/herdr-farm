@@ -127,7 +127,81 @@ pub(super) fn has_receipt(db: &Connection, operation: &OperationId, payload: &st
     Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM events WHERE kind='runtime.worker_brief_delivered' AND entity=?1 AND payload=?2)",
         params![operation.as_str(),payload], |r| r.get(0))?)
 }
+/// A contract-bound submission proves that this attempt received its inputs.
+/// Preserve the submission identity as evidence, without manufacturing a native
+/// acknowledgment or changing any earlier ambiguous outcome event.
+pub(super) fn submitted(db: &Connection, attempt_id: &AttemptId, submission: &str, now: i64) -> Result<()> {
+    let mut attempt = read_attempt(db, attempt_id)?;
+    if attempt.state != AttemptState::Launching || !attempt.retains_capacity() { return Ok(()); }
+    let operation: Option<String> = db.query_row("SELECT id FROM operations WHERE kind='runtime.worker_brief' AND json_extract(payload,'$.attempt')=?1", [attempt_id.as_str()], |r| r.get(0)).optional()?;
+    let Some(operation) = operation else { return Ok(()); };
+    let operation = OperationId::new(operation).map_err(StoreError::Corrupt)?;
+    let op = read_operation(db, &operation)?;
+    let intent: WorkerBriefIntent = serde_json::from_value(op.payload).map_err(|_| invalid("invalid worker brief operation"))?;
+    context_with_budget(db, &intent, None)?;
+    let old = super::delivery::delivery(db, &operation)?;
+    if old.state == DeliveryState::PermanentFailure { return Ok(()); }
+    let received: i64 = db.query_row("SELECT created_unix_ms FROM result_submissions WHERE submission_id=?1 AND attempt_id=?2", params![submission,attempt_id.as_str()], |row| row.get(0))?;
+    let received = received.min(now).max(0);
+    let payload = serde_json::json!({"version":1,"operation":operation,"attempt":attempt_id,"submission":submission,"evidence":"result.submitted","evidence_unix_ms":received,"observed_unix_ms":now}).to_string();
+    db.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES('runtime.worker_brief_delivered',?1,?2,1,?3)", params![operation.as_str(),integer(old.revision)?,payload])?;
+    super::delivery::update_outcome(db, &old, &Outcome::Confirmed { observed_identity: payload }, now, "submission-evidence")?;
+    attempt.revision = attempt.revision.checked_add(1).ok_or(StoreError::Conflict)?;
+    attempt.state = AttemptState::Running;
+    db.execute("UPDATE attempts SET revision=?2,state='running' WHERE id=?1", params![attempt.id.as_str(),integer(attempt.revision)?])?;
+    super::dispatch_log::mark(db, &attempt, received, "submission-evidence")?;
+    db.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES('attempt.changed',?1,?2,1,?3)", params![attempt.id.as_str(),integer(attempt.revision)?,encode(&attempt)?])?;
+    super::consumer_bindings::reconcile_active(db)?;
+    Ok(())
+}
+
+/// One explicitly observed idle retry, never a generic ambiguous replay.
+pub(super) fn retry_authorized(db: &Connection, delivery: &Delivery) -> Result<bool> {
+    Ok(delivery.attempts == 1 && delivery.epoch == 1 && db.query_row("SELECT EXISTS(SELECT 1 FROM events WHERE kind='runtime.worker_brief_retry' AND entity=?1)", [delivery.operation.as_str()], |r| r.get::<_,bool>(0))?)
+}
+
 impl SqliteStore {
+    pub(crate) fn worker_brief_readiness_expired(&self, input: &AttemptInputRecord, now: i64) -> Result<bool> {
+        // A readiness observation can itself outlast authority. Expiry wins
+        // over the earlier readiness deadline and retains its typed reason.
+        super::approvals::validate_consumed_launch(&self.connection, input, now, None)?;
+        let approval = super::approvals::grant(&self.connection, &input.inputs.approval.id, None)?;
+        let margin = (crate::timing::retry(Duration::from_secs(120)).as_millis() as i64)
+            .min(approval.expires_unix_ms.saturating_sub(approval.issued_unix_ms) / 4);
+        Ok(now >= approval.expires_unix_ms.saturating_sub(margin))
+    }
+    pub(crate) fn observe_worker_brief_submission(&mut self, operation: &OperationId, revision: u64, expected_head: u64, now: i64) -> Result<Option<Delivery>> {
+        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if head(&tx)? != expected_head { return Err(StoreError::Conflict); }
+        let old = super::delivery::delivery(&tx, operation)?;
+        if old.revision != revision || old.state != DeliveryState::Ambiguous { return Err(StoreError::Conflict); }
+        let op = read_operation(&tx, operation)?;
+        if op.kind != "runtime.worker_brief" { return Err(StoreError::Conflict); }
+        let intent: WorkerBriefIntent = serde_json::from_value(op.payload).map_err(|_| invalid("invalid worker brief operation"))?;
+        let submission: Option<String> = tx.query_row("SELECT submission_id FROM result_submissions WHERE attempt_id=?1 ORDER BY created_unix_ms,submission_id LIMIT 1", [intent.attempt.as_str()], |r| r.get(0)).optional()?;
+        let Some(submission) = submission else { return Ok(None); };
+        submitted(&tx, &intent.attempt, &submission, now)?;
+        let result = super::delivery::delivery(&tx, operation)?;
+        if result.state != DeliveryState::Confirmed { return Err(StoreError::Conflict); }
+        tx.commit()?;
+        Ok(Some(result))
+    }
+
+    /// The caller holds the root gate and has just observed the exact worker idle.
+    pub(crate) fn retry_worker_brief(&mut self, operation: &OperationId, revision: u64, expected_head: u64, now: i64) -> Result<Delivery> {
+        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if head(&tx)? != expected_head { return Err(StoreError::Conflict); }
+        let old = super::delivery::delivery(&tx, operation)?;
+        if old.revision != revision || old.state != DeliveryState::Ambiguous || old.attempts != 1 || retry_authorized(&tx, &old)? { return Err(StoreError::Conflict); }
+        check_with_budget(&tx, operation, now, None)?;
+        let revision = old.revision.checked_add(1).ok_or(StoreError::Conflict)?;
+        tx.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES('runtime.worker_brief_retry',?1,?2,1,?3)", params![operation.as_str(),integer(revision)?,serde_json::json!({"evidence":"exact worker observed idle at prompt","observed_unix_ms":now}).to_string()])?;
+        tx.execute("UPDATE operation_delivery SET state='pending',revision=?2,next_due_ms=?3,owner=NULL,lease_until_ms=NULL WHERE operation_id=?1", params![operation.as_str(),integer(revision)?,now])?;
+        let result = super::delivery::delivery(&tx, operation)?;
+        tx.commit()?;
+        Ok(result)
+    }
+
     pub fn enqueue_worker_brief(
         &mut self,
         prepared: &PreparedWorkerBrief,
@@ -272,7 +346,7 @@ impl SqliteStore {
             {
                 return Err(StoreError::Conflict);
             }
-        } else if old.state != DeliveryState::Ambiguous || old.attempts != 1 {
+        } else if old.state != DeliveryState::Ambiguous || !(1..=2).contains(&old.attempts) {
             return Err(StoreError::Conflict);
         }
         let op = read_operation_with_budget(&tx, &receipt.operation, budget)?;

@@ -146,7 +146,12 @@ fn record(db: &Connection, version: u32, attempt: &str, task: &str, state: &str,
     // an absent mark may have happened before the log existed.
     let predates = !marks.contains_key("reserved");
     let terminal = TERMINAL.contains(&state);
-    let terminal_ms = TERMINAL.iter().find_map(|s| marks.get(*s).copied());
+    // Only an audited correction changes how multiple terminal marks are read.
+    // Preserve its original terminal time rather than charging time until repair.
+    let corrected: bool = db.prepare_cached("SELECT EXISTS(SELECT 1 FROM events WHERE kind='attempt.completion_recovered' AND entity=?1)")?
+        .query_row([attempt], |row| row.get(0))?;
+    let terminal_ms = if corrected { TERMINAL.iter().filter_map(|s| marks.get(*s).copied()).min() }
+        else { TERMINAL.iter().find_map(|s| marks.get(*s).copied()) };
     let at = |mark: Option<i64>, happened: bool| match mark {
         Some(ms) => json!(ms),
         None if predates && happened => status("unavailable", "predates_lifecycle_log"),

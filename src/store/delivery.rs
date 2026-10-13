@@ -142,7 +142,7 @@ impl SqliteStore {
             super::approvals::consume_with_budget(&tx,id,revision,epoch,now,budget)?;
         }
         if kind=="runtime.worker_brief" {
-            if old.attempts!=0 || old.epoch!=0 {return Err(StoreError::Conflict);}
+            if (old.attempts!=0 || old.epoch!=0) && !super::worker_brief::retry_authorized(&tx,&old)? {return Err(StoreError::Conflict);}
             super::worker_brief::check_with_budget(&tx,id,now,budget)?;
         }
         if kind=="routine.run" {

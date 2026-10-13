@@ -120,6 +120,13 @@ pub fn advance_launch(project: &Path, operation: &OperationId, mut revision: u64
         match advance_launch_once(project, operation, revision, deadline, cancellation.clone()) {
             Ok(value) => return Ok(value),
             Err(error) => {
+                // A reservation can go stale before creation as well as before
+                // briefing. The exact snapshot cannot heal under this approval.
+                if super::brief_failure_phase(&error) == Some("knowledge_snapshot_stale") {
+                    let _guard = crate::execution_guard::RootGuard::exclusive_by(project.parent().context("project root missing")?, Instant::now() + Duration::from_secs(5), &Default::default())?;
+                    crate::migration::open_active(project)?.record_launch_failure(operation, "knowledge_snapshot_stale", &format!("{error:#}"), true, now())?;
+                    return Err(error.context("knowledge_snapshot_stale: fresh snapshot and approval required"));
+                }
                 if error.downcast_ref::<super::resources::NativeObservationTimeout>().is_some()
                     && super::resources::cancel_unresponsive_creation(project, operation, revision,
                         deadline, cancellation.clone())? {

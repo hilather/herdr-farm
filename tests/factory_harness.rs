@@ -4886,3 +4886,45 @@ fn main() {
         assert_eq!(sql_count(&path, "SELECT count(*) FROM attempt_cancellations"), 1);
     }
 }
+
+/// Real submission, verification and integration workflows followed by public
+/// completion recovery, without needing a Herdr socket or a running worker.
+#[cfg(target_os = "linux")]
+#[test]
+fn blocked_integrated_submission_recovers_completion_without_rewriting_failure_history() {
+    let (_root, _project, db_path) = slice::through_d();
+    let mut db = SqliteStore::open(&db_path).unwrap();
+    let before = db.read_snapshot(None).unwrap();
+    let mut task = before.tasks.iter().find(|t| t.id.as_str() == "a").unwrap().clone();
+    let mut attempt = before.attempts.iter().find(|a| a.id.as_str() == "attempt-a").unwrap().clone();
+    let (task_revision, attempt_revision) = (task.revision, attempt.revision);
+    // The historical failure shape is established through the public store
+    // API; the result evidence comes from the real local workflows above.
+    task.revision += 1;
+    task.state = TaskState::Blocked;
+    attempt.revision += 1;
+    attempt.state = AttemptState::Failed;
+    db.commit(Commit { expected_head: before.head, mutations: vec![
+        Mutation::Task { expected: Some(task_revision), next: task.clone() },
+        Mutation::Attempt { expected: Some(attempt_revision), next: attempt.clone() },
+    ] }).unwrap();
+    let failed = db.read_snapshot(None).unwrap();
+    assert!(db.request_completion(&task.id, task_revision, unix_ms()).is_err());
+    assert_eq!(db.read_snapshot(None).unwrap(), failed, "stale recovery is atomic");
+    let change = db.request_completion(&task.id, task.revision, unix_ms()).unwrap();
+    assert!(change.terminated && !change.replayed);
+    let recovered = db.read_snapshot(None).unwrap();
+    assert_eq!(recovered.tasks.iter().find(|t| t.id == task.id).unwrap().state, TaskState::Succeeded);
+    let ended = recovered.attempts.iter().find(|a| a.id == attempt.id).unwrap();
+    assert_eq!(ended.state, AttemptState::Completed);
+    assert!(!ended.retains_capacity());
+    let correction = recovered.events.iter().find(|e| e.kind == "attempt.completion_recovered").unwrap();
+    assert_eq!(correction.entity, attempt.id.as_str());
+    assert_eq!(correction.payload["prior_state"], "failed");
+    assert!(correction.payload["submission"].as_str().is_some_and(|s| !s.is_empty()));
+    assert!(recovered.events.starts_with(&failed.events), "all pre-recovery events remain intact");
+    assert!(db.request_completion(&task.id, 0, unix_ms()).unwrap().replayed);
+    drop(db);
+    let mut reopened = SqliteStore::open(&db_path).unwrap();
+    assert_eq!(reopened.read_snapshot(None).unwrap(), recovered, "correction is durable across reopen");
+}

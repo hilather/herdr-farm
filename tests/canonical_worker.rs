@@ -378,6 +378,22 @@ sys.stdout.buffer.write(json.dumps({'result':json.loads(reply)['result']}).encod
         }
         fs::remove_file(&stop).unwrap();
     }
+    /// Ticker exit can precede the last supervised descendant releasing its
+    /// inherited root lock. Observe ownership release before operator recovery.
+    fn wait_for_root_release(&self) {
+        let file = fs::OpenOptions::new().read(true).write(true).open(self.path("root/.execution.lock")).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            match file.try_lock() {
+                Ok(()) => { file.unlock().unwrap(); return; }
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    assert!(Instant::now() < deadline, "ticker descendants did not release the root lock; ticker log:\n{}", fs::read_to_string(self.path("root/.ticker.log")).unwrap_or_default());
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("root release observation failed: {error}"),
+            }
+        }
+    }
     fn bounded_passes(&self, passes: u32) {
         let output = Command::new(BIN).env_clear().env("HOME", self.home.path()).env("PATH", "/usr/bin:/bin")
             .env("HERDR_BIN_PATH", &self.herdr)
@@ -4775,4 +4791,266 @@ fn exit_watch_maintenance(permanent: bool) {
     assert_eq!(lab.events("runtime.worker_terminated").len(), 1);
     if permanent {assert_eq!(runtime::worker_exit_notices(&lab.project).unwrap().len(), 1);}
     lab.stop(ticker);
+}
+
+#[test]
+fn brief_recovery_lock_budget_exhaustion_is_actionable_and_preserves_state() {
+    let lab = Lab::new("unknown_usage='allow_with_warning'");
+    let head = lab.head().to_string();
+    let args = ["operations", "demo", "recover-brief", "missing-brief", "--expected-revision", "1", "--expected-head", &head];
+    let before = lab.state();
+    // The same request reaches the store when there is no root contention.
+    let baseline = lab.cli(&args);
+    assert!(!baseline.status.success(), "{}", String::from_utf8_lossy(&baseline.stderr));
+    let guard = herdr_farm::execution_guard::RootGuard::exclusive(&lab.path("root")).unwrap();
+    let out = Command::new(BIN).env_clear()
+        .env("HERDR_FARM_TEST_TIME_SCALE", include_str!("support/time-scale.txt").trim())
+        .env("HERDR_FARM_LOCK_WAIT_SECS", "0")
+        .env("HOME", lab.home.path()).env("PATH", "/usr/bin:/bin")
+        .args(["--root", lab.path("root").to_str().unwrap()]).args(args).output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{stderr}");
+    assert!(stderr.contains("operator root lock wait expired") && stderr.contains("retry with fresh revision and head"), "{stderr}");
+    drop(guard);
+    assert_eq!(lab.state(), before, "contention must not mutate recovery state");
+    let released = lab.cli(&args);
+    assert!(!released.status.success(), "{}", String::from_utf8_lossy(&released.stderr));
+    assert_eq!(released.stderr, baseline.stderr, "released recovery must reach the store");
+    assert_eq!(lab.state(), before);
+}
+
+#[test]
+fn ambiguous_brief_recovery_requires_exact_idle_worker_and_sends_only_once() {
+    for absent in [false, true] {
+        let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+        let (_, attempt) = lab.reserve("Resolve the uncertain brief explicitly.");
+        fs::write(lab.path("lab/swallow-prompts"), "99").unwrap();
+        lab.serve();
+        lab.run_until(120, &|| lab.state().deliveries.iter().any(|d| d.state == DeliveryState::Ambiguous));
+        lab.wait_for_root_release();
+        let state = lab.state();
+        let brief = state.operations.iter().find(|o| o.kind == "runtime.worker_brief").unwrap();
+        let delivery = state.deliveries.iter().find(|d| d.operation == brief.id).unwrap();
+        let advice = lab.ok(&["reconcile", "demo", "--plan"]);
+        let text = advice.to_string();
+        assert!(text.contains(brief.id.as_str()) && text.contains("recover-brief") && text.contains("--retry-idle"), "{advice}");
+        fs::remove_file(lab.path("lab/swallow-prompts")).unwrap();
+        if absent { fs::write(lab.path("lab/vanish"), "").unwrap(); }
+        let args = ["operations", "demo", "recover-brief", brief.id.as_str(), "--expected-revision", &delivery.revision.to_string(), "--expected-head", &state.head.to_string(), "--retry-idle"];
+        let out = lab.cli(&args);
+        if absent {
+            assert!(!out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            assert_eq!(lab.count("agent.prompt"), 3);
+            assert_eq!(lab.attempt(&attempt).state, AttemptState::Launching);
+            assert_eq!(lab.state().deliveries.iter().find(|d| d.operation == brief.id).unwrap().state, DeliveryState::Ambiguous);
+            assert!(lab.events("runtime.worker_brief_retry").is_empty());
+        } else {
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            assert_eq!(lab.attempt(&attempt).state, AttemptState::Running);
+            assert_eq!(lab.count("agent.prompt"), 4);
+            assert_eq!(lab.events("runtime.worker_brief_retry").len(), 1);
+            let refused = lab.cli(&args);
+            assert!(!refused.status.success(), "{}", String::from_utf8_lossy(&refused.stderr));
+            lab.run_passes(4);
+            assert_eq!(lab.count("agent.prompt"), 4);
+        }
+    }
+}
+
+#[test]
+fn ambiguous_brief_submission_advances_and_blocked_integrated_work_recovers_with_audit() {
+    let agent = SUBMITTING_EDITING_AGENT
+        .replace("    for index in 0..2 {", "    while !Path::new(\"allow-submission\").exists() { std::thread::sleep(Duration::from_millis(50)); }\n    for index in 0..1 {")
+        .replace("    loop { std::thread::park() }", "    while !Path::new(\"exit-now\").exists() { std::thread::sleep(Duration::from_millis(50)); }");
+    let (mut lab, attempt, worktree) = editing_submission_lab_with("verify_then_integrate", WORK_POLICY, true, true, &agent);
+    // Hold automatic completion so process exit reproduces an older blocked task.
+    lab.ok(&["result", "demo", "auto", "--verify", "on", "--integrate", "off", "--expected-head", &lab.head().to_string()]);
+    fs::write(lab.path("lab/swallow-prompts"), "99").unwrap();
+    lab.serve();
+    lab.run_until(120, &|| lab.state().deliveries.iter().any(|d| d.state == DeliveryState::Ambiguous));
+    assert_eq!(lab.attempt(&attempt).state, AttemptState::Launching);
+    fs::write(worktree.join("allow-submission"), "go").unwrap();
+    let mut ticker = lab.spawn();
+    lab.wait_for(&mut ticker, "submission confirms ambiguous brief", &attempt, 120, &|| lab.attempt(&attempt).state == AttemptState::Running);
+    lab.stop(ticker);
+    let shown = lab.ok(&["result", "demo", "show"]);
+    let submission = shown[0]["submission_id"].as_str().unwrap();
+    let receipt = lab.events("runtime.worker_brief_delivered");
+    assert_eq!(receipt.len(), 1);
+    assert_eq!(receipt[0].payload["submission"], submission);
+    assert_eq!(receipt[0].payload["evidence"], "result.submitted");
+    assert_eq!(lab.count("agent.prompt"), 3);
+    // Reproduce the historical store shape: submission retained, but the old
+    // ingress left its attempt launching and the brief ambiguous. Exercise the
+    // supported operator command against that pre-fix state, without resending.
+    let state = lab.state();
+    let brief = state.operations.iter().find(|o| o.kind == "runtime.worker_brief").unwrap();
+    let raw = rusqlite::Connection::open(lab.project.join(".state/state.db")).unwrap();
+    raw.execute("UPDATE attempts SET state='launching',revision=revision+1 WHERE id=?1", [attempt.as_str()]).unwrap();
+    raw.execute("UPDATE operation_delivery SET state='ambiguous',revision=revision+1 WHERE operation_id=?1", [brief.id.as_str()]).unwrap();
+    drop(raw);
+    let state = lab.state();
+    let delivery = state.deliveries.iter().find(|d| d.operation == brief.id).unwrap();
+    let recovered = lab.ok(&["operations", "demo", "recover-brief", brief.id.as_str(), "--expected-revision", &delivery.revision.to_string(), "--expected-head", &state.head.to_string()]);
+    assert_eq!(recovered["state"], "confirmed");
+    assert_eq!(lab.attempt(&attempt).state, AttemptState::Running);
+    assert_eq!(lab.count("agent.prompt"), 3);
+    assert_eq!(lab.events("runtime.worker_brief_delivered")[0], receipt[0]);
+    let policy = lab.path("manual-policy.json");
+    fs::write(&policy, WORK_POLICY).unwrap();
+    let verified = lab.ok(&["result", "demo", "verify", submission, "--policy-id", "clean", "--policy-file", policy.to_str().unwrap(), "--idempotency-key", "ambiguous-verify", "--work-dir", lab.path("manual-verify").to_str().unwrap()]);
+    assert_eq!(verified["state"], "accepted");
+    let integrated = lab.ok(&["result", "demo", "integrate", verified["receipt"]["result_id"].as_str().unwrap(), "--repository", lab.repo.to_str().unwrap(), "--idempotency-key", "ambiguous-integrate", "--work-dir", lab.path("manual-integrate").to_str().unwrap()]);
+    assert_eq!(integrated["state"], "integrated");
+    fs::write(worktree.join("exit-now"), "go").unwrap();
+    lab.run_until(120, &|| lab.attempt(&attempt).termination_observed);
+    let before = lab.state();
+    let task = before.tasks.iter().find(|t| t.id.as_str() == "work").unwrap();
+    assert_eq!(task.state, TaskState::Blocked);
+    let terminated = lab.events("runtime.worker_terminated");
+    let ended_report = lab.ok(&["telemetry", "demo", "attempts", "--json"]);
+    let terminal_time = ended_report["attempts"].as_array().unwrap().iter().find(|r| r["attempt_id"] == attempt.as_str()).unwrap()["terminal_unix_ms"].clone();
+    let correction = lab.ok(&["task", "demo", "complete", "work", "--expected-revision", &task.revision.to_string()]);
+    assert_eq!(correction["terminated"], true);
+    assert_eq!(lab.attempt(&attempt).state, AttemptState::Completed);
+    assert!(!lab.attempt(&attempt).retains_capacity());
+    assert_eq!(lab.state().tasks.iter().find(|t| t.id.as_str() == "work").unwrap().state, TaskState::Succeeded);
+    assert_eq!(lab.events("runtime.worker_terminated"), terminated, "original exit history preserved");
+    let recovered = lab.events("attempt.completion_recovered");
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].payload["submission"], submission);
+    assert_eq!(lab.ok(&["task", "demo", "complete", "work", "--expected-revision", "0"])["replayed"], true);
+    let report = lab.ok(&["telemetry", "demo", "attempts", "--json"]);
+    let row = report["attempts"].as_array().unwrap().iter().find(|r| r["attempt_id"] == attempt.as_str()).unwrap();
+    assert_eq!(row["terminal_state"], "completed");
+    assert_eq!(row["accepted"], true);
+    assert_eq!(row["integration"]["state"], "integrated");
+    assert_eq!(row["terminal_unix_ms"], terminal_time, "repair does not move the proven end time");
+    assert!(lab.events("attempt.launch_failed").is_empty());
+}
+
+#[test]
+fn changed_knowledge_snapshot_fails_once_releases_capacity_and_fresh_snapshot_launches() {
+    let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+    let (_, attempt) = lab.reserve("Never silently replace approved knowledge.");
+    lab.serve();
+    let operation = lab.state().attempt_inputs.iter().find(|i| i.attempt == attempt).unwrap().operation.clone();
+    herdr_farm::canonical_worker::advance_launch(&lab.project, &operation, 1, Instant::now() + Duration::from_secs(45), Default::default()).unwrap();
+    // Real memory import after reservation changes the snapshot's memory head.
+    fs::write(lab.project.join("MEMORY.md"), "Owner decision recorded after reservation\n").unwrap();
+    let plan = herdr_farm::memory::plan(&lab.project).unwrap();
+    herdr_farm::memory::import_plan(&lab.project, &plan).unwrap();
+    let epoch = lab.state().control.unwrap().epoch;
+    lab.run_until(120, &|| lab.attempt(&attempt).termination_observed);
+    assert_eq!(lab.events("attempt.launch_failed").len(), 1);
+    assert_eq!(lab.events("attempt.launch_failed")[0].payload["reason"], "knowledge_snapshot_stale");
+    assert!(!lab.attempt(&attempt).retains_capacity());
+    assert!(lab.state().ownership.iter().all(|o| o.attempt.as_ref() != Some(&attempt)));
+    lab.run_passes(4);
+    assert_eq!(lab.events("attempt.launch_failed").len(), 1);
+    assert_eq!(lab.state().inbox.iter().filter(|i| i.content.kind == "attempt.launch_failure").count(), 1);
+    assert_eq!(lab.count("agent.prompt"), 0);
+    assert_eq!(lab.state().control.unwrap().epoch, epoch);
+    fs::write(lab.path("lab/reset-workspace"), "").unwrap();
+    lab.ok(&["task", "demo", "add", "next", "--title", "next", "--expected-head", &lab.head().to_string()]);
+    lab.ok(&["task", "demo", "queue", "next", "--input-file", lab.path("queue.json").to_str().unwrap(), "--expected-revision", "1", "--expected-head", &lab.head().to_string()]);
+    let id = TaskId::new("next").unwrap();
+    let revision = lab.state().tasks.iter().find(|t| t.id == id).unwrap().revision;
+    let route = RuntimeRoute { socket: lab.socket().display().to_string(), cwd: lab.repo.canonicalize().unwrap().display().to_string(), ..Default::default() };
+    let binding = runtime::create_binding(&lab.project, Some(&id), Some(revision), lab.head(), &route).unwrap().binding.id;
+    let selection = lab.selection_for("next", &binding, "Use the newly approved snapshot.");
+    let (_, next) = lab.reserve_selection(&selection);
+    lab.run_until(120, &|| lab.attempt(&next).state == AttemptState::Running);
+    assert_eq!(lab.count("agent.prompt"), 1);
+    assert_eq!(lab.state().control.unwrap().state, herdr_farm::domain::ProjectState::Active);
+}
+
+#[test]
+fn ambiguous_idle_brief_can_have_only_one_explicit_recovery_send() {
+    let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+    let (_, attempt) = lab.reserve("Never loop on an uncertain prompt.");
+    fs::write(lab.path("lab/swallow-prompts"), "99").unwrap();
+    lab.serve();
+    lab.run_until(120, &|| lab.state().deliveries.iter().any(|d| d.state == DeliveryState::Ambiguous));
+    lab.wait_for_root_release();
+    let state = lab.state();
+    let brief = state.operations.iter().find(|o| o.kind == "runtime.worker_brief").unwrap();
+    let delivery = state.deliveries.iter().find(|d| d.operation == brief.id).unwrap();
+    let out = lab.cli(&["operations", "demo", "recover-brief", brief.id.as_str(), "--expected-revision", &delivery.revision.to_string(), "--expected-head", &state.head.to_string(), "--retry-idle"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "swallowed retry must remain uncertain: {stderr}");
+    assert!(stderr.contains("the brief was sent 1 times but the agent never left its idle prompt"), "recovery must reach the uncertain send: {stderr}");
+    assert_eq!(lab.count("agent.prompt"), 4);
+    let state = lab.state();
+    let delivery = state.deliveries.iter().find(|d| d.operation == brief.id).unwrap();
+    assert_eq!(delivery.state, DeliveryState::Ambiguous);
+    assert_eq!(delivery.attempts, 2);
+    assert_eq!(lab.attempt(&attempt).state, AttemptState::Launching);
+    let refused = lab.cli(&["operations", "demo", "recover-brief", brief.id.as_str(), "--expected-revision", &delivery.revision.to_string(), "--expected-head", &state.head.to_string(), "--retry-idle"]);
+    assert!(!refused.status.success(), "{}", String::from_utf8_lossy(&refused.stderr));
+    lab.run_passes(4);
+    assert_eq!(lab.count("agent.prompt"), 4);
+    assert_eq!(lab.events("runtime.worker_brief_retry").len(), 1);
+}
+
+#[test]
+fn worker_readiness_has_a_typed_deadline_before_brief_approval_expiry() {
+    let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+    let (approval, attempt) = lab.reserve_with_validity("Bound startup readiness.", 60);
+    let expiry = lab.state().approvals.iter().find(|a| a.reference.id == approval).unwrap().grant.expires_unix_ms;
+    lab.serve();
+    fs::write(lab.path("lab/agent-status"), "working").unwrap();
+    lab.run_until(120, &|| lab.attempt(&attempt).termination_observed);
+    let failure = lab.events("attempt.launch_failed");
+    assert_eq!(failure.len(), 1);
+    assert_eq!(failure[0].payload["reason"], "brief_not_ready");
+    assert!(failure[0].payload["observed_unix_ms"].as_i64().unwrap() < expiry);
+    assert!(!lab.attempt(&attempt).retains_capacity());
+    assert_eq!(lab.count("agent.prompt"), 0);
+    lab.run_passes(4);
+    assert_eq!(lab.events("attempt.launch_failed").len(), 1);
+    assert_eq!(lab.state().inbox.iter().filter(|i| i.content.kind == "attempt.launch_failure").count(), 1);
+    assert!(lab.state().ownership.iter().all(|o| o.attempt.as_ref() != Some(&attempt)));
+    assert_eq!(lab.state().control.unwrap().state, herdr_farm::domain::ProjectState::Active);
+}
+
+#[test]
+fn reserved_snapshot_change_fails_before_worker_creation_without_retries() {
+    let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+    let (_, attempt) = lab.reserve("Seal knowledge before reserving.");
+    fs::write(lab.project.join("MEMORY.md"), "A later owner memory decision\n").unwrap();
+    let plan = herdr_farm::memory::plan(&lab.project).unwrap();
+    herdr_farm::memory::import_plan(&lab.project, &plan).unwrap();
+    // No server: memory authority must fail before any external launch effect.
+    lab.run_until(120, &|| lab.attempt(&attempt).termination_observed);
+    let failure = lab.events("attempt.launch_failed");
+    assert_eq!(failure.len(), 1);
+    assert_eq!(failure[0].payload["reason"], "knowledge_snapshot_stale");
+    assert!(!lab.attempt(&attempt).retains_capacity());
+    assert!(lab.events("runtime.launch_creation").is_empty());
+    assert!(lab.events("runtime.launch_started").is_empty());
+    lab.run_passes(4);
+    assert_eq!(lab.events("attempt.launch_failed").len(), 1);
+    assert_eq!(lab.state().inbox.iter().filter(|i| i.content.kind == "attempt.launch_failure").count(), 1);
+    assert_eq!(lab.state().control.unwrap().state, herdr_farm::domain::ProjectState::Active);
+}
+
+#[test]
+fn revoked_started_brief_fails_once_and_releases_exact_worker_ownership() {
+    let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+    let (approval, attempt) = lab.reserve_with_validity("Never send under revoked approval.", 900);
+    lab.serve();
+    fs::write(lab.path("lab/agent-status"), "working").unwrap();
+    lab.run_until(120, &|| lab.state().operations.iter().any(|o| o.kind == "runtime.worker_brief"));
+    lab.ok(&["approval", "demo", "revoke", &approval, "--expected-head", &lab.head().to_string(), "--reason", "owner withdrew this brief approval"]);
+    lab.run_until(120, &|| lab.attempt(&attempt).termination_observed);
+    assert_eq!(lab.events("attempt.launch_failed").len(), 1);
+    assert_eq!(lab.events("attempt.launch_failed")[0].payload["reason"], "brief_approval_expired");
+    assert!(!lab.attempt(&attempt).retains_capacity());
+    assert!(lab.state().ownership.iter().all(|o| o.attempt.as_ref() != Some(&attempt)));
+    lab.run_passes(4);
+    assert_eq!(lab.events("attempt.launch_failed").len(), 1);
+    assert_eq!(lab.state().inbox.iter().filter(|i| i.content.kind == "attempt.launch_failure").count(), 1);
+    assert_eq!(lab.count("agent.prompt"), 0);
+    assert_eq!(lab.state().control.unwrap().state, herdr_farm::domain::ProjectState::Active);
 }

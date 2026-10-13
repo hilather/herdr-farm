@@ -226,3 +226,25 @@ corrupt or stale evidence leaves the operation unresolved. A crash before receip
 publication remains ambiguous; it does not trigger blind copying. This explicit
 adapter does not yet automatically replay imported `legacy.finalize` obligations,
 perform remote transfers or bind completion to merged-PR evidence.
+
+## Worker brief evidence and explicit recovery
+
+A contract-bound result submission from a launching attempt confirms its retained
+worker brief and records `runtime.worker_brief_delivered` with `result.submitted`
+and the submission ID as evidence. The same transaction advances the attempt to
+running. It does not assert verification or integration success, nor manufacture
+a native acknowledgment. Previously recorded ambiguous outcomes remain history.
+
+`operations PROJECT recover-brief ID --expected-revision R --expected-head H`
+observes an older retained submission without sending. With `--retry-idle`, an
+operator may authorize one send after fresh inventory and exact native visible
+readiness, under the root gate. Recovery queues a writer turn so new shared
+probes cannot overtake it, waiting up to 30 seconds for root ownership (override
+with `HERDR_FARM_LOCK_WAIT_SECS`, bounded by the command's 45-second deadline).
+Test labs scale the default wait with a 250 ms floor. Exhaustion returns typed
+`OperatorLockContention` with advice to wait for the active operation or ticker
+drain and retry with fresh revision and head. The `runtime.worker_brief_retry` event fences this
+permission; claim attempts and epochs increase rather than reset. The retry uses
+only the retained approved bytes and rechecks authority. It sends at most once;
+a second uncertain outcome requires receipt observation, retirement or stop.
+Generic dispatch cannot reopen an ambiguous brief.

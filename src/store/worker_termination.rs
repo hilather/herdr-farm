@@ -234,7 +234,11 @@ impl SqliteStore {
             .checked_add(1)
             .ok_or(StoreError::Conflict)?;
         attempt.termination_observed = true;
-        attempt.state = if cancelled {
+        let accepted_launching = attempt.state == AttemptState::Launching
+            && tx.query_row(&format!("SELECT EXISTS({ACCEPTED_SUBMISSION})"), params![task.id.as_str(),attempt.id.as_str()], |row| row.get::<_,bool>(0))?;
+        attempt.state = if accepted_launching {
+            AttemptState::Completed
+        } else if cancelled {
             AttemptState::Cancelled
         } else if completion {
             AttemptState::Completed
@@ -243,7 +247,9 @@ impl SqliteStore {
         };
         task.revision = task.revision.checked_add(1).ok_or(StoreError::Conflict)?;
         task.active_attempt = None;
-        task.state = if cancelled {
+        task.state = if accepted_launching && !succeeded {
+            TaskState::Blocked
+        } else if cancelled {
             TaskState::Cancelled
         } else if succeeded {
             TaskState::Succeeded
@@ -301,7 +307,7 @@ impl SqliteStore {
         // waiting for a later terminal inventory can spuriously pause control.
         let brief_failure: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM events WHERE kind='attempt.launch_failed' AND entity=?1
-             AND json_extract(payload,'$.reason')='brief_approval_expired')",
+             AND json_extract(payload,'$.reason') IN ('brief_approval_expired','knowledge_snapshot_stale','brief_not_ready'))",
             [attempt.id.as_str()], |row| row.get(0))?;
         if brief_failure {
             super::ownership::relinquish_ended(&tx, &owner, "failed brief worker termination proven",
@@ -515,7 +521,7 @@ fn completion_requested(db:&Connection,attempt:&AttemptId)->Result<bool> {
 /// Accepted evidence: a submission of this attempt under the task's installed
 /// contract whose every acceptance policy has an accepted run, a verified
 /// result and a current (version 2) contract check.
-const ACCEPTED_SUBMISSION: &str = "SELECT s.submission_id FROM result_submissions s
+pub(super) const ACCEPTED_SUBMISSION: &str = "SELECT s.submission_id FROM result_submissions s
     JOIN task_contracts c ON c.task_id=s.task_id AND c.contract_revision=s.contract_revision AND c.raw_digest=s.contract_digest
     WHERE s.task_id=?1 AND s.attempt_id=?2
       AND EXISTS(SELECT 1 FROM acceptance_policies p WHERE p.task_id=s.task_id AND p.contract_revision=s.contract_revision)
@@ -553,15 +559,61 @@ impl SqliteStore {
         if version<43 {return Err(StoreError::UnsupportedSchema(version));}
         let task=read_task(&tx,task_id.as_str())?;
         let requested:Option<String>=tx.query_row("SELECT e.entity FROM events e JOIN attempts a ON a.id=e.entity
-            WHERE e.kind='attempt.completion_requested' AND a.task_id=?1 ORDER BY e.sequence DESC LIMIT 1",[task_id.as_str()],|row|row.get(0)).optional()?;
+            WHERE e.kind IN ('attempt.completion_requested','attempt.completion_recovered') AND a.task_id=?1 ORDER BY e.sequence DESC LIMIT 1",[task_id.as_str()],|row|row.get(0)).optional()?;
         if let Some(requested)=requested {
             let attempt=read_attempt(&tx,&AttemptId::new(requested).map_err(StoreError::Corrupt)?)?;
-            if task.active_attempt.as_ref().is_none_or(|active|*active==attempt.id) {
+            if task.active_attempt.as_ref()==Some(&attempt.id) || (task.active_attempt.is_none() && task.state!=TaskState::Blocked) {
                 return Ok(CompletionChange{head:head(&tx)?,task:task.id,attempt_revision:attempt.revision,terminated:attempt.termination_observed,attempt:attempt.id,replayed:true});
             }
         }
         if task.revision!=expected_revision {return Err(StoreError::Conflict);}
-        let active=task.active_attempt.clone().ok_or_else(||StoreError::Invalid("task has no active attempt to complete".into()))?;
+        let Some(active)=task.active_attempt.clone() else {
+            if automatic || task.state!=TaskState::Blocked {return Err(StoreError::Invalid("task has no active attempt to complete".into()));}
+            // Recover only the most recently ended attempt: never resurrect an
+            // older candidate beneath a newer attempt or changed task contract.
+            let latest:Option<String>=tx.query_row("SELECT id FROM attempts WHERE task_id=?1 ORDER BY rowid DESC LIMIT 1",[task_id.as_str()],|row|row.get(0)).optional()?;
+            let latest=latest.ok_or_else(||StoreError::Invalid("task has no ended attempt to recover".into()))?;
+            let mut attempt=read_attempt(&tx,&AttemptId::new(latest).map_err(StoreError::Corrupt)?)?;
+            if !attempt.termination_observed || attempt.retains_capacity() {return Err(StoreError::Conflict);}
+            let accepted:Option<String>=tx.query_row(&format!("{ACCEPTED_SUBMISSION}
+                AND s.contract_revision=(SELECT max(contract_revision) FROM task_contracts WHERE task_id=s.task_id)
+                AND NOT EXISTS(SELECT 1 FROM acceptance_policies p WHERE p.task_id=s.task_id AND p.contract_revision=s.contract_revision
+                    AND (SELECT v.state FROM verification_runs v WHERE v.submission_id=s.submission_id AND v.policy_id=p.policy_id
+                        ORDER BY v.created_unix_ms DESC,v.rowid DESC LIMIT 1) IS NOT 'accepted')
+                AND EXISTS(SELECT 1 FROM verified_results r JOIN integration_operations i ON i.verified_result_id=r.result_id
+                    JOIN integrated_commits m ON m.operation_id=i.operation_id WHERE r.submission_id=s.submission_id
+                    AND i.state='integrated' AND i.checks_passed=1)
+                ORDER BY s.created_unix_ms DESC,s.submission_id LIMIT 1"),params![task_id.as_str(),attempt.id.as_str()],|row|row.get(0)).optional()?;
+            let submission=accepted.ok_or_else(||StoreError::Invalid("blocked recovery requires accepted, integrated evidence from the latest ended attempt under the current contract".into()))?;
+            if super::seeded_defects::seeded_submission(&tx,&submission)? || super::candidate_groups::completion_hold(&tx,&submission)?.is_some() {
+                return Err(StoreError::Invalid("held or seeded submission cannot recover completion".into()));
+            }
+            let integrations:Vec<String>=tx.prepare("SELECT m.integrated_id FROM verified_results r JOIN integration_operations i ON i.verified_result_id=r.result_id
+                JOIN integrated_commits m ON m.operation_id=i.operation_id WHERE r.submission_id=?1 AND i.state='integrated'")?.query_map([&submission],|row|row.get(0))?.collect::<rusqlite::Result<_>>()?;
+            for integration in integrations {
+                if !super::contract_binding::integrated_output_checks_current(&tx,&integration,None)? {return Err(StoreError::Invalid("integrated output checks are stale".into()));}
+            }
+            if !super::memory_barrier::report_with_budget(&tx,task_id.as_str(),now,None)?.blockers.is_empty() {return Err(StoreError::Invalid("completion recovery has unresolved memory obligations".into()));}
+            let prior_state=attempt.state;
+            attempt.revision=attempt.revision.checked_add(1).ok_or(StoreError::Conflict)?;
+            attempt.state=AttemptState::Completed;
+            let mut task=task;
+            task.revision=task.revision.checked_add(1).ok_or(StoreError::Conflict)?;
+            task.state=TaskState::Succeeded;
+            tx.execute("UPDATE attempts SET revision=?2,state='completed' WHERE id=?1",params![attempt.id.as_str(),integer(attempt.revision)?])?;
+            tx.execute("UPDATE tasks SET revision=?2,state='succeeded' WHERE id=?1",params![task.id.as_str(),integer(task.revision)?])?;
+            let payload=serde_json::json!({"version":1,"task":task.id,"attempt":attempt.id,"prior_state":prior_state,"submission":submission,"evidence":"accepted verification and integrated commit","corrected_unix_ms":now}).to_string();
+            tx.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES('attempt.completion_recovered',?1,?2,1,?3)",params![attempt.id.as_str(),integer(attempt.revision)?,payload])?;
+            for (kind,entity,revision,payload) in [("attempt.changed",attempt.id.as_str(),attempt.revision,serde_json::to_string(&attempt)),("task.changed",task.id.as_str(),task.revision,serde_json::to_string(&task))] {
+                tx.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES(?1,?2,?3,1,?4)",params![kind,entity,integer(revision)?,payload.map_err(|e|StoreError::Invalid(e.to_string()))?])?;
+            }
+            super::dispatch_log::mark(&tx,&attempt,now,"completion-recovery")?;
+            super::active_work::invalidate(&tx)?;
+            super::consumer_bindings::reconcile_task(&tx,task_id.as_str(),None)?;
+            let change=CompletionChange{head:head(&tx)?,task:task.id,attempt:attempt.id,attempt_revision:attempt.revision,replayed:false,terminated:true};
+            tx.commit()?;
+            return Ok(change);
+        };
         let mut attempt=read_attempt(&tx,&active)?;
         if !attempt.retains_capacity() {return Err(StoreError::Invalid("attempt already has termination evidence".into()));}
         if tx.query_row("SELECT EXISTS(SELECT 1 FROM attempt_cancellations WHERE attempt_id=?1)",[active.as_str()],|row|row.get::<_,bool>(0))? {
