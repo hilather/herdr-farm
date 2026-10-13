@@ -1532,7 +1532,7 @@ Passive worker observations are named
 `canonical-worker:worker-exit-watch:terminate-<attempt>`. Requested stops retain
 their existing safety-job identity and priority.
 A read-only retained selection and pidfd exit poll precede root ownership: a live
-worker without cancellation, completion, wall expiry or launch-lease recovery
+worker without failure, cancellation, completion, wall expiry or launch-lease recovery
 returns without `.execution.lock`. Live staged gates also poll without ownership
 while their original launch authority remains usable.
 An exited worker awaiting its own verification verdict also avoids that lock.
@@ -1544,7 +1544,13 @@ exclusive root, never past the original 45-second job deadline or cancellation.
 The existing OS-backed `.execution-turn.lock` writer turn drains current
 holders and prevents new phases from overtaking the recorder. Existing
 ROOT-LOCK-FAIRNESS safety admission, requested-stop priority and maintenance
-batch scheduling remain in place. Exit selection is read again after acquisition;
+batch scheduling remain in place for effects. Retained exit watches may be
+admitted while the maintenance observation batch is pending, so a blocked batch
+cannot suppress the lock-free exit poll or contention escalation. They retain
+the single queue ticket and take the exclusive root fence before recording.
+Failed attempts bypass the live-worker early return and reach supervised stop,
+including workers whose brief approval expired after launch.
+Exit selection is read again after acquisition;
 all existing identity, revision, receipt and lock-order fences remain.
 
 The old card's process-local priority reservation, copy-phase yielding and

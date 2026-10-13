@@ -303,7 +303,8 @@ Health text prints their summaries. They are stable notices under
 attempt ID, reporting the deferral count and root-lock holder class. The exit
 recorder emits one after three bounded lock waits or two minutes of deferral;
 it does not emit for normal live-worker polling. Acknowledgement retains the
-notice. The attempt projection includes the matching array on each row; current
+notice. The attempt projection includes the matching array on each row, empty
+when the attempt has no contention notice; current
 attempt state indicates whether recording subsequently succeeded. This is an
 advisory runtime diagnostic using existing inbox retention/backup classification,
 not a new sidecar alert rule or migration. Counters are volatile; stable notice

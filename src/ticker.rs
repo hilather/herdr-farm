@@ -985,7 +985,12 @@ fn admit_effects(log:&Log,memory:&mut Memory)->bool {
     let Some(queue)=memory.copy_jobs.as_mut()else{return false;};
     #[cfg(feature="state-store")]
     let errors=queue.admit_matching(|identity|{
-        if crate::copy_jobs::exclusive_root(identity) {
+        if identity.operation.starts_with("canonical-worker:worker-exit-watch:") {
+            // Exit watches read retained identity without root ownership. Their
+            // recording phase takes its own bounded exclusive fence, so a
+            // maintenance observation batch must not prevent the poll itself.
+            true
+        }else if crate::copy_jobs::exclusive_root(identity) {
             !memory.canonical_maintenance_turn&&!memory.canonical_observations.as_ref().is_some_and(|reads|reads.pending())
         }else{!memory.canonical_observations.as_ref().is_some_and(|reads|reads.pending_project(&identity.project))}
     });

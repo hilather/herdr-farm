@@ -568,6 +568,7 @@ pub fn reconcile_termination(
     let selected=db.termination_selection(attempt,expected_revision)?;
     if selected.attempt.termination_observed {clear_exit_contention(&project,attempt);return Ok(Some(selected.attempt));}
     if let Some(state)=selected.worker.as_ref()
+        && selected.attempt.state != AttemptState::Failed
         && !state.cancelled && !state.completion && !state.wall_expired {
             let started=state.events.iter().find(|event|event.kind=="runtime.launch_started");
             // A live gate with expired/ambiguous launch authority still needs

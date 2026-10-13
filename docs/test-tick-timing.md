@@ -381,6 +381,10 @@ three-second lock-wait override is literal; every CLI process still uses the
 shared lab scale. Existing transfer fences and ROOT-LOCK-FAIRNESS maintenance scheduling remain.
 Exit-watch labs retain their ticker across the held lock so inventory is already
 available, and use 10–20 second safety deadlines with scaled product waits.
+Retained exit watches remain admissible while maintenance observations are
+pending; their recording phase still uses the bounded exclusive fence. Failed
+attempts reach the stop path even when their supervised process remains live,
+preserving the expired-brief ownership-release workflow.
 
 Sandbox validation: lib 529 passed, 84 socket-only failures, 13 ignored;
 canonical-worker 13 passed and 67 socket-only failures; ticker 1 passed and
