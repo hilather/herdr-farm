@@ -678,3 +678,51 @@ fn worker_memory_without_root_reads_the_spool_project() {
         assert_eq!(actual, p.ok(&["memory", "demo", "inspect"]));
     }
 }
+
+#[test]
+fn worker_memory_is_bounded_and_retains_hard_rules_and_summary_revisions() {
+    let p=Project::new();
+    let producer=p.producer("writer");
+    p.remember("writer",&producer,"hard-rule",b"Never publish private credentials.",json!({}));
+    p.policy("hard_rule","hard-rule");
+    for n in 0..12 {
+        p.remember("writer",&producer,&format!("large-{n}"),format!("# Owner fact {n}\nKeep the dashboard accessible.\n{}","long background detail ".repeat(500)).as_bytes(),json!({}));
+    }
+    p.add_task("bounded");
+    let snapshot=p.memory().create_worker_snapshot(SnapshotRequest {schema_version:1,task_id:"bounded".into(),profile:"worker".into(),domains:vec![],paths:vec![],pinned_keys:vec![],sensitivity:"default".into()},"worker",&"a".repeat(64),None,32000,"Implement a normal brief.",jiff::Timestamp::now().as_millisecond(),None).unwrap();
+    assert!(snapshot.entries.iter().any(|e|e.reason=="summary"));
+    let rendered=p.ok(&["memory","demo","snapshot-input","--id",snapshot.id.as_str()]);
+    let text=rendered["text"].as_str().unwrap();
+    assert!(text.contains("Never publish private credentials."));
+    assert!(text.contains("attempt-fact --attempt $A --record"));
+    assert!(!text.contains(&"long background detail ".repeat(500)));
+    assert!(text.split_once("# Memory\n").unwrap().1.len()<=8192);
+    assert!(text.contains("Owner fact"));
+    let parts=&rendered["prompt_parts"];
+    assert_eq!(parts["memory"].as_u64().unwrap(),text.split_once("# Memory\n").unwrap().1.len() as u64);
+    assert_eq!(parts["framing"].as_u64().unwrap()+parts["memory"].as_u64().unwrap()+parts["guidance"].as_u64().unwrap()+parts["brief"].as_u64().unwrap(),text.len() as u64);
+    let head=p.head();
+    let limited=migration::open_active(&p.project).unwrap().create_memory_snapshot_with_memory_budget(SnapshotPlan {
+        coordinator:false,session_id:None,
+        request:SnapshotRequest {schema_version:1,task_id:"bounded".into(),profile:"worker".into(),domains:vec![],paths:vec![],pinned_keys:vec![],sensitivity:"default".into()},
+        profile_name:"worker".into(),profile_digest:"a".repeat(64),config_digest:None,budget_chars:32000,
+        estimator:snapshot.estimator.clone(),instructions:"Implement a normal brief.".into(),
+        now_unix_ms:jiff::Timestamp::now().as_millisecond(),expected_heads_digest:None,
+    },1024).unwrap();
+    let limited_text=p.ok(&["memory","demo","snapshot-input","--id",limited.id.as_str()]);
+    let memory=limited_text["text"].as_str().unwrap().split_once("# Memory\n").unwrap().1;
+    assert!(memory.len()<=1024);
+    assert!(memory.contains("Never publish private credentials."));
+    assert!(limited.omitted_optional_count>snapshot.omitted_optional_count);
+    let after=p.head();
+    p.ok(&["memory","demo","snapshot-input","--id",limited.id.as_str()]);
+    assert_eq!(p.head(),after,"report rendering must not change retained approval inputs");
+    assert_eq!(after,head);
+    assert_eq!(migration::open_active(&p.project).unwrap().read_memory_snapshot(limited.id.as_str()).unwrap(),limited);
+    p.remember("writer",&producer,"huge-hard",&vec![b'x';9000],json!({}));
+    p.policy("hard_rule","huge-hard");
+    let error=p.memory().create_worker_snapshot(SnapshotRequest {schema_version:1,task_id:"bounded".into(),profile:"worker".into(),domains:vec![],paths:vec![],pinned_keys:vec![],sensitivity:"default".into()},"worker",&"a".repeat(64),None,32000,"Normal brief",jiff::Timestamp::now().as_millisecond(),None).unwrap_err();
+    assert!(matches!(&error,MemoryError::Storage(herdr_farm::store::StoreError::PromptTooLarge {part,budget_bytes, ..}) if part=="hard_memory" && *budget_bytes==8192));
+    assert!(error.to_string().contains("prompt_too_large"));
+    assert!(error.to_string().contains(p.record("huge-hard").unwrap()["id"].as_str().unwrap()));
+}

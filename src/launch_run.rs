@@ -87,6 +87,7 @@ struct Run<'a> {
     deadline: Instant,
     preflight_elapsed_ms: u128,
     budget_seconds: u64,
+    prompt_bytes: Value,
 }
 
 impl Run<'_> {
@@ -686,6 +687,43 @@ pub fn run(ctx: &Ctx, slug: &str, mut args: Args) -> Result<Value> {
     eprintln!("launch run: preflight");
     let pinned = migration::status(&project)?.plan.config.context("migration has no pinned config")?;
     let config: toml::Value = toml::from_str(&String::from_utf8(migration::read_plan_file(Path::new(&pinned.path))?)?)?;
+    let memory_budget = config.get("launch").and_then(|v|v.get("memory_budget_bytes")).map(|v|v.as_integer().context("launch.memory_budget_bytes must be an integer")).transpose()?.unwrap_or(8192);
+    ensure!((1..=32000).contains(&memory_budget), "launch.memory_budget_bytes must be in 1..32000");
+    let existing=runtime::snapshot(&project)?.tasks.into_iter().find(|t|t.id.as_str()==args.task).and_then(|t|t.active_attempt);
+    let preview=if let Some(attempt)=existing {
+        herdr_farm::memory::worker_brief::retained_attempt_brief(&project,attempt.as_str())?
+    } else {
+        let resolved=crate::agents::resolve::resolve(&args.profile,&ctx.config_dir.join("config.toml"),None)?;
+        let mut retained=String::from_utf8(migration::read_plan_file(&project.join("PROJECT.md"))?)?;
+        if let Some(path)=&args.prompt_file {
+            let brief=String::from_utf8(migration::read_plan_file(path)?)?;
+            if args.review_of.is_some() {retained.push_str(&format!("\n\n## Review instructions\n\n{brief}\n"));}
+            else {retained.push_str(&format!("\n\n---\n\n# Task {}\n\n{brief}\n",args.task));}
+        }
+        let contract=match migration::open_active(&project)?.task_contract_document(&args.task)? {
+            Some(document)=>document,
+            None=>serde_json::from_slice(&contract_document(&args,&args.repository,runtime::snapshot(&project)?.head,config["profiles"][&args.profile]["kind"].as_str().context("profile kind missing")?,&project)?)?,
+        };
+        let reference=runtime::task_contract(&project,&TaskId::new(args.task.clone()).map_err(anyhow::Error::msg)?)?.unwrap_or(VersionedReference { id: args.task.clone(), revision: 1, digest: "0".repeat(64) });
+        if let Some(output)=&args.plan_output { retained.push_str(&format!("\n## Deliverable\n\nWrite the document `{output}` in the current directory (a disposable git worktree), with the {} as its content. Do not change any other file, do not push and do not use the network.\n",if args.review_of.is_some(){"review report"}else{"plan"})); }
+        retained.push_str(&finish_instructions(&ctx.root,slug,&contract,&reference)?);
+        if let Some(reviewed)=&args.review_of {
+            let base=migration::open_active(&project)?.preview_review_run_instructions(&args.task,reviewed,&args.review_kind,&args.review_scope,&args.profile,&ctx.root.display().to_string(),slug)?;
+            retained=format!("{base}\n## Project context\n\n{retained}");
+        }
+        let state=runtime::snapshot(&project)?;
+        let title=state.tasks.iter().find(|t|t.id.as_str()==args.task).map(|t|t.title.as_str()).unwrap_or(args.title.as_deref().unwrap_or(&args.task));
+        let memory=herdr_farm::memory::preview_launch_memory(&project,&args.task,memory_budget as u64)?;
+        let parts=herdr_farm::memory::worker_brief::retained_prompt_bytes(&retained,title,&memory);
+        retained=format!("# Project instructions\n\n{retained}\n\n# Task\n\n{title}\n\n# Memory\n{memory}");
+        let attempt=format!("attempt-{}","0".repeat(64));
+        let output=project.join(".state/worker-output").join(&attempt);
+        let source=herdr_farm::domain::RepositoryInput {repository:args.repository.canonicalize()?.display().to_string(),commit:contract["base_oid"].as_str().context("contract base missing")?.into(),tree:git(&args.repository,&["rev-parse","HEAD^{tree}"])?};
+        let worktrees=vec![herdr_farm::domain::WorktreePlan {source,path:project.join(".state/worktrees").join(&attempt).join("repo-00").display().to_string(),branch:format!("hp-{}","0".repeat(64))}];
+        let retained=json!({"text":retained,"prompt_parts":parts});
+        herdr_farm::memory::worker_brief::preview_worker_brief(&attempt,&format!("snap-{}","0".repeat(64)),resolved.budget.soft_input_chars,&retained,&worktrees,output.to_str().context("output path is not UTF-8")?)?
+    };
+    eprintln!("launch run: prompt_bytes {}",serde_json::to_string(&preview.prompt_bytes)?);
     let cap = config.get("launch").and_then(|v| v.get("max_workers")).map(|v| v.as_integer().context("launch.max_workers must be an integer")).transpose()?.unwrap_or(4);
     ensure!((1..=64).contains(&cap), "launch.max_workers must be in 1..64");
     args.max_active_workers = Some(args.max_active_workers.unwrap_or(cap as u32));
@@ -793,7 +831,7 @@ pub fn run(ctx: &Ctx, slug: &str, mut args: Args) -> Result<Value> {
     let preflight_elapsed_ms = operation_started.elapsed().as_millis();
     eprintln!("launch run: preflight: completed ({preflight_elapsed_ms} ms; admission budget {} s)", args.budget_seconds);
     ensure!(problems.is_empty(), "launch run preflight refused after {preflight_elapsed_ms} ms (admission budget {} s):\n{}", args.budget_seconds, problems.join("\n"));
-    let mut run = Run { ctx, project: project.clone(), slug: slug.to_owned(), steps: Vec::new(), step_started: Instant::now(), active_step: "profile_evidence", deadline: operation_started + Duration::from_secs(args.budget_seconds), preflight_elapsed_ms, budget_seconds: args.budget_seconds };
+    let mut run = Run { ctx, project: project.clone(), slug: slug.to_owned(), steps: Vec::new(), step_started: Instant::now(), active_step: "profile_evidence", deadline: operation_started + Duration::from_secs(args.budget_seconds), preflight_elapsed_ms, budget_seconds: args.budget_seconds, prompt_bytes: serde_json::to_value(&preview.prompt_bytes)? };
     match steps(&mut run, &args, plan.context("profile evidence preflight failed")?) {
         Ok(report) => Ok(report),
         Err(error) => {
@@ -1020,21 +1058,28 @@ fn steps(run: &mut Run, args: &Args, plan: ProfilePlan) -> Result<Value> {
             "schema_version":1,"task_id":args.task,"profile":args.profile,"domains":[],"paths":[],"pinned_keys":[],"sensitivity":"default"}))?;
         let now = jiff::Timestamp::now().as_millisecond();
         let created = if let Some(reviewed) = &args.review_of {
-            migration::open_active(&project)?.create_review_run_snapshot(herdr_farm::domain::SnapshotPlan {
+            migration::open_active(&project)?.create_review_run_snapshot_with_memory_budget(herdr_farm::domain::SnapshotPlan {
                 coordinator: false, session_id: None, request, profile_name: resolved.name.clone(), profile_digest: resolved.definition_digest.clone(),
                 config_digest: Some(resolved.config_digest.clone()), budget_chars: resolved.budget.soft_input_chars,
                 estimator: "char-count-worker-brief-v3".into(), instructions: instructions.clone(), now_unix_ms: now, expected_heads_digest: None,
-            }, &project, reviewed, &args.review_kind, &args.review_scope, &ctx.root.display().to_string(), &run.slug)?
+            }, &project, reviewed, &args.review_kind, &args.review_scope, &ctx.root.display().to_string(), &run.slug, memory_budget_for(&project)?)?
         } else {
-            let mut memory = herdr_farm::memory::MemoryStore::from_sqlite(migration::open_active(&project)?, project.join(".state/objects"));
-            memory.create_worker_snapshot(request, &resolved.name, &resolved.definition_digest, Some(&resolved.config_digest), resolved.budget.soft_input_chars, &instructions, now, None)?
+            migration::open_active(&project)?.create_memory_snapshot_with_memory_budget(herdr_farm::domain::SnapshotPlan {
+                coordinator:false,session_id:None,request,profile_name:resolved.name.clone(),profile_digest:resolved.definition_digest.clone(),
+                config_digest:Some(resolved.config_digest.clone()),budget_chars:resolved.budget.soft_input_chars,estimator:"char-count-worker-brief-v3".into(),
+                instructions:instructions.clone(),now_unix_ms:now,expected_heads_digest:None,
+            },memory_budget_for(&project)?)?
         };
         let selected = created.entries.iter().map(|e| &e.record_id).collect::<Vec<_>>();
-        let omitted = migration::open_active(&project)?.active_facts(now)?.into_iter()
+        let summarized_ids=created.entries.iter().filter(|e|e.reason=="summary").map(|e|&e.record_id).collect::<Vec<_>>();
+        let facts=migration::open_active(&project)?.active_facts(now)?;
+        let summarized=facts.iter().filter(|f|summarized_ids.contains(&&f.record.id)).map(|f|f.record.record_key.clone()).collect::<Vec<_>>();
+        let omitted = facts.into_iter()
             .filter(|f| f.record.scope_id == "project" && f.record.kind != herdr_farm::domain::MemoryKind::TaskLocal && !selected.contains(&&f.record.id))
             .map(|f| f.record.record_key).collect::<Vec<_>>();
         let mut value = serde_json::to_value(&created)?;
         value["omitted_for_budget"] = json!(omitted);
+        value["summarized_for_budget"] = json!(summarized);
         Ok(value)
     })?;
     let selection = LaunchSelection {
@@ -1046,12 +1091,13 @@ fn steps(run: &mut Run, args: &Args, plan: ProfilePlan) -> Result<Value> {
         reason: None,
         note: None,
     };
-    run.done("knowledge_snapshot", json!({"snapshot":selection.knowledge,"omitted_for_budget":knowledge["omitted_for_budget"]}));
+    run.done("knowledge_snapshot", json!({"snapshot":selection.knowledge,"omitted_for_budget":knowledge["omitted_for_budget"],"summarized_for_budget":knowledge["summarized_for_budget"]}));
     run.begin("draft");
     let drafted = budgeted("draft", run.deadline, |deadline| retry(|| launch_preparation::draft(&project, &selection, run.head()?, Duration::from_secs(args.validity_seconds), deadline, Default::default())))?;
     let approval = dir.join("approval.json");
     fs::write(&approval, serde_json::to_vec_pretty(&drafted.approval)?)?;
-    run.done("draft", json!({"approval_document":approval,"brief_chars":drafted.brief.prompt_chars}));
+    run.prompt_bytes=serde_json::to_value(&drafted.brief.prompt_bytes)?;
+    run.done("draft", json!({"approval_document":approval,"brief_chars":drafted.brief.prompt_chars,"prompt_bytes":drafted.brief.prompt_bytes}));
     let key = args.sign_with.as_deref().with_context(|| format!("the launch approval needs the owner's signature: pass --sign-with KEY, or sign {} with `ssh-keygen -Y sign -n {} -f KEY`, then `approval import` and `launch reserve`", approval.display(), authority::SIGNATURE_NAMESPACE))?;
     run.begin("approval_import");
     let imported = retry(|| {
@@ -1088,6 +1134,7 @@ fn report(run: &Run, task: &str, profile: &VersionedReference, kind: &str, herdr
         }).collect::<Vec<_>>()),
         "worker_wall_seconds":worker_wall_seconds,
         "launch_budget":{"admission_seconds":run.budget_seconds,"preflight_elapsed_ms":run.preflight_elapsed_ms,"step_seconds":60,"max_budget_tries":3},
+        "prompt_bytes":run.prompt_bytes,
         "contract_digest":reference.map(|r| r.digest),
         "write_paths":contract["scope"]["paths"].as_array().map(|paths| paths.iter().filter(|p| p["access"] == "write").map(|p| p["path"].clone()).collect::<Vec<_>>()),
         "outputs":contract["outputs"].as_array().map(|outputs| outputs.iter().map(|o| o["path"].clone()).collect::<Vec<_>>()),
@@ -1308,4 +1355,10 @@ pub fn initialize_memory(config_dir: &Path, project: &Path) -> Result<()> {
         fs::read(sign(&key, authority::MEMORY_SIGNATURE_NAMESPACE, &document)?).map_err(Into::into)
     })?;
     Ok(())
+}
+
+fn memory_budget_for(project: &Path) -> Result<u64> {
+    let pinned=migration::status(project)?.plan.config.context("pinned config missing")?;
+    let config:toml::Value=toml::from_str(&String::from_utf8(migration::read_plan_file(Path::new(&pinned.path))?)?)?;
+    Ok(config.get("launch").and_then(|v|v.get("memory_budget_bytes")).and_then(|v|v.as_integer()).unwrap_or(8192) as u64)
 }

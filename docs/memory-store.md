@@ -408,3 +408,22 @@ Schema 71 installs the capture and delegated-decision tables. Both are canonical
 lifetime evidence, retained with the whole canonical store backup; telemetry
 maintenance never deletes them. Proposal references retain body/provenance
 objects through the existing memory object retention path.
+
+### Bounded worker memory
+
+Worker snapshots reserve an independent 8192-byte memory allowance; launch can
+configure it with `launch.memory_budget_bytes`. Hard constraints and pinned facts
+are never summarized or silently removed. If they exceed the allowance, snapshot
+creation refuses with `prompt_too_large` and record IDs. Optional selection ranks
+applicability and relevance before promotion recency. A fact too large to include
+verbatim is retained with `reason=summary`: its key, first non-heading content
+line (at most 160 characters), record ID, and a worker-safe `attempt-fact` command.
+The renderer reconstructs this deterministic excerpt from the captured revision;
+existing snapshot retention protects its full body. Excerpts that cannot fit are
+counted as omitted, and launch reports distinguish summarized keys from fully omitted keys.
+`attempt-fact --attempt ID --record RECORD` only reads entries in the attempt's
+immutable snapshot and verifies the attempt binding before returning full text.
+
+`attempt-brief` adds a byte partition under `prompt_bytes`, including the exact
+UTF-8 total and limit. Snapshot selection conservatively reserves framing bytes;
+the final canonical brief checks the complete outbound prompt in bytes.

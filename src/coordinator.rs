@@ -320,6 +320,7 @@ pub fn digest(ctx: &Ctx, project: &Project, prefix: &str) -> Result<(String, Vec
     }
 
     let _ = writeln!(out, "\n## Memory index (MEMORY.md)");
+    let _ = writeln!(out, "Keep owner memory facts short: they are delivered to every worker.");
     let memory = std::fs::read_to_string(project.dir().join("MEMORY.md")).unwrap_or_default();
     let _ = writeln!(out, "{}", memory.trim());
 

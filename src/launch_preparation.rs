@@ -200,9 +200,9 @@ fn brief(project: &Path, db: &mut ControlledStore, inputs: &LaunchInputs) -> Res
     let (attempt,_) = crate::store::reservations::record_ids(inputs)?;
     let worktrees=if inputs.repositories.is_empty(){vec![]}else{worktree_plans(inputs,&attempt).map_err(anyhow::Error::msg)?};
     let brief = crate::memory::preview_worker_brief(attempt.as_str(),&reference.id,snapshot.budget_bytes,
-        value["text"].as_str().context("retained knowledge text missing")?,&worktrees,&worker_output_path(inputs,&attempt).map_err(anyhow::Error::msg)?)?;
+        &value,&worktrees,&worker_output_path(inputs,&attempt).map_err(anyhow::Error::msg)?)?;
     crate::profile_config::frozen_definition(inputs.effective_profile.as_ref().context("effective profile missing")?)?
-        .validate_gated_preparation(brief.prompt_chars)?;
+        .validate_gated_preparation(brief.prompt_bytes.total)?;
     Ok(brief)
 }
 

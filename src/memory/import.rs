@@ -550,7 +550,8 @@ pub(crate) fn render_knowledge_snapshot_budgeted(project: &Path, id: &str, db: &
     let (memory,_)=render_snapshot_budgeted(project,db,&snapshot,snapshot.budget_bytes,budget)?;
     let text=format!("# Project instructions\n\n{}\n\n# Task\n\n{}\n\n# Memory\n{}",inputs.instructions,inputs.task_text,memory);
     ensure!(text.chars().count() as u64<=snapshot.budget_bytes,"retained knowledge input exceeds snapshot budget");
-    Ok(serde_json::json!({"snapshot":snapshot,"inputs":inputs,"text":text}))
+    let prompt_parts=super::worker_brief::retained_prompt_bytes(&inputs.instructions,&inputs.task_text,&memory);
+    Ok(serde_json::json!({"snapshot":snapshot,"inputs":inputs,"text":text,"prompt_parts":prompt_parts}))
 }
 
 /// Render launch knowledge solely from sealed attempt inputs and retained bytes.
@@ -593,7 +594,7 @@ fn render_attempt_knowledge_inner(project:&Path,attempt:&str,db:&mut crate::stor
     let current=db.attempt_knowledge_snapshot_with_budget(attempt,jiff::Timestamp::now().as_millisecond(),budget)?;
     ensure!(current==snapshot,"attempt knowledge changed while rendering");
     let worktrees=if sealed.inputs.repositories.is_empty() {vec![]} else {crate::domain::worktree_plans(&sealed.inputs,&sealed.attempt).map_err(anyhow::Error::msg)?};
-    Ok(serde_json::json!({"estimator":snapshot.estimator,"output_directory":crate::domain::worker_output_path(&sealed.inputs,&sealed.attempt).map_err(anyhow::Error::msg)?,"worktrees":worktrees,"attempt_id":attempt,"snapshot_id":snapshot.id,"profile":snapshot.profile_name,"profile_digest":snapshot.profile_digest,"config_digest":snapshot.config_digest,"budget_chars":snapshot.budget_bytes,"text":rendered["text"]}))
+    Ok(serde_json::json!({"estimator":snapshot.estimator,"output_directory":crate::domain::worker_output_path(&sealed.inputs,&sealed.attempt).map_err(anyhow::Error::msg)?,"worktrees":worktrees,"attempt_id":attempt,"snapshot_id":snapshot.id,"profile":snapshot.profile_name,"profile_digest":snapshot.profile_digest,"config_digest":snapshot.config_digest,"budget_chars":snapshot.budget_bytes,"text":rendered["text"],"prompt_parts":rendered["prompt_parts"]}))
 }
 
 /// Read only the immutable snapshot actually bound to this attempt.
@@ -622,6 +623,14 @@ fn render_snapshot_budgeted(project: &Path, db: &mut crate::store::SqliteStore, 
             .ok_or_else(|| MemoryError::Invalid("snapshot revision missing".into()))?;
         let rec = db.memory_record_with_budget(entry.record_id.as_str(),budget)?
             .ok_or_else(|| MemoryError::Invalid("snapshot record missing".into()))?;
+        if entry.reason == "summary" {
+            let body=super::read_object_controlled(&objects,&rev.body_hash,16*1024*1024,budget)?;
+            let body=std::str::from_utf8(&body).map_err(|_|MemoryError::Invalid("memory body is not UTF-8".into()))?;
+            let summary=super::worker_brief::memory_summary(&rec.record_key,entry.record_id.as_str(),body);
+            used_chars+=summary.len() as u64;
+            rendered.push_str(&summary);
+            continue;
+        }
         let header = format!("\n## {}\n\n", rec.record_key);
         let overhead = header.chars().count() as u64 + 1;
         let remaining = budget_chars.saturating_sub(used_chars);
@@ -731,6 +740,26 @@ pub fn legacy_owner_memory_warning(project: &Path) -> Option<String> {
     });
     if !approved { return None; }
     Some(format!("Owner-approved memory is still legacy-markdown; import it into canonical worker briefs with `memory {} adopt`.", project.file_name()?.to_string_lossy()))
+}
+
+/// Read only a revision retained in this worker's immutable snapshot.
+pub fn read_attempt_fact(project: &Path, attempt: &str, record: &str) -> Result<serde_json::Value> {
+    if let Some(spool)=crate::submission_spool::worker_spool() {
+        ensure!(spool==project.join(".state/spool").join(attempt),"fact read names another attempt than this worker spool");
+    }
+    render_attempt_knowledge(project,attempt)?;
+    let mut db=migration::open_active_read_only(project)?;
+    let snapshot=db.attempt_knowledge_snapshot(attempt,jiff::Timestamp::now().as_millisecond())?;
+    let entry=snapshot.entries.iter().find(|e|e.record_id.as_str()==record).context("record is not retained for this attempt")?;
+    let revision=db.memory_revision(record,entry.revision)?.context("retained revision missing")?;
+    let body=super::read_object(&objects_dir(project),&revision.body_hash)?;
+    Ok(serde_json::json!({"record":record,"revision":entry.revision,"text":String::from_utf8(body)?}))
+}
+
+/// Read-only preflight, before any profile probe or task mutation.
+pub fn preview_launch_memory(project: &Path, task: &str, budget: u64) -> Result<String> {
+    let request=SnapshotRequest {schema_version:1,task_id:task.into(),profile:String::new(),domains:vec![],paths:vec![],pinned_keys:vec![],sensitivity:"default".into()};
+    Ok(migration::open_active_read_only(project)?.preview_worker_memory(&request,budget,jiff::Timestamp::now().as_millisecond())?)
 }
 
 #[cfg(test)]

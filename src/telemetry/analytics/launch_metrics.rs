@@ -473,6 +473,16 @@ pub(super) fn metrics(project: &Path, since: Option<i64>) -> Result<BTreeMap<Str
     let db = crate::telemetry::read_only(&project.join(".state/state.db"))?;
     let side = crate::telemetry::sidecar::read(project)?;
     let rows = invocations(side.as_deref(), since)?;
+    let mut prompt_samples=Vec::new();
+    if table(&db,"attempt_inputs")? {
+        let attempts=db.prepare("SELECT DISTINCT i.attempt_id FROM attempt_inputs i JOIN attempt_lifecycle l ON l.attempt_id=i.attempt_id WHERE l.unix_ms>=?1 ORDER BY i.attempt_id")?.query_map([since.unwrap_or(0)],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        for attempt in attempts {
+            match crate::memory::worker_brief::retained_attempt_brief(project,&attempt) {
+                Ok(brief)=>prompt_samples.push(json!({"attempt":attempt,"bytes":brief.prompt_bytes})),
+                Err(_)=>prompt_samples.push(json!({"attempt":attempt,"status":"unavailable","reason":"retained_prompt_unavailable"})),
+            }
+        }
+    }
     let mut out: BTreeMap<String, Value> = BTreeMap::from([
         ("M90".into(), launches(&db, rows.as_deref())?),
         ("M91".into(), interventions(&db, rows.as_deref())?),
@@ -488,5 +498,6 @@ pub(super) fn metrics(project: &Path, since: Option<i64>) -> Result<BTreeMap<Str
         body["definition"] = json!(format!("{id}.v1"));
         body["name"] = json!(super::registry::find(id).map(|m| m.name));
     }
+    if let Some(metric)=out.get_mut("M95") { metric["prompt_bytes"]=json!({"unit":"bytes","basis":"retained_worker_prompt","samples":prompt_samples}); }
     Ok(out)
 }

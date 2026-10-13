@@ -526,7 +526,8 @@ fn launch_run_reserves_a_planning_task_for_each_kind_and_reruns_safely() {
             assert!(timing["elapsed_ms"].is_u64(), "missing elapsed time: {timing}");
         }
         let knowledge = report["steps"].as_array().unwrap().iter().find(|s|s["step"] == "knowledge_snapshot").unwrap();
-        assert_eq!(knowledge["detail"]["omitted_for_budget"], serde_json::json!(["memory/optional.md"]));
+        assert_eq!(knowledge["detail"]["omitted_for_budget"], serde_json::json!([]));
+        assert_eq!(knowledge["detail"]["summarized_for_budget"], serde_json::json!(["memory/optional.md"]));
         let state = herdr_farm::runtime::snapshot(&lab.project).unwrap();
         assert!(lab.fail(&["memory", "demo", "adopt"]).contains("mid-launch"));
         assert_eq!(herdr_farm::runtime::snapshot(&lab.project).unwrap(), state, "refused adoption changed a reserved launch");
@@ -540,6 +541,24 @@ fn launch_run_reserves_a_planning_task_for_each_kind_and_reruns_safely() {
         // The brief ends with the exact submission the worker must make; following
         // it records one submission bound to this attempt's contract.
         let brief_text = lab.ok(&["memory", "demo", "attempt-brief", "--attempt", &attempt])["text"].as_str().unwrap().to_owned();
+        assert!(brief_text.contains("attempt-fact --attempt $A --record"));
+        assert!(!brief_text.contains(&"Optional background detail. ".repeat(1800)));
+        let rendered=lab.ok(&["memory","demo","attempt-brief","--attempt",&attempt]);
+        let bytes=&rendered["prompt_bytes"];
+        assert_eq!(bytes["total"].as_u64().unwrap(),brief_text.len() as u64);
+        assert!(bytes["memory"].as_u64().unwrap()<=8192);
+        let draft=report["steps"].as_array().unwrap().iter().find(|s|s["step"]=="draft").unwrap();
+        assert_eq!(&draft["detail"]["prompt_bytes"],bytes);
+        assert_eq!(&report["prompt_bytes"],bytes);
+        let mut db=herdr_farm::migration::open_active(&lab.project).unwrap();
+        let snapshot=db.attempt_knowledge_snapshot(&attempt,jiff::Timestamp::now().as_millisecond()).unwrap();
+        let summary=snapshot.entries.iter().find(|e|e.reason=="summary").unwrap();
+        let full=lab.ok(&["memory","demo","attempt-fact","--attempt",&attempt,"--record",summary.record_id.as_str()]);
+        assert_eq!(full["text"],"Optional background detail. ".repeat(1800));
+        assert!(lab.fail(&["memory","demo","attempt-fact","--attempt",&attempt,"--record","unretained-record"]).contains("not retained for this attempt"));
+        let metrics=lab.ok(&["telemetry","demo","query","--metric","M95","--json"]);
+        assert!(metrics["results"][0]["detail"]["prompt_bytes"]["samples"].as_array().unwrap().iter().any(|s|s["attempt"]==attempt && &s["bytes"]==bytes));
+
         assert!(brief_text.contains("herdr-farm --root") && brief_text.contains("submission_id") && brief_text.contains("result demo submit"), "{brief_text}");
         let root = lab.root.to_str().unwrap().replace('\'', "'\\''");
         let output_directory = lab.project.join(".state/worker-output").join(&attempt);
@@ -2098,4 +2117,21 @@ fn slow_draft_retries_internally_and_reserve_gets_a_fresh_budget() {
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert!(report["attempt"].is_string());
     assert_eq!(herdr_farm::runtime::snapshot(&lab.project).unwrap().attempts.len(), 1);
+
+}
+
+#[test]
+fn oversized_brief_is_refused_before_profile_probe() {
+    let lab=Lab::new();
+    fs::write(lab.home.join("bin/herdr"), "#!/bin/sh\nprintf called > \"$HOME/probe-called\"\nexit 1\n").unwrap();
+    let prompt=lab.repo.join("oversized.txt");
+    fs::write(&prompt,"界".repeat(32000)).unwrap();
+    let error=lab.fail(&["launch","demo","run","--task","oversized","--profile","codex-sol","--repository",lab.repo.to_str().unwrap(),"--plan-output","docs/oversized.md","--prompt-file",prompt.to_str().unwrap()]);
+    assert!(error.contains("prompt_too_large"),"{error}");
+    assert!(error.contains("brief="),"{error}");
+    assert!(error.contains("limit="),"{error}");
+    assert!(!error.contains("readiness"),"{error}");
+    assert!(!lab.home.join("probe-called").exists());
+    let store=herdr_farm::migration::open_active(&lab.project).unwrap().read_snapshot(None).unwrap();
+    assert!(!store.tasks.iter().any(|t|t.id.as_str()=="oversized"));
 }

@@ -401,10 +401,27 @@ impl SqliteStore {
         Ok(opportunity)
     }
 
+    /// Preview the exact review context with all temporary records rolled back.
+    #[allow(clippy::too_many_arguments)]
+    pub fn preview_review_run_instructions(&mut self, task: &str, reviewed: &str, kind: &str, scope: &str, profile: &str, root: &str, slug: &str) -> anyhow::Result<String> {
+        self.connection.execute_batch("SAVEPOINT launch_prompt_preview")?;
+        let result=(|| {
+            let opportunity=self.prepare_review_run(task,reviewed,kind,scope,profile,jiff::Timestamp::now().as_millisecond())?;
+            Ok(self.review_brief(&opportunity,root,slug)?.text)
+        })();
+        self.connection.execute_batch("ROLLBACK TO launch_prompt_preview; RELEASE launch_prompt_preview")?;
+        result
+    }
+
     /// Atomically retain the opportunity, assignment, pass and bound snapshot.
     /// A refusal or interruption cannot leave an unbound opportunity to replay.
     #[allow(clippy::too_many_arguments)]
-    pub fn create_review_run_snapshot(&mut self, mut plan: crate::domain::SnapshotPlan, project: &std::path::Path, reviewed: &str, kind: &str, scope: &str, root: &str, slug: &str) -> anyhow::Result<crate::domain::MemorySnapshot> {
+    pub fn create_review_run_snapshot(&mut self, plan: crate::domain::SnapshotPlan, project: &std::path::Path, reviewed: &str, kind: &str, scope: &str, root: &str, slug: &str) -> anyhow::Result<crate::domain::MemorySnapshot> {
+        self.create_review_run_snapshot_with_memory_budget(plan,project,reviewed,kind,scope,root,slug,8192)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_review_run_snapshot_with_memory_budget(&mut self, mut plan: crate::domain::SnapshotPlan, project: &std::path::Path, reviewed: &str, kind: &str, scope: &str, root: &str, slug: &str, memory_budget: u64) -> anyhow::Result<crate::domain::MemorySnapshot> {
         self.check_review_run(&plan.request.task_id, reviewed, kind, scope, &plan.profile_name, &plan.instructions)?;
         let existing: Option<String> = self.connection.query_row("SELECT b.snapshot_id FROM review_briefs b JOIN memory_snapshots s ON s.id=b.snapshot_id JOIN tasks t ON t.id=b.task_id WHERE b.task_id=?1 AND s.task_revision=t.revision ORDER BY b.recorded_unix_ms DESC LIMIT 1", [&plan.request.task_id], |r| r.get(0)).optional()?;
         if let Some(snapshot) = existing { return Ok(self.read_memory_snapshot(&snapshot)?); }
@@ -412,7 +429,7 @@ impl SqliteStore {
             let opportunity = store.prepare_review_run(&plan.request.task_id, reviewed, kind, scope, &plan.profile_name, plan.now_unix_ms)?;
             let base = store.review_brief(&opportunity, root, slug)?.text;
             plan.instructions = format!("{base}\n## Project context\n\n{}", plan.instructions);
-            let snapshot = store.create_memory_snapshot(plan.clone())?;
+            let snapshot = store.create_memory_snapshot_with_memory_budget(plan.clone(),memory_budget)?;
             let rendered = crate::memory::render_knowledge_snapshot_held(project, snapshot.id.as_str(), store)?;
             store.bind_review_brief(&opportunity, &plan.request.task_id, snapshot.id.as_str(), rendered["text"].as_str().ok_or_else(|| invalid("retained knowledge text missing"))?, root, slug, "operator:cli", plan.now_unix_ms)?;
             Ok(snapshot)

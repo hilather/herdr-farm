@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, ensure};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub(crate) const WORKER_BRIEF_ESTIMATOR: &str = "char-count-worker-brief-v3";
@@ -11,9 +11,9 @@ pub(crate) const WORKER_BRIEF_ESTIMATOR: &str = "char-count-worker-brief-v3";
 pub(crate) fn framing_chars(store_path: &str) -> Result<u64> {
     let attempt=format!("attempt-{}", "0".repeat(64));
     let output=Path::new(store_path).parent().context("snapshot store has no parent")?.join("worker-output").join(&attempt);
-    Ok((frame(&attempt,&format!("snap-{}", "0".repeat(64)),"").chars().count()
-        + output_section(output.to_str().context("worker output path is not UTF-8")?)?.chars().count()
-        + command_card(&attempt, output.to_str().context("worker output path is not UTF-8")?)?.chars().count()) as u64)
+    Ok((frame(&attempt,&format!("snap-{}", "0".repeat(64)),"").len()
+        + output_section(output.to_str().context("worker output path is not UTF-8")?)?.len()
+        + command_card(&attempt, output.to_str().context("worker output path is not UTF-8")?)?.len()) as u64)
 }
 
 fn output_section(path: &str) -> Result<String> {
@@ -31,6 +31,47 @@ fn command_card(attempt: &str, output: &str) -> Result<String> {
     Ok(format!("\n## Worker commands\n\nSubmit with the script above and wait for `submission_id`. Report: {output}/report.md (artifacts: {output}/library/)\n```sh\n{memory}; A={attempt}\n$M attempt-brief --attempt $A; $M attempt-input --attempt $A; $M receipts --attempt $A\n$M update --attempt $A --delivery ID  # acknowledge after applying it\n$M propose --input FILE; $M ack --input FILE\n```\nThese are all the commands you need; do not run `herdr-farm --help`.\n"))
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct PromptBytes {
+    pub framing: u64,
+    pub memory: u64,
+    pub guidance: u64,
+    pub brief: u64,
+    pub fixed_overhead: u64,
+    pub total: u64,
+    pub limit: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RetainedPromptBytes {
+    pub framing: u64,
+    pub memory: u64,
+    pub guidance: u64,
+    pub brief: u64,
+}
+
+/// Count captured components before inserting them into the rendered envelope.
+pub fn retained_prompt_bytes(instructions: &str, task: &str, memory: &str) -> RetainedPromptBytes {
+    let (context, submission)=instructions.rsplit_once("\n## When the deliverable is complete: submit it").unwrap_or((instructions,""));
+    let (context, deliverable)=context.rsplit_once("\n## Deliverable\n\n").unwrap_or((context,""));
+    let task_brief=context.split_once("\n\n---\n\n# Task ").and_then(|(_,b)|b.split_once("\n\n").map(|(_,b)|b))
+        .or_else(||context.split_once("\n\n## Review instructions\n\n").map(|(_,b)|b)).unwrap_or("");
+    let brief=(task_brief.strip_suffix('\n').unwrap_or(task_brief).len()+task.len()) as u64;
+    let guidance=(if submission.is_empty(){0}else{submission.len()+"\n## When the deliverable is complete: submit it".len()}
+        + if deliverable.is_empty(){0}else{deliverable.len()+"\n## Deliverable\n\n".len()}) as u64;
+    let total=(instructions.len()+task.len()+memory.len()+"# Project instructions\n\n\n\n# Task\n\n\n\n# Memory\n".len()) as u64;
+    RetainedPromptBytes {framing:total-memory.len() as u64-brief-guidance,memory:memory.len() as u64,guidance,brief}
+}
+
+#[derive(Debug)]
+pub struct PromptTooLarge { pub bytes: PromptBytes, pub part: String }
+impl std::fmt::Display for PromptTooLarge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "prompt_too_large: part={} framing={} memory={} guidance={} brief={} fixed_overhead={} total={} limit={} (exceeding the captured budget)", self.part, self.bytes.framing, self.bytes.memory, self.bytes.guidance, self.bytes.brief, self.bytes.fixed_overhead, self.bytes.total, self.bytes.limit)
+    }
+}
+impl std::error::Error for PromptTooLarge {}
+
 #[derive(Debug, Serialize)]
 pub struct WorkerBrief {
     pub version: u32,
@@ -39,6 +80,7 @@ pub struct WorkerBrief {
     pub budget_chars: u64,
     pub prompt_chars: u64,
     pub prompt_digest: String,
+    pub prompt_bytes: PromptBytes,
     pub text: String,
     pub output_directory: String,
 }
@@ -55,7 +97,8 @@ fn frame(attempt: &str, snapshot: &str, retained: &str) -> String {
     )
 }
 
-fn compose(attempt: &str, snapshot: &str, budget: u64, retained: &str, worktrees: &[crate::domain::WorktreePlan], output_directory: &str) -> Result<WorkerBrief> {
+#[allow(clippy::too_many_arguments)]
+fn compose_parts(attempt: &str, snapshot: &str, budget: u64, retained: &str, worktrees: &[crate::domain::WorktreePlan], output_directory: &str, parts: Option<&RetainedPromptBytes>) -> Result<WorkerBrief> {
     let mut text = frame(attempt, snapshot, retained);
     text.push_str(&output_section(output_directory)?);
     if !worktrees.is_empty() {
@@ -65,18 +108,26 @@ fn compose(attempt: &str, snapshot: &str, budget: u64, retained: &str, worktrees
     }
     text.push_str(&command_card(attempt, output_directory)?);
     let prompt_chars = text.chars().count() as u64;
-    // Count the whole outbound prompt, including protocol and identity framing.
-    // Never trim required instructions or silently enlarge the approved envelope.
-    ensure!(
-        prompt_chars <= budget,
-        "complete worker brief requires {prompt_chars} characters, exceeding the captured budget of {budget}; prepare a smaller snapshot or a newly approved budget"
-    );
+    let parts=parts.map(|p|RetainedPromptBytes {framing:p.framing,memory:p.memory,guidance:p.guidance,brief:p.brief})
+        .unwrap_or(RetainedPromptBytes {framing:retained.len() as u64,memory:0,guidance:0,brief:0});
+    let outbound_guidance=(text.len()-frame(attempt,snapshot,retained).len()+PROTOCOL.len()) as u64;
+    let total=text.len() as u64;
+    let guidance=parts.guidance+outbound_guidance;
+    let bytes=PromptBytes {framing:total-parts.memory-parts.brief-guidance,memory:parts.memory,guidance,brief:parts.brief,
+        fixed_overhead:total-parts.brief,total,limit:budget};
+    if total > budget {
+        let part=if bytes.fixed_overhead <= budget { "brief" }
+            else if bytes.framing>=bytes.guidance && bytes.framing>=bytes.memory { "framing" }
+            else if bytes.guidance>=bytes.memory { "guidance" } else { "memory" };
+        return Err(PromptTooLarge { bytes, part: part.into() }.into());
+    }
     Ok(WorkerBrief {
         version: 2,
         attempt_id: attempt.into(),
         snapshot_id: snapshot.into(),
         budget_chars: budget,
         prompt_chars,
+        prompt_bytes: bytes,
         prompt_digest: format!("{:x}", Sha256::digest(text.as_bytes())),
         text,
         output_directory: output_directory.into(),
@@ -85,8 +136,9 @@ fn compose(attempt: &str, snapshot: &str, budget: u64, retained: &str, worktrees
 
 /// Construct the exact pre-reservation prompt with the eventual content-derived
 /// attempt identity. No delivery obligation or authority is created.
-pub(crate) fn preview_worker_brief(attempt: &str, snapshot: &str, budget: u64, text: &str, worktrees: &[crate::domain::WorktreePlan], output_directory: &str) -> Result<WorkerBrief> {
-    compose(attempt, snapshot, budget, text, worktrees, output_directory)
+pub fn preview_worker_brief(attempt: &str, snapshot: &str, budget: u64, retained: &serde_json::Value, worktrees: &[crate::domain::WorktreePlan], output_directory: &str) -> Result<WorkerBrief> {
+    let parts=retained.get("prompt_parts").map(|p|serde_json::from_value::<RetainedPromptBytes>(p.clone())).transpose()?;
+    compose_parts(attempt,snapshot,budget,retained["text"].as_str().context("retained text missing")?,worktrees,output_directory,parts.as_ref())
 }
 
 /// Builds from the immutable attempt binding, never from caller-selected memory,
@@ -98,7 +150,8 @@ pub fn render_attempt_brief(project: &Path, attempt: &str) -> Result<WorkerBrief
 
 pub(crate) fn compose_knowledge(knowledge: serde_json::Value) -> Result<WorkerBrief> {
     ensure!(knowledge["estimator"].as_str()==Some(WORKER_BRIEF_ESTIMATOR),"worker snapshot uses an older output contract; prepare a new worker snapshot and approved attempt");
-    compose(
+    let parts=knowledge.get("prompt_parts").map(|p|serde_json::from_value::<RetainedPromptBytes>(p.clone())).transpose()?;
+    compose_parts(
         knowledge["attempt_id"]
             .as_str()
             .context("attempt identity missing")?,
@@ -113,6 +166,7 @@ pub(crate) fn compose_knowledge(knowledge: serde_json::Value) -> Result<WorkerBr
             .context("retained knowledge missing")?,
         &serde_json::from_value::<Vec<crate::domain::WorktreePlan>>(knowledge["worktrees"].clone())?,
         knowledge["output_directory"].as_str().context("worker output directory missing")?,
+        parts.as_ref(),
     )
 }
 
@@ -146,6 +200,32 @@ pub(crate) fn enqueue_attempt_brief_controlled(
     db.prepare_worker_brief(project,attempt,expected_head)
 }
 
+/// Deterministic excerpt; the retained revision remains available to workers.
+pub(crate) fn memory_summary(key: &str, id: &str, body: &str) -> String {
+    let line=body.lines().find(|l| !l.trim().is_empty() && !l.starts_with('#') && !l.trim_start().starts_with("<!--")).unwrap_or("");
+    let excerpt: String=line.chars().take(160).collect();
+    let title=body.lines().find(|l|l.starts_with('#')).map(|l|l.trim_start_matches('#').trim().chars().take(80).collect::<String>()).unwrap_or_else(||key.to_owned());
+    format!("\n## {title} ({key})\n\n{excerpt}… [record {id}; full text: $M attempt-fact --attempt $A --record {id}]\n")
+}
+
+/// Size-report reconstruction from sealed bytes; grants no execution authority.
+pub fn retained_attempt_brief(project: &Path, attempt: &str) -> Result<WorkerBrief> {
+    let mut db=crate::migration::open_active_read_only(project)?;
+    let sealed=db.sealed_attempt_input(attempt,None)?;
+    let reference=sealed.inputs.memory.as_ref().context("retained memory binding missing")?;
+    let snapshot=db.read_memory_snapshot(&reference.id)?;
+    ensure!(snapshot.estimator==WORKER_BRIEF_ESTIMATOR,"retained snapshot uses an older worker output contract");
+    let retained=super::render_knowledge_snapshot_held(project,snapshot.id.as_str(),&mut db)?;
+    let worktrees=if sealed.inputs.repositories.is_empty() { vec![] } else { crate::domain::worktree_plans(&sealed.inputs,&sealed.attempt).map_err(anyhow::Error::msg)? };
+    let output=crate::domain::worker_output_path(&sealed.inputs,&sealed.attempt).map_err(anyhow::Error::msg)?;
+    preview_worker_brief(attempt,snapshot.id.as_str(),snapshot.budget_bytes,&retained,&worktrees,&output)
+}
+
+#[cfg(test)]
+fn compose(attempt: &str, snapshot: &str, budget: u64, retained: &str, worktrees: &[crate::domain::WorktreePlan], output: &str) -> Result<WorkerBrief> {
+    compose_parts(attempt,snapshot,budget,retained,worktrees,output,None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,7 +234,7 @@ mod tests {
     fn framing_is_budgeted_and_retained_unicode_is_never_truncated() {
         let retained = "Required memory: é界🦀\nKeep every character.\n";
         let brief = compose("attempt-a", "snapshot-a", 32_000, retained, &[], "/tmp/output").unwrap();
-        let required = brief.prompt_chars;
+        let required = brief.prompt_bytes.total;
         assert!(required > retained.chars().count() as u64);
         assert!(brief.text.contains(retained));
         assert_eq!(
@@ -192,8 +272,8 @@ mod tests {
         assert!(mapped.text.contains("Required memory"));
         assert!(mapped.text.contains("/checkout/界"));
         assert!(mapped.prompt_chars>plain.prompt_chars);
-        assert!(compose("attempt-a","snapshot-a",mapped.prompt_chars-1,"Required memory",&plans,"/tmp/output").is_err());
-        assert_eq!(compose("attempt-a","snapshot-a",mapped.prompt_chars,"Required memory",&plans,"/tmp/output").unwrap().text,mapped.text);
+        assert!(compose("attempt-a","snapshot-a",mapped.prompt_bytes.total-1,"Required memory",&plans,"/tmp/output").is_err());
+        assert_eq!(compose("attempt-a","snapshot-a",mapped.prompt_bytes.total,"Required memory",&plans,"/tmp/output").unwrap().text,mapped.text);
     }
 
     #[test]
@@ -204,7 +284,7 @@ mod tests {
         let attempt=format!("attempt-{}","a".repeat(64));
         let output=Path::new(path).parent().unwrap().join("worker-output").join(&attempt);
         let brief=compose(&attempt,&format!("snap-{}","b".repeat(64)),32000,"",&[],output.to_str().unwrap()).unwrap();
-        assert_eq!(framing_chars(path).unwrap(),brief.prompt_chars);
+        assert_eq!(framing_chars(path).unwrap(),brief.prompt_bytes.total);
         assert_eq!(brief.version,2);
     }
 

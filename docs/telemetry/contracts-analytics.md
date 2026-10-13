@@ -701,3 +701,14 @@ before the window remain eligible when they overlap it. Missing timing in the
 observable period still yields `historical_activity_times_missing`; historical
 times are never invented. No canonical schema, event volume, retention or
 backup classification changes are needed.
+
+LAUNCH-OVERHEAD-GROWTH-1 adds `prompt_bytes` to M95's result metadata (`detail.prompt_bytes` in `telemetry query`). Its
+`unit` is `bytes`, `basis` is `retained_worker_prompt`, and `samples` contains
+attempt IDs and the retained brief's framing, memory, guidance, brief,
+fixed_overhead, total and limit. This is a byte counterpart to M58-style startup
+overhead, not a token conversion or a replacement for M58. Samples are selected
+by lifecycle marks in the requested window and reconstructed from sealed inputs
+and retained objects; unreadable retained prompts explicitly report
+`retained_prompt_unavailable`. It grants no launch authority, records no prompt
+text in telemetry, and introduces no tables. Existing M95 count semantics remain
+unchanged.

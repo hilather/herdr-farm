@@ -15,7 +15,7 @@ pub(super) fn command(
     profile: &FrozenProfile,
     operation: &OperationId,
     attempt: &AttemptId,
-    prompt_chars: u64,
+    prompt_bytes: u64,
     project: &Path,
     route: &RuntimeRoute,
     inputs: &crate::domain::LaunchInputs,
@@ -24,7 +24,7 @@ pub(super) fn command(
     contract: Option<&crate::domain::PreparedContract>,
 ) -> Result<Vec<String>> {
     let definition = crate::profile_config::frozen_definition(profile)?;
-    let wall = definition.validate_gated_preparation(prompt_chars)?;
+    let wall = definition.validate_gated_preparation(prompt_bytes)?;
     if let Some(home) = &profile.execution_home {
         let repositories = inputs.repositories.iter().map(|r| Path::new(r.repository.as_str())).collect::<Vec<_>>();
         let git = crate::worktree_preparation::retained_git_directories(events, operation)?;
@@ -522,7 +522,7 @@ fn create_resource_inner(
         db.render_attempt_brief(&project, record.attempt.as_str())?;
     let hides = launch_hides(&mut db, &project, &record.inputs.task)?;
     let contract = db.attempt_contract(record.inputs.task.as_str(), record.inputs.task_contract.as_ref())?;
-    let argv = command(profile, operation, &record.attempt, brief.prompt_chars, &project, route, &record.inputs, &state.events, &hides, contract.as_ref())?;
+    let argv = command(profile, operation, &record.attempt, brief.prompt_bytes.total, &project, route, &record.inputs, &state.events, &hides, contract.as_ref())?;
     executable(&profile.agent, deadline, &cancellation)?;
     let session = session_identity(Path::new(&route.socket))?;
     let mut api = Api {
@@ -1326,7 +1326,7 @@ pub fn release_gate(
     let worktrees=crate::worktree_preparation::verify_events_held(&project,&state.events,record,deadline,cancellation.clone(),guard.inherit()?)?;
     let hides = launch_hides(&mut db, &project, &record.inputs.task)?;
     let contract = db.attempt_contract(record.inputs.task.as_str(), record.inputs.task_contract.as_ref())?;
-    let argv = command(profile, operation, &record.attempt, brief.prompt_chars, &project, &target.route, &record.inputs, &state.events, &hides, contract.as_ref())?;
+    let argv = command(profile, operation, &record.attempt, brief.prompt_bytes.total, &project, &target.route, &record.inputs, &state.events, &hides, contract.as_ref())?;
     // The sandbox binds the attempt's spool and output directory writable
     // only when they exist, so they are created (owner-only) before release.
     crate::submission_spool::prepare(&project, &record.attempt)?;
