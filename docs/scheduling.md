@@ -320,3 +320,19 @@ Resource recovery has a distinct volatile queue key from launch advancement, so
 its cooldown cannot delay advancement under an original live claim.
 Idle and legacy-only polling retain the normal 15-second interval. All queues and
 cooldowns remain volatile hints, reconstructed from durable state after restart.
+
+### Brief receipt and accepted completion recovery
+
+A submission matching an attempt's installed contract is receipt evidence for its
+retained brief. Submission ingress commits `launching` to `running` together with
+brief confirmation; a result remains untrusted until verification. Accepted
+verification also permits `task PROJECT complete TASK --expected-revision R`
+while launching, using the normal supervised termination path. An accepted
+launching attempt's termination preserves acceptance rather than calling it a
+failed launch; cancellation/exit receipts still record what stopped the worker.
+
+For a blocked task with no active attempt, the same completion command recovers
+only its latest proven-ended attempt with accepted, integrated evidence for the
+current contract, current output checks and no memory or candidate hold. It
+appends a correction naming the submission, then updates current state to
+completed/succeeded; historical failure and termination events stay intact.

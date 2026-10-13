@@ -7,6 +7,8 @@ enum LaunchFailureReason {
     LaunchConflict,
     BriefAuthorityStale,
     BriefApprovalExpired,
+    KnowledgeSnapshotStale,
+    BriefNotReady,
     BriefAuthorityInvalid,
     DedicatedServerLost,
     LaunchRecoveryFailed,
@@ -17,6 +19,8 @@ impl LaunchFailureReason {
     fn as_str(self) -> &'static str {
         match self {
             Self::BriefApprovalExpired => "brief_approval_expired",
+            Self::KnowledgeSnapshotStale => "knowledge_snapshot_stale",
+            Self::BriefNotReady => "brief_not_ready",
             Self::BriefAuthorityInvalid => "brief_authority_invalid",
             Self::BriefAuthorityStale => "brief_authority_stale",
             Self::LaunchConflict => "launch_conflict",
@@ -273,6 +277,16 @@ impl SqliteStore {
         if !attempt.retains_capacity() {
             return Ok(true);
         }
+        // Accepted work is evidence of receipt, even when an old ticker left
+        // its brief ambiguous. Expiry cannot retroactively erase that effect.
+        if attempt.state == AttemptState::Launching {
+            let accepted:Option<String> = tx.query_row(&format!("{} ORDER BY s.created_unix_ms,s.submission_id LIMIT 1", super::worker_termination::ACCEPTED_SUBMISSION), params![attempt.task.as_str(),attempt.id.as_str()], |row| row.get(0)).optional()?;
+            if let Some(submission) = accepted {
+                super::worker_brief::submitted(&tx, &attempt.id, &submission, now)?;
+                tx.commit()?;
+                return Ok(true);
+            }
+        }
         let delivery = super::delivery::delivery(&tx, operation)?;
         let socket = creation_socket(&tx, &record).unwrap_or(None);
         let gone = socket
@@ -295,6 +309,10 @@ impl SqliteStore {
             LaunchFailureReason::LaunchLeaseExpired
         } else if phase == "brief_approval_expired" {
             LaunchFailureReason::BriefApprovalExpired
+        } else if phase == "knowledge_snapshot_stale" {
+            LaunchFailureReason::KnowledgeSnapshotStale
+        } else if phase == "brief_not_ready" {
+            LaunchFailureReason::BriefNotReady
         } else if phase == "brief_authority_invalid" {
             LaunchFailureReason::BriefAuthorityInvalid
         } else if phase == "brief_authority_stale" {
@@ -379,6 +397,8 @@ impl SqliteStore {
             tx.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES('task.changed',?1,?2,1,?3)",params![task.id.as_str(),integer(task.revision)?,serde_json::to_string(&task).map_err(|e| StoreError::Invalid(e.to_string()))?])?;
             super::dispatch_log::mark(&tx, &attempt, now, "launch.failure")?;
             super::consumer_bindings::reconcile_task(&tx, attempt.task.as_str(), None)?;
+            let project = Path::new(&record.inputs.project_store).parent().and_then(Path::parent)
+                .and_then(Path::file_name).and_then(|name| name.to_str()).unwrap_or("PROJECT");
             super::inbox::result_notice(
                 &tx,
                 "attempt.launch_failure",
@@ -387,7 +407,7 @@ impl SqliteStore {
                 attempt.id.as_str(),
                 phase,
                 &format!(
-                    "{reason}; phase {phase}; error {diagnostic}; worktrees retained; recovery: relaunch after released capacity, or task cancel-attempt with fresh revisions for retained resources"
+                    "{reason}; phase {phase}; error {diagnostic}; worktrees retained; recovery: launch {project} run with a fresh approval after released capacity, or task cancel-attempt with fresh revisions for retained resources"
                 ),
             )?;
         }

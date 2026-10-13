@@ -118,6 +118,16 @@ pub fn build(snapshot:&Snapshot,batch:&ObservationBatch,now:i64,config:Option<&s
                 DeliveryState::Pending=>(C::RequiresReconciliation,A::InspectUnsupportedAdapter,"No automatic adapter is available; inspect imported receipts or retire explicitly."),
             }
         }};
+        let brief_advice;
+        let reason = if operation.kind == "runtime.worker_brief" && delivery.is_some_and(|d| d.state == DeliveryState::Ambiguous) {
+            let project_path = snapshot.attempt_inputs.iter().find(|i| operation.payload["attempt"].as_str() == Some(i.attempt.as_str()))
+                .and_then(|i| std::path::Path::new(&i.inputs.project_store).parent()?.parent());
+            let project = project_path.and_then(|p| p.file_name()?.to_str()).unwrap_or("PROJECT");
+            let root = project_path.and_then(|p| p.parent()?.to_str()).unwrap_or("ROOT");
+            let root = format!("'{}'", root.replace('\'', "'\\''"));
+            brief_advice = format!("Ambiguous worker brief {}: confirm retained submission evidence with `herdr-farm --root {} operations {} recover-brief {} --expected-revision {} --expected-head {}`. If no evidence exists, inspect the exact worker and add `--retry-idle` for one retry only when it is idle at its prompt. Missing or busy agents retain ambiguity.", operation.id.as_str(), root, project, operation.id.as_str(), revision, snapshot.head);
+            brief_advice.as_str()
+        } else { reason };
         add("operation",operation.id.as_str(),revision,classification,action,reason);
     }
     items.sort_by(|a,b|(&a.entity_kind,&a.entity).cmp(&(&b.entity_kind,&b.entity)));

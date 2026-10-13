@@ -318,7 +318,7 @@ unbound attempts return `unavailable: lineage_not_recorded`.
 state, attempt_revision, unix_ms, source)`, PK `(attempt_id, state)`, written
 in the same transaction as each transition: `reserved`
 (`admit_prepared`), `launching` (`apply_launch_started`), `running`
-(`apply_worker_brief`), terminal `completed|failed|cancelled|lost`
+(`apply_worker_brief` or contract-bound `submission-evidence`), terminal `completed|failed|cancelled|lost`
 (`record_worker_termination_with_budget`, `record_launch_stopped_with_budget`,
 `stop_worktree_preparation_with_budget`, `cancel_attempt_in_transaction`).
 `source` names the function. A mark missing because the attempt predates 0051
@@ -330,7 +330,7 @@ reads `unavailable: predates_lifecycle_log`.
 | --- | --- |
 | `attempt_id`, `task_id`, `configuration_id`, `classification` | decision row |
 | `reserved/launching/running/terminal_unix_ms` | marks; absent later marks are `null` with `state: open` |
-| `terminal_state` | terminal mark, else `open` |
+| `terminal_state` | current canonical terminal state (including audited completion recovery), else `open` |
 | `active_ms` | `terminal − running` wall time, idle time at the prompt included (not an activity signal; attention is S4); open → `censored`; no running mark → `unavailable`. The text form labels it `wall_ms` |
 | `queue_to_launch_ms` | `launching − reserved` |
 | `result` | latest submission meeting §6 `A` for the current contract (including confirmed integration when required), otherwise latest submission; ties use insertion order. `submission_id`, `candidate_oid`, `created_unix_ms` identify the chosen submission; `submissions` counts all submissions and is absent when `not_submitted` (reports carry no numeric zeros) |
@@ -1131,3 +1131,19 @@ No schema, retention or backup classification changes are required. See
 LAUNCH-OVERHEAD-GROWTH-1: M95 result metadata includes the byte partition of
 retained worker prompts (see contracts-analytics.md). This uses existing sealed
 inputs, snapshot entries and object retention; no schema version changes.
+
+### Completion correction evidence
+
+`task complete` may append `attempt.completion_recovered` for the latest ended
+attempt of a blocked task with current accepted/integrated evidence. Its payload
+names the prior state, submission and correction time. Canonical attempt/task
+state becomes completed/succeeded; telemetry reads that current state and the
+retained verification/integration receipts. Historical failed/cancelled marks and
+termination events are immutable. Where both a historical terminal mark and a
+later completion correction mark exist, terminal time and active duration use the
+earliest terminal mark, so repair does not charge post-termination time as work.
+Submission receipt recovery uses the retained submission time for the first
+running mark, with the later observation time recorded separately in its event.
+The completion mark records when the correction was made. No schema or retention
+classification changes: correction evidence lives in the existing event journal
+and lifecycle marks.
