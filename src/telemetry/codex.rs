@@ -277,6 +277,10 @@ pub fn doctor_checks(project: &Path) -> Vec<(Option<bool>, String)> {
         Ok(None) => checks.push((Some(true), "coordinator usage: no Claude Code coordinator source".into())),
         Err(error) => checks.push((None, format!("coordinator usage: unreadable configuration: {error:#}"))),
     }
+    match super::sidecar::finished_unbound(project, jiff::Timestamp::now().as_millisecond()) {
+        Ok(items) => for item in items { checks.push((None, item["text"].as_str().unwrap_or_default().to_owned())); },
+        Err(error) => checks.push((None, format!("finished attempt usage: unreadable: {error:#}"))),
+    }
     checks
 }
 
@@ -384,15 +388,28 @@ pub fn collect(project: &Path, budget: Budget, create: bool) -> Result<Option<Co
     let project = std::fs::canonicalize(project)?;
     let worktrees = format!("{}/.state/worktrees/", project.display());
     clean_foreign(&mut db, &project)?;
-    // Keep the first full ingestion in stable discovery order. Prioritization
-    // is useful on later passes with a backlog, but reversing an empty sidecar's
-    // history slows its initial ingest and delays the first accounting frontier.
+    // Keep the first foreground ingestion in stable discovery order. Ticker
+    // passes prioritize recent sources even when starting an empty sidecar.
     let initial = !db.query_row("SELECT EXISTS(SELECT 1 FROM rollout_sources)", [], |r| r.get::<_, bool>(0))?;
-    if !initial {
+    if !initial || budget.bytes <= Budget::TICK.bytes {
         // Prefer homes with a live binding, then the most recent dispatch, so an
         // older profile's backlog cannot take the budget ahead of current workers.
         homes.sort_by_key(|home| std::cmp::Reverse(attempts.iter().filter(|a| a.home.as_ref() == Some(home))
             .map(|a| (matches!(&a.binding, Binding::Active(_)) && a.terminated.is_none(), a.decided_unix_ms)).max()));
+    }
+
+    if budget.bytes <= Budget::TICK.bytes {
+        // Rotate across shared profile homes too: a large growing source in
+        // the preferred home must not consume every pass ahead of other homes.
+        let serviced: std::collections::BTreeMap<String, i64> = db.prepare(
+            "SELECT s.home_digest,max(c.updated_unix_ms) FROM rollout_sources s JOIN collect_offsets c USING(path_digest) GROUP BY s.home_digest")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+        homes.sort_by_key(|home| {
+            let key = if coordinator.as_ref().is_some_and(|p| p == Path::new(home)) {
+                digest(format!("coordinator-source:{home}").as_bytes())
+            } else { digest(home.as_bytes()) };
+            serviced.get(&key).copied()
+        });
     }
 
     let earliest = if project.join(".state/state.db").exists() {
@@ -400,6 +417,10 @@ pub fn collect(project: &Path, budget: Budget, create: bool) -> Result<Option<Co
         let decisions: bool = canonical.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='dispatch_decisions' AND type='table')", [], |r| r.get(0))?;
         if decisions { canonical.query_row("SELECT min(decided_unix_ms) FROM dispatch_decisions", [], |r| r.get::<_, Option<i64>>(0))? } else { None }
     } else { None };
+    let serviced: std::collections::BTreeMap<String, i64> = if budget.bytes <= Budget::TICK.bytes {
+        db.prepare("SELECT path_digest,updated_unix_ms FROM collect_offsets")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?
+    } else { Default::default() };
     let mut test_classes = ProjectTestClasses::load(&project);
     let mut done = Collected::default();
     let mut remaining = budget.bytes;
@@ -433,7 +454,7 @@ pub fn collect(project: &Path, budget: Budget, create: bool) -> Result<Option<Co
             opencode::collect(&mut db, home, &worktrees, &tombstones, &mut remaining, &mut done)?;
         }
         let codex_root = Path::new(home).join(".codex/sessions");
-        if initial {
+        if initial && budget.bytes > Budget::TICK.bytes {
             files.sort();
         } else {
             files.sort_by(|a, b| match (a.starts_with(&codex_root), b.starts_with(&codex_root)) {
@@ -442,6 +463,12 @@ pub fn collect(project: &Path, budget: Budget, create: bool) -> Result<Option<Co
                 (true, false) => std::cmp::Ordering::Less,
                 (false, true) => std::cmp::Ordering::Greater,
             });
+        }
+        if budget.bytes <= Budget::TICK.bytes {
+            // New sources first (in recent-first discovery order), then the
+            // least recently serviced cursor. A growing rollout cannot monopolize
+            // every pass while another finished source waits behind it.
+            files.sort_by_key(|file| serviced.get(&digest(file.as_os_str().as_encoded_bytes())).copied());
         }
         // Coordinator identities cannot match any attempt execution-home digest.
         let home_key = if owner_source { digest(format!("coordinator-source:{home}").as_bytes()) } else { digest(home.as_bytes()) };
@@ -1020,7 +1047,7 @@ fn tail(db: &mut Connection, file: &Path, home: &str, worktrees: &str, allowance
         pulled += read;
         // Public collect counts files, not transaction batches.
         if done.files > files { done.files = files + 1; }
-        if !more || pulled == allowance || read == 0 { return Ok(pulled); }
+        if !more || pulled >= allowance || read == 0 { return Ok(pulled); }
     }
 }
 
@@ -1101,11 +1128,14 @@ fn tail_batch(db: &mut Connection, file: &Path, home: &str, worktrees: &str, all
     cursor.session = tx.query_row("SELECT session_id,cli_version,session_unix_ms FROM rollout_sources WHERE path_digest=?1", [&key],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
     handle.seek(SeekFrom::Start(cursor.offset))?;
-    let mut reader = BufReader::new(handle.take(allowance));
+    // A ticker allowance is checked between complete lines. Cutting the
+    // reader at the allowance strands a line larger than that allowance forever.
+    let read_limit = if bounded { u64::MAX } else { allowance };
+    let mut reader = BufReader::new(handle.take(read_limit));
     let (mut line, mut read, mut lines) = (Vec::new(), 0u64, 0u64);
     let mut batch_full = false;
     loop {
-        if bounded && !replaying && (lines >= 2_000 || read >= 8 << 20) { batch_full = true; break; }
+        if bounded && (read >= allowance || (!replaying && (lines >= 2_000 || read >= 8 << 20))) { batch_full = true; break; }
         line.clear();
         let n = reader.by_ref().take(MAX_LINE).read_until(b'\n', &mut line)? as u64;
         if n == 0 { break; }
@@ -1220,9 +1250,10 @@ fn tail_batch(db: &mut Connection, file: &Path, home: &str, worktrees: &str, all
     // back to the committed cursor, rather than skipping those unread bytes.
     let buffered = reader.buffer().len() as u64;
     let rest = reader.into_inner();
-    let (pulled, at_eof) = (allowance - rest.limit() - buffered, !batch_full && rest.limit() > 0);
+    let (pulled, at_eof) = (read_limit - rest.limit() - buffered, !batch_full && (bounded || rest.limit() > 0));
     let after = rest.into_inner().metadata()?;
-    let at_eof = at_eof || (batch_full && cursor.offset == after.len() && pulled < allowance);
+    done.budget_exhausted |= pulled >= allowance && cursor.offset < after.len();
+    let at_eof = at_eof || (cursor.offset == after.len() && (bounded || (batch_full && pulled < allowance)));
     if read > 0 { done.files += 1; }
     done.bytes += pulled;
     tx.execute("INSERT INTO collect_offsets(path_digest,device,inode,byte_offset,records,rate_limits,model,effort,updated_unix_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)

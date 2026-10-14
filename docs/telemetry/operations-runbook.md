@@ -609,3 +609,17 @@ backups; telemetry maintenance does not prune it. Publication/maintenance log
 summaries appear at most once per project per five minutes and include a count;
 error counters retain every occurrence. Live copy phases share the admitted
 180-second default deadline and retry EINTR without renewing that deadline.
+
+## Finished attempts with missing usage
+
+When doctor or health reports `finished_usage_not_bound`, run
+`herdr-farm telemetry PROJECT collect` with the normal foreground 256 MiB
+budget. Repeat if the result reports `budget_exhausted`, then inspect
+`herdr-farm telemetry PROJECT usage` and `herdr-farm telemetry PROJECT
+collectors sessions` for binding and complete records/totals. Run
+`herdr-farm telemetry PROJECT health evaluate` to refresh the coverage alert.
+This supports backfill of finished attempts from retained rollouts in their
+recorded execution homes. It does not contact an agent service or require
+relaunching attempts. Missing or tombstoned native rollouts cannot be
+recovered by collection. The ticker resumes large files over successive
+8 MiB passes; its allowance is checked between full lines.

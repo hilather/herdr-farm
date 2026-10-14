@@ -297,6 +297,12 @@ pub fn evaluate(project: &Path, now: i64) -> Vec<Outcome> {
             Err(_) => out.push(unknown(rule, "source_error", lane_metric(rule.source), unbounded(now))),
         }
     }
+    if let Some(coverage) = out.iter_mut().find(|o| o.rule.name == "usage_coverage") {
+        match crate::telemetry::sidecar::finished_unbound(project, now) {
+            Ok(items) => coverage.evidence["finished_unbound"] = json!(items),
+            Err(error) => coverage.evidence["finished_unbound_error"] = json!(format!("{error:#}")),
+        }
+    }
     out
 }
 

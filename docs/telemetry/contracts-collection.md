@@ -2948,3 +2948,26 @@ are reused for every command item of an attempt. First physical installation
 replays retained Codex rollouts; logical stream rollback with the class table still installed preserves
 existing offsets and coverage gaps. Classification dedupes by session/item ID.
 Metric definitions and windows are in contracts-analytics.md section 13.
+
+## Ticker progress and finished-session backfill
+
+Ticker collection has an 8 MiB pass allowance. It checks that allowance
+between complete JSONL lines: one complete line may cross the allowance,
+using the existing 16 MiB parse limit and whole-line oversized quarantine.
+Only a genuinely incomplete final line waits for an append. Committed
+`collect_offsets` and `source_cursors` resume the next pass mid-file.
+Ticker discovery prefers recent files even on an empty sidecar, then visits
+new sources before the least recently serviced cursors so a growing source
+cannot repeatedly displace other files in its home. Profile homes also rotate
+by their most recent cursor service time. Shared-home scope checks
+still exclude foreign project content before ingestion. Foreground collection
+keeps its stable initial discovery order and 256 MiB allowance.
+
+For missed usage on finished attempts whose native rollouts still exist, run
+`herdr-farm telemetry <slug> collect`, repeating while `budget_exhausted` is
+true, then inspect `telemetry <slug> usage` and `telemetry <slug> collectors
+sessions`. Collection refreshes bindings from retained canonical inputs,
+including finished attempts; it does not require relaunching workers.
+A bound source alone does not prove a complete tail: inspect its persisted
+cursor and the expected usage records/totals. Retention tombstones continue
+to prevent reingestion. Never delete the sidecar to backfill.
