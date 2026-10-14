@@ -623,7 +623,7 @@ struct ProfilePlan {
     refresh: Option<(PathBuf, PathBuf)>,
 }
 
-fn profile_plan(ctx: &Ctx, project: &Path, args: &Args, observe: bool, deadline: Instant) -> Result<ProfilePlan> {
+fn profile_plan(ctx: &Ctx, project: &Path, args: &Args, observe: bool) -> Result<ProfilePlan> {
     ensure!(!args.profile.is_empty() && args.profile.len()<=64 && args.profile.as_bytes()[0].is_ascii_alphabetic() && args.profile.bytes().all(|c|c.is_ascii_alphanumeric() || b"_-".contains(&c)), "invalid profile name");
     let mut store=herdr_farm::store::SqliteStore::open(&project.join(".state/state.db"))?;
     let candidate = store.latest_native_profile(&args.profile)?;
@@ -640,7 +640,7 @@ fn profile_plan(ctx: &Ctx, project: &Path, args: &Args, observe: bool, deadline:
     let reason = match &candidate {
         Some(_) if retained.as_ref().is_some_and(|v|v["preparation"]["launchable"] != true) => Some("latest profile evidence is not launchable".into()),
         Some(_) if frozen.as_ref().is_some_and(|f|Path::new(&f.herdr.path).canonicalize().ok()!=herdr.canonicalize().ok()) => Some("selected Herdr executable changed".into()),
-        Some((reference,_)) if observe => match herdr_farm::profile_preparation::revalidate(project, reference, deadline, Default::default()) {
+        Some((reference,_)) if observe => match herdr_farm::profile_preparation::revalidate(project, reference, Instant::now()+herdr_farm::profile_preparation::BUDGET, Default::default()) {
             Ok(_) => None,
             Err(error) if error.is::<herdr_farm::execution_guard::OperatorLockContention>() => return Err(error.context("launch run stopped at step 1 (profile_evidence); no durable steps completed; rerun the same command")),
             Err(error) => Some(format!("{error:#}")),
@@ -853,7 +853,8 @@ pub fn run(ctx: &Ctx, slug: &str, mut args: Args) -> Result<Value> {
         }
     }
     eprintln!("launch run: profile_evidence");
-    let plan=profile_plan(ctx, &project, &args, problems.is_empty(), operation_started + Duration::from_secs(args.budget_seconds));
+    // Revalidation keeps its own work budget; LaunchWait bounds only its lock wait.
+    let plan=profile_plan(ctx, &project, &args, problems.is_empty());
     let plan = match plan {
         Err(error) if error.is::<herdr_farm::execution_guard::OperatorLockContention>() => return Err(error),
         other => other,
