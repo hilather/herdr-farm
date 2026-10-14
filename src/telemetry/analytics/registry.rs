@@ -1,11 +1,11 @@
-//! The TM4.1 metric registry `analytics-registry.v12` (docs/telemetry/contracts-analytics.md §1):
+//! The TM4.1 metric registry `analytics-registry.v13` (docs/telemetry/contracts-analytics.md §1):
 //! one declared, read-only table of every metric the report or the query
 //! service can name, with its definition versions, family, cohorts, window
 //! semantics, unit, certification and activation. A change here is a new
 //! registry version, never an edit in place of a published definition.
 use serde_json::{Value, json};
 
-pub const VERSION: &str = "analytics-registry.v12";
+pub const VERSION: &str = "analytics-registry.v13";
 
 /// The TM3.5 quality certificate. Without it every validated-quality family is
 /// `unavailable: awaiting_quality_certificate`; landing or withdrawing it is
@@ -252,6 +252,7 @@ pub const METRICS: &[Metric] = &[
     m!("M101", "worker_self_check_rate", Tools, "ratio", [lane("analytics", "M101.v1", A, "attempt_first_submission_time")], "fixture", "tests/telemetry_verification.rs", Some("metadata only")),
     m!("M102", "verification_minutes_per_accepted_task", Lifecycle, "minutes", [lane("analytics", "M102.v1", A, "task_first_acceptance_time")], "fixture", "tests/telemetry_verification.rs", Some("metadata only")),
     m!("M103", "final_report_quality", Lifecycle, "ratio", [lane("analytics", "M103.v1", A, "submission_time")], "fixture", "tests/telemetry_verification.rs", Some("metadata only")),
+    m!("M104", "output_tokens_per_model_second", Consumption, "tokens_per_second", [lane("analytics", "M104.v1", A, "response_end_time")], "certified-fixture", "docs/telemetry/contracts-analytics.md M104; tests/telemetry_collect.rs; tests/telemetry_claude.rs", Some("TTFT included; tools excluded; reasoning included; bounded native timing")),
     m!("flaky_tests", "newly_flaky_tests_proxy", Proxy, "tests", [lane("quality", "flaky_tests.proxy-v1", A, "ci_run")], "unavailable", QUALITY, Some("no_repeat_runs")),
     m!("verification_flip_rate", "verification_flip_rate", Proxy, "ratio", [lane("quality", "verification_flip_rate.v1", A, "verification_completed")], "fixture", "tests/telemetry_quality.rs (DG6)", Some("passive reruns only; accepted vs checks_failed; policy drill-down in quality flaky")),
 ];

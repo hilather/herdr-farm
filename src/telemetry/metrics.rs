@@ -286,6 +286,14 @@ fn headroom(project: &Path, sidecar: Option<&Connection>, attempts: &[Attempt], 
 /// tools` prints it, never `n/a` while the counts are known.
 pub fn structured_text(value: &Value) -> Option<String> {
     let o = value.as_object()?;
+    if let Some(speed) = value["tokens_per_second"].as_str() {
+        let distribution = &value["distribution"];
+        let spread = distribution["median"].as_str().map(|median| format!("median {median}, p10 {}, p90 {}", distribution["p10"].as_str().unwrap_or("?"), distribution["p90"].as_str().unwrap_or("?")))
+            .unwrap_or_else(|| format!("distribution n/a ({})", distribution["reason"].as_str().unwrap_or("unknown")));
+        let share = value["model_wall_time_share"].as_str().unwrap_or("n/a");
+        let status = if value["status"] == "partial" { format!(" · partial ({})", value["reason"].as_str().unwrap_or("unknown")) } else { String::new() };
+        return Some(format!("{speed} output tok/s · {spread} · model/wall {share}{status}"));
+    }
     if o.contains_key("by_currency") && o.contains_key("unpriced_requests") {
         if value["status"] == "available" && value["amount"] == "0" { return Some("0".to_owned()); }
         let amounts = value["by_currency"].as_object()?.iter()
@@ -366,6 +374,11 @@ pub fn text(report: &Value) -> String {
         };
         for w in m["not_reported"].as_array().into_iter().flatten() {
             out += &format!("limit {} {} {} n/a ({})\n", w["account"].as_str().unwrap_or(""), w["limit_id"].as_str().unwrap_or(""), w["window_kind"].as_str().unwrap_or(""), w["reason"].as_str().unwrap_or("not_reported"));
+        }
+        if id == "M104" {
+            out += &format!("{id} {name} {}\n", show_metric(m));
+            out += &super::analytics::generation_speed::text(m);
+            continue;
         }
         for (dimension, cells) in [("profile", &m["by_profile"]), ("currency", &m["by_currency"])] {
             for (label, cell) in cells.as_object().into_iter().flatten() {

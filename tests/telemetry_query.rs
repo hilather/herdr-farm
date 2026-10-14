@@ -126,7 +126,7 @@ fn nd(m: &Value) -> (Value, Value, Value) { (m["numerator"].clone(), m["denomina
 fn registry_declares_every_metric_and_gates_families() {
     let p = Planted::new();
     let registry = p.json(&["metrics", "registry", "--json"]);
-    assert_eq!(registry["registry"], "analytics-registry.v12");
+    assert_eq!(registry["registry"], "analytics-registry.v13");
     assert_eq!(registry["rejected_cohorts"], json!({"completed_task": "ambiguous_cohort"}));
     let metrics = registry["metrics"].as_array().unwrap();
     let ids: Vec<&str> = metrics.iter().map(|m| m["id"].as_str().unwrap()).collect();
@@ -135,7 +135,7 @@ fn registry_declares_every_metric_and_gates_families() {
     expected.extend((70..=77).map(|n| format!("M{n}")));
     expected.extend((80..=87).map(|n| format!("M{n}")));
     expected.extend((90..=95).map(|n| format!("M{n}")));
-    expected.extend((100..=103).map(|n| format!("M{n}")));
+    expected.extend((100..=104).map(|n| format!("M{n}")));
     expected.push("flaky_tests".into());
     expected.push("verification_flip_rate".into());
     // Numeric metric suffixes have no fixed width; named proxies sort after them.
@@ -148,7 +148,11 @@ fn registry_declares_every_metric_and_gates_families() {
     assert_eq!(report_ids, ids);
     let text = String::from_utf8(p.raw(&["report"])).unwrap();
     let text_ids: Vec<&str> = text.lines().filter_map(|line| line.split_whitespace().next()).filter(|id| ids.contains(id)).collect();
-    assert_eq!(text_ids, ids);
+    let mut expected_text_ids = ids.clone();
+    let speed_position = expected_text_ids.iter().position(|id| *id == "M104").unwrap();
+    expected_text_ids.insert(speed_position + 1, "M104"); // Explicit coordinator availability row.
+    assert_eq!(text_ids, expected_text_ids);
+    assert!(text.contains("    M104 coordinator: n/a (coordinator_request_duration_not_reported)"));
     assert!(text.contains("M50 evidence_freshness per recommendation (see `telemetry PROJECT recommend`)"));
     assert_eq!(report["metrics"]["M19"]["reason"], "blocked_intervals_not_recorded");
     assert_eq!(p.query(&["--metric", "M19"])["reason"], "blocked_intervals_not_recorded");

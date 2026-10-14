@@ -8,13 +8,13 @@ are [contracts.md](contracts.md) §0. Code: `src/telemetry/analytics/`
 (TM4.3). Telemetry never grants launch, changes budgets or accepts results;
 nothing here writes `state.db`.
 
-## 1. Metric registry (`analytics-registry.v12`)
+## 1. Metric registry (`analytics-registry.v13`)
 
-Version history: v12 adds MET-VERIFY-1 M100–M103 (section 13). v11 adds MET-COORD-1 M80–M87 (contracts-accounting.md; M88–M89 reserved) and MET-LAUNCH-1 M90–M95 (section 12; M96–M99 reserved). v10 adds MET-REWORK-1 M65–M69 (section 10) and MET-WORKER-1 M70–M77; M78–M79 are reserved pending definitions. v8 adds bounded lifecycle `role` and M37.lineage-v2 (LINEAGE-1); M37.fleet-v1 remains absent as `definition_superseded`. v1 TM4.1; v2 adds `verification_flip_rate` (DG6, #198); v3 adds M30 `M30.submission-v1` (DG1, #202); v4 adds M10 `M10.v1` (DG2, #204); v5 adds M03 operating throughput (DG3); v6 adds M05 lifecycle tokens and specifies M19’s missing timed history; v7 adds M13 never-running exclusions, M04/M05 partial values and M31 lifecycle sampling, M35 attempt-time concurrency and M40 reported/merged quota windows, plus the bounded lifecycle `profile` dimension (TFIX-4, no definition change). Previous M13.slice-v1, M04.cost-v1, M05.tokens-v1, M31.attention-v1, M35.fanout-v1 and M40.quota-windows-v1 definitions remain only as absent (`definition_superseded`). v9 adds MET-NOW-A `M51.v1`–`M58.v1` and MET-NOW-B `M60`–`M64` (sections 8 and 9).
+Version history: v13 adds M104 model generation speed (M104 section below). v12 adds MET-VERIFY-1 M100–M103 (section 13). v11 adds MET-COORD-1 M80–M87 (contracts-accounting.md; M88–M89 reserved) and MET-LAUNCH-1 M90–M95 (section 12; M96–M99 reserved). v10 adds MET-REWORK-1 M65–M69 (section 10) and MET-WORKER-1 M70–M77; M78–M79 are reserved pending definitions. v8 adds bounded lifecycle `role` and M37.lineage-v2 (LINEAGE-1); M37.fleet-v1 remains absent as `definition_superseded`. v1 TM4.1; v2 adds `verification_flip_rate` (DG6, #198); v3 adds M30 `M30.submission-v1` (DG1, #202); v4 adds M10 `M10.v1` (DG2, #204); v5 adds M03 operating throughput (DG3); v6 adds M05 lifecycle tokens and specifies M19’s missing timed history; v7 adds M13 never-running exclusions, M04/M05 partial values and M31 lifecycle sampling, M35 attempt-time concurrency and M40 reported/merged quota windows, plus the bounded lifecycle `profile` dimension (TFIX-4, no definition change). Previous M13.slice-v1, M04.cost-v1, M05.tokens-v1, M31.attention-v1, M35.fanout-v1 and M40.quota-windows-v1 definitions remain only as absent (`definition_superseded`). v9 adds MET-NOW-A `M51.v1`–`M58.v1` and MET-NOW-B `M60`–`M64` (sections 8 and 9).
 
 `telemetry <slug> metrics registry [--json]` prints one declared table
 (`registry.rs`) of every metric `telemetry report` or `query` can name:
-M01–M58, M60–M69, M70–M77, M80–M87, M90–M95, M100–M103 and lane C's `flaky_tests` and `verification_flip_rate`. A change is a new registry version, never
+M01–M58, M60–M69, M70–M77, M80–M87, M90–M95, M100–M104 and lane C's `flaky_tests` and `verification_flip_rate`. A change is a new registry version, never
 an edit in place of a published definition. Per metric:
 
 | field | meaning |
@@ -712,3 +712,52 @@ and retained objects; unreadable retained prompts explicitly report
 `retained_prompt_unavailable`. It grants no launch authority, records no prompt
 text in telemetry, and introduces no tables. Existing M95 count semantics remain
 unchanged.
+
+## M104 — output tokens per model second (`M104.v1`)
+
+Registry v13 adds a fixture-certified consumption metric, available in `report`
+(text and JSON), `query --metric M104`, and the models view. Activity windows
+select response end timestamps at or after `since`; half-open end windows and
+query dimensions remain unsupported. The report carries `by_model` and
+`by_profile` summaries and a separate coordinator summary.
+
+Speed is summed output tokens divided by summed model milliseconds, multiplied
+by 1000. It includes reasoning output and time to first token. Tool execution
+is excluded. Codex certified native rollouts pair `token_usage_record` timestamps
+with the latest preceding turn context, user message, or function/custom tool
+output, then use the following `token_count.info.last_token_usage.output_tokens`.
+A trigger is consumed once; missing, reversed or zero duration never becomes
+zero speed. The per-response distribution uses nearest-rank median, p10 and p90
+(as in the other timing distributions). Decimal values are strings rounded to
+six places. Model wall-time share divides measured model time by the observed
+session span; each session contributes its span once per applicable group.
+Sessions spanning multiple models contribute their full span to each model's
+wall denominator; these model shares must not be added together. Concurrent
+requests can yield shares above one. No elapsed time after the last observed
+record is inferred.
+
+Claude uses explicit `duration_api_ms`, including result summaries when no
+request timings were exposed in that turn. A result summary supplies an aggregate
+speed, with distribution unavailable (`per_request_durations_not_reported`),
+never a synthetic response distribution. A result's explicit model is preferred;
+otherwise a single observed model is used. Mixed-model result summaries use
+the `unknown` model bucket unless they report an explicit model. Results without
+a timestamp use the reported wall duration to derive the end, or the last
+observed record time when no wall duration exists. Coordinator Claude sessions use
+the same native timing source when present; request records with only
+`recorded_unix_ms` yield `coordinator_request_duration_not_reported`.
+Other sources without durations yield `model_duration_not_reported`.
+Missing responses make a measured subtotal partial.
+
+Analytics stream migration 0005 retains only numeric timing/counters, bounded
+model identifiers, source digests and session identities. The existing
+incremental collector pass writes at most 4096 samples per session; reaching
+that bound reports partial `response_sample_limit`. Collection never performs
+an extra rollout scan. Existing offsets are preserved on upgrade, so historical
+responses without retained timing remain unavailable until a deliberate normal
+sidecar rebuild. Timing state and samples belong to `sidecar.normalized_sessions`
+(90 days, existing terminal/accounting/hold restrictions), are included in full
+sidecar backups and deleted/tombstoned with their source. No canonical schema
+change. Certification: synthetic CLI workflows in `telemetry_collect` and
+`telemetry_claude`; no production generation-speed claim is inferred from older
+live token-counter certificates.

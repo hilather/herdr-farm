@@ -1074,3 +1074,47 @@ fn claude_canonical_end_notice_and_never_running_coverage() {
         assert_eq!(if id == "M70" { &missing[id]["reason"] } else { &missing[id]["value"]["reason"] }, "session_metadata_not_collected");
     }
 }
+
+#[test]
+fn claude_generation_speed_requires_api_duration() {
+    let f = claude();
+    let start = f.decided + 1000;
+    let path = transcript(&f,SID,&f.worktree(),"2.1.286",start);
+    let mut records: Vec<Value> = fs::read_to_string(&path).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    f.cli("collect");
+    assert_eq!(f.cli_args(&["report","--json"]).0["metrics"]["M104"]["value"],json!({"status":"unavailable","reason":"model_duration_not_reported"}));
+    transcript(&f,"speed-missing-coordinator",&f.project.display().to_string(),"2.1.286",start);
+    f.cli("collect");
+    assert_eq!(f.cli_args(&["report","--json"]).0["metrics"]["M104"]["coordinator"],json!({"status":"unavailable","reason":"coordinator_request_duration_not_reported"}));
+    records.push(json!({"type":"result","sessionId":SID,"timestamp":jiff::Timestamp::from_millisecond(start+10000).unwrap().to_string(),
+        "model":"claude-fixture-sonnet","duration_api_ms":2500,"usage":{"output_tokens":25}}));
+    fs::write(&path,records.iter().map(|r|format!("{r}\n")).collect::<String>()).unwrap();
+    f.cli("collect");
+    let m = f.cli_args(&["report","--json"]).0["metrics"]["M104"].clone();
+    assert_eq!(m["value"]["tokens_per_second"],"10");
+    assert_eq!(m["value"]["model_time_ms"],2500);
+    assert_eq!(m["value"]["distribution"],json!({"status":"unavailable","reason":"per_request_durations_not_reported"}));
+    assert_eq!(m["by_model"]["claude-fixture-sonnet"]["tokens_per_second"],"10");
+    assert_eq!(m["value"]["model_wall_time_share"],"0.25");
+    assert_eq!(m["by_profile"]["claude"]["tokens_per_second"],"10");
+}
+
+#[test]
+fn coordinator_generation_speed_uses_request_durations_when_exposed() {
+    let f = claude();
+    let start = f.decided + 1000;
+    let path = transcript(&f,"speed-coordinator",&f.project.display().to_string(),"2.1.286",start);
+    let mut records: Vec<Value> = fs::read_to_string(&path).unwrap().lines().map(|line|serde_json::from_str(line).unwrap()).collect();
+    records[1]["duration_api_ms"] = json!(2000);
+    records[4]["duration_api_ms"] = json!(1000);
+    records.push(json!({"type":"result","sessionId":"speed-coordinator","timestamp":jiff::Timestamp::from_millisecond(start+10000).unwrap().to_string(),
+        "duration_api_ms":3000,"usage":{"output_tokens":25}}));
+    fs::write(&path,records.iter().map(|r|format!("{r}\n")).collect::<String>()).unwrap();
+    f.cli("collect");
+    let m = f.cli_args(&["report","--json"]).0["metrics"]["M104"].clone();
+    assert_eq!(m["coordinator"]["tokens_per_second"],"8.333333");
+    assert_eq!(m["coordinator"]["model_time_ms"],3000);
+    assert_eq!(m["coordinator"]["responses"],2);
+    assert_eq!(m["coordinator"]["distribution"],json!({"median":"5","p10":"5","p90":"10"}));
+    assert_eq!(m["coordinator"]["model_wall_time_share"],"0.3");
+}

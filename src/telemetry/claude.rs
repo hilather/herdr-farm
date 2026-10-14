@@ -104,16 +104,19 @@ pub(super) fn record_line(tx: &Transaction, ledger: &ingest::Ledger, at: u64, li
             cursor.session = Some((session.clone(), version.clone(), started));
         }
     }
+    if accepted_version(&version) {
+        super::super::analytics::generation_speed::record(tx, key, &session, at, &raw, cursor.model.as_deref(), None, true)?;
+    }
     let message = &raw["message"];
     let mut unknown = Vec::new();
     let mut unmapped_count = 0;
-    unmapped(&raw, "", &["type", "sessionId", "timestamp", "cwd", "version", "isSidechain", "effort", "message", "toolUseResult", "summary", "turnOrigin", "promptSource", "turnPosition", "promptId", "requestId", "subtype", "durationMs", "operation"], &mut unknown, &mut unmapped_count);
+    unmapped(&raw, "", &["type", "sessionId", "timestamp", "cwd", "version", "isSidechain", "effort", "message", "toolUseResult", "summary", "turnOrigin", "promptSource", "turnPosition", "promptId", "requestId", "subtype", "durationMs", "operation", "duration_api_ms", "duration_ms", "usage", "model"], &mut unknown, &mut unmapped_count);
     unmapped(message, "message.", &["id", "model", "usage", "content", "stop_reason"], &mut unknown, &mut unmapped_count);
     let usage = &message["usage"];
     unmapped(usage, "message.usage.", &["input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens_details", "cache_creation"], &mut unknown, &mut unmapped_count);
     unmapped(&usage["output_tokens_details"], "message.usage.output_tokens_details.", &["thinking_tokens"], &mut unknown, &mut unmapped_count);
     unmapped(&usage["cache_creation"], "message.usage.cache_creation.", &["ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens"], &mut unknown, &mut unmapped_count);
-    if !matches!(kind, "assistant" | "user" | "summary" | "system" | "queue-operation") { unknown.push(format!("type:{kind}")); unmapped_count += 1; }
+    if !matches!(kind, "assistant" | "user" | "summary" | "system" | "queue-operation" | "result") { unknown.push(format!("type:{kind}")); unmapped_count += 1; }
     let mut payload = json!({"session_id": session, "timestamp": timestamp, "version": raw["version"], "line_type": kind,
         "model": field(message, "model", sanitize::Class::ModelId), "message_id": id(message, "id"), "isSidechain": raw["isSidechain"].as_bool(),
         "tool_use_ids": [], "tool_names": [], "tool_result_ids": [], "tool_result_errors": 0});

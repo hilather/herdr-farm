@@ -40,7 +40,7 @@ impl View {
         match self {
             View::Project => &[("M01", "accepted tasks"), ("M02", "acceptance rate"), ("M06", "lead time p95"), ("M07", "attempt amplification"),
                 ("M36", "integration conflict rate")],
-            View::Models => &[("M15", "effective model reported"), ("M08", "input tokens"), ("M09", "output tokens"), ("M13", "usage coverage"),
+            View::Models => &[("M104", "output tokens per model second"), ("M15", "effective model reported"), ("M08", "input tokens"), ("M09", "output tokens"), ("M13", "usage coverage"),
                 ("M41", "candidate win rate"), ("M42", "paired acceptance difference")],
             View::Reviews => &[("M20", "review completion"), ("M21", "validated unique findings"), ("M22", "proposal validation rate"),
                 ("M23", "duplicate report share"), ("M25", "fix verified"), ("M26", "currently resolved"), ("M27", "reopen rate"),
@@ -214,6 +214,7 @@ pub fn body(view: View, slug: &str, answers: &Answers, window: Window) -> Value 
     if matches!(view, View::Models | View::Project) { out["configurations"] = json!(answers.configurations); }
     match view {
         View::Models => {
+            if let Some(metric) = result(&answers.main, "M104") { out["generation_speed"] = metric["detail"].clone(); }
             let cells: Vec<Value> = answers.by_agent.iter().flat_map(|out| view.by_agent().iter().filter_map(move |id| result(out, id)))
                 .map(render::agent_cells).collect();
             out["by_agent"] = json!(cells);
