@@ -369,3 +369,17 @@ Ticker labs that are not about health notification set
 evaluation timing cannot inject unrelated notices into exact event, inbox or
 prompt assertions. The health episode tests and the coordinator critical-notice
 wake workflow keep the default policy.
+
+### Named finished-attempt usage diagnostics
+
+The `usage_coverage` state's `evidence.finished_unbound` lists supported
+attempts finished at least ten minutes ago with no bound rollout. Each item
+contains `code: finished_usage_not_bound`, `attempt_id`, `finished_unix_ms`,
+`age_ms`, `grace_ms`, `reason` (`not_bound` or `collection_not_run`), and a
+clock-dependent human-readable `text`: `attempt X finished N min ago, usage not bound:
+<reason>`. Terminal lifecycle timestamps or worker termination receipts
+provide the finish time. Health text and doctor show each named item; live
+health reads and recorded evaluations use the same diagnostic. The existing
+aggregate coverage alert and its notification episode remain authoritative
+for delivery. A successful backfill removes the named item on the next read
+or evaluation; see [contracts-collection.md](contracts-collection.md).

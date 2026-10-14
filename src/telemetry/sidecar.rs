@@ -612,3 +612,34 @@ pub(crate) fn reasoning_missing(db: &Connection, session: &str) -> rusqlite::Res
 pub(crate) fn has_column(db: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
     db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name=?2)", [table, column], |r| r.get(0))
 }
+
+/// Named diagnostics after two normal five-minute collection passes. Read only;
+/// the aggregate coverage alert retains its existing notification episode.
+pub fn finished_unbound(project: &Path, now: i64) -> Result<Vec<Value>> {
+    const GRACE_MS: i64 = 10 * 60_000;
+    let attempts = super::codex::canonical_attempts(project)?;
+    let canonical = super::read_only(&project.join(".state/state.db"))?;
+    let side = read(project)?;
+    let mut items = Vec::new();
+    for attempt in attempts.iter().filter(|a| a.supported()) {
+        let finished: Option<i64> = canonical.query_row(
+            "SELECT max(unix_ms) FROM attempt_lifecycle WHERE attempt_id=?1 AND state IN ('completed','failed','cancelled')",
+            [&attempt.id], |r| r.get(0))?;
+        let Some(finished) = finished.or(attempt.terminated_unix_ms()) else { continue };
+        let launched: bool = canonical.query_row(
+            "SELECT EXISTS(SELECT 1 FROM attempt_lifecycle WHERE attempt_id=?1 AND state='running')",
+            [&attempt.id], |r| r.get(0))?;
+        if !launched && attempt.terminated_unix_ms().is_none() { continue; }
+        let age = now.saturating_sub(finished);
+        if age < GRACE_MS { continue; }
+        let bound = if let Some(db) = &side {
+            db.query_row("SELECT EXISTS(SELECT 1 FROM rollout_sources WHERE attempt_id=?1 AND binding='bound')", [&attempt.id], |r| r.get::<_, bool>(0))?
+        } else { false };
+        if bound { continue; }
+        let reason = if side.is_some() { "not_bound" } else { "collection_not_run" };
+        items.push(json!({"code":"finished_usage_not_bound", "attempt_id":attempt.id, "finished_unix_ms":finished,
+            "age_ms":age, "grace_ms":GRACE_MS, "reason":reason,
+            "text":format!("attempt {} finished {} min ago, usage not bound: {reason}", attempt.id, age / 60_000)}));
+    }
+    Ok(items)
+}

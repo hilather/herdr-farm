@@ -109,6 +109,11 @@ pub fn text(v: &Value) -> String {
         } else {String::new()};
         out += &format!("  {} [{}]: {} {}{waiting}\n", word(&s["rule"]), scope(&s["labels"]), word(&s["state"]), codes(&s["reasons"]));
     }
+    for s in v["states"].as_array().into_iter().flatten() {
+        for item in s["evidence"]["finished_unbound"].as_array().into_iter().flatten() {
+            out += &format!("  finished_usage_not_bound: {}\n", word(&item["text"]));
+        }
+    }
     match v["alerts"]["open"].as_array() {
         Some(open) => { out += &format!("alerts open {}\n", open.len()); for a in open { out += &alert_line(a); } }
         None => out += &format!("alerts n/a ({})\n", word(&v["alerts"]["reason"])),

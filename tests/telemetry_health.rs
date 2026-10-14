@@ -401,6 +401,15 @@ fn coverage_loss_grades_usage_coverage_exactly() {
     assert_eq!((&s["state"], &s["evidence"]["value"], &s["evidence"]["numerator"], &s["evidence"]["denominator"]), (&json!("warn"), &json!("1/2"), &json!(1), &json!(2)), "{s}");
     assert_eq!(s["evidence"]["incomplete"], json!({"not_bound": 1}));
     assert_eq!(codes(s), vec!["coverage_loss"]);
+    let overdue = &s["evidence"]["finished_unbound"];
+    assert_eq!(overdue.as_array().unwrap().len(), 1);
+    assert_eq!(overdue[0]["attempt_id"], "t2-a0");
+    assert_eq!(overdue[0]["code"], "finished_usage_not_bound");
+    assert_eq!(overdue[0]["reason"], "not_bound");
+    assert!(overdue[0]["age_ms"].as_i64().unwrap() >= 10 * MINUTE);
+    let text = String::from_utf8(p.raw(&["health"])).unwrap();
+    assert!(text.contains("attempt t2-a0 finished") && text.contains("usage not bound: not_bound"), "{text}");
+
     assert_eq!(s["metric"]["definition"], "M13.slice-v2");
     assert_eq!(s["metric"]["registry"], "analytics-registry.v13");
 

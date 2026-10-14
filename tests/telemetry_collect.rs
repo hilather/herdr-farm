@@ -575,3 +575,94 @@ fn generation_speed_by_model_and_profile_through_cli() {
     assert_eq!(updated["results"][0]["value"]["model_wall_time_share"],"0.28");
     assert_eq!(updated["results"][0]["value"]["responses"],3);
 }
+
+/// Finished sessions resume through the real ticker even when a single valid
+/// line exceeds its allowance; foreground backfill reaches missed sessions too.
+#[test]
+fn finished_large_rollout_resumes_across_ticker_passes_and_backfills() {
+    let f = Fixture::new();
+    fs::write(f.project.join("PROJECT.md"), "isolated telemetry lab\n").unwrap();
+    fs::write(f.project.join(".state/format.json"), "{}").unwrap();
+    let db = rusqlite::Connection::open(f.project.join(".state/state.db")).unwrap();
+    db.execute("UPDATE project_control SET state='paused',factory_admission='off'", []).unwrap();
+    db.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES('runtime.worker_terminated',?1,2,1,?2)",
+        rusqlite::params![f.attempt, serde_json::json!({"version":1,"attempt":f.attempt,"cause":"completion","observed_unix_ms":f.decided + 5_000}).to_string()]).unwrap();
+    let path = f.rollout(&f.home, "zz-current", &["head.jsonl"], &f.worktree(), f.decided + 1_000, "0.154.0");
+    let large = format!("{{\"type\":\"response_item\",\"payload\":{{\"text\":\"{}\"}}}}\n", "x".repeat(9 << 20));
+    append(&path, &large);
+    append(&path, &large);
+    append(&path, &tail(&f, 1).replace("@SID@", SID));
+    let end = fs::metadata(&path).unwrap().len() as i64;
+    let offset = || rusqlite::Connection::open_with_flags(f.project.join(".state/telemetry.db"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()
+        .and_then(|db| db.query_row("SELECT byte_offset FROM collect_offsets WHERE path_digest=?1", [digest(&path)], |r| r.get::<_, i64>(0)).ok()).unwrap_or(0);
+    let pass = || {
+        struct Ticker(std::process::Child);
+        impl Drop for Ticker { fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); } }
+        let before = offset();
+        let mut child = Ticker(Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", f.scale)
+            .env("HOME", f.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
+            // Only one collect in this process's lab observation window.
+            .env("HERDR_PROJECTS_TELEMETRY_COLLECT_SECS", "3600")
+            .args(["--root", f.root.to_str().unwrap(), "ticker", "run"])
+            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap());
+        let log = || fs::read_to_string(f.root.join(".ticker.log")).unwrap_or_default();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while offset() <= before {
+            assert!(std::time::Instant::now() < deadline && child.0.try_wait().unwrap().is_none(), "no committed ticker progress: {}", log());
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        fs::write(f.root.join(".ticker.stop"), "").unwrap();
+        loop {
+            if let Some(status) = child.0.try_wait().unwrap() { assert!(status.success(), "{status}: {}", log()); break; }
+            assert!(std::time::Instant::now() < deadline, "ticker did not drain: {}", log());
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        fs::remove_file(f.root.join(".ticker.stop")).unwrap();
+    };
+    pass();
+    let first = offset();
+    assert!(first > 8 << 20 && first < end, "committed full line: {first}/{end}");
+    pass();
+    assert!(offset() > first && offset() < end);
+    pass();
+    assert_eq!(offset(), end);
+    let report = f.cli_args(&["usage", "--json"]).0;
+    assert_eq!(report["attempts"][0]["usage"]["total_tokens"], 1680);
+    assert_eq!(report["attempts"][0]["usage"]["records"], 2);
+    assert_eq!(f.binding(), ("bound".into(), Some(f.attempt.clone())));
+    let persisted = ledger(&f);
+    f.cli("collect");
+    assert_eq!(ledger(&f), persisted);
+
+    // A missed sidecar is repaired through the supported foreground command,
+    // including the finished attempt and usage at the very end of the rollout.
+    remove_sidecar(&f);
+    let (backfill, _) = f.cli("collect");
+    assert_eq!(backfill["collected"]["budget_exhausted"], false);
+    assert_eq!(offset(), end);
+    assert_eq!(backfill["attempts"][0]["usage"], report["attempts"][0]["usage"]);
+    assert_eq!(f.binding(), ("bound".into(), Some(f.attempt.clone())));
+}
+
+#[test]
+fn finished_unbound_health_item_clears_after_cli_backfill() {
+    let f = Fixture::new();
+    let db = rusqlite::Connection::open(f.project.join(".state/state.db")).unwrap();
+    let finished = unix_ms() - 20 * 60_000;
+    let receipt = |at| serde_json::json!({"version":1,"attempt":f.attempt,"cause":"completion","observed_unix_ms":at}).to_string();
+    db.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES('runtime.worker_terminated',?1,2,1,?2)",
+        rusqlite::params![f.attempt, receipt(unix_ms() - 5 * 60_000)]).unwrap();
+    let items = |v: &serde_json::Value| v["states"].as_array().unwrap().iter().find(|s| s["rule"] == "usage_coverage").unwrap()["evidence"]["finished_unbound"].clone();
+    assert_eq!(items(&f.cli_args(&["health", "--json"]).0), serde_json::json!([]), "within grace");
+    db.execute("UPDATE events SET payload=?1 WHERE kind='runtime.worker_terminated'", [receipt(finished)]).unwrap();
+    let health = f.cli_args(&["health", "--json"]).0;
+    let overdue = items(&health);
+    assert_eq!(overdue.as_array().unwrap().len(), 1);
+    assert_eq!(overdue[0]["attempt_id"], f.attempt);
+    assert_eq!(overdue[0]["reason"], "collection_not_run");
+    assert!(f.text(&["health"]).contains(&format!("attempt {} finished 20 min ago, usage not bound: collection_not_run", f.attempt)));
+    f.rollout(&f.home, SID, &["head.jsonl", "tail.jsonl"], &f.worktree(), f.decided + 1_000, "0.154.0");
+    let (backfill, _) = f.cli("collect");
+    assert_eq!(backfill["attempts"][0]["usage"]["total_tokens"], 1680);
+    assert_eq!(items(&f.cli_args(&["health", "evaluate", "--json"]).0), serde_json::json!([]));
+}
