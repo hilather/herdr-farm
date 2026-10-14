@@ -770,7 +770,11 @@ fn ticker_collects_recorded_sources_before_observing_a_new_sidecar() {
     for suffix in ["","-wal","-shm"] {let _=fs::remove_file(format!("{}{suffix}",d.sidecar().display()));}
     let mut child=Ticker(command(&d,&["ticker","run"]).env("HERDR_PROJECTS_TELEMETRY_COLLECT_SECS","1")
         .stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
-    let deadline=Instant::now()+Duration::from_secs(15);
+    // Collection runs at idle CPU/I/O priority, without a wall-time completion
+    // bound. A subsequent pass also retains the 15.5 s native-call window
+    // (docs/test-tick-timing.md), even with collection configured to one second.
+    // Match the idle-worker allowance in ticker_batched_telemetry_resumes_after_kill.
+    let deadline=Instant::now()+Duration::from_secs(60);
     loop {
         let ready=rusqlite::Connection::open_with_flags(d.sidecar(),rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()
             .and_then(|db|db.query_row("SELECT count(*) FROM usage_entries WHERE basis='delta'",[],|r|r.get::<_,i64>(0)).ok())==Some(d.totals.records);

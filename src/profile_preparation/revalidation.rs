@@ -151,10 +151,10 @@ pub fn revalidate(
     deadline: Instant,
     cancellation: Cancellation,
 ) -> Result<RevalidatedProfile> {
-    let deadline = deadline.min(Instant::now() + super::BUDGET);
     check(deadline, &cancellation)?;
     let project = project.canonicalize()?;
     let guard = RootGuard::exclusive(project.parent().context("project root missing")?)?;
+    let deadline = deadline.min(Instant::now() + super::BUDGET);
     let path = project.join(".state/state.db");
     ensure!(path.canonicalize()? == path, "project store must be canonical");
     let source_file = crate::store::pin_database_inode(&path)?;

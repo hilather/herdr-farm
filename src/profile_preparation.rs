@@ -129,8 +129,8 @@ pub fn prepare(
 ) -> Result<ProfilePreparation> {
     check(deadline, &cancellation)?;
     let project = project.canonicalize()?;
-    let guard = crate::execution_guard::RootGuard::exclusive(
-        project.parent().context("project root missing")?,
+    let guard = crate::execution_guard::RootGuard::exclusive_operator_by(
+        project.parent().context("project root missing")?, deadline, &cancellation,
     )?;
     prepare_locked(&project, name, herdr_path, agent_path, execution_home, deadline, cancellation, &guard, None)
 }

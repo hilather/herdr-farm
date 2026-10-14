@@ -409,3 +409,21 @@ health evaluation timing injecting unrelated notices; assertions remain exact.
 The telemetry health episode and coordinator critical-notice wake workflows
 retain the default policy. See `telemetry/contracts-health.md` for deployment
 triggers and the no-bound-usage coverage caveat.
+
+## Launch lock waits and telemetry completion
+
+Operator launches queue root-exclusive stages through `.execution-turn.lock`.
+Shared stages release partial acquisitions while retrying, so a queued writer
+cannot keep a launch waiting beyond its remaining `--budget-seconds` deadline.
+Expiry returns typed `OperatorLockContention`. No root-wide lock spans the
+whole launch; different projects and same-project launches can overlap between
+exclusive stages. Profile preparation retains exclusion of running checks.
+Capacity admission and refusal are unchanged.
+
+Telemetry starts asynchronous collection on the first eligible pass after
+controller services, at idle CPU and I/O priority. Collection reads at most
+8 MiB per turn, resumes persisted cursors, and batches up to 2,000 lines per
+transaction. Subsequent collection intervals retain the native-call quiet
+window (15.5 seconds in accelerated labs). The recorded-source/new-sidecar
+workflow allows 60 seconds for idle-worker completion while retaining exact
+usage totals, paused operating intervals, and usage gate assertions.

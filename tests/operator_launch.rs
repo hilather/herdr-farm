@@ -339,7 +339,7 @@ impl Lab {
         #[derive(serde::Serialize)] struct Interaction { session: ResourceIdentity, terminal: &'static str, readiness_manifest: &'static str, prompt_digest: String, acknowledged_unix_ms: i64, pinned: Pinned }
         #[derive(serde::Serialize)] struct Evidence { version: u32, prepared_profile: VersionedReference, supervisor: SupervisorIdentity, native_kind: String, observed_unix_ms: i64, stopped_unix_ms: i64, interaction: Interaction }
         let (herdr, agent, home) = (self.home.join("bin/herdr"), self.home.join("bin").join(kind), self.home.join(format!("agent-home-{kind}")));
-        let prepared = self.ok(&["profile", "prepare", "demo", profile, "--herdr-executable", herdr.to_str().unwrap(),
+        let prepared = self.ok(&["profile", "prepare", self.project.file_name().unwrap().to_str().unwrap(), profile, "--herdr-executable", herdr.to_str().unwrap(),
             "--agent-executable", agent.to_str().unwrap(), "--execution-home", home.to_str().unwrap()]);
         let mut frozen: FrozenProfile = serde_json::from_value(prepared["profile"].clone()).unwrap();
         let evidence = Evidence { version: 2, prepared_profile: frozen.reference().unwrap(), native_kind: kind.into(), observed_unix_ms: 1000, stopped_unix_ms: 1001,
@@ -1407,6 +1407,9 @@ fn automatic_signer_refusals_change_nothing_and_policy_limits_deliver_owner_requ
 #[test]
 fn automatic_signer_reserves_and_defaults_to_owner_capacity() {
     let mut lab=Lab::new();
+    // The queued turn spans unscaled signing/profile subprocesses. Use the
+    // production foreground allowance rather than scaling those costs away.
+    lab.extra_env.push(("HERDR_FARM_LOCK_WAIT_SECS".into(), PathBuf::from("30")));
     lab.extra_env.push(("HERDR_BIN_PATH".into(), PathBuf::new()));
     lab.plant_launchable("codex-sol","codex","gpt-6.1-sol");
     let socket=lab.socket_inode_once("auto.socket");
@@ -1452,15 +1455,7 @@ fn automatic_signer_reserves_and_defaults_to_owner_capacity() {
     }
     std::thread::scope(|scope| {
         let attempts: Vec<_> = ["fourth", "fifth"].into_iter().map(|task| scope.spawn(move || {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-            loop {
-                let out = launch(task, false);
-                if !String::from_utf8_lossy(&out.stderr).contains("lock acquisition failed") {
-                    return out;
-                }
-                assert!(std::time::Instant::now() < deadline, "{}", String::from_utf8_lossy(&out.stderr));
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
+            launch(task, false)
         })).collect();
         for attempt in attempts {
             let out = attempt.join().unwrap();
@@ -2095,6 +2090,43 @@ fn owner_toolchain_policy_names_unavailable_paths_and_bounds() {
 }
 
 #[test]
+fn launches_in_different_projects_succeed_concurrently() {
+    let mut lab = Lab::with_herdr(STATIC_HERDR);
+    lab.plant_launchable("codex-sol", "codex", "gpt-6.1-sol");
+    lab.ok(&["new", "second"]);
+    lab.ok(&["pause", "second"]);
+    let second = lab.root.join("second");
+    let config = lab.home.join(".config/herdr-farm/config.toml");
+    herdr_farm::migration::apply(&second, &herdr_farm::migration::inspect_with_config(&second, &config).unwrap(), true).unwrap();
+    fs::copy(lab.project.join("PROJECT.md"), second.join("PROJECT.md")).unwrap();
+    // Plant the same public preparation workflow in the second project.
+    let first = lab.project.clone();
+    lab.project = second.clone();
+    lab.plant_launchable("codex-sol", "codex", "gpt-6.1-sol");
+    lab.project = first.clone();
+    // Run full launches in both projects using
+    // deterministic local Herdr probes and operator-managed socket inodes.
+    let prompt = lab.home.join("concurrent-prompt.txt");
+    fs::write(&prompt, "Plan the next milestone.").unwrap();
+    let socket = lab.socket_inode_once("concurrent.sock");
+    let mut args = lab.run_args("parallel", "codex-sol", "docs/parallel.md", prompt.to_str().unwrap());
+    args.extend(["--herdr-socket", socket.to_str().unwrap(), "--budget-seconds", "120"]);
+    let mut other = args.clone();
+    other[1] = "second";
+    let one = lab.command(&args).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+    let two = lab.command(&other).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+    for (child, project) in [(one, first), (two, second)] {
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let state = herdr_farm::runtime::snapshot(&project).unwrap();
+        assert_eq!(state.attempts.len(), 1);
+        assert_eq!(state.attempts[0].id.as_str(), report["attempt"].as_str().unwrap());
+        assert_eq!(state.control.unwrap().state, ProjectState::Active);
+    }
+}
+
+#[test]
 fn launch_run_busy_execution_lock_exhaustion_keeps_the_resumable_step_report() {
     use std::{io::{BufRead, BufReader}, process::Stdio, time::{Duration, Instant}};
     let mut lab = Lab::new();
@@ -2103,6 +2135,20 @@ fn launch_run_busy_execution_lock_exhaustion_keeps_the_resumable_step_report() {
     let prompt = lab.home.join("prompt.txt");
     fs::write(&prompt, "Plan the next milestone.").unwrap();
     let before = herdr_farm::runtime::snapshot(&lab.project).unwrap();
+    // Public CLI ingress must bound a queued launch before any durable step.
+    let intent = fs::OpenOptions::new().create(true).truncate(false).write(true)
+        .open(lab.root.join(".execution-turn.lock")).unwrap();
+    intent.try_lock().unwrap();
+    let started = Instant::now();
+    let mut args = lab.run_args("busy", "codex-sol", "docs/busy.md", prompt.to_str().unwrap());
+    args.extend(["--budget-seconds", "2"]);
+    let error = lab.fail(&args);
+    assert!(started.elapsed() >= Duration::from_secs(2));
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(error.contains("operator root lock wait expired"), "{error}");
+    assert_eq!(herdr_farm::runtime::snapshot(&lab.project).unwrap(), before);
+    intent.unlock().unwrap();
+    drop(intent);
     let mut holder = Command::new("/usr/bin/python3").args(["-c",
         "import fcntl,sys; f=open(sys.argv[1],'a'); fcntl.flock(f,fcntl.LOCK_EX); print('ready',flush=True); sys.stdin.read()"])
         .arg(lab.root.join(".execution.lock")).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
@@ -2110,9 +2156,11 @@ fn launch_run_busy_execution_lock_exhaustion_keeps_the_resumable_step_report() {
     BufReader::new(holder.stdout.take().unwrap()).read_line(&mut ready).unwrap();
     assert_eq!(ready.trim(), "ready");
     let started = Instant::now();
-    let error = lab.fail(&lab.run_args("busy", "codex-sol", "docs/busy.md", prompt.to_str().unwrap()));
+    let mut args = lab.run_args("busy", "codex-sol", "docs/busy.md", prompt.to_str().unwrap());
+    args.extend(["--budget-seconds", "2"]);
+    let error = lab.fail(&args);
     holder.kill().ok(); holder.wait().unwrap();
-    assert!(started.elapsed() >= Duration::from_secs(1));
+    assert!(started.elapsed() >= Duration::from_secs(2));
     assert!(started.elapsed() < Duration::from_secs(5));
     assert!(error.contains("launch run stopped at step 1"), "{error}");
     assert!(error.contains(".execution.lock"), "{error}");
