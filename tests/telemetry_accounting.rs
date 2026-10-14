@@ -746,7 +746,7 @@ fn quota_runway_links_usage_and_preserves_previously_reported_null() {
         UPDATE accounting_fleet_snapshot SET body=json_remove(body,'$.accepted_tasks');
         UPDATE telemetry_streams SET version=22 WHERE stream='accounting';").unwrap();
     f.cli_args(&["accounting", "sync"]);
-    assert_eq!(f.cli_args(&["accounting", "status"]).0["version"], 27);
+    assert_eq!(f.cli_args(&["accounting", "status"]).0["version"], 28);
     assert_eq!(f.sidecar().query_row("SELECT json_type(body,'$.accepted_tasks') FROM accounting_fleet_snapshot", [], |r| r.get::<_, String>(0)).unwrap(), "object");
     assert_eq!(f.cli_args(&["accounting", "quota", "--json"]).0, quota);
     assert_eq!(f.report()["metrics"]["M40"]["decisions"], quota["metrics"]["M40"]["decisions"]);
@@ -1207,7 +1207,7 @@ fn attention_intervals_union_and_censor() {
         (serde_json::from_str(&text).unwrap_or(serde_json::Value::Null), text)
     };
     cli(&["collect"]);
-    assert_eq!(cli(&["accounting", "status"]).0, json!({"stream": "accounting", "version": 27}));
+    assert_eq!(cli(&["accounting", "status"]).0, json!({"stream": "accounting", "version": 28}));
     // Stream 8 dropped the superseded projections (v2, v4, v6); their replacements stay.
     let tables: Vec<String> = rusqlite::Connection::open(project.join(".state/telemetry.db")).unwrap()
         .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('session_graph','quota_observations','session_nodes','session_graph_nodes','quota_window_observations') ORDER BY name").unwrap()
@@ -2132,7 +2132,7 @@ fn provider_charges_reconcile_allocate_and_convert() {
     let current = f.cli_args(&["accounting", "charges"]).1;
     f.sidecar().execute("UPDATE telemetry_streams SET version=9 WHERE stream='accounting'", []).unwrap();
     assert_eq!(f.cli_args(&["accounting", "import-charges", &part("charges-2.json")]).0["charges"][0]["imported"], false);
-    assert_eq!((f.cli_args(&["accounting", "status"]).0["version"].clone(), f.cli_args(&["accounting", "charges"]).1), (json!(27), current));
+    assert_eq!((f.cli_args(&["accounting", "status"]).0["version"].clone(), f.cli_args(&["accounting", "charges"]).1), (json!(28), current));
 
     // Invoice allocation by a named, versioned rule: 12 × 2980/3480 and 12 × 500/3480 in units
     // of 10^-12; the one remaining unit goes to the larger remainder; the sum is exactly 12.
@@ -3299,4 +3299,140 @@ fn task_supersession_prices_ended_effort_and_work_items_without_double_counting(
     let explicit = f.cli_args(&["accounting","fleet","--json"]).0;
     assert_eq!(explicit["metrics"]["M37"]["value"],"0");
     assert_eq!(explicit["metrics"]["M37"]["buckets"]["other"]["attempts"],1);
+}
+
+/// Thousands of historical windows exercise the CLI runway lookup while an
+/// isolated ticker collects new usage and a writer requests WAL checkpoints.
+#[test]
+fn quota_large_history_with_concurrent_collection_and_checkpoints() {
+    let f = Fixture::new();
+    let path = f.rollout(&f.home, "quota-large", &[RECORD], &f.worktree(), f.decided + 1000, "0.154.0");
+    let original = fs::read_to_string(&path).unwrap();
+    let mut out = original.clone();
+    let base = f.decided.div_euclid(1000) * 1000 - 6000 * 3_600_000;
+    for i in 0..6000i64 {
+        let at = base + i * 3_600_000;
+        out += &format!("{}\n", json!({"timestamp": jiff::Timestamp::from_millisecond(at).unwrap().to_string(),
+            "type": "event_msg", "payload": {"type": "token_count", "info": null,
+            "rate_limits": {"limit_id": "codex", "primary": {"used_percent": 25, "window_minutes": 60,
+                "resets_at": (at + 3_600_000) / 1000}, "secondary": null}}}));
+    }
+    fs::write(&path, out).unwrap();
+    f.cli("collect");
+    f.cli_args(&["accounting", "sync"]);
+    let quota = || {
+        let start = std::time::Instant::now();
+        let output = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", f.scale)
+            .env("HOME", f.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
+            .args(["--root", f.root.to_str().unwrap(), "telemetry", "demo", "accounting", "quota", "--json"])
+            .output().unwrap();
+        let elapsed = start.elapsed();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        (value, elapsed)
+    };
+    let (expected, elapsed) = quota();
+    assert!(elapsed < Duration::from_secs(6), "CLI took {elapsed:?}; status={} read={}", expected["status"], expected["read"]);
+    assert_eq!(expected["windows"].as_array().unwrap_or_else(|| panic!("{expected}")).len(), 6000);
+    assert_eq!(expected["observations"], json!({"primary": {"trusted": 6000}, "secondary": {"not_reported": 6000}}));
+    let account = digest(&f.home);
+    let mut windows = Vec::new();
+    let mut runway = Vec::new();
+    for i in 0..6000i64 {
+        let at = base + i * 3_600_000;
+        let id = format!("codex:{account}:codex:primary:{}", at + 3_600_000);
+        windows.push(json!({"window_id": id, "service": "codex", "account": account, "limit_id": "codex",
+            "window_kind": "primary", "unit": "percent", "window_minutes": 60,
+            "window_start_unix_ms": at, "resets_unix_ms": at + 3_600_000,
+            "start_evidence": if i == 0 { "first_observation" } else { "reset_elapsed" },
+            "first_observed_unix_ms": at, "last_observed_unix_ms": at,
+            "first_used": "25", "used": "25", "remaining": "75", "observed_increase": "0",
+            "plan_type": null, "observations": 1, "flagged": 0}));
+        runway.push(json!({"window_id": id, "as_of_unix_ms": at, "lookback_ms": 86_400_000,
+            "points_used": "0", "points_per_hour": "0", "project_points": "0", "unattributed_points": "0",
+            "project_share": json!({"status": "unavailable", "reason": "no_observed_burn"}), "unattributed_share": json!({"status": "unavailable", "reason": "no_observed_burn"}),
+            "hours_to_exhaustion": json!({"status": "unavailable", "reason": "no_observed_burn"}), "hours_to_reset": "1",
+            "exhausts_before_reset": null, "attribution_basis": "counted_project_usage_since_previous_session_observation",
+            "semantics": "not_certified"}));
+    }
+    assert_eq!(expected["windows"], json!(windows));
+    assert_eq!(expected["evidence_windows"], expected["windows"]);
+    assert_eq!(expected["runway"], json!(runway));
+    // A newly discoverable rollout provides observable evidence of a ticker
+    // collection pass. No sleep decides when the concurrent read has completed.
+    f.rollout(&f.home, "quota-new", &[RECORD], &f.worktree(), f.decided + 2000, "0.154.0");
+    fs::write(f.project.join("PROJECT.md"), "ticker fixture").unwrap();
+    fs::write(f.project.join(".state/format.json"), "{}").unwrap();
+    struct Ticker(std::process::Child);
+    impl Drop for Ticker {
+        fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); }
+    }
+    let mut ticker = Ticker(Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", f.scale)
+        .env("HOME", f.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
+        .args(["--root", f.root.to_str().unwrap(), "ticker", "run", "--passes", "200"])
+        .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap());
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    struct Stop(std::sync::Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for Stop {
+        fn drop(&mut self) { self.0.store(true, std::sync::atomic::Ordering::Relaxed); }
+    }
+    let _stop_on_exit = Stop(stop.clone());
+    let checkpoint_stop = stop.clone();
+    let db_path = f.project.join(".state/telemetry.db");
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let checkpoint = std::thread::spawn(move || {
+        let db = rusqlite::Connection::open(db_path).unwrap();
+        db.busy_timeout(Duration::ZERO).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        ready_tx.send(()).unwrap();
+        let mut passes = 0;
+        while !checkpoint_stop.load(std::sync::atomic::Ordering::Relaxed) && std::time::Instant::now() < deadline {
+            let result = db.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get::<_, i64>(0));
+            match result {
+                Ok(_) => passes += 1,
+                Err(error) => assert_eq!(error.sqlite_error_code(), Some(rusqlite::ErrorCode::DatabaseBusy)),
+            }
+            std::thread::yield_now();
+        }
+        passes
+    });
+    ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(25);
+    let mut reads = 0;
+    loop {
+        let (actual, elapsed) = quota();
+        assert!(elapsed < Duration::from_secs(6), "CLI took {elapsed:?}; status={} read={}", actual["status"], actual["read"]);
+        assert_eq!(actual["windows"], expected["windows"]);
+        assert_eq!(actual["runway"], expected["runway"]);
+        reads += 1;
+        if reads >= 3 && f.count("rollout_sources") >= 2 { break; }
+        assert!(std::time::Instant::now() < deadline, "ticker never collected the new rollout");
+        assert!(ticker.0.try_wait().unwrap().is_none(), "ticker exited before collection");
+    }
+    fs::write(f.root.join(".ticker.stop"), b"").unwrap();
+    ticker.0.wait().unwrap();
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(checkpoint.join().unwrap() > 0);
+
+}
+
+/// An exclusive database owner must produce a typed CLI read-budget result,
+/// without attributing healthy fixture contention to database corruption.
+#[test]
+fn quota_exclusive_owner_exhausts_read_budget() {
+    let f = Fixture::new();
+    quota_rollout(&f, "quota-budget", "quota-single.jsonl", f.decided - 60_000,
+        &[f.decided - 60_000], &[f.decided / 1000 + 3600]);
+    f.cli("collect");
+    f.cli_args(&["accounting", "sync"]);
+    let owner = rusqlite::Connection::open(f.project.join(".state/telemetry.db")).unwrap();
+    owner.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE").unwrap();
+    let start = std::time::Instant::now();
+    let result = f.cli_args(&["accounting", "quota", "--json"]).0;
+    assert!(start.elapsed() < Duration::from_secs(7));
+    assert_eq!(result, json!({"status": "unavailable", "reason": "budget_exhausted",
+        "read": {"sqlite_vm_steps": 0, "budget_ms": 5000, "phase": "open_snapshot"}}));
+    owner.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(owner.query_row("PRAGMA quick_check", [], |r| r.get::<_, String>(0)).unwrap(), "ok");
+    assert_eq!(f.cli_args(&["accounting", "quota", "--json"]).0["windows"].as_array().unwrap().len(), 1);
 }
