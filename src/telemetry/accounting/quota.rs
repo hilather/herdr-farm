@@ -341,9 +341,17 @@ type Decision = (String, Option<String>, Option<String>, i64);
 
 /// Attempts with a dispatch decision, in attempt order.
 fn decisions(project: &Path) -> Result<Vec<Decision>> {
+    decisions_bounded(project, None)
+}
+
+fn decisions_bounded(project: &Path, deadline: Option<std::time::Instant>) -> Result<Vec<Decision>> {
     let path = project.join(".state/state.db");
     if !path.exists() { return Ok(Vec::new()); }
-    let db = crate::telemetry::read_only(&path)?;
+    let db = if deadline.is_some() { crate::telemetry::read_only_nowait(&path)? } else { crate::telemetry::read_only(&path)? };
+    if let Some(deadline) = deadline {
+        db.progress_handler(1000, Some(move || std::time::Instant::now() >= deadline));
+        db.busy_timeout(std::time::Duration::from_millis(50))?;
+    }
     if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='dispatch_decisions')", [], |r| r.get::<_, bool>(0))? {
         return Ok(Vec::new());
     }
@@ -493,34 +501,151 @@ pub(crate) const CURRENT_WINDOW_SQL: &str = "w.window_start_unix_ms<=?1 AND w.re
 /// `accounting quota`: synced windows, observation trust, M38/M39 and extended
 /// M40 per dispatch decision. Read-only; `ledger_not_synced` before a sync.
 pub fn read(project: &Path, db: &Connection) -> Result<Value> {
+    read_bounded(project, db, std::time::Instant::now() + std::time::Duration::from_secs(5))
+}
+
+pub(crate) fn read_project(project: &Path) -> Result<Value> {
+    read_project_bounded(project, std::time::Instant::now() + std::time::Duration::from_secs(5))
+}
+
+pub(crate) fn read_json(project: &Path) -> Result<String> {
+    use std::io::Write;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let value = read_project_bounded(project, deadline)?;
+    if value["status"] == "unavailable" { return Ok(serde_json::to_string(&value)?); }
+    struct Output { bytes: Vec<u8>, deadline: std::time::Instant }
+    impl Write for Output {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if std::time::Instant::now() >= self.deadline {
+                return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "quota read budget exhausted"));
+            }
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    }
+    let mut output = Output { bytes: Vec::new(), deadline };
+    match serde_json::to_writer(&mut output, &value) {
+        Ok(()) => Ok(String::from_utf8(output.bytes)?),
+        Err(error) if error.io_error_kind() == Some(std::io::ErrorKind::TimedOut) => Ok(serde_json::to_string(&json!({
+            "status": "unavailable", "reason": "budget_exhausted", "read": {"budget_ms": 5000, "phase": "json_encoding",
+            "window_rows": value["evidence_windows"].as_array().map_or(0, Vec::len),
+            "runway_windows": value["runway"].as_array().map_or(0, Vec::len),
+            "decision_rows": value["metrics"]["M40"]["decisions"].as_array().map_or(0, Vec::len)}}))?),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn read_project_bounded(project: &Path, deadline: std::time::Instant) -> Result<Value> {
+    loop {
+        match crate::telemetry::sidecar::read_quota(project) {
+            Ok(Some(db)) => return read_bounded(project, &db, deadline),
+            Ok(None) => return Ok(unavailable("collection_not_run")),
+            Err(error) => {
+                let busy = error.downcast_ref::<std::io::Error>().is_some_and(|e|
+                    matches!(e.raw_os_error(), Some(libc::EAGAIN) | Some(libc::EACCES)))
+                    || error.downcast_ref::<rusqlite::Error>().and_then(|e| e.sqlite_error_code()).is_some_and(|c|
+                        matches!(c, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked | rusqlite::ErrorCode::SchemaChanged));
+                if !busy { return Err(error); }
+                if std::time::Instant::now() >= deadline {
+                    return Ok(json!({"status": "unavailable", "reason": "budget_exhausted", "read": {
+                        "sqlite_vm_steps": 0, "budget_ms": 5000, "phase": "open_snapshot"}}));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct ReadProgress {
+    phase: std::cell::Cell<&'static str>,
+    windows: std::cell::Cell<u64>,
+    runway_windows: std::cell::Cell<u64>,
+    decisions: std::cell::Cell<u64>,
+}
+
+fn read_bounded(project: &Path, db: &Connection, deadline: std::time::Instant) -> Result<Value> {
+    let progress = ReadProgress::default();
+    let work = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let observed = work.clone();
+    db.progress_handler(1000, Some(move || {
+        observed.fetch_add(1000, std::sync::atomic::Ordering::Relaxed);
+        std::time::Instant::now() >= deadline
+    }));
+    struct Reset<'a>(&'a Connection);
+    impl Drop for Reset<'_> {
+        fn drop(&mut self) { self.0.progress_handler(0, None::<fn() -> bool>); }
+    }
+    let _reset = Reset(db);
+    db.busy_timeout(std::time::Duration::from_millis(50))?;
+    loop {
+        let result = (|| {
+            let transaction = db.is_autocommit().then(|| db.unchecked_transaction()).transpose()?;
+            let result = read_snapshot(project, db, deadline, &progress);
+            drop(transaction);
+            result
+        })();
+        match result {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                let code = error.downcast_ref::<rusqlite::Error>().and_then(|e| e.sqlite_error_code());
+                let retry = matches!(code, Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked | rusqlite::ErrorCode::SchemaChanged))
+                    || error.downcast_ref::<std::io::Error>().is_some_and(|e|
+                        matches!(e.raw_os_error(), Some(libc::EAGAIN) | Some(libc::EACCES)));
+                if std::time::Instant::now() >= deadline || code == Some(rusqlite::ErrorCode::OperationInterrupted) {
+                    return Ok(json!({"status": "unavailable", "reason": "budget_exhausted", "read": {
+                        "sqlite_vm_steps": work.load(std::sync::atomic::Ordering::Relaxed), "budget_ms": 5000,
+                        "phase": progress.phase.get(), "window_rows": progress.windows.get(),
+                        "runway_windows": progress.runway_windows.get(), "decision_rows": progress.decisions.get()}}));
+                }
+                if !retry { return Err(error); }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    }
+}
+
+fn read_snapshot(project: &Path, db: &Connection, deadline: std::time::Instant, progress: &ReadProgress) -> Result<Value> {
+    let check = || -> Result<()> {
+        if std::time::Instant::now() >= deadline { return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_INTERRUPT), None).into()); }
+        Ok(())
+    };
+    progress.phase.set("availability");
     if !synced(db)? { return Ok(unavailable("ledger_not_synced")); }
+    progress.phase.set("windows");
     let now = jiff::Timestamp::now().as_millisecond();
     let mut windows: Vec<Value> = db.prepare(&format!("SELECT window_id,account,limit_id,window_kind,unit,window_minutes,window_start_unix_ms,resets_unix_ms,start_evidence,
         first_observed_unix_ms,last_observed_unix_ms,first_used,used,remaining,observed_increase,plan_type,observations,flagged,
         ({CURRENT_WINDOW_SQL}) FROM quota_windows w ORDER BY account,limit_id,window_kind,resets_unix_ms"))?
-        .query_map([now], |r| Ok(json!({"window_id": r.get::<_, String>(0)?, "service": "codex", "account": r.get::<_, String>(1)?, "limit_id": r.get::<_, String>(2)?,
+        .query_map([now], |r| { progress.windows.set(progress.windows.get() + 1); Ok(json!({"window_id": r.get::<_, String>(0)?, "service": "codex", "account": r.get::<_, String>(1)?, "limit_id": r.get::<_, String>(2)?,
             "window_kind": r.get::<_, String>(3)?, "unit": r.get::<_, String>(4)?, "window_minutes": r.get::<_, i64>(5)?,
             "window_start_unix_ms": r.get::<_, i64>(6)?, "resets_unix_ms": r.get::<_, i64>(7)?, "start_evidence": r.get::<_, String>(8)?,
             "first_observed_unix_ms": r.get::<_, i64>(9)?, "last_observed_unix_ms": r.get::<_, i64>(10)?, "first_used": r.get::<_, String>(11)?,
             "used": r.get::<_, String>(12)?, "remaining": r.get::<_, String>(13)?, "observed_increase": r.get::<_, String>(14)?,
-            "plan_type": r.get::<_, Option<String>>(15)?, "observations": r.get::<_, i64>(16)?, "flagged": r.get::<_, i64>(17)?, "current": r.get::<_, bool>(18)?})))?
+            "plan_type": r.get::<_, Option<String>>(15)?, "observations": r.get::<_, i64>(16)?, "flagged": r.get::<_, i64>(17)?, "current": r.get::<_, bool>(18)?})) })?
         .collect::<rusqlite::Result<_>>()?;
     let mut current_windows = Vec::new();
     for window in &mut windows {
+        check()?;
         let current = window.as_object_mut().expect("quota window object").remove("current");
         if current == Some(json!(true)) { current_windows.push(window.clone()); }
     }
     // Windows of different accounts with the same limit, kind, length and reset (within the jitter
     // tolerance of the group's earliest reset): one provider window seen from several homes.
+    progress.phase.set("shared_windows");
     let mut groups = BTreeMap::<(String, String, i64, i64), Vec<(String, String)>>::new();
     let mut ordered: Vec<&Value> = windows.iter().collect();
-    ordered.sort_by_key(|w| (w["limit_id"].as_str().unwrap_or("").to_owned(), w["window_kind"].as_str().unwrap_or("").to_owned(),
+    ordered.sort_by_cached_key(|w| (w["limit_id"].as_str().unwrap_or("").to_owned(), w["window_kind"].as_str().unwrap_or("").to_owned(),
         w["window_minutes"].as_i64().unwrap_or(0), w["resets_unix_ms"].as_i64().unwrap_or(0)));
     for w in ordered {
+        check()?;
         let text = |key: &str| w[key].as_str().unwrap_or("").to_owned();
         let (minutes, resets) = (w["window_minutes"].as_i64().unwrap_or(0), w["resets_unix_ms"].as_i64().unwrap_or(0));
-        let anchor = groups.keys().rev().find(|k| k.0 == text("limit_id") && k.1 == text("window_kind") && k.2 == minutes && resets - k.3 <= RESETS_TOLERANCE_MS)
-            .map_or(resets, |k| k.3);
+        let low = (text("limit_id"), text("window_kind"), minutes, resets.saturating_sub(RESETS_TOLERANCE_MS));
+        let high = (text("limit_id"), text("window_kind"), minutes, resets);
+        let anchor = groups.range(low..=high).next_back().map_or(resets, |(key, _)| key.3);
         groups.entry((text("limit_id"), text("window_kind"), minutes, anchor)).or_default().push((text("account"), text("window_id")));
     }
     let shared: Vec<Value> = groups.into_iter().filter(|(_, members)| members.iter().any(|m| m.0 != members[0].0)).map(|((limit, kind, minutes, resets), mut members)| {
@@ -531,6 +656,7 @@ pub fn read(project: &Path, db: &Connection) -> Result<Value> {
     }).collect();
     let evidence_windows = windows.clone();
     for group in &shared {
+        check()?;
         let ids: Vec<&str> = group["window_ids"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
         let members: Vec<Value> = windows.iter().filter(|w| ids.contains(&w["window_id"].as_str().unwrap_or(""))).cloned().collect();
         let Some(mut latest) = members.into_iter().max_by_key(|w| w["last_observed_unix_ms"].as_i64()) else { continue };
@@ -541,9 +667,16 @@ pub fn read(project: &Path, db: &Connection) -> Result<Value> {
         latest["merge_evidence"] = group["evidence"].clone();
         windows.push(latest);
     }
-    windows.sort_by_key(|w| (w["account"].as_str().unwrap_or("").to_owned(), w["limit_id"].as_str().unwrap_or("").to_owned(),
+    windows.sort_by_cached_key(|w| (w["account"].as_str().unwrap_or("").to_owned(), w["limit_id"].as_str().unwrap_or("").to_owned(),
         w["window_kind"].as_str().unwrap_or("").to_owned(), w["resets_unix_ms"].as_i64().unwrap_or(0)));
-    let runway: Vec<Value> = windows.iter().map(|w| runway(db, w)).collect::<Result<_>>()?;
+    progress.phase.set("runway");
+    let runway: Vec<Value> = windows.iter().map(|w| {
+        check()?;
+        let value = runway(db, w)?;
+        progress.runway_windows.set(progress.runway_windows.get() + 1);
+        Ok(value)
+    }).collect::<Result<_>>()?;
+    progress.phase.set("observation_summary");
     let not_reported = unreported(db)?;
     let mut trust = BTreeMap::<String, BTreeMap<String, i64>>::new();
     for row in db.prepare("SELECT window_kind,trust,count(*) FROM quota_window_observations GROUP BY window_kind,trust")?
@@ -559,7 +692,10 @@ pub fn read(project: &Path, db: &Connection) -> Result<Value> {
         reached.insert(t, n);
     }
     let mut list = Vec::new();
-    for (attempt, kind, home, decided) in decisions(project)? {
+    progress.phase.set("dispatch_decisions");
+    for (attempt, kind, home, decided) in decisions_bounded(project, Some(deadline))? {
+        check()?;
+        progress.decisions.set(progress.decisions.get() + 1);
         let mut entry = match (kind.as_deref(), home) {
             (Some(kind), _) if kind != "codex" => json!({"value": unavailable("adapter_absent")}),
             (_, None) => json!({"value": unavailable("execution_home_unknown")}),
@@ -575,8 +711,16 @@ pub fn read(project: &Path, db: &Connection) -> Result<Value> {
     let mut m40 = super::metric("M40", "quota_headroom_at_dispatch", json!({"decisions": list, "stale_after_ms": STALE_AFTER_MS}));
     m40["definition"] = json!("M40.quota-windows-v2");
     metrics.insert("M40".to_owned(), m40);
-    Ok(json!({"semantics": "not_certified", "account_basis": ACCOUNT_BASIS, "windows": windows, "evidence_windows": evidence_windows, "current_windows": current_windows, "runway": runway, "not_reported": not_reported, "shared_window_candidates": shared, "observations": trust,
-        "evidence": {"rate_limit_reached_type": {"snapshots": reached, "semantics": "not_certified", "certified": "fixture"}}, "metrics": metrics}))
+    // Move the large arrays into the response. json! serializes its expression
+    // arguments again, duplicating every historical row after the SQL budget.
+    Ok(Value::Object([
+        ("semantics", json!("not_certified")), ("account_basis", json!(ACCOUNT_BASIS)),
+        ("windows", Value::Array(windows)), ("evidence_windows", Value::Array(evidence_windows)),
+        ("current_windows", Value::Array(current_windows)), ("runway", Value::Array(runway)),
+        ("not_reported", Value::Array(not_reported)), ("shared_window_candidates", Value::Array(shared)),
+        ("observations", json!(trust)), ("metrics", Value::Object(metrics)),
+        ("evidence", json!({"rate_limit_reached_type": {"snapshots": reached, "semantics": "not_certified", "certified": "fixture"}})),
+    ].into_iter().map(|(key, value)| (key.to_owned(), value)).collect()))
 }
 
 /// Limit-level missing kinds, emitted once rather than once per dispatch.

@@ -128,6 +128,17 @@ pub(crate) fn read_only_nowait(path: &std::path::Path) -> anyhow::Result<ReadOnl
     read_only_bounded(path, std::time::Duration::ZERO)
 }
 
+/// Quota can outlive a collector checkpoint: always participate in SQLite's
+/// WAL read locks, including when an idle database has no side files yet.
+pub(crate) fn read_only_wal(path: &std::path::Path) -> anyhow::Result<ReadOnly> {
+    let lock = DatabaseReadLock::acquire(path, std::time::Duration::ZERO)?;
+    let db = rusqlite::Connection::open_with_flags(path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
+        | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW)?;
+    db.busy_timeout(std::time::Duration::from_millis(50))?;
+    Ok(ReadOnly { db: std::rc::Rc::new(db), _lock: std::rc::Rc::new(lock) })
+}
+
 fn read_only_bounded(path: &std::path::Path, wait: std::time::Duration) -> anyhow::Result<ReadOnly> {
     use anyhow::Context;
     use rusqlite::OpenFlags;

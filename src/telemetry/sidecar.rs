@@ -269,6 +269,14 @@ pub(crate) fn migrate(db: &mut Connection) -> Result<()> {
 
 /// The sidecar opened strictly read-only (`super::read_only`); absent → `None`.
 pub(crate) fn read(project: &Path) -> Result<Option<super::ReadOnly>> {
+    read_with(project, false)
+}
+
+pub(crate) fn read_quota(project: &Path) -> Result<Option<super::ReadOnly>> {
+    read_with(project, true)
+}
+
+fn read_with(project: &Path, wal: bool) -> Result<Option<super::ReadOnly>> {
     let path = path(project);
     match std::fs::symlink_metadata(&path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -276,7 +284,7 @@ pub(crate) fn read(project: &Path) -> Result<Option<super::ReadOnly>> {
         Ok(meta) if !meta.is_file() => bail!("telemetry sidecar is not a regular file"),
         Ok(_) => {}
     }
-    let db = super::read_only(&path)?;
+    let db = if wal { super::read_only_wal(&path)? } else { super::read_only(&path)? };
     let versions = versions(&db)?;
     check(&versions)?;
     if versions.get("codex").is_none_or(|&version| version == 0) {

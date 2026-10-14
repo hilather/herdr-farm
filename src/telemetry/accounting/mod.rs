@@ -52,7 +52,8 @@ pub const MIGRATIONS: &[&str] = &[include_str!("../../../migrations/telemetry/ac
     include_str!("../../../migrations/telemetry/accounting/0024_claude_cache_tiers.sql"),
     include_str!("../../../migrations/telemetry/accounting/0025_cli_invocations.sql"),
     include_str!("../../../migrations/telemetry/accounting/0026_host_checks.sql"),
-    include_str!("../../../migrations/telemetry/accounting/0027_cli_error_class.sql")];
+    include_str!("../../../migrations/telemetry/accounting/0027_cli_error_class.sql"),
+    include_str!("../../../migrations/telemetry/accounting/0028_quota_read.sql")];
 
 /// `herdr-farm telemetry <slug> accounting ...`
 #[derive(clap::Subcommand)]
@@ -271,12 +272,8 @@ pub fn run(project: &Path, command: Command) -> Result<String> {
         },
         Command::BudgetShadow { policy, as_of } => budget::shadow(project, policy.as_deref(), as_of)?,
         Command::Quota { json } => {
-            let value = match super::sidecar::read(project)? {
-                Some(db) => quota::read(project, &db)?,
-                None => unavailable("collection_not_run"),
-            };
-            if !json { return Ok(quota::text(&value)); }
-            value
+            if json { return quota::read_json(project); }
+            return Ok(quota::text(&quota::read_project(project)?));
         }
         Command::ObserveAttention => match super::sidecar::open(project, false)? {
             Some(mut db) => attention::observe(project, &mut db, super::codex::Budget::CLI)?,

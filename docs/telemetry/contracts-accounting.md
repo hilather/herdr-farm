@@ -1684,6 +1684,26 @@ groups entries by session once, and the sync reuses its insert statements.
 instead of the whole ledger as JSON (same counts). Measurements:
 [certificate-scale.md](certificate-scale.md) §5.
 
+Quota reads pin one sidecar read transaction for windows, runway, trust and
+M40. A five-second read budget includes snapshot acquisition, SQLite work and
+JSON encoding; quota JSON is compact to bound encoding work. Exhaustion returns
+`status: unavailable`, `reason: budget_exhausted`, with `read.budget_ms`.
+Query exhaustion additionally reports `read.sqlite_vm_steps` (a lower bound
+in batches of 1,000 instructions). Query exhaustion reports the read phase, window rows visited, completed runway
+windows and dispatch rows visited, accumulated across retries. An exhausted
+open reports `phase: open_snapshot` and zero VM work. Encoding exhaustion reports
+`phase: json_encoding` and the completed row counts.
+Busy, locked and schema-change failures retry in fresh snapshots within that
+budget. Corruption remains an error rather than being silently hidden.
+Accounting stream v28 (`0028_quota_read.sql`) indexes runway window identities,
+previous session observations and usage positions. These indexes add no retained
+evidence; existing session/projection retention and full sidecar backup apply.
+
+Quota's sidecar connection always uses SQLite READONLY WAL locking, never
+`immutable` or `nolock`. On an idle WAL database SQLite may create its locking
+side files (`-wal`/`-shm`); no database or evidence rows are written. A main-file
+shared lock alone does not substitute for a WAL read mark during checkpoint.
+
 
 ## 17. DG2: M10 cache-read share and maintained cache totals
 

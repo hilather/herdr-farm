@@ -139,6 +139,9 @@ migrated sidecar.
   read-only open that reads committed WAL frames through the existing `-shm`;
   otherwise (no connection has the file open) an `immutable` open, because a
   plain read-only open would create `-wal`/`-shm` that only a writer removes.
+  Quota is an explicit exception: it always uses normal READONLY WAL locking
+  and pins a transaction, allowing SQLite locking side files on idle stores
+  rather than relying on immutable main-file reads across checkpoints.
   The pre-open lock uses an OFD lock on a pooled descriptor retained for the
   whole process lifetime. Reader teardown explicitly unlocks and recycles it,
   never closing it: closing any ordinary descriptor on a database inode drops
@@ -1024,6 +1027,11 @@ adds nullable fixed-enum `cli_invocations.error_class` for worker CLI diagnosis.
 No message text is retained. It uses the existing `sidecar.cli_invocations`
 retention/backup class and tombstones; the canonical schema is unchanged.
 See [accounting contracts](contracts-accounting.md#worker-cli-failure-classes-memory-brief-cli-1).
+
+Accounting stream **v28**, `migrations/telemetry/accounting/0028_quota_read.sql`,
+adds quota runway lookup indexes. Quota uses one bounded read snapshot; see
+`contracts-accounting.md` for the typed exhaustion result. Indexes follow the
+existing sidecar session/projection retention and backup classifications.
 
 ### TRAIN-19-FIX-2 retained worker memory rendering
 
