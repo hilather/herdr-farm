@@ -124,6 +124,7 @@ fn exclusive_file_until(path:&Path,until:std::time::Instant,cancelled:&dyn Fn()-
     }
 }
 thread_local! {
+    static LAUNCH_DEADLINE: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
     static FOREGROUND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static ACQUIRING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     // Weak ownership markers remain accurate when a guard moves to another thread.
@@ -160,6 +161,16 @@ fn operator_wait_budget() -> std::time::Duration {
         .map_or_else(|| crate::timing::retry(std::time::Duration::from_secs(30)).max(std::time::Duration::from_millis(250)), std::time::Duration::from_secs)
 }
 
+/// Scope implicit operator acquisitions to the launch's remaining budget.
+/// This carries no lock and permits other launches between durable stages.
+pub struct LaunchWait(Option<std::time::Instant>);
+impl LaunchWait {
+    pub fn enter(deadline: std::time::Instant) -> Self { Self(LAUNCH_DEADLINE.replace(Some(deadline))) }
+}
+impl Drop for LaunchWait {
+    fn drop(&mut self) { LAUNCH_DEADLINE.set(self.0); }
+}
+
 /// A bounded operator write could not obtain its root execution turn.
 #[derive(Debug)]
 pub struct OperatorLockContention { pub root: std::path::PathBuf }
@@ -175,9 +186,9 @@ fn bounded_wait<T>(mut acquire: impl FnMut() -> Result<T>) -> Result<T> {
     impl Drop for Acquisition { fn drop(&mut self) { ACQUIRING.set(false); } }
     ACQUIRING.set(true);
     let _acquisition = Acquisition;
-    // An explicit override is taken literally; the 30 s default is scaled in
-    // test labs like every other product wait.
-    let bound = operator_wait_budget();
+    // Launch stages use the remaining overall deadline. Other foreground
+    // calls retain the literal override or scaled 30 s default.
+    let bound = LAUNCH_DEADLINE.get().map_or_else(operator_wait_budget, |deadline| deadline.saturating_duration_since(std::time::Instant::now()));
     let started = std::time::Instant::now();
     let poll = crate::timing::retry(std::time::Duration::from_millis(100));
     let mut notified = false;
@@ -255,6 +266,9 @@ impl RootGuard {
         Ok(vec![crate::runner::InheritedLock::new(self._file.transfer()?)])
     }
     pub fn exclusive(root:&Path)->Result<Self> {
+        if let Some(deadline) = LAUNCH_DEADLINE.get() {
+            return Self::exclusive_operator_by(root, deadline, &Default::default());
+        }
         foreground_acquire(|| Self::exclusive_now(root))
     }
     fn exclusive_now(root:&Path)->Result<Self> {
@@ -274,6 +288,9 @@ impl RootGuard {
     /// never past `deadline` or cancellation, for shared holders to finish.
     /// The lock is the same exclusive lock; only the wait for it is added.
     pub fn exclusive_by(root:&Path,deadline:std::time::Instant,cancellation:&crate::runner::Cancellation)->Result<Self> {
+        if let Some(launch) = LAUNCH_DEADLINE.get() {
+            return Self::operator_by(root, launch, cancellation);
+        }
         let until=deadline.min(std::time::Instant::now()+EXCLUSIVE_WAIT);
         // Hold a writer turn while draining existing shared holders. New
         // status/start probes cannot repeatedly overtake this queued effect.
@@ -281,10 +298,10 @@ impl RootGuard {
         let file=exclusive_file_until(&root.join(".execution.lock"),until,&|| cancellation.is_cancelled())?;
         Ok(Self{_file:file,_check:None})
     }
-    /// Short operator writes queue a writer turn for the foreground lock
-    /// budget (30 seconds by default), bounded by their overall deadline.
+    /// Operator writes queue a writer turn until the launch deadline when
+    /// scoped by LaunchWait, otherwise within the foreground lock budget.
     pub fn operator_by(root:&Path,deadline:std::time::Instant,cancellation:&crate::runner::Cancellation)->Result<Self> {
-        let until=deadline.min(std::time::Instant::now()+operator_wait_budget());
+        let until=LAUNCH_DEADLINE.get().unwrap_or_else(|| deadline.min(std::time::Instant::now()+operator_wait_budget()));
         let acquire=|| -> Result<Self> {
             let _turn=exclusive_file_until(&root.join(".execution-turn.lock"),until,&|| cancellation.is_cancelled())?;
             let file=exclusive_file_until(&root.join(".execution.lock"),until,&|| cancellation.is_cancelled())?;
@@ -315,9 +332,16 @@ impl RootGuard {
         Ok(Self{_file:file,_check:None})
     }
     fn shared(root:&Path)->Result<Self> {
-        let _turn=shared_file(&root.join(".execution-turn.lock"),"root exclusive operation is waiting; retry")?;
-        let file=shared_file(&root.join(".execution.lock"),"root maintenance or exclusive external operation is active; retry")?;
-        Ok(Self{_file:file,_check:None})
+        let acquire = || -> Result<Self> {
+            let _turn=shared_file(&root.join(".execution-turn.lock"),"root exclusive operation is waiting; retry")?;
+            let file=shared_file(&root.join(".execution.lock"),"root maintenance or exclusive external operation is active; retry")?;
+            Ok(Self{_file:file,_check:None})
+        };
+        acquire().map_err(|error| {
+            if LAUNCH_DEADLINE.get().is_some() && error.chain().any(|cause| matches!(cause.downcast_ref::<std::fs::TryLockError>(), Some(std::fs::TryLockError::WouldBlock))) {
+                error.context(OperatorLockContention { root: root.to_path_buf() })
+            } else { error }
+        })
     }
 }
 
@@ -387,33 +411,6 @@ impl ProjectGuard {
         let metadata=std::fs::metadata(&project)?;
         Ok(Self{_project:file,_root:root,root:root_path,project,identity:(metadata.dev(),metadata.ino())})
     }
-}
-
-/// Serialize multi-stage operator launches before they take execution locks.
-/// This intent is outside the execution lock order: holding it does not own
-/// the root, and background workers never acquire it. Separate intent avoids
-/// keeping the writer turn across stages that themselves need that turn.
-pub struct OperatorLaunchGuard { file: File }
-impl OperatorLaunchGuard {
-    pub fn acquire(root: &Path, deadline: std::time::Instant) -> Result<Self> {
-        let until = deadline.min(std::time::Instant::now() + operator_wait_budget());
-        let file = lock_file(&root.join(".operator-launch.lock"))?;
-        loop {
-            match file.try_lock() {
-                Ok(()) => return Ok(Self { file }),
-                Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < until => {
-                    std::thread::sleep(crate::timing::retry(std::time::Duration::from_millis(100))
-                        .min(until.saturating_duration_since(std::time::Instant::now())));
-                }
-                Err(std::fs::TryLockError::WouldBlock) => return Err(anyhow::Error::new(std::fs::TryLockError::WouldBlock)
-                    .context(OperatorLockContention { root: root.to_path_buf() })),
-                Err(error) => return Err(error.into()),
-            }
-        }
-    }
-}
-impl Drop for OperatorLaunchGuard {
-    fn drop(&mut self) { let _ = self.file.unlock(); }
 }
 
 /// Foreground coordinator intent survives release of project ownership for

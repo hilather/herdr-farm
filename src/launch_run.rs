@@ -623,7 +623,7 @@ struct ProfilePlan {
     refresh: Option<(PathBuf, PathBuf)>,
 }
 
-fn profile_plan(ctx: &Ctx, project: &Path, args: &Args, observe: bool) -> Result<ProfilePlan> {
+fn profile_plan(ctx: &Ctx, project: &Path, args: &Args, observe: bool, deadline: Instant) -> Result<ProfilePlan> {
     ensure!(!args.profile.is_empty() && args.profile.len()<=64 && args.profile.as_bytes()[0].is_ascii_alphabetic() && args.profile.bytes().all(|c|c.is_ascii_alphanumeric() || b"_-".contains(&c)), "invalid profile name");
     let mut store=herdr_farm::store::SqliteStore::open(&project.join(".state/state.db"))?;
     let candidate = store.latest_native_profile(&args.profile)?;
@@ -640,7 +640,11 @@ fn profile_plan(ctx: &Ctx, project: &Path, args: &Args, observe: bool) -> Result
     let reason = match &candidate {
         Some(_) if retained.as_ref().is_some_and(|v|v["preparation"]["launchable"] != true) => Some("latest profile evidence is not launchable".into()),
         Some(_) if frozen.as_ref().is_some_and(|f|Path::new(&f.herdr.path).canonicalize().ok()!=herdr.canonicalize().ok()) => Some("selected Herdr executable changed".into()),
-        Some((reference,_)) if observe => herdr_farm::profile_preparation::revalidate(project, reference, Instant::now()+herdr_farm::profile_preparation::BUDGET, Default::default()).err().map(|e|format!("{e:#}")),
+        Some((reference,_)) if observe => match herdr_farm::profile_preparation::revalidate(project, reference, deadline, Default::default()) {
+            Ok(_) => None,
+            Err(error) if error.is::<herdr_farm::execution_guard::OperatorLockContention>() => return Err(error.context("launch run stopped at step 1 (profile_evidence); no durable steps completed; rerun the same command")),
+            Err(error) => Some(format!("{error:#}")),
+        },
         Some(_) => None,
         None => Some(format!("no launchable evidence retained for profile {}", args.profile)),
     };
@@ -669,9 +673,9 @@ pub fn run(ctx: &Ctx, slug: &str, mut args: Args) -> Result<Value> {
     let operation_started = Instant::now();
     let capacity_explicit = args.max_active_workers.is_some();
     let project = ctx.root.join(slug).canonicalize().with_context(|| format!("project {slug} not found"))?;
-    let _launch_turn = herdr_farm::execution_guard::OperatorLaunchGuard::acquire(
-        &ctx.root, operation_started + Duration::from_secs(args.budget_seconds),
-    )?;
+    let _launch_wait = herdr_farm::execution_guard::LaunchWait::enter(
+        operation_started + Duration::from_secs(args.budget_seconds),
+    );
     eprintln!("{}", crate::capacity::report(&project, slug)?.0);
     // File locks do not alter SQLite bytes and span the entire multi-step launch.
     let memory_launch_guard = herdr_farm::authority::open_launch_lock(&project)?;
@@ -849,7 +853,11 @@ pub fn run(ctx: &Ctx, slug: &str, mut args: Args) -> Result<Value> {
         }
     }
     eprintln!("launch run: profile_evidence");
-    let plan=profile_plan(ctx, &project, &args, problems.is_empty());
+    let plan=profile_plan(ctx, &project, &args, problems.is_empty(), operation_started + Duration::from_secs(args.budget_seconds));
+    let plan = match plan {
+        Err(error) if error.is::<herdr_farm::execution_guard::OperatorLockContention>() => return Err(error),
+        other => other,
+    };
     if let Err(error)=&plan {problems.push(format!("profile evidence: {error:#}"));}
     problems.dedup();
     let repository_refusal="project repositories: canonical repository is not a local repository listed in PROJECT.md";
