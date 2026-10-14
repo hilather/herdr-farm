@@ -1407,6 +1407,9 @@ fn automatic_signer_refusals_change_nothing_and_policy_limits_deliver_owner_requ
 #[test]
 fn automatic_signer_reserves_and_defaults_to_owner_capacity() {
     let mut lab=Lab::new();
+    // The queued turn spans unscaled signing/profile subprocesses. Use the
+    // production foreground allowance rather than scaling those costs away.
+    lab.extra_env.push(("HERDR_FARM_LOCK_WAIT_SECS".into(), PathBuf::from("30")));
     lab.extra_env.push(("HERDR_BIN_PATH".into(), PathBuf::new()));
     lab.plant_launchable("codex-sol","codex","gpt-6.1-sol");
     let socket=lab.socket_inode_once("auto.socket");
@@ -1452,15 +1455,7 @@ fn automatic_signer_reserves_and_defaults_to_owner_capacity() {
     }
     std::thread::scope(|scope| {
         let attempts: Vec<_> = ["fourth", "fifth"].into_iter().map(|task| scope.spawn(move || {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-            loop {
-                let out = launch(task, false);
-                if !String::from_utf8_lossy(&out.stderr).contains("lock acquisition failed") {
-                    return out;
-                }
-                assert!(std::time::Instant::now() < deadline, "{}", String::from_utf8_lossy(&out.stderr));
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
+            launch(task, false)
         })).collect();
         for attempt in attempts {
             let out = attempt.join().unwrap();
@@ -2103,6 +2098,18 @@ fn launch_run_busy_execution_lock_exhaustion_keeps_the_resumable_step_report() {
     let prompt = lab.home.join("prompt.txt");
     fs::write(&prompt, "Plan the next milestone.").unwrap();
     let before = herdr_farm::runtime::snapshot(&lab.project).unwrap();
+    // Public CLI ingress must bound a queued launch before any durable step.
+    let intent = fs::OpenOptions::new().create(true).truncate(false).write(true)
+        .open(lab.root.join(".operator-launch.lock")).unwrap();
+    intent.try_lock().unwrap();
+    let started = Instant::now();
+    let error = lab.fail(&lab.run_args("busy", "codex-sol", "docs/busy.md", prompt.to_str().unwrap()));
+    assert!(started.elapsed() >= Duration::from_secs(1));
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(error.contains("operator root lock wait expired"), "{error}");
+    assert_eq!(herdr_farm::runtime::snapshot(&lab.project).unwrap(), before);
+    intent.unlock().unwrap();
+    drop(intent);
     let mut holder = Command::new("/usr/bin/python3").args(["-c",
         "import fcntl,sys; f=open(sys.argv[1],'a'); fcntl.flock(f,fcntl.LOCK_EX); print('ready',flush=True); sys.stdin.read()"])
         .arg(lab.root.join(".execution.lock")).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();

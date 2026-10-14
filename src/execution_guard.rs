@@ -296,6 +296,15 @@ impl RootGuard {
             } else { error }
         })
     }
+    /// Operator profile preparation keeps the maintenance/check exclusion
+    /// while queuing the same bounded writer turn as other operator writes.
+    pub fn exclusive_operator_by(root: &Path, deadline: std::time::Instant, cancellation: &crate::runner::Cancellation) -> Result<Self> {
+        let mut guard = Self::operator_by(root, deadline, cancellation)?;
+        let check = check_file(root)?;
+        check.try_lock().context("a verification or integration check is running; retry")?;
+        guard._check = Some(held(check));
+        Ok(guard)
+    }
     /// An observed exit gets a bounded 30 second window, with the same root
     /// fence and cancellation policy as other staged effects.
     pub fn exit_recording_by(root:&Path,deadline:std::time::Instant,cancellation:&crate::runner::Cancellation)->Result<Self> {
@@ -378,6 +387,33 @@ impl ProjectGuard {
         let metadata=std::fs::metadata(&project)?;
         Ok(Self{_project:file,_root:root,root:root_path,project,identity:(metadata.dev(),metadata.ino())})
     }
+}
+
+/// Serialize multi-stage operator launches before they take execution locks.
+/// This intent is outside the execution lock order: holding it does not own
+/// the root, and background workers never acquire it. Separate intent avoids
+/// keeping the writer turn across stages that themselves need that turn.
+pub struct OperatorLaunchGuard { file: File }
+impl OperatorLaunchGuard {
+    pub fn acquire(root: &Path, deadline: std::time::Instant) -> Result<Self> {
+        let until = deadline.min(std::time::Instant::now() + operator_wait_budget());
+        let file = lock_file(&root.join(".operator-launch.lock"))?;
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(Self { file }),
+                Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < until => {
+                    std::thread::sleep(crate::timing::retry(std::time::Duration::from_millis(100))
+                        .min(until.saturating_duration_since(std::time::Instant::now())));
+                }
+                Err(std::fs::TryLockError::WouldBlock) => return Err(anyhow::Error::new(std::fs::TryLockError::WouldBlock)
+                    .context(OperatorLockContention { root: root.to_path_buf() })),
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+}
+impl Drop for OperatorLaunchGuard {
+    fn drop(&mut self) { let _ = self.file.unlock(); }
 }
 
 /// Foreground coordinator intent survives release of project ownership for

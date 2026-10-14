@@ -669,6 +669,9 @@ pub fn run(ctx: &Ctx, slug: &str, mut args: Args) -> Result<Value> {
     let operation_started = Instant::now();
     let capacity_explicit = args.max_active_workers.is_some();
     let project = ctx.root.join(slug).canonicalize().with_context(|| format!("project {slug} not found"))?;
+    let _launch_turn = herdr_farm::execution_guard::OperatorLaunchGuard::acquire(
+        &ctx.root, operation_started + Duration::from_secs(args.budget_seconds),
+    )?;
     eprintln!("{}", crate::capacity::report(&project, slug)?.0);
     // File locks do not alter SQLite bytes and span the entire multi-step launch.
     let memory_launch_guard = herdr_farm::authority::open_launch_lock(&project)?;

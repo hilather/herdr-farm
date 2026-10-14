@@ -409,3 +409,50 @@ health evaluation timing injecting unrelated notices; assertions remain exact.
 The telemetry health episode and coordinator critical-notice wake workflows
 retain the default policy. See `telemetry/contracts-health.md` for deployment
 triggers and the no-bound-usage coverage caveat.
+
+## TEST-FLAKE-9: operator launch turns and telemetry completion
+
+Operator `launch run` takes a root-local `.operator-launch.lock` intent before
+preflight and retains it across its resumable steps. It queues within the
+foreground lock budget (30 seconds in production, 600 ms at the shared lab
+scale, with a 250 ms floor), bounded by the launch's overall deadline;
+`HERDR_FARM_LOCK_WAIT_SECS` remains a literal override. Expiry returns typed
+`OperatorLockContention`. The intent precedes execution locks and is never
+acquired by background workers. It does not block ticker execution. Profile
+preparation also queues the `.execution-turn.lock` writer turn through
+`RootGuard::exclusive_operator_by`, preserving exclusion of running checks.
+This prevents concurrent launches from repeatedly overtaking each other's
+shared/exclusive stages; capacity admission and its refusal remain unchanged.
+The concurrent capacity E2E now invokes each launch once and still requires
+both refusals to report `project worker capacity is full`. That fixture uses
+an explicit 30-second foreground allowance because the intent spans unscaled
+signing/profile subprocesses; the shared test time scale remains enabled.
+
+Telemetry scheduling starts collection on the first eligible pass, after
+controller services, without an initial jitter or mandatory quiet-window wait.
+Collection is asynchronous at idle CPU and I/O priority, so full completion
+has no 15-second wall-time bound under load. Ticker collection reads at most
+8 MiB per turn and resumes persisted cursors; transactions batch up to 2,000
+lines rather than committing each record. If another collection is needed,
+its interval retains the native-call quiet window (15.5 seconds in labs),
+even when the configured interval is one second. The recorded-source/new-sidecar
+E2E uses the existing telemetry batch workflow's 60-second idle-worker allowance.
+This is a contract-aligned observation deadline, not a product execution budget
+or a weaker usage assertion: exact usage totals, paused operating intervals,
+and all usage gates remain required. The 15.5-second floor does not itself
+prove this fixture requires multiple passes; idle scheduling alone rules out
+a structural 15-second completion guarantee.
+
+Sandbox validation: lib 528 passed, 84 socket-denied failures, 13 ignored,
+and one admission deadline failure that passed on isolated rerun. Operator
+launch 30 passed initially; four failures explicitly reported socket denial
+and five native probe servers exited at socket startup. Two additional tests
+saw the CLI binary replaced by overlapping builds; both passed on sequential
+reruns against the stable binary. The concurrent capacity test and extended
+socket-free lock-expiry workflow passed. Telemetry scale: four passed, 13
+ignored, including the recorded-source/new-sidecar and kill/resume workflows.
+Clippy completed with no warnings in changed lines; existing warnings remain.
+The three checkout-sensitive `copy_jobs::tests` are not in the requested lib
+or integration targets and were not run. Full socket failure names and test
+output are retained in `target/test-flake-9-socket-failures.txt` and the
+`target/test-flake-9-*.log` files for the steward's outside-sandbox checks.
