@@ -2971,3 +2971,34 @@ including finished attempts; it does not require relaunching workers.
 A bound source alone does not prove a complete tail: inspect its persisted
 cursor and the expected usage records/totals. Retention tombstones continue
 to prevent reingestion. Never delete the sidecar to backfill.
+
+## Project collection state (ingest 0018)
+
+`collection_check` is a single content-free project receipt, written after a
+successful collection even when no source contains new bytes. It records the
+check time, last byte progress, pending budget work and the start of continuously
+due work. Read-only projections fall back to `collect_offsets.updated_unix_ms`
+for older sidecars; reads never migrate or manufacture a collection receipt.
+`collection_not_run` means no collect has ever been recorded, including by an
+empty collection. The query sidecar watermark, doctor last-collect line and
+workspace collection field share this receipt.
+
+Open attempts or unread project-scoped source bytes make collection due. With
+nothing due, `collector_idle` is ok regardless of receipt age. Discovery uses
+recorded execution homes, project scope and maintenance tombstones; foreign
+rollouts do not make this project's collector stale. Progress is recorded atomically with each advancing native cursor, so an
+interrupted pass or busy final receipt cannot conceal a committed batch. Recent progress with budget
+work pending is `collector_catching_up` (at most warn). Due work without progress
+warns after 15 minutes and becomes critical after one hour. Repeated empty checks
+advance the check watermark but do not reset continuously due work's stall clock.
+Idle checks resolve existing collector alerts on the next health evaluation.
+
+The singleton belongs to `sidecar.collection_check`: source-of-truth, retained
+without age pruning, overwritten per collect and included in full sidecar backups.
+No canonical schema changes are involved. Complete-line ticker budgets and fair
+home/source rotation retain their existing bounded catch-up policy.
+
+Receipt admission is nonblocking: if another sidecar writer owns admission, an
+unchanged collection still succeeds and defers its advisory check receipt to the
+next pass. Previously committed offsets remain readable; busy receipt admission
+never manufactures progress or resolves a due stale collector.

@@ -294,7 +294,7 @@ impl<'a> Sources<'a> {
                 let streams: BTreeMap<String, i64> = if table("telemetry_streams")? {
                     db.prepare("SELECT stream,version FROM telemetry_streams")?.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?
                 } else { BTreeMap::from([("codex".to_owned(), db.query_row("PRAGMA user_version", [], |r| r.get(0))?)]) };
-                let last_collect: Option<i64> = db.query_row("SELECT max(updated_unix_ms) FROM collect_offsets", [], |r| r.get(0))?;
+                let last_collect = crate::telemetry::codex::last_collect(&db)?;
                 let usage_rowid: Option<i64> = db.query_row("SELECT max(rowid) FROM codex_usage", [], |r| r.get(0))?;
                 let valuation = if table("valuation_revisions")? {
                     db.query_row("SELECT revision,digest,computed_unix_ms FROM valuation_revisions ORDER BY revision DESC LIMIT 1", [],

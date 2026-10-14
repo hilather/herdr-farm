@@ -68,6 +68,8 @@ fn envelopes_replay_identically_after_interrupted_collect() {
     const FILES: usize = 6;
     const REPEATS: usize = 400;
     let f = Fixture::new();
+    f.cli("collect");
+    f.sidecar().execute("UPDATE collection_check SET checked_unix_ms=?1,progress_unix_ms=NULL,due_since_unix_ms=?1", [unix_ms() - 3 * 60 * 60_000]).unwrap();
     let mut paths = Vec::new();
     for n in 0..FILES {
         let sid = if n == 0 { SID.to_owned() } else { format!("00000000-0000-4000-8000-{n:012}") };
@@ -90,6 +92,10 @@ fn envelopes_replay_identically_after_interrupted_collect() {
     let partial = f.count("source_observations");
     assert!(partial > 0 && partial < per_file * FILES as i64, "interrupted after {partial} observations");
     assert_eq!(partial % per_file, 0, "only whole rollouts are committed");
+    let health = f.cli_args(&["health", "--json"]).0;
+    let collector = health["states"].as_array().unwrap().iter().find(|s| s["rule"] == "collector_stale").unwrap();
+    assert_eq!(collector["state"], "warn", "committed progress survives the interrupted pass: {collector}");
+    assert_eq!(collector["reasons"][0]["code"], "collector_catching_up");
 
     f.cli("collect");
     assert_eq!((f.count("source_observations"), f.count("codex_usage"), f.count("source_cursors")),
@@ -620,10 +626,15 @@ fn finished_large_rollout_resumes_across_ticker_passes_and_backfills() {
         fs::remove_file(f.root.join(".ticker.stop")).unwrap();
     };
     pass();
+    let health = || f.cli_args(&["health", "--json"]).0["states"].as_array().unwrap().iter().find(|s| s["rule"] == "collector_stale").unwrap().clone();
+    let catching_up = health();
+    assert_ne!(catching_up["state"], "critical");
+    assert_eq!(catching_up["reasons"][0]["code"], "collector_catching_up");
     let first = offset();
     assert!(first > 8 << 20 && first < end, "committed full line: {first}/{end}");
     pass();
     assert!(offset() > first && offset() < end);
+    assert_ne!(health()["state"], "critical");
     pass();
     assert_eq!(offset(), end);
     let report = f.cli_args(&["usage", "--json"]).0;
@@ -665,4 +676,38 @@ fn finished_unbound_health_item_clears_after_cli_backfill() {
     let (backfill, _) = f.cli("collect");
     assert_eq!(backfill["attempts"][0]["usage"]["total_tokens"], 1680);
     assert_eq!(items(&f.cli_args(&["health", "evaluate", "--json"]).0), serde_json::json!([]));
+}
+
+#[test]
+fn finished_project_is_idle_until_new_rollout_bytes_make_collection_due() {
+    let f = Fixture::new();
+    let path = f.rollout(&f.home, "idle", &["head.jsonl"], &f.worktree(), f.decided + 1_000, "0.154.0");
+    rusqlite::Connection::open(f.project.join(".state/state.db")).unwrap().execute("UPDATE attempts SET state='completed'", []).unwrap();
+    f.cli("collect");
+    let old = unix_ms() - 3 * 60 * 60_000;
+    age(&path, 3 * 60 * 60 + 60);
+    f.sidecar().execute("UPDATE collect_offsets SET updated_unix_ms=?1", [old]).unwrap();
+    f.sidecar().execute("UPDATE collection_check SET checked_unix_ms=?1,progress_unix_ms=?1,due_since_unix_ms=NULL", [old]).unwrap();
+    let state = || f.cli_args(&["health", "--json"]).0["states"].as_array().unwrap().iter().find(|s| s["rule"] == "collector_stale").unwrap().clone();
+    assert_eq!(state()["reasons"][0]["code"], "collector_idle");
+    assert_eq!(state()["state"], "ok");
+    let new_bytes = tail(&f, 1).replace("@SID@", SID);
+    append(&path, &new_bytes[..40]);
+    let canonical = rusqlite::Connection::open(f.project.join(".state/state.db")).unwrap();
+    canonical.execute("UPDATE attempts SET state='running'", []).unwrap();
+    assert_eq!(state()["state"], "critical");
+    canonical.execute("UPDATE attempts SET state='completed'", []).unwrap();
+    assert_eq!(state()["state"], "critical", "finished attempts retain unread source work");
+    f.cli_args(&["health", "evaluate", "--json"]);
+    // Retrying an unfinished line records checks but makes no durable progress.
+    for _ in 0..2 {
+        f.cli("collect");
+        assert_eq!(state()["state"], "critical");
+    }
+    append(&path, &new_bytes[40..]);
+    f.cli("collect");
+    assert_eq!(state()["state"], "ok");
+    assert_eq!(state()["reasons"][0]["code"], "collector_idle");
+    let evaluated = f.cli_args(&["health", "evaluate", "--json"]).0;
+    assert!(evaluated["resolved"].as_array().unwrap().iter().any(|a| a["rule"] == "collector_stale"));
 }

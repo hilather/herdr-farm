@@ -119,6 +119,7 @@ pub fn text(s: &Value) -> String {
         .map_or_else(|| "n/a".into(), |t| t.strftime("%Y-%m-%d %H:%M:%S UTC").to_string());
     let _ = writeln!(out, "{slug} · fleet · query {at} · usage coverage {} · advisory, read-only", s["coverage"].as_object().map_or("n/a".into(), |_| value(&s["coverage"])));
 
+    let _ = writeln!(out, "collection: {} ({})", s["collection"]["state"].as_str().unwrap_or("unknown"), s["collection"]["reason"].as_str().unwrap_or("collection_not_run"));
     let _ = writeln!(out, "{}", history(s));
     let names: Vec<Value> = s["configuration_names"].as_array().into_iter().flatten().take(PANE_ROWS).cloned().collect();
     out += &super::super::configuration_names::text(&names);

@@ -310,6 +310,85 @@ pub fn collection_configured(project: &Path) -> Result<bool> {
     Ok(false)
 }
 
+/// Durable cursor/observation changes, rather than bytes merely reread from a
+/// partial line or unchanged mutable source, certify collection progress.
+fn progress_positions(db: &Connection) -> Result<Vec<(String, i64)>> {
+    Ok(db.prepare("SELECT 'native:' || path_digest || ':' || device || ':' || inode,byte_offset FROM collect_offsets
+        UNION ALL SELECT 'ingest-offset:' || source,byte_offset FROM source_cursors
+        UNION ALL SELECT 'ingest-observations:' || source,observations FROM source_cursors
+        UNION ALL SELECT 'sdk:' || source_digest || ':' || device || ':' || inode,byte_offset FROM gemini_file_cursors ORDER BY 1")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?)
+}
+
+/// The recorded collection/check watermark, without filesystem discovery.
+pub(crate) fn last_collect(db: &Connection) -> Result<Option<i64>> {
+    let table: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='collection_check' AND type='table')", [], |r| r.get(0))?;
+    let check: Option<i64> = if table { db.query_row("SELECT max(checked_unix_ms) FROM collection_check", [], |r| r.get(0))? } else { None };
+    let offset: Option<i64> = db.query_row("SELECT max(updated_unix_ms) FROM collect_offsets", [], |r| r.get(0))?;
+    Ok(check.into_iter().chain(offset).max())
+}
+
+/// Project collection receipt shared by health, query, doctor and workspace.
+/// Old sidecars fall back to their durable offsets until their next collect.
+pub(crate) fn collection_state(project: &Path, db: &Connection, now: i64) -> Result<Value> {
+    let table: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='collection_check' AND type='table')", [], |r| r.get(0))?;
+    let check: Option<(i64, Option<i64>, bool, Option<i64>)> = if table {
+        db.query_row("SELECT checked_unix_ms,progress_unix_ms,pending,due_since_unix_ms FROM collection_check WHERE singleton=1", [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional()?
+    } else { None };
+    let at = last_collect(db)?;
+    let Some(at) = at else { return Ok(json!({"state": "unknown", "reason": "collection_not_run", "last_collect_unix_ms": null})); };
+    let (attempts, mut homes) = canonical(project)?;
+    let coordinator = claude::coordinator_dir(project)?;
+    if let Some(path) = &coordinator { homes.push(path.display().to_string()); }
+    let canonical = super::read_only(&project.join(".state/state.db"))?;
+    let open: bool = canonical.query_row("SELECT EXISTS(SELECT 1 FROM attempts WHERE state IN ('reserved','launching','running','awaiting_input') AND termination_observed=0)", [], |r| r.get(0))?;
+    let mut due = open;
+    let has_decisions: bool = canonical.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='dispatch_decisions' AND type='table')", [], |r| r.get(0))?;
+    let earliest = if has_decisions { canonical.query_row("SELECT min(decided_unix_ms) FROM dispatch_decisions", [], |r| r.get::<_, Option<i64>>(0))? } else { None };
+    let tombstones = super::maintenance::Tombstones::of(project)?;
+    let project_path = std::fs::canonicalize(project)?;
+    let worktrees = format!("{}/.state/worktrees/", project_path.display());
+    let mut ignored = ScopeChanges::new();
+    for home in homes {
+        if due { break; }
+        let mut files = Vec::new();
+        let owner_source = coordinator.as_ref().is_some_and(|p| p == Path::new(&home));
+        if owner_source { files.extend(claude::coordinator_files(Path::new(&home))); }
+        if !owner_source && (attempts.iter().any(|a| a.codex() && a.home.as_ref() == Some(&home)) || !attempts.iter().any(|a| a.home.as_ref() == Some(&home))) {
+            walk(&Path::new(&home).join(".codex/sessions"), 0, &mut files);
+        }
+        if !owner_source {
+            if attempts.iter().any(|a| a.kind.as_deref() == Some("claude") && a.home.as_ref() == Some(&home)) {
+                claude::walk(&Path::new(&home).join(".claude/projects"), &mut files);
+            }
+            files.extend(muse::discover(&home, &attempts).into_keys());
+            files.extend(gemini::discover(&home, &attempts, &worktrees).into_keys());
+        }
+        for file in files {
+            let key = digest(file.as_os_str().as_encoded_bytes());
+            if tombstones.key(super::maintenance::SESSIONS, &format!("path:{key}")).is_some() { continue; }
+            let Ok(meta) = std::fs::symlink_metadata(&file) else { continue };
+            if !meta.is_file() { continue; }
+            let unchanged: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM collect_offsets WHERE path_digest=?1 AND device=?2 AND inode=?3 AND byte_offset=?4 AND updated_unix_ms>=?5)",
+                params![key, meta.dev() as i64, meta.ino() as i64, meta.len() as i64, meta.mtime() * 1000 + meta.mtime_nsec() / 1_000_000], |r| r.get(0))?;
+            if unchanged { continue; }
+            if file.starts_with(Path::new(&home).join(".codex/sessions")) && !in_project(db, &file, &worktrees, earliest, &mut ignored)? { continue; }
+            due = true;
+            break;
+        }
+        if due { break; }
+    }
+    let age = (now - at).max(0);
+    let stall_at = check.and_then(|c| c.1.into_iter().chain(c.3).max()).unwrap_or(at);
+    let stalled_ms = (now - stall_at).max(0);
+    let progressing = check.is_some_and(|c| c.2 && c.1.is_some_and(|p| p == c.0 && now - p < 15 * 60_000));
+    let reason = if !due { "collector_idle" } else if progressing { "collector_catching_up" } else if stalled_ms >= 15 * 60_000 { "collector_stale" } else { "collector_current" };
+    let state = if !due { "ok" } else if progressing { "warn" } else if stalled_ms >= 60 * 60_000 { "critical" } else if stalled_ms >= 15 * 60_000 { "warn" } else { "ok" };
+    Ok(json!({"state": state, "reason": reason, "last_collect_unix_ms": at, "age_ms": age, "stalled_ms": stalled_ms, "due": due,
+        "last_progress_unix_ms": check.and_then(|c| c.1)}))
+}
+
 type ScopeChanges = Vec<(String, Option<(i64, i64, i64)>)>;
 
 /// Inspect only the bounded metadata line; foreign content never reaches ingest.
@@ -374,8 +453,12 @@ pub fn collect(project: &Path, budget: Budget, create: bool) -> Result<Option<Co
     let coordinator = claude::coordinator_dir(project)?;
     // A separate source root prevents worker discovery in the owner home.
     if let Some(path) = &coordinator { homes.push(path.display().to_string()); }
-    super::gemini::collect(project, budget, &attempts)?;
     let Some(mut db) = super::sidecar::open(project, create || !homes.is_empty())? else { return Ok(None) };
+    let before_now = jiff::Timestamp::now().as_millisecond();
+    let before = collection_state(project, &db, before_now)?;
+    let due_since = (before["due"] == true).then(|| before_now - before["stalled_ms"].as_i64().unwrap_or(0));
+    let progress_before = progress_positions(&db)?;
+    super::gemini::collect(project, budget, &attempts)?;
     // Foreground collection races the same accounting/analytics writers. A
     // longer bounded admission wait prevents their successful retries from
     // starving a collector at the old five-second timeout. Ticker stays at
@@ -529,6 +612,24 @@ pub fn collect(project: &Path, budget: Budget, create: bool) -> Result<Option<Co
             canonical.notify_worker_question(&crate::domain::AttemptId::new(attempt).map_err(anyhow::Error::msg)?, &session, &call, &tool, jiff::Timestamp::now().as_millisecond())?;
         }
     }
+    let now = jiff::Timestamp::now().as_millisecond();
+    let advanced = progress_positions(&db)? != progress_before;
+    // A completed unchanged prefix must remain readable beside another writer.
+    // Defer only the advisory receipt when admission is busy; offsets/progress
+    // already committed by this pass remain the durable fallback.
+    db.busy_timeout(std::time::Duration::ZERO)?;
+    let tx = match db.transaction_with_behavior(TransactionBehavior::Immediate) {
+        Ok(tx) => tx,
+        Err(error) if matches!(error.sqlite_error_code(), Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)) => return Ok(Some(done)),
+        Err(error) => return Err(error.into()),
+    };
+    tx.execute("INSERT INTO collection_check(singleton,checked_unix_ms,progress_unix_ms,pending) VALUES(1,?1,?2,?3)
+        ON CONFLICT(singleton) DO UPDATE SET checked_unix_ms=excluded.checked_unix_ms,
+        progress_unix_ms=coalesce(excluded.progress_unix_ms,collection_check.progress_unix_ms),pending=excluded.pending",
+        params![now, advanced.then_some(now), done.budget_exhausted || unwritable])?;
+    let due = collection_state(&project, &tx, now)?["due"] == true;
+    tx.execute("UPDATE collection_check SET due_since_unix_ms=CASE WHEN ?1 THEN coalesce(due_since_unix_ms,?2) ELSE NULL END WHERE singleton=1", params![due, due_since.unwrap_or(now)])?;
+    tx.commit()?;
     Ok(Some(done))
 }
 
@@ -1067,12 +1168,12 @@ fn tail_batch(db: &mut Connection, file: &Path, home: &str, worktrees: &str, all
     // An append after this metadata observation is read on the next pass,
     // exactly as on the writer path. Recheck the idle deadline after the read.
     if !reread.contains(&key) && meta.len() > 0 {
+        let modified = meta.mtime() * 1000 + meta.mtime_nsec() / 1_000_000;
         let unchanged: Option<bool> = db.query_row("SELECT x.last_turn_offset IS NULL OR x.last_turn_completed=1
             FROM collect_offsets c JOIN source_cursors i ON i.source=c.path_digest
             JOIN rollout_ingest_state x ON x.path_digest=c.path_digest
-            WHERE c.path_digest=?1 AND c.device=?2 AND c.inode=?3 AND c.byte_offset=?4",
-            params![key, meta.dev() as i64, meta.ino() as i64, meta.len() as i64], |r| r.get(0)).optional()?;
-        let modified = meta.mtime() * 1000 + meta.mtime_nsec() / 1_000_000;
+            WHERE c.path_digest=?1 AND c.device=?2 AND c.inode=?3 AND c.byte_offset=?4 AND c.updated_unix_ms>=?5",
+            params![key, meta.dev() as i64, meta.ino() as i64, meta.len() as i64, modified], |r| r.get(0)).optional()?;
         if unchanged.is_some_and(|completed| completed
             || jiff::Timestamp::now().as_millisecond() - modified < ingest::FINAL_EVENT_IDLE_MS) {
             *span = (meta.len(), meta.len());
@@ -1084,6 +1185,7 @@ fn tail_batch(db: &mut Connection, file: &Path, home: &str, worktrees: &str, all
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let stored = tx.query_row("SELECT device,inode,byte_offset,records,rate_limits,model,effort FROM collect_offsets WHERE path_digest=?1", [&key],
         |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))).optional()?;
+    let stored_position = stored.as_ref().map(|cursor| (cursor.0, cursor.1, cursor.2));
     let reread_zero = stored.as_ref().is_some_and(|cursor| cursor.2 == 0)
         && tx.query_row("SELECT EXISTS(SELECT 1 FROM rollout_sources WHERE path_digest=?1)", [&key], |r| r.get::<_, bool>(0))?;
     // A byte-zero replay must cover predates-ingest gaps atomically: those
@@ -1260,6 +1362,13 @@ fn tail_batch(db: &mut Connection, file: &Path, home: &str, worktrees: &str, all
         ON CONFLICT(path_digest) DO UPDATE SET device=excluded.device,inode=excluded.inode,byte_offset=excluded.byte_offset,records=excluded.records,
         rate_limits=excluded.rate_limits,model=excluded.model,effort=excluded.effort,updated_unix_ms=excluded.updated_unix_ms",
         params![key, meta.dev() as i64, meta.ino() as i64, cursor.offset as i64, cursor.records, cursor.rate_limits, cursor.model, cursor.effort, now])?;
+    if cursor.offset > 0 && stored_position != Some((meta.dev() as i64, meta.ino() as i64, cursor.offset as i64)) {
+        // Progress survives interruption before the overall pass receipt. Health
+        // can observe a committed batch while the next source is still busy.
+        let progressed_at = jiff::Timestamp::now().as_millisecond();
+        tx.execute("INSERT INTO collection_check(singleton,checked_unix_ms,progress_unix_ms,pending) VALUES(1,?1,?1,1)
+            ON CONFLICT(singleton) DO UPDATE SET checked_unix_ms=excluded.checked_unix_ms,progress_unix_ms=excluded.progress_unix_ms,pending=1", [progressed_at])?;
+    }
     tx.execute("UPDATE rollout_sources SET records=?2 WHERE path_digest=?1", params![key, cursor.records])?;
     ledger.finish(&tx, cursor.session.as_ref().map(|s| s.0.as_str()), cursor.offset, now)?;
     if cursor.session.is_some() {

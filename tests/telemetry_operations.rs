@@ -251,6 +251,10 @@ fn pane_recorded(mut pane: Value) -> Value {
             _ => {}
         }
     }
+    if let Some(collection) = pane.get_mut("collection").and_then(Value::as_object_mut) {
+        collection.remove("age_ms");
+        collection.remove("stalled_ms");
+    }
     clocks(&mut pane);
     pane
 }

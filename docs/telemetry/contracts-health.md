@@ -52,7 +52,7 @@ A change of a rule, threshold or read path is a new rules version. v5 adds
 | `result_waiting_on_coordinator` | attention | canonical unfinished worker-result inbox rows, independent of SEEN | age ≥ 1 min | ≥ 10 min | 1 h |
 | `test_weakening` | proxy | quality `tests-net-removal.v1` observation counts, last 24 hours | ≥ 1 flagged submission | — | 1 h |
 | `verification_flaky` | proxy | `quality flaky`, last 30 days | ≥ 1 flipped tree/policy pair | — | 1 h |
-| `collector_stale` | collection / codex | query `source_watermarks.sidecar.last_collect_unix_ms` | age ≥ 15 min | ≥ 60 min | 1 h |
+| `collector_stale` | collection / codex | query `source_watermarks.sidecar.last_collect_unix_ms` | due, no progress ≥ 15 min | due, no progress ≥ 60 min | 1 h |
 | `usage_after_termination` | consumption / codex | `usage.after_termination` (bound record times and canonical receipts) | ≥ 1 record | — | 1 h |
 | `usage_coverage` | consumption / codex | query M13 | < 100 % | < 50 % | 1 h |
 | `cost_coverage` | cost / codex | query M14 | < 100 % | < 50 % | 1 h |
@@ -383,3 +383,11 @@ health reads and recorded evaluations use the same diagnostic. The existing
 aggregate coverage alert and its notification episode remain authoritative
 for delivery. A successful backfill removes the named item on the next read
 or evaluation; see [contracts-collection.md](contracts-collection.md).
+
+Collection severity uses the shared project collection state (ingest 0018),
+not receipt age alone. `collector_idle` is always ok, including an old receipt;
+`collector_catching_up` is at most warn while recent byte progress continues.
+Only due work with no progress reaches the 15-minute warning / one-hour critical
+thresholds. An empty check is recorded but cannot hide a continuously stuck due
+collector. Existing false alerts resolve on the next evaluation when idle.
+Evidence includes receipt age, due status, progress time and stalled duration.

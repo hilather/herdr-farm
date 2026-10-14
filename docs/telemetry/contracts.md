@@ -1156,3 +1156,12 @@ running mark, with the later observation time recorded separately in its event.
 The completion mark records when the correction was made. No schema or retention
 classification changes: correction evidence lives in the existing event journal
 and lifecycle marks.
+
+### Collection-check receipt (ingest 0018)
+
+`migrations/telemetry/ingest/0018_collection_checks.sql` adds the singleton
+`collection_check` in the ingest stream's migration list. Its check, progress,
+pending-work and continuously-due timestamps unify project collection health,
+workspace and doctor. Retention class `sidecar.collection_check` retains the
+content-free singleton and includes it in full sidecar backups; no canonical
+schema version changes. See contracts-collection.md and contracts-health.md.

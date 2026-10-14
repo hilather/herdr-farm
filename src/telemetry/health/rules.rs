@@ -111,7 +111,7 @@ pub const RULES: &[Rule] = &[
         detail: "bound usage after termination warns; records remain counted in M08" },
     Rule { name: "collector_stale", family: "collection", service: Some("codex"), source: "query:source_watermarks.sidecar.last_collect_unix_ms",
         eval: Eval::Collector, direction: Direction::Above, warn: 15 * MINUTE, critical: HOUR, unit: "ms", window_ms: None, cooldown_ms: HOUR,
-        detail: "time since the last Codex collect; no sidecar or no collect recorded is unknown" },
+        detail: "idle is ok; due work without progress warns after 15 minutes and is critical after one hour; catching up is at most warn" },
     Rule { name: "usage_coverage", family: "consumption", service: Some("codex"), source: "query:M13", eval: Eval::Coverage("M13"),
         direction: Direction::Below, warn: 1000, critical: 500, unit: "permille", window_ms: None, cooldown_ms: HOUR,
         detail: "terminated Codex attempts with complete bound usage; below 100% warns, below 50% is critical" },
@@ -363,9 +363,11 @@ fn evaluate_rule(ctx: &mut Ctx, rule: &'static Rule) -> Result<Vec<Outcome>> {
             if sidecar.is_null() { return Ok(vec![unknown(rule, "collection_not_run", metric, unbounded(now))]); }
             let Some(at) = sidecar["last_collect_unix_ms"].as_i64() else { return Ok(vec![unknown(rule, "no_collect_recorded", metric, unbounded(now))]) };
             let age = now - at;
-            let state = grade(rule, |t| age >= t, |_| false);
-            outcome(rule, state, vec![json!({"code": if state == State::Ok { "collector_current" } else { "collector_stale" }, "age_ms": age})], metric,
-                json!({"from_unix_ms": at, "to_unix_ms": now, "semantics": "observation_lag"}), json!({"last_collect_unix_ms": at, "age_ms": age}))
+            let db = crate::telemetry::sidecar::read(ctx.project)?.expect("query read the sidecar");
+            let collection = crate::telemetry::codex::collection_state(ctx.project, &db, now)?;
+            let state = match collection["state"].as_str() { Some("critical") => State::Critical, Some("warn") => State::Warn, Some("ok") => State::Ok, _ => State::Unknown };
+            outcome(rule, state, vec![json!({"code": collection["reason"], "age_ms": age, "stalled_ms": collection["stalled_ms"]})], metric,
+                json!({"from_unix_ms": at, "to_unix_ms": now, "semantics": "observation_lag"}), json!({"last_collect_unix_ms": at, "age_ms": age, "collection": collection}))
         }
         Eval::Coverage(id) => {
             let r = ctx.result(id, None, None)?;

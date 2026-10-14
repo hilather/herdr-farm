@@ -233,6 +233,7 @@ fn snapshot_for(project: &Path, slug: &str, digest: bool) -> Value {
     let mut out = json!({"schema_version": SCHEMA_VERSION, "contract": CONTRACT, "project": slug, "status": "available",
         "query_unix_ms": answer["query_unix_ms"], "advisory": {"authority": "none", "writes": "none"},
         "coverage": result(&answer, "M13").map(metric_fields),
+        "collection": super::sidecar::read(project).ok().flatten().and_then(|db| super::codex::collection_state(project, &db, now).ok()),
         "needs_you": needs, "active": {"count": active.len(), "attempts": active}, "services": services,
         "configurations": configurations, "candidate_groups": groups,
         "replay": result(&answer, "M49").map(metric_fields), "alerts": alerts});
@@ -307,11 +308,12 @@ pub fn doctor_checks(project: &Path, slug: &str, config_dir: &Path) -> Vec<(Opti
         return out;
     }
     out.push((Some(true), format!("telemetry query service: ok (fleet snapshot in {elapsed} ms)")));
-    let lag = &snapshot["coverage"]["lag_ms"];
+    let collection = &snapshot["collection"];
+    let lag = &collection["age_ms"];
     match lag.as_i64() {
-        Some(ms) if ms <= 15 * 60_000 => out.push((Some(true), format!("telemetry ingestion lag: ok ({}s since the last collect)", ms / 1000))),
+        Some(ms) if collection["state"] == "ok" => out.push((Some(true), format!("telemetry ingestion lag: ok ({}s since the last collect)", ms / 1000))),
         Some(ms) => out.push((None, format!("telemetry ingestion lag: degraded ({}s since the last collect); run `telemetry {slug} collect`", ms / 1000))),
-        None => out.push((None, format!("telemetry ingestion lag: degraded (n/a: {}); run `telemetry {slug} collect`", snapshot["coverage"]["lag_reason"].as_str().unwrap_or("unknown")))),
+        None => out.push((None, format!("telemetry ingestion lag: degraded (n/a: {}); run `telemetry {slug} collect`", collection["reason"].as_str().unwrap_or("collection_not_run")))),
     }
     let active = snapshot["active"]["attempts"].as_array().cloned().unwrap_or_default();
     let uncovered: Vec<&Value> = active.iter().filter(|a| a["coverage"] != "complete").collect();

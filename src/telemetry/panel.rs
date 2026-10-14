@@ -28,12 +28,12 @@ fn show_usage(value: &Value) -> String {
     }
 }
 
-/// Sidecar presence and age of the last collect that ingested a rollout.
+/// Sidecar presence and age of the shared last collection/check watermark.
 pub fn collection(project: &Path, now_ms: i64) -> Result<String> {
     let Some(db) = super::sidecar::read(project)? else {
         return Ok("collection not run (no telemetry sidecar)".into());
     };
-    let last: Option<i64> = db.query_row("SELECT max(updated_unix_ms) FROM collect_offsets", [], |r| r.get(0))?;
+    let last = super::codex::last_collect(&db)?;
     Ok(format!("sidecar present; last collect {}", last.map_or("n/a (no_rollouts)".into(), |at| format!("{} ago", elapsed(now_ms - at)))))
 }
 

@@ -56,7 +56,15 @@ impl Planted {
         String::from_utf8(out.stderr).unwrap()
     }
     /// `telemetry demo collect` with no execution home: creates and migrates the sidecar, collects nothing.
-    fn sidecar_created(&self) { self.raw(&["collect"]); assert!(self.project.join(".state/telemetry.db").is_file()); }
+    fn sidecar_created(&self) {
+        self.raw(&["collect"]); assert!(self.project.join(".state/telemetry.db").is_file());
+        // These legacy fixtures model a sidecar predating collection-check receipts.
+        self.sidecar().execute("DELETE FROM collection_check", []).unwrap();
+    }
+    fn collection_due(&self) {
+        self.db().execute_batch("INSERT OR IGNORE INTO tasks(id,revision,state,title) VALUES('collect-due',1,'running','collect due');
+            INSERT OR IGNORE INTO attempts(id,task_id,revision,state,reservation,termination_observed) VALUES('collect-due-a','collect-due',1,'running','collect-due-a',0);").unwrap();
+    }
     fn health(&self) -> Value { self.json(&["health", "--json"]) }
     fn evaluate(&self) -> Value { self.json(&["health", "evaluate", "--json"]) }
     fn alerts(&self) -> Value { self.json(&["health", "alerts", "--json"]) }
@@ -199,7 +207,9 @@ fn ticker_health_evaluates_by_default_obeys_interval_and_never_notifies() {
 
     // A 20-minute-old collection is above the 15-minute warning threshold, below one hour.
     let now = unix_ms();
+    p.collection_due();
     p.sidecar().execute("INSERT INTO collect_offsets(path_digest,device,inode,byte_offset,records,rate_limits,model,effort,updated_unix_ms) VALUES('ticker-source',1,1,0,0,0,NULL,NULL,?1)", [now - 20 * MINUTE]).unwrap();
+    p.sidecar().execute_batch("UPDATE collection_check SET checked_unix_ms=(SELECT max(updated_unix_ms) FROM collect_offsets),progress_unix_ms=NULL,due_since_unix_ms=(SELECT max(updated_unix_ms) FROM collect_offsets),pending=0").unwrap();
     assert_eq!(p.evaluate()["recorded"], true);
     assert_eq!(evaluations(), (2, 1, 1));
     assert_eq!(open_alert(&p.alerts(), "collector_stale").unwrap()["occurrences"], 1);
@@ -269,7 +279,9 @@ fn ticker_notifies_critical_launch_stalled_episode_once() {
         assert_eq!(evaluations(), previous + 1);
     };
     let now = unix_ms();
+    p.collection_due();
     p.sidecar().execute("INSERT INTO collect_offsets(path_digest,device,inode,byte_offset,records,rate_limits,model,effort,updated_unix_ms) VALUES('ticker-source',1,1,0,0,0,NULL,NULL,?1)", [now - 20 * MINUTE]).unwrap();
+    p.sidecar().execute_batch("UPDATE collection_check SET checked_unix_ms=(SELECT max(updated_unix_ms) FROM collect_offsets),progress_unix_ms=NULL,due_since_unix_ms=(SELECT max(updated_unix_ms) FROM collect_offsets),pending=0").unwrap();
     assert_eq!(p.evaluate()["recorded"], true);
     // A rollout must leave old resolved, never-notified history quiet.
     p.sidecar().execute("INSERT INTO health_alerts(rule_key,rule,labels,state,reasons,metric,evidence_window,evidence,rules_version,opened_unix_ms,last_seen_unix_ms,occurrences,resolved_unix_ms) SELECT rule_key,rule,labels,'critical',reasons,metric,evidence_window,evidence,rules_version,opened_unix_ms,last_seen_unix_ms,occurrences,last_seen_unix_ms FROM health_alerts WHERE rule='collector_stale' AND resolved_unix_ms IS NULL", []).unwrap();
@@ -359,7 +371,9 @@ fn stale_collector_and_missing_sources_are_health_states_never_zero_usage() {
     assert_eq!((&s["state"], codes(&s)), (&json!("unknown"), vec!["no_collect_recorded".to_owned()]));
 
     let at = unix_ms() - 20 * MINUTE;
+    p.collection_due();
     p.sidecar().execute("INSERT INTO collect_offsets(path_digest,device,inode,byte_offset,records,rate_limits,model,effort,updated_unix_ms) VALUES('p',1,1,0,0,0,NULL,NULL,?1)", [at]).unwrap();
+    p.sidecar().execute_batch("UPDATE collection_check SET checked_unix_ms=(SELECT max(updated_unix_ms) FROM collect_offsets),progress_unix_ms=NULL,due_since_unix_ms=(SELECT max(updated_unix_ms) FROM collect_offsets),pending=0").unwrap();
     let evaluated = p.evaluate();
     let s = state(&evaluated, "collector_stale");
     assert_eq!((&s["state"], codes(s)), (&json!("warn"), vec!["collector_stale".to_owned()]));
@@ -616,7 +630,7 @@ fn attempt_cost_shift_and_latency_shift_compare_two_windows() {
 
 /// A copy without the fields that are a function of the clock, for comparing two reads.
 fn timeless(v: &Value) -> Value {
-    const CLOCK: [&str; 10] = ["query_unix_ms", "observation_cutoff_unix_ms", "lag_ms", "evaluated_unix_ms", "age_ms", "observed_unix_ms", "from_unix_ms", "to_unix_ms", "text", "lag_text"];
+    const CLOCK: [&str; 11] = ["stalled_ms", "query_unix_ms", "observation_cutoff_unix_ms", "lag_ms", "evaluated_unix_ms", "age_ms", "observed_unix_ms", "from_unix_ms", "to_unix_ms", "text", "lag_text"];
     match v {
         Value::Object(o) => Value::Object(o.iter().filter(|(k, _)| !CLOCK.contains(&k.as_str())).map(|(k, v)| (k.clone(), timeless(v))).collect()),
         Value::Array(a) => Value::Array(a.iter().map(timeless).collect()),
@@ -686,7 +700,9 @@ fn maintained_reads_match_live_never_go_stale_and_windows_follow_the_clock() {
     // Terminal 8 s after the current 7-day window opens: it leaves the window as the clock advances.
     task(&p.db(), "edge", "accepted", "code", &[one("completed")], unix_ms() - 7 * 24 * HOUR + 8_000 - 100);
     let at = unix_ms() - 15 * MINUTE + 8_000;
+    p.collection_due();
     p.sidecar().execute("INSERT INTO collect_offsets(path_digest,device,inode,byte_offset,records,rate_limits,model,effort,updated_unix_ms) VALUES('p',1,1,0,0,0,NULL,NULL,?1)", [at]).unwrap();
+    p.sidecar().execute_batch("UPDATE collection_check SET checked_unix_ms=(SELECT max(updated_unix_ms) FROM collect_offsets),progress_unix_ms=NULL,due_since_unix_ms=(SELECT max(updated_unix_ms) FROM collect_offsets),pending=0").unwrap();
     p.json(&["analytics", "refresh"]);
     let before = p.health();
     assert_eq!((&state(&before, "collector_stale")["state"], shift_samples(&before)), (&json!("ok"), (json!(8), json!(5))));
@@ -1417,4 +1433,42 @@ fn rule_table_is_declared_with_bounded_labels() {
     assert_eq!(p.json(&["health", "status"]), json!({"stream": "health", "version": {"status": "unavailable", "reason": "collection_not_run"}}));
     p.sidecar_created();
     assert_eq!(p.json(&["health", "status"]), json!({"stream": "health", "version": 1}));
+}
+
+/// Empty collections have a durable receipt; idle age cannot page the owner,
+/// and the next evaluation closes a previously critical collector alert.
+#[test]
+fn idle_collection_receipt_closes_a_critical_alert_and_never_escalates() {
+    let p = Planted::new();
+    p.raw(&["collect"]);
+    let old = unix_ms() - 3 * HOUR;
+    p.sidecar().execute("UPDATE collection_check SET checked_unix_ms=?1", [old]).unwrap();
+    let idle = p.evaluate();
+    let s = state(&idle, "collector_stale");
+    assert_eq!((&s["state"], codes(s)), (&json!("ok"), vec!["collector_idle".to_owned()]));
+    assert_eq!(s["evidence"]["last_collect_unix_ms"], old);
+    assert!(s["evidence"]["age_ms"].as_i64().unwrap() >= 3 * HOUR);
+    p.collection_due();
+    let stuck = p.evaluate();
+    assert_eq!(state(&stuck, "collector_stale")["state"], "critical");
+    assert_eq!(open_alert(&p.alerts(), "collector_stale").unwrap()["state"], "critical");
+    // Going idle resolves even an already open critical on the next evaluation.
+    p.db().execute("UPDATE attempts SET state='completed' WHERE id='collect-due-a'", []).unwrap();
+    let resolved = p.evaluate();
+    assert_eq!(state(&resolved, "collector_stale")["state"], "ok");
+    assert!(open_alert(&p.alerts(), "collector_stale").is_none());
+    assert!(resolved["resolved"].as_array().unwrap().iter().any(|a| a["rule"] == "collector_stale"));
+}
+
+#[test]
+fn repeated_empty_checks_do_not_hide_a_stuck_due_collector() {
+    let p = Planted::new();
+    p.collection_due();
+    p.raw(&["collect"]);
+    p.sidecar().execute("UPDATE collection_check SET due_since_unix_ms=?1", [unix_ms() - 2 * HOUR]).unwrap();
+    p.raw(&["collect"]);
+    let s = state(&p.health(), "collector_stale").clone();
+    assert_eq!(s["state"], "critical");
+    assert!(s["evidence"]["collection"]["age_ms"].as_i64().unwrap() < MINUTE);
+    assert!(s["evidence"]["collection"]["stalled_ms"].as_i64().unwrap() >= 2 * HOUR);
 }
