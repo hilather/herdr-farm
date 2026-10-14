@@ -258,6 +258,7 @@ pub fn header(body: &Value) -> String {
 pub fn rows_text(body: &Value) -> String {
     let mut out = String::new();
     for row in body["rows"].as_array().into_iter().flatten() { out += row["text"].as_str().unwrap_or(""); out.push('\n'); }
+    out += &crate::telemetry::analytics::generation_speed::text(&body["generation_speed"]);
     if let Some(cells) = body["by_agent"].as_array() {
         for m in cells {
             if m["status"] == "unavailable" { out += &format!("    {} by agent_kind: {}\n", m["metric_id"].as_str().unwrap_or(""), na(m["reason"].as_str())); continue; }

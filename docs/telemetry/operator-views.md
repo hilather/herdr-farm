@@ -32,7 +32,7 @@ telemetry <slug> view <view> --drill <metric> [--bucket B] [--page-size N] [--cu
 | view | rows (metric: label) | extra section |
 |---|---|---|
 | `project` | M01 accepted tasks, M02 acceptance rate, M06 lead time p95, M07 attempt amplification, M36 integration conflict rate | — |
-| `models` | M15 effective model reported, M08/M09 tokens, M13 usage coverage, M41/M42 paired quality | M02 and M07 per profile (`profile`) and requested agent (`agent_kind`); requested / reported / unknown model identity |
+| `models` | M104 output tokens per model second, M15 effective model reported, M08/M09 tokens, M13 usage coverage, M41/M42 paired quality | M02 and M07 per profile (`profile`) and requested agent (`agent_kind`); requested / reported / unknown model identity; M104 generation speed by model/profile |
 | `reviews` | M20–M23, M25 fix verified, M26 currently resolved, M27 reopen rate, M29 attribution coverage; proxies M45/M47/M48 labelled `[proxy]` | fixes: verified \| integrated \| currently resolved |
 | `cost` | M11 provider-billed spend, M12 estimated spend, M14 cost coverage, M04 cost per accepted task, M34, M37 | — |
 | `health` | M13, M15, M14, M29 coverage; M38–M40 services; M49 replay; M50 freshness | source watermarks (canonical head, sidecar streams, last collect, valuation revision) and per-family lag |
@@ -151,8 +151,10 @@ demo · project view · window [-inf, +inf) · live
 <!-- example: view models -->
 ```text
 demo · models view · window [-inf, +inf) · live
+  M104 output tokens per model second: n/a (model_duration_not_reported) · basis lane_analytics · coverage unavailable · n=n/a · lag n/a (collection_not_run) · live
   M15 effective model reported: n/a (no_certified_source) · basis central_report · coverage unavailable · n=n/a · lag n/a (collection_not_run) · live
   M08 input tokens: n/a (no_certified_source) · basis lane_accounting · coverage unavailable · n=n/a · lag n/a (collection_not_run) · live
+    M104 coordinator: n/a (coordinator_request_duration_not_reported)
     M02 agent_kind=unknown: 2/3 (66.7%) · n=3
     M07 agent_kind=unknown: 5/2 (= 2.5 attempts per accepted task) · n=2
   identity requested agent (profile kind): unknown 3 tasks
@@ -315,3 +317,13 @@ command failures and shares by class and `by_profile`, lingering nearest-rank
 p50/p95 with sample count, and unanswered requests. Shares use numerator /
 denominator strings; an empty denominator is null. Summary status/coverage identifies unavailable or partial collection.
 Missing attempts are excluded from observed command/latency totals and remain in the end-state distribution.
+
+### M104 generation speed
+
+The models view's `generation_speed` section reuses its M104 query detail:
+`by_model`, `by_profile`, and coordinator summaries. Text shows output tok/s,
+response median/p10/p90, and the measured model/wall fraction. Result-only
+Claude timing supplies aggregate speed with an unavailable request distribution.
+Missing timing stays unavailable with its reason. See the
+[M104 definition](contracts-analytics.md#m104--output-tokens-per-model-second-m104v1)
+for collection, timing, bounded retention and interpretation.

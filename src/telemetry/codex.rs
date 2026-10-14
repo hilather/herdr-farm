@@ -1260,6 +1260,11 @@ fn record(tx: &Transaction, ledger: &ingest::Ledger, at: u64, tag: &Tag, line: &
 #[allow(clippy::too_many_arguments)]
 fn record_with_classes(tx: &Transaction, ledger: &ingest::Ledger, at: u64, tag: &Tag, line: &[u8], key: &str, home: &str, worktrees: &str, cursor: &mut Cursor, now: i64,
     done: &mut Collected, observed: &mut Option<Value>, test_classes: &mut ProjectTestClasses) -> Result<bool> {
+    if let Some((session, version, _)) = &cursor.session
+        && certified(version)
+        && let Ok(raw) = serde_json::from_slice::<Value>(line) {
+        super::analytics::generation_speed::record(tx, key, session, at, &raw, cursor.model.as_deref(), Some(cursor.records + 1), false)?;
+    }
     let inner = tag.payload.as_ref().and_then(|p| p.kind.as_deref());
     match (tag.kind.as_deref(), inner) {
         (Some("session_meta"), _) if cursor.session.is_none() => {

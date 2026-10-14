@@ -510,3 +510,68 @@ fn shared_home_scope_skips_backlog_and_cleans_legacy_foreign_rows() {
     b.cli("collect");
     assert_eq!(b.count("rollout_scope_skips"), 9);
 }
+
+/// Timing follows request triggers across a tool gap and incremental appends.
+#[test]
+fn generation_speed_by_model_and_profile_through_cli() {
+    let f = Fixture::new();
+    let start = f.decided + 1000;
+    let ts = |ms| jiff::Timestamp::from_millisecond(start + ms).unwrap().to_string();
+    let path = f.rollout(&f.home, "speed", &[], &f.worktree(), start, "0.154.0");
+    let records = vec![
+        serde_json::json!({"type":"session_meta","payload":{"id":SID,"cwd":f.worktree(),"timestamp":ts(0),"cli_version":"0.154.0","originator":"codex_cli_rs","source":"cli"}}),
+        serde_json::json!({"type":"turn_context","timestamp":ts(0),"payload":{"model":"speed-a"}}),
+        serde_json::json!({"type":"token_usage_record","timestamp":ts(2000),"payload":{"response_id":"a","usage":{"input_tokens":10,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":70,"reasoning_output_tokens":30,"total_tokens":80}}}),
+        serde_json::json!({"type":"event_msg","timestamp":ts(2000),"payload":{"type":"token_count","info":{"last_token_usage":{"output_tokens":100}}}}),
+        serde_json::json!({"type":"response_item","timestamp":ts(8000),"payload":{"type":"function_call_output","call_id":"tool-a"}}),
+        serde_json::json!({"type":"token_usage_record","timestamp":ts(10000),"payload":{"response_id":"b","usage":{"input_tokens":10,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":20,"reasoning_output_tokens":5,"total_tokens":30}}}),
+        serde_json::json!({"type":"event_msg","timestamp":ts(10000),"payload":{"type":"token_count","info":{"last_token_usage":{"output_tokens":20}}}}),
+        serde_json::json!({"type":"turn_context","timestamp":ts(12000),"payload":{"model":"speed-b"}}),
+        serde_json::json!({"type":"token_usage_record","timestamp":ts(15000),"payload":{"response_id":"c","usage":{"input_tokens":10,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":120,"reasoning_output_tokens":40,"total_tokens":130}}}),
+        serde_json::json!({"type":"event_msg","timestamp":ts(15000),"payload":{"type":"token_count","info":{"last_token_usage":{"output_tokens":120}}}}),
+        serde_json::json!({"type":"thread_settings_applied","timestamp":ts(20000)}),
+    ];
+    let text = |lines: &[serde_json::Value]| lines.iter().map(|v| format!("{v}\n")).collect::<String>();
+    fs::write(&path,text(&records[..5])).unwrap();
+    f.cli("collect");
+    fs::write(&path,text(&records)).unwrap();
+    f.cli("collect");
+    let report = f.cli_args(&["report","--json"]).0;
+    let m = &report["metrics"]["M104"];
+    let expected = serde_json::json!({"status":"available","reason":null,"output_tokens":240,"model_time_ms":7000,"responses":3,"missing_responses":0,
+        "tokens_per_second":"34.285714","distribution":{"median":"40","p10":"10","p90":"50"},"session_wall_time_ms":20000,"model_wall_time_share":"0.35"});
+    assert_eq!(m["value"],expected);
+    assert_eq!(m["by_model"]["speed-a"]["tokens_per_second"],"30");
+    assert_eq!(m["by_model"]["speed-a"]["distribution"],serde_json::json!({"median":"10","p10":"10","p90":"50"}));
+    assert_eq!(m["by_model"]["speed-a"]["model_wall_time_share"],"0.2");
+    assert_eq!(m["by_model"]["speed-b"]["tokens_per_second"],"40");
+    assert_eq!(m["by_model"]["speed-b"]["distribution"],serde_json::json!({"median":"40","p10":"40","p90":"40"}));
+    assert_eq!(m["by_model"]["speed-b"]["model_wall_time_share"],"0.15");
+    assert_eq!(m["by_profile"]["codex"],expected);
+    assert_eq!(m["coordinator"],serde_json::json!({"status":"unavailable","reason":"coordinator_request_duration_not_reported"}));
+    f.cli("collect");
+    assert_eq!(f.cli_args(&["report","--json"]).0["metrics"]["M104"],*m);
+    let printed = f.text(&["report"]);
+    assert!(printed.contains("model=speed-a: 30 output tok/s"));
+    assert!(printed.contains("profile=codex: 34.285714 output tok/s"));
+    let view = f.cli_args(&["view","models","--json"]).0;
+    assert_eq!(view["generation_speed"]["by_model"],m["by_model"]);
+    let query = f.cli_args(&["query","--metric","M104","--json"]).0;
+    assert_eq!(query["results"][0]["value"],expected);
+    assert_eq!(query["results"][0]["detail"]["by_profile"],m["by_profile"]);
+    f.cli_args(&["analytics","refresh","--metric","M104"]);
+    let verified = f.cli_args(&["analytics","rebuild","--verify"]).0;
+    let cells: Vec<_> = verified["cells"].as_array().unwrap().iter().filter(|c|c["cell"]["metric"]=="M104").collect();
+    assert!(!cells.is_empty());
+    for cell in cells { assert_eq!(cell["identical"],true,"{cell}"); }
+    assert!(f.text(&["view","models"]).contains("model=speed-b: 40 output tok/s"));
+    // A trailing clock-only event changes wall exposure without adding usage.
+    let trailing = serde_json::json!({"type":"thread_settings_applied","timestamp":ts(25000)});
+    fs::write(&path,format!("{}{trailing}\n",text(&records))).unwrap();
+    f.cli("collect");
+    f.cli_args(&["analytics","refresh","--metric","M104"]);
+    let updated = f.cli_args(&["query","--metric","M104","--json"]).0;
+    assert_eq!(updated["results"][0]["value"]["session_wall_time_ms"],25000);
+    assert_eq!(updated["results"][0]["value"]["model_wall_time_share"],"0.28");
+    assert_eq!(updated["results"][0]["value"]["responses"],3);
+}

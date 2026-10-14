@@ -31,7 +31,8 @@ needs a new reviewed revision, not a silent reinterpretation.
   one stream per lane under
   `migrations/telemetry/<stream>/`: `ingest`, `accounting` (0025 adds product CLI metadata, §7), `quality` (0004 adds DG6d/e rerun observations; contracts-quality.md §6),
   `review`,
-  `analytics` (TM4.1 aggregate revisions), `health` (TM4.5 alert
+  `analytics` (TM4.1 aggregate revisions; 0005 adds bounded M104 model timing,
+  native-session retention and sidecar backup; contracts-analytics.md M104), `health` (TM4.5 alert
   state), `otlp` (DG4a sanitized native records, migration 0001;
   DG4c Gemini SDK file cursors, migration 0002;
   DG4h hashed per-attempt tokens and revocations, migration 0003;

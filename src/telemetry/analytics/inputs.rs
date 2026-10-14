@@ -79,6 +79,7 @@ fn canonical_files(project: &Path) -> Vec<Value> {
 
 pub(crate) fn group(provider: Provider, id: &str) -> &'static str {
     match provider {
+        Provider::Lane("analytics") if id == "M104" => "generation_speed",
         Provider::Native if id == "M03" => "operating",
         Provider::Native => "native",
         Provider::Central => "central",
@@ -110,6 +111,7 @@ pub(crate) fn stamp(group: &str, canonical: &Value, generations: &BTreeMap<Strin
         // Native lifecycle rows and their maintained task body read only the canonical store.
         "native" | "lifecycle" => false,
         "operating" => table.starts_with("operating_"),
+        "generation_speed" => table.starts_with("model_time_") || matches!(table, "codex_usage" | "codex_session_clock" | "rollout_sources"),
         "central" | "comparison" => !table.starts_with("operating_"),
         "diagnostics" => matches!(table, "codex_usage" | "codex_usage_times" | "rollout_sources"),
         "usage" => matches!(table, "rollout_sources" | "codex_usage" | "codex_quarantine" | "accounting_stream" | "accounting_dirty_sessions" | "accounting_usage_totals" | "accounting_cache_totals" | "accounting_cache_frontier" | "accounting_source_summary"),
