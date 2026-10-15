@@ -3400,7 +3400,7 @@ fn idle_without_submission_surfaces_in_health_context_and_task_show() {
     let shown = lab.ok(&["task", "demo", "show", "work"]);
     assert_eq!(shown["worker_attention"].as_array().unwrap().len(), 1);
     let context = lab.cli(&["context", "demo"]);
-    assert!(context.status.success());
+    assert!(context.status.success(), "context failed: {}", String::from_utf8_lossy(&context.stderr));
     assert!(String::from_utf8(context.stdout).unwrap().contains("worker idle without submission"));
     assert_eq!(lab.attempt(&attempt).state, AttemptState::Running);
 }

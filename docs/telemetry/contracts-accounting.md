@@ -595,7 +595,11 @@ headroom) and 47 back at R is `window_regressed`.
 Idle-without-submission attention uses the same retained `attention_samples`
 labels, source and retention/backup classification; no stream or canonical schema
 change. The ticker records exact-owned worker observations on resting passes,
-including unknown-state gaps. Consecutive idle/done samples qualify after
+including unknown-state gaps, only when the telemetry sidecar already exists.
+Idle monitoring never creates a sidecar; canonical notices remain available without
+telemetry. Recording uses the sidecar’s normal bounded five-second busy wait,
+after native probes finish and without a canonical write transaction. Consecutive
+idle/done samples qualify after
 `HERDR_FARM_WORKER_IDLE_SECS` (1–3600 seconds; default 300; invalid values use the
 default), with the test timing floor described in `docs/test-tick-timing.md`.
 An observation gap or working/blocked label resets the idle clock. Submission

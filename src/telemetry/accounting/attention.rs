@@ -144,9 +144,10 @@ fn classify(b: &Bound, agents: &[Value]) -> std::result::Result<&'static str, &'
 
 /// The worker monitor already verified route, ownership and socket incarnation.
 /// Retain its labels using the existing sample vocabulary and retention policy.
-/// Writes are best effort and cannot delay or prevent the canonical notice.
+/// Only an existing sidecar is sampled; use its normal bounded busy wait.
+/// Native probes finish before opening the sidecar or starting a transaction.
 pub fn record_worker_observation(project: &Path, attempt: &str, state: Option<&str>, now: i64) -> Result<()> {
-    let Some(db) = crate::telemetry::sidecar::open_nowait(project, true)? else { return Ok(()); };
+    let Some(db) = crate::telemetry::sidecar::open(project, false)? else { return Ok(()); };
     let sample = match state {
         Some("idle") => Ok("idle"), Some("done") => Ok("done"),
         Some("working") => Ok("working"), Some("blocked") => Ok("blocked"),
