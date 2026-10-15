@@ -2937,7 +2937,8 @@ fn launch_advancement_recovers_each_boundary_then_delivers_brief_and_stops() {
         // One budget covers launch (including the worker's filesystem
         // isolation setup, dozens of mount execs that slow under host load),
         // brief, stop and preservation.
-        let deadline = Instant::now() + Duration::from_secs(30);
+        // Match the 45 s operation budget in src/canonical_controller.rs (dispatch_prepared).
+        let deadline = Instant::now() + Duration::from_secs(45);
         if lost=="historical_workspace" {
             resources::create_legacy_resource(&f.project,&f.operation.id,1,deadline,Default::default()).unwrap();
         }
