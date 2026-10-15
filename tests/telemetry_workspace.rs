@@ -741,3 +741,23 @@ fn doctor_and_capabilities_warn_on_an_uncertified_or_drifting_codex_profile() {
     assert!(text.lines().any(|l| l.starts_with("[warn] project demo: codex profile `stale`: agent 0.154.0") && l.contains("installed as Codex 0.153.0, not the recorded 0.154.0")), "{text}");
     assert!(!text.contains("[FAIL] project demo: codex profile"), "{text}");
 }
+
+#[test]
+fn doctor_and_workspace_share_empty_collect_and_never_collected_watermarks() {
+    let f = Fixture::new();
+    migrated(&f);
+    rusqlite::Connection::open(f.project.join(".state/state.db")).unwrap().execute("UPDATE attempts SET state='completed'", []).unwrap();
+    // No native rollout or sidecar exists.
+    let before = doctor(&f);
+    assert!(before.contains("telemetry ingestion lag: degraded (n/a: collection_not_run)"), "{before}");
+    f.cli("collect");
+    let snap = f.cli_args(&["workspace", "show", "--json"]).0;
+    assert!(snap["collection"]["last_collect_unix_ms"].is_i64(), "{snap}");
+    assert_eq!(snap["collection"]["state"], "ok");
+    let after = doctor(&f);
+    assert!(after.contains("telemetry: sidecar present; last collect "), "{after}");
+    assert!(after.contains("telemetry ingestion lag: ok ("), "{after}");
+    assert!(!after.contains("collection_not_run"), "{after}");
+    let read = f.cli_args(&["query", "--metric", "M08", "--json"]).0;
+    assert_eq!(read["results"][0]["source_watermarks"]["sidecar"]["last_collect_unix_ms"], snap["collection"]["last_collect_unix_ms"]);
+}

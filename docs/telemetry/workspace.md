@@ -424,3 +424,12 @@ E2E evidence: `tests/telemetry_routines.rs`, using the shared signed replay
 workflow fixture in `tests/support/replay.rs`.
 
 Compatibility: legacy environment variables and existing data/config locations remain supported; see [renaming](../renaming.md).
+
+The snapshot's `collection` field shares the project collection receipt with
+health and the doctor last-collect line. It exposes `state`, `reason`,
+`last_collect_unix_ms`, `age_ms`, `due`, `last_progress_unix_ms` and `stalled_ms`.
+Doctor grades ingestion using this state: an old idle receipt remains ok; recent
+progress with backlog warns; continuously due work without progress degrades.
+An empty successful collect has a timestamp; `collection_not_run` is reserved
+for projects with no recorded collect. Metric-specific coverage remains separate
+from project collection liveness.
