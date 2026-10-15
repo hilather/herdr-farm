@@ -3399,6 +3399,9 @@ fn idle_without_submission_surfaces_in_health_context_and_task_show() {
     assert!(worker["attention"]["intervals"].as_array().unwrap().iter().any(|i| i["reason"] == "worker_idle_without_submission"));
     let shown = lab.ok(&["task", "demo", "show", "work"]);
     assert_eq!(shown["worker_attention"].as_array().unwrap().len(), 1);
+    // `context` reads the canonical project manifest, as in the other context workflows.
+    let instructions = fs::read_to_string(lab.project.join("PROJECT.md")).unwrap();
+    fs::write(lab.project.join("PROJECT.md"), format!("+++\nname = \"demo\"\n+++\n{instructions}")).unwrap();
     let context = lab.cli(&["context", "demo"]);
     assert!(context.status.success(), "context failed: {}", String::from_utf8_lossy(&context.stderr));
     assert!(String::from_utf8(context.stdout).unwrap().contains("worker idle without submission"));
