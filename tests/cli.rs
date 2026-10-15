@@ -5659,6 +5659,19 @@ fn fleet_text_matches_report_json() {
     // appends its own observation after printing its result.
     let writer=rusqlite::Connection::open(std::path::Path::new(&r).join("demo/.state/telemetry.db")).unwrap();
     writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let checked: i64 = writer.query_row("SELECT checked_unix_ms FROM collection_check WHERE singleton=1", [], |row| row.get(0)).unwrap();
+    // Require the exact age-and-reason line, allowing only seconds elapsed
+    // during the real CLI invocation (doctor may take more than one second).
+    let collection_matches = |line: &str, prefix: &str, before: i64, after: i64| {
+        ((before - checked).max(0) / 1000..=(after - checked).max(0) / 1000).any(|seconds| {
+            let age = match (seconds / 3600, seconds / 60 % 60, seconds % 60) {
+                (0, 0, s) => format!("{s}s"),
+                (0, m, s) => format!("{m}m{s:02}s"),
+                (h, m, _) => format!("{h}h{m:02}m"),
+            };
+            line == format!("{prefix}sidecar present; last collect {age} ago (no_rollouts)")
+        })
+    };
     let out=hp(home.path(),&["--root",&r,"telemetry","demo","report","--json"]);assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stderr));
     let report:serde_json::Value=serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(report["tasks"],serde_json::json!({"accepted":0,"open":2,"succeeded_without_evidence":0,"terminal":1,"replay_candidates":0}));
@@ -5666,7 +5679,9 @@ fn fleet_text_matches_report_json() {
     // Extended M40: no attempt inputs record the execution home, so no account to read; unavailable, never 0.
     assert_eq!(report["metrics"]["M40"]["decisions"],serde_json::json!([{"attempt_id":"t2-a1","decided_unix_ms":decided,"service":"codex","value":{"reason":"execution_home_unknown","status":"unavailable"}}]));
     assert_eq!(report["metrics"]["M40"]["definition"],"M40.quota-windows-v2");
+    let fleet_before = jiff::Timestamp::now().as_millisecond();
     let out=hp(home.path(),&["--root",&r,"pane","fleet"]);assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stderr));
+    let fleet_after = jiff::Timestamp::now().as_millisecond();
     let text=String::from_utf8(out.stdout).unwrap();
     let line=|prefix:&str|text.lines().find(|l|l.starts_with(prefix)).unwrap_or_else(||panic!("no `{prefix}` in {text}")).to_owned();
     assert_eq!(line("M02 "),"M02 task_acceptance_rate 0/1");
@@ -5689,13 +5704,15 @@ fn fleet_text_matches_report_json() {
         if expected.starts_with("n/a") {assert!(!shown.split_whitespace().any(|w|w=="0"),"unavailable must not read 0: {shown}");}
     }
     assert_eq!(line("tasks "),"tasks terminal=1 accepted=0 open=2 succeeded_without_evidence=0");
-    assert!(line("usage: ").contains("last collect n/a (no_rollouts)"),"{text}");
+    assert!(collection_matches(&line("usage: "), "usage: ", fleet_before, fleet_after), "{text}");
     let active=line("t2-a1 ");
     assert!(active.contains("t2 codex 0.154.0 running elapsed 1m3")&&active.ends_with("usage n/a (not_bound)"),"{active}");
     assert_eq!(line("t3-a1 "),"t3-a1 t3 n/a (predates_dispatch_log) reserved elapsed n/a (predates_lifecycle_log) usage n/a (not_bound)");
     assert!(!text.contains("t1-a1"),"terminal attempts are not active: {text}");
+    let doctor_before = jiff::Timestamp::now().as_millisecond();
     let doctor=String::from_utf8(hp(home.path(),&["--root",&r,"doctor"]).stdout).unwrap();
-    assert!(doctor.contains("[ok  ] project demo: telemetry: sidecar present; last collect n/a (no_rollouts)\n"),"{doctor}");
+    let doctor_after = jiff::Timestamp::now().as_millisecond();
+    assert!(doctor.lines().any(|line| collection_matches(line, "[ok  ] project demo: telemetry: ", doctor_before, doctor_after)), "{doctor}");
 }
 
 #[cfg(all(feature="state-store",target_os="linux"))]

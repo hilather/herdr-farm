@@ -34,7 +34,10 @@ pub fn collection(project: &Path, now_ms: i64) -> Result<String> {
         return Ok("collection not run (no telemetry sidecar)".into());
     };
     let last = super::codex::last_collect(&db)?;
-    Ok(format!("sidecar present; last collect {}", last.map_or("n/a (no_rollouts)".into(), |at| format!("{} ago", elapsed(now_ms - at)))))
+    let has_rollouts: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM collect_offsets)", [], |r| r.get(0))?;
+    let reason = if has_rollouts { "" } else { " (no_rollouts)" };
+    let age = last.map_or("n/a".into(), |at| format!("{} ago", elapsed(now_ms - at)));
+    Ok(format!("sidecar present; last collect {age}{reason}"))
 }
 
 /// The popup body for one project with a canonical store.

@@ -2983,6 +2983,11 @@ for older sidecars; reads never migrate or manufacture a collection receipt.
 empty collection. The query sidecar watermark, doctor last-collect line and
 workspace collection field share this receipt.
 
+Fleet and doctor retain the check age and append `(no_rollouts)` when there
+are no retained rollout offsets, for example
+`sidecar present; last collect 0s ago (no_rollouts)`. This reason describes
+source availability, not a failed or missing collection check.
+
 Open attempts or unread project-scoped source bytes make collection due. With
 nothing due, `collector_idle` is ok regardless of receipt age. Discovery uses
 recorded execution homes, project scope and maintenance tombstones; foreign
