@@ -152,10 +152,16 @@ fn live_fleet(f: &Fixture) -> (String, String) {
     // Fixture only: the attempt runs from its launch (no launch happens here).
     db.execute("UPDATE attempts SET state='running' WHERE id=?1", [&f.attempt]).unwrap();
     db.execute("INSERT INTO attempt_lifecycle(attempt_id,state,attempt_revision,unix_ms,source) VALUES(?1,'running',1,?2,'fixture')", rusqlite::params![f.attempt, f.decided - 400_000]).unwrap();
-    // One sample every 30 s, as the observation pass writes them: working, then blocked from −370 s to −10 s.
+    // One sample every 30 s: working, then blocked from −370 s to −10 s.
+    // Keep this synthetic lane fresh for a day: reads censor an open wait
+    // after twice interval_ms, even though its duration uses only sample
+    // timestamps. A production 30 s interval gives slow surface comparisons
+    // only 50 s before the expected open wait disappears. This freshness
+    // allowance changes neither the samples nor the exact 6m00s assertions.
+    let interval_ms = 24 * 60 * 60 * 1_000;
     for (ms, label) in std::iter::once((-400_000, "working")).chain((0..13).map(|i| (-370_000 + 30_000 * i, "blocked"))) {
-        f.sidecar().execute("INSERT INTO attention_samples(attempt_id,observed_unix_ms,state,gap,interval_ms,source) VALUES(?1,?2,?3,NULL,30000,'herdr-agent-list-v1')",
-            rusqlite::params![f.attempt, f.decided + ms, label]).unwrap();
+        f.sidecar().execute("INSERT INTO attention_samples(attempt_id,observed_unix_ms,state,gap,interval_ms,source) VALUES(?1,?2,?3,NULL,?4,'herdr-agent-list-v1')",
+            rusqlite::params![f.attempt, f.decided + ms, label, interval_ms]).unwrap();
     }
     let (a, b) = (configuration(&db, "claude", "1.0"), configuration(&db, "gemini", "2.0"));
     for i in 0..20 { terminal_task(&db, &format!("ca{i:02}"), true, "code", &a, 1_000 + 10 * i); }
