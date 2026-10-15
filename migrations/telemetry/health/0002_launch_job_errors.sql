@@ -1,5 +1,5 @@
 -- One bounded summary per attempt, never an append-only error journal.
-CREATE TABLE launch_job_errors (
+CREATE TABLE IF NOT EXISTS launch_job_errors (
     attempt TEXT PRIMARY KEY,
     job TEXT NOT NULL,
     count INTEGER NOT NULL,

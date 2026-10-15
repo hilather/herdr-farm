@@ -120,6 +120,7 @@ may only be shortened.
 ```text
 $ herdr-farm telemetry demo maintenance classes
 retention.v1
+sidecar.launch_job_errors retain - source_of_truth destructive
 sidecar.collection_check retain - source_of_truth destructive
 sidecar.native_probe_failures retain - source_of_truth destructive
 sidecar.launch_load retain - source_of_truth destructive
