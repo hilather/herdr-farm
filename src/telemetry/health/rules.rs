@@ -1,4 +1,4 @@
-//! The declared health-rule table `health-rules.v6`
+//! The declared health-rule table `health-rules.v7`
 //! (docs/telemetry/contracts-health.md §2). Each rule reads only through the
 //! TM4.1 query service (`analytics::query`) or a lane's own read path
 //! (`accounting quota|attention|entries|budget-shadow`, TM4.4 `compare`), and
@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-pub const VERSION: &str = "health-rules.v6";
+pub const VERSION: &str = "health-rules.v7";
 const MINUTE: i64 = 60_000;
 const HOUR: i64 = 60 * MINUTE;
 const DAY: i64 = 24 * HOUR;
@@ -39,6 +39,7 @@ impl State {
 #[derive(Clone, Copy, Debug)]
 pub enum Eval {
     LaunchStalled,
+    SpoolContention,
     /// Unfinished worker results survive context reads.
     CoordinatorResult,
     /// Passive verification flips with canonical run evidence.
@@ -94,6 +95,9 @@ pub struct Rule {
 }
 
 pub const RULES: &[Rule] = &[
+    Rule { name: "spool_contention", family: "runtime", service: None, source: "owner:spool-contention", eval: Eval::SpoolContention,
+        direction: Direction::Above, warn: 120_000, critical: 600_000, unit: "ms", window_ms: None, cooldown_ms: HOUR,
+        detail: "retained spool rows blocked by SQLite contention; evidence names attempts and blocking databases" },
     Rule { name: "control_epoch_churn", family: "runtime", service: None, source: "query:M105", eval: Eval::Count("M105"),
         direction: Direction::Above, warn: 6, critical: 12, unit: "epoch_increments", window_ms: Some(10 * MINUTE), cooldown_ms: HOUR,
         detail: "six control epoch increments in ten minutes warn; twelve are critical; dominant invalidation binding is evidence only" },
@@ -318,6 +322,13 @@ pub(crate) fn evaluate_control_churn(project: &Path, now: i64) -> Result<Outcome
 fn evaluate_rule(ctx: &mut Ctx, rule: &'static Rule) -> Result<Vec<Outcome>> {
     let now = ctx.now;
     Ok(vec![match rule.eval {
+        Eval::SpoolContention => {
+            let items = crate::submission_spool::spool_contention(ctx.project)?;
+            let age = items.values().map(|item| now.saturating_sub(item.first_failure)).max().unwrap_or(0);
+            let evidence = items.iter().map(|(attempt, item)| json!({"attempt":attempt,"database":item.database,"first_failure_unix_ms":item.first_failure})).collect::<Vec<_>>();
+            let state = grade(rule, |threshold| age >= crate::timing::retry(std::time::Duration::from_millis(threshold as u64)).as_millis() as i64, |_| false);
+            outcome(rule, state, vec![json!({"code":"spool_database_busy","age_ms":age,"attempts":evidence})], lane_metric(rule.source), unbounded(now), json!({"attempts":evidence}))
+        }
         Eval::LaunchStalled => {
             let launches=crate::migration::open_active_read_only(ctx.project)?.launch_progress_health()?;
             let mut evidence = Vec::new();

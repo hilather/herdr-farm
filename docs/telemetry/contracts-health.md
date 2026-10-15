@@ -41,15 +41,17 @@ warn, critical, unknown}, states[], alerts {open[], last_evaluated_unix_ms}
 | `evidence` | the numbers the state rests on (numerator/denominator, age, remaining, longest wait, counts by reason); unavailable values stay `{status: unavailable, reason}` |
 | `thresholds` | `{direction, warn, critical, unit, window_ms, cooldown_ms}` from the rule table |
 
-## 2. Rule table (`health-rules.v6`, `rules.rs` `RULES`)
+## 2. Rule table (`health-rules.v7`, `rules.rs` `RULES`)
 
-A change of a rule, threshold or read path is a new rules version. v6 adds
+A change of a rule, threshold or read path is a new rules version. v7 adds
+`spool_contention`; v6 adds
 `control_epoch_churn` (M105); v5 adds
 `result_waiting_on_coordinator`; v4 added
 `test_weakening` (MET-NOW-A; fixture evidence `tests/telemetry_stored_metrics.rs`).
 
 | rule | family / service | read path | warn | critical | cooldown |
 |---|---|---|---|---|---|
+| `spool_contention` | runtime | owner spool retry evidence, attempt and blocking database | age ≥ 2 min | ≥ 10 min | 1 h |
 | `control_epoch_churn` | runtime | query M105, last 10 minutes | ≥ 6 epoch increments | ≥ 12 epoch increments | 1 h |
 | `result_waiting_on_coordinator` | attention | canonical unfinished worker-result inbox rows, independent of SEEN | age ≥ 1 min | ≥ 10 min | 1 h |
 | `test_weakening` | proxy | quality `tests-net-removal.v1` observation counts, last 24 hours | ≥ 1 flagged submission | — | 1 h |
@@ -407,3 +409,20 @@ timestamp are explicitly excluded and counted as `legacy_events_without_time`;
 the detector cannot reconstruct historical windows before this instrumentation.
 No canonical or sidecar schema changes are required; canonical event retention
 and backup classification remain unchanged.
+
+`spool_contention` reads owner-only `.state/spool-contention.json` retry evidence.
+CLI invocation replay writes `.state/telemetry.db` with a one-second total retry
+budget, outside runtime mutation guards and external work. A busy attempt logs
+once per unresolved episode and retries every thirty seconds; its append-only
+rows remain intact. Health warns after two minutes and becomes critical after
+ten minutes, naming attempts and blocking databases in evidence. Existing health
+notification policy delivers and deduplicates notices (critical by default).
+For this rule the health notifier reads retained retry evidence before trying to
+write health alerts to the blocked sidecar. Canonical inbox IDs include the attempt
+and episode start, so each attempt is noticed once even across ticker restarts or
+acknowledgement. Aggregate sidecar alerts remain diagnostic; their numeric alert
+IDs do not drive this rule's delivery or resolution notices.
+Success clears the evidence; no canonical or sidecar schema changes are needed.
+Retry and health intervals honor the isolated-lab test scale; the SQLite admission
+budget remains one second. The owner retry file is operational state, not a
+telemetry retention class; removing a completed spool clears its entry.

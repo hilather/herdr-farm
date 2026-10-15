@@ -33,16 +33,65 @@ pub fn inbox(project: &Path) -> Result<Value> {
 }
 
 /// Owner policy: critical by default, warn optionally, or off.
-pub fn automatic(project: &Path, config_dir: &Path) -> Result<Value> {
+fn notification_threshold(config_dir: &Path) -> Result<String> {
     let setting = crate::telemetry::views::telemetry_setting(config_dir, "health_notify")?;
     let threshold = setting.as_ref().and_then(toml::Value::as_str).unwrap_or("critical");
     anyhow::ensure!(setting.is_none() || matches!(&setting, Some(toml::Value::String(_))), "[telemetry] health_notify must be critical, warn or off");
     anyhow::ensure!(matches!(threshold, "critical" | "warn" | "off"), "[telemetry] health_notify must be critical, warn or off");
+    Ok(threshold.to_owned())
+}
+
+pub fn automatic(project: &Path, config_dir: &Path) -> Result<Value> {
+    let threshold = notification_threshold(config_dir)?;
     if threshold == "off" { return Ok(json!({"disabled": true})); }
-    deliver(project, Some(threshold))
+    deliver(project, Some(&threshold))
+}
+
+/// This rule's source must remain deliverable while its alert database is locked.
+/// Use the same canonical health-notice delivery and deduplication as other rules,
+/// with one stable ID per attempt episode rather than a sidecar-generated alert ID.
+fn spool_notices(project: &Path, threshold: Option<&str>) -> Result<Vec<Value>> {
+    let now = jiff::Timestamp::now().as_millisecond();
+    let rule = super::rules::find("spool_contention").expect("declared spool rule");
+    let limit = if threshold == Some("critical") { rule.critical } else { rule.warn };
+    let limit = crate::timing::retry(std::time::Duration::from_millis(limit as u64)).as_millis() as i64;
+    let mut delivered = Vec::new();
+    for (attempt, state) in crate::submission_spool::spool_contention(project)? {
+        if now.saturating_sub(state.first_failure) < limit { continue; }
+        let content = crate::domain::InboxContent {
+            id: format!("telemetry-health-spool-{attempt}-{}", state.first_failure),
+            kind: KIND.into(), subject: "spool_contention".into(), created: String::new(), body: String::new(),
+            summary: format!("telemetry health: spool_contention attempt {attempt}: {}; rows retained for retry", state.database),
+        };
+        let db = crate::telemetry::read_only(&project.join(".state/state.db"))?;
+        let noticed: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM inbox_items WHERE id=?1)", [&content.id], |row| row.get(0))?;
+        drop(db);
+        if noticed { continue; }
+        let mut store = crate::store::SqliteStore::open_scoped(&project.join(".state/state.db"))?;
+        let mut outcome = None;
+        for _ in 0..3 {
+            match store.deliver_telemetry_notice(store.current_head()?, &content, now) {
+                Ok(result) => { outcome = Some(result); break; }
+                Err(crate::store::StoreError::Conflict) => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        let Some(outcome) = outcome else { bail!("store head moved on every spool health notice attempt") };
+        if outcome == crate::domain::ReminderOutcome::Delivered {
+            delivered.push(json!({"notice_id":content.id,"outcome":"delivered","summary":content.summary}));
+        }
+    }
+    Ok(delivered)
+}
+
+pub(super) fn spool_tick(project: &Path, config_dir: &Path) -> Result<()> {
+    let threshold = notification_threshold(config_dir)?;
+    if threshold != "off" { spool_notices(project, Some(&threshold))?; }
+    Ok(())
 }
 
 fn deliver(project: &Path, threshold: Option<&str>) -> Result<Value> {
+    let mut delivered = spool_notices(project, threshold)?;
     let Some(mut alerts) = open_alerts(project)? else { return Ok(json!({"status": "unavailable", "reason": "collection_not_run"})) };
     if threshold.is_some() {
         let Some(db) = crate::telemetry::sidecar::read(project)? else { return Ok(json!({"status": "unavailable", "reason": "collection_not_run"})); };
@@ -52,8 +101,10 @@ fn deliver(project: &Path, threshold: Option<&str>) -> Result<Value> {
         }
     }
     let slug = slug(project);
-    let (mut delivered, mut already) = (Vec::new(), 0usize);
+    let mut already = 0usize;
     for alert in alerts {
+        // Spool episodes are delivered from owner evidence, independently of this database.
+        if alert["rule"] == "spool_contention" { continue; }
         let resolved = !alert["resolved_unix_ms"].is_null() && !alert["notified_unix_ms"].is_null();
         if !resolved && threshold.is_some_and(|t| alert["state"] != "critical" && !(t == "warn" && alert["state"] == "warn")) { continue; }
         if !resolved && !alert["notified_unix_ms"].is_null() { already += 1; continue; }

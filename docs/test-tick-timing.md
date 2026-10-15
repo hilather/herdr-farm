@@ -427,3 +427,10 @@ transaction. Subsequent collection intervals retain the native-call quiet
 window (15.5 seconds in accelerated labs). The recorded-source/new-sidecar
 workflow allows 60 seconds for idle-worker completion while retaining exact
 usage totals, paused operating intervals, and usage gate assertions.
+
+Spool CLI replay admits sidecar writers for at most one unscaled second per
+attempt, without a canonical transaction or runtime mutation guard. Unresolved
+SQLite contention retries every 30 seconds via `timing::retry`; health warns at
+120 seconds and becomes critical at 600 seconds through the same scaling helper.
+The append-only worker report survives failures. Owner retry evidence persists
+across ticker restarts, so restarting does not reset the log suppression or age.
