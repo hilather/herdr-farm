@@ -3344,6 +3344,7 @@ fn idle_worker_notice_restarts_stretch_and_deduplicates_within_a_ticker() {
     // ~50 resting passes at the unscaled 15.5 s advisory window need ~13 min (docs/test-tick-timing.md), beyond the default 600 s budget.
     let config = lab.path(".config/herdr-farm/config.toml");
     fs::write(&config, fs::read_to_string(&config).unwrap().replace("max_wall_seconds=600", "max_wall_seconds=3600")).unwrap();
+    lab.resume();
     let (_, attempt) = lab.reserve("Retained instructions");
     lab.serve();
     lab.run_until(100, &|| lab.attempt(&attempt).state == AttemptState::Running);
