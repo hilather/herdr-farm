@@ -270,6 +270,11 @@ pub(super) fn ended_notice(db: &Connection, attempt: &Attempt) -> Result<()> {
 impl SqliteStore {
     /// Deliver a ticker-owned idle stretch through the stable inbox path.
     pub fn notify_worker_idle(&mut self, expected_head: u64, attempt: &AttemptId, revision: u64, since: i64, now: i64) -> Result<Option<crate::domain::ReminderOutcome>> {
+        self.notify_worker_idle_activity(expected_head, attempt, revision, (since, None), now)
+    }
+
+    pub fn notify_worker_idle_activity(&mut self, expected_head: u64, attempt: &AttemptId, revision: u64, idle: (i64, Option<i64>), now: i64) -> Result<Option<crate::domain::ReminderOutcome>> {
+        let (since, last_activity) = idle;
         super::delivery::now_check(now)?;
         let current = read_attempt(&self.connection, attempt)?;
         if current.revision != revision { return Err(StoreError::Conflict); }
@@ -278,8 +283,30 @@ impl SqliteStore {
             return Ok(None);
         }
         let minutes = now.saturating_sub(since) / 60_000;
-        let content = InboxContent { id: format!("worker-idle-{}-{revision}-{since}", attempt.as_str()), kind: "attempt.worker_idle".into(), subject: current.task.as_str().into(), created: String::new(), summary: format!("attempt {}: worker idle for {minutes} min without submitting", attempt.as_str()), body: String::new() };
+        let activity = last_activity.map_or_else(|| "unavailable before first idle observation".into(), |at| format!("last working/blocked observation at {at} unix ms"));
+        let content = InboxContent { id: format!("worker-idle-{}-{revision}-{since}", attempt.as_str()), kind: "attempt.worker_idle".into(), subject: current.task.as_str().into(), created: String::new(), summary: format!("attempt {}: worker idle for {minutes} min without submitting", attempt.as_str()), body: format!("worker idle without submission; first observed idle at {since} unix ms; last activity: {activity}.") };
         self.deliver_stable_notice(expected_head, &content, now).map(Some)
+    }
+
+    /// Durable operator nudge audit, without retaining prompt text. The request
+    /// precedes the external effect; an unacknowledged request stays ambiguous.
+    pub fn record_worker_nudge(&mut self, expected_head: u64, attempt: &AttemptId, revision: u64, request: &str, acknowledged: bool, now: i64) -> Result<u64> {
+        super::delivery::now_check(now)?;
+        if request.is_empty() || request.len() > 256 { return Err(StoreError::Invalid("invalid nudge request".into())); }
+        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if head(&tx)? != expected_head { return Err(StoreError::Conflict); }
+        let current = read_attempt(&tx, attempt)?;
+        if current.revision != revision || current.state != AttemptState::Running || current.termination_observed { return Err(StoreError::Conflict); }
+        let seen = |ack: bool| -> Result<bool> {
+            Ok(tx.query_row("SELECT EXISTS(SELECT 1 FROM events WHERE kind='attempt.worker_nudge' AND entity=?1 AND json_extract(payload,'$.request')=?2 AND json_extract(payload,'$.acknowledged')=?3)", params![attempt.as_str(), request, ack], |r| r.get(0))?)
+        };
+        if seen(acknowledged)? { return head(&tx); }
+        if acknowledged && !seen(false)? { return Err(StoreError::Invalid("nudge acknowledgment lacks request".into())); }
+        let payload = serde_json::json!({"attempt":attempt,"task":current.task,"request":request,"acknowledged":acknowledged,"observed_unix_ms":now});
+        tx.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES('attempt.worker_nudge',?1,?2,1,?3)", params![attempt.as_str(), integer(revision)?, payload.to_string()])?;
+        let next = head(&tx)?;
+        tx.commit()?;
+        Ok(next)
     }
 
     /// Metadata-only question notice. Stable native call identity deduplicates

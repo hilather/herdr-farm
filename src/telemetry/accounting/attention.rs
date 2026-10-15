@@ -42,6 +42,7 @@ struct Bound {
     /// Terminal lifecycle mark (contracts §4), when the attempt ended and has one.
     ended: Option<i64>,
     decided: Option<i64>,
+    submitted: Option<i64>,
     machine: String,
     socket: String,
     workspace: String,
@@ -73,17 +74,20 @@ fn bindings_filtered(project: &Path, selected: Option<&BTreeSet<String>>, open_o
     let filter = format!(" WHERE {}", conditions.join(" AND "));
     let sql = format!("WITH started AS (SELECT json_extract(payload,'$.attempt') AS attempt,max(sequence) AS sequence FROM events
         WHERE kind='runtime.launch_started' GROUP BY 1)
-        SELECT a.id,a.task_id,a.state,a.termination_observed,e.payload,{ended},{decided} FROM started s JOIN events e ON e.sequence=s.sequence
+        SELECT a.id,a.task_id,a.state,a.termination_observed,e.payload,{ended},{decided},(SELECT min(created_unix_ms) FROM result_submissions WHERE attempt_id=a.id) FROM started s JOIN events e ON e.sequence=s.sequence
         JOIN attempts a ON a.id=s.attempt{filter} ORDER BY a.rowid");
-    type Row = (String, String, String, bool, String, Option<i64>, Option<i64>);
+    type Row = (String, String, String, bool, String, Option<i64>, Option<i64>, Option<i64>);
     let rows: Vec<Row> = db.prepare(&sql)?
-        .query_map([selected.map(serde_json::to_string).transpose()?], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)))?.collect::<rusqlite::Result<_>>()?;
-    Ok(rows.into_iter().map(|(attempt, task, state, terminated, payload, ended, decided)| {
+        .query_map([selected.map(serde_json::to_string).transpose()?], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)))?.collect::<rusqlite::Result<_>>()?;
+    Ok(rows.into_iter().map(|(attempt, task, state, terminated, payload, ended, decided, submitted)| {
         let receipt: Value = serde_json::from_str(&payload).unwrap_or(Value::Null);
         let text = |value: &Value| value.as_str().unwrap_or("").to_owned();
         let route = &receipt["route"];
         let open = !terminated && OPEN.contains(&state.as_str());
-        Bound { attempt, task, open, launched: receipt["observed_unix_ms"].as_i64().unwrap_or(0), ended: if open { None } else { ended }, decided,
+        let report = project.join(".state/worker-output").join(&attempt).join("report.md");
+        let reported = std::fs::metadata(report).ok().filter(|m| m.is_file()).and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|t| t.as_millis().min(i64::MAX as u128) as i64);
+        let submitted = submitted.into_iter().chain(reported).min();
+        Bound { attempt, task, open, submitted, launched: receipt["observed_unix_ms"].as_i64().unwrap_or(0), ended: if open { None } else { ended }, decided,
             machine: text(&route["machine"]), socket: text(&route["socket"]), workspace: text(&route["workspace_id"]), tab: text(&route["tab_id"]),
             pane: text(&route["pane_id"]), cwd: text(&route["cwd"]), kind: text(&receipt["agent"]["kind"]), name: text(&receipt["agent"]["name"]) }
     }).collect())
@@ -136,6 +140,21 @@ fn classify(b: &Bound, agents: &[Value]) -> std::result::Result<&'static str, &'
         "" | "unknown" => Err("state_unknown"),
         _ => Err("state_unrecognized"),
     }
+}
+
+/// The worker monitor already verified route, ownership and socket incarnation.
+/// Retain its labels using the existing sample vocabulary and retention policy.
+/// Only an existing sidecar is sampled; use its normal bounded busy wait.
+/// Native probes finish before opening the sidecar or starting a transaction.
+pub fn record_worker_observation(project: &Path, attempt: &str, state: Option<&str>, now: i64) -> Result<()> {
+    let Some(db) = crate::telemetry::sidecar::open(project, false)? else { return Ok(()); };
+    let sample = match state {
+        Some("idle") => Ok("idle"), Some("done") => Ok("done"),
+        Some("working") => Ok("working"), Some("blocked") => Ok("blocked"),
+        _ => Err("state_unknown"),
+    };
+    insert_samples(&db, &[(attempt.into(), sample)], now, crate::timing::collection_interval(Duration::from_secs(30)).as_millis() as i64)?;
+    Ok(())
 }
 
 /// One observation pass: a sample for every launched, unterminated attempt.
@@ -217,7 +236,7 @@ fn insert_samples(db: &Connection, samples: &[Observation], now: i64, interval: 
 
 struct Sample { at: i64, state: std::result::Result<String, String>, interval: i64 }
 
-struct Interval { opened: i64, start: &'static str, last: i64, closed: Option<i64>, end: &'static str, gap: Option<String>, counted: bool }
+struct Interval { reason: &'static str, opened: i64, start: &'static str, last: i64, closed: Option<i64>, end: &'static str, gap: Option<String>, counted: bool }
 
 impl Interval {
     /// Only an interval with an observed transition in and out has a duration.
@@ -251,8 +270,18 @@ fn derive(b: &Bound, samples: &[Sample], now: i64) -> Derived {
     let mut prev: Option<(i64, &str, i64)> = None;
     let mut failed: Option<&str> = None;
     let mut open: Option<Interval> = None;
+    let mut idle_since = None;
+    let mut last_sample = None;
+    let threshold = crate::timing::worker_idle_policy().as_millis() as i64;
     for s in samples.iter().filter(|s| b.ended.is_none_or(|end| s.at <= end)) {
-        let state = match &s.state { Err(reason) => { failed.get_or_insert(reason.as_str()); continue } Ok(state) => state.as_str() };
+        let state = match &s.state { Err(reason) => { idle_since = None; failed.get_or_insert(reason.as_str()); continue } Ok(state) => state.as_str() };
+        if last_sample.is_some_and(|at| s.at - at > 2 * s.interval) { idle_since = None; }
+        last_sample = Some(s.at);
+        let idle = matches!(state, "idle" | "done") && b.submitted.is_none_or(|at| s.at < at);
+        if !idle { idle_since = None; }
+        let idle_wait = idle && s.at - *idle_since.get_or_insert(s.at) >= threshold;
+        let reason = if idle_wait { "worker_idle_without_submission" } else { "blocked_untyped" };
+        let state = if idle_wait { WAITING } else { state };
         let from = prev.map_or(b.launched, |p| p.0);
         let broken = failed.take().map(str::to_owned).or_else(|| (s.at - from > 2 * s.interval).then(|| "not_observed".to_owned()));
         let (mut gap, mut censored) = (false, false);
@@ -263,12 +292,17 @@ fn derive(b: &Bound, samples: &[Sample], now: i64) -> Derived {
         } else if let Some((at, previous, _)) = prev && previous != WAITING {
             d.nonwaiting_ms += s.at - at;
         }
+        if state == WAITING && open.as_ref().is_some_and(|i| i.reason != reason) {
+            let mut interval = open.take().unwrap();
+            (interval.closed, interval.end) = (Some(s.at), "closed");
+            d.intervals.push(interval);
+        }
         if state == WAITING {
             match open.as_mut() {
                 Some(interval) => interval.last = s.at,
                 None => {
                     let start = if prev.is_none() { "first_observation" } else if gap { "after_gap" } else { "observed_transition" };
-                    open = Some(Interval { opened: s.at, start, last: s.at, closed: None, end: "open", gap: None, counted: !censored });
+                    open = Some(Interval { reason, opened: s.at, start, last: s.at, closed: None, end: "open", gap: None, counted: !censored });
                 }
             }
         } else if let Some(mut interval) = open.take() {
@@ -389,7 +423,7 @@ const SCOPE: &str = "human_routed_waits";
 fn certified(kind: &str) -> &'static str { if LIVE_KINDS.contains(&kind) { "live" } else { "fixture" } }
 
 pub fn signal() -> Value {
-    json!({"source": SOURCE, "field": "agent_status", "waiting_states": [WAITING], "reason_type": "blocked_untyped", "certified": "live",
+    json!({"source": SOURCE, "field": "agent_status", "waiting_states": [WAITING, "idle_without_submission"], "reason_type": "blocked_untyped", "certified": "live",
         "certified_by_agent_kind": LIVE_KINDS.iter().map(|k| (k.to_string(), json!("live"))).collect::<serde_json::Map<_, _>>(), "other_agent_kinds": "fixture",
         "basis": "stock Herdr `agent list` agent_status; `blocked` was observed live (herdr 0.9.1) for a codex 0.154.0 approval prompt routed to the human \
             (docs/telemetry/codex-live-0.154.0-a4.md) and for claude's trust dialog (docs/herdr-notes.md); other agent kinds' approval prompts are not certified live",
@@ -405,8 +439,12 @@ fn attention_json(b: &Bound, derived: Option<&Derived>) -> Value {
         None => unobserved(vec![json!({"from_unix_ms": b.launched, "to_unix_ms": if b.open { None } else { b.ended }, "reason": "not_observed"})]),
         Some(d) if !d.observed => unobserved(gaps(d)),
         Some(d) => json!({
-            "intervals": d.intervals.iter().map(|i| json!({"opened_unix_ms": i.opened, "start": i.start, "last_observed_unix_ms": i.last,
-                "closed_unix_ms": i.closed, "end": i.end, "gap_reason": i.gap, "duration_ms": i.duration(), "counted": i.counted})).collect::<Vec<_>>(),
+            "intervals": d.intervals.iter().map(|i| {
+                let mut value = json!({"opened_unix_ms": i.opened, "start": i.start, "last_observed_unix_ms": i.last,
+                    "closed_unix_ms": i.closed, "end": i.end, "gap_reason": i.gap, "duration_ms": i.duration(), "counted": i.counted});
+                if i.reason == "worker_idle_without_submission" { value["reason"] = json!(i.reason); }
+                value
+            }).collect::<Vec<_>>(),
             "gaps": gaps(d), "interventions": d.interventions(), "uncertain_starts": d.uncertain(), "waiting_ms": d.waiting_ms(), "observed_ms": d.resolved_ms()}),
     }
 }
@@ -416,6 +454,14 @@ fn attention_json(b: &Bound, derived: Option<&Derived>) -> Value {
 pub(crate) type OpenWaitSummary = (usize, usize, usize, Option<(i64, i64)>);
 
 pub(crate) fn open_wait_summary(project: &Path, db: &Connection) -> Result<Option<OpenWaitSummary>> {
+    open_summary(project, db, false)
+}
+
+pub(crate) fn open_idle_summary(project: &Path, db: &Connection) -> Result<Option<OpenWaitSummary>> {
+    open_summary(project, db, true)
+}
+
+fn open_summary(project: &Path, db: &Connection, idle_only: bool) -> Result<Option<OpenWaitSummary>> {
     if !collected(db)? { return Ok(None); }
     let bound = bindings_scoped(project, true)?;
     // As attention::read, use the attention read's wall-clock horizon, not
@@ -430,7 +476,7 @@ pub(crate) fn open_wait_summary(project: &Path, db: &Connection) -> Result<Optio
         })?.collect::<rusqlite::Result<Vec<_>>>()?;
         let d = derive(b, &samples, now);
         missing += usize::from(!d.observed);
-        for i in d.intervals.iter().filter(|i| i.end == "open_at_horizon" && i.closed.is_none()) {
+        for i in d.intervals.iter().filter(|i| i.end == "open_at_horizon" && i.closed.is_none() && (!idle_only || i.reason == "worker_idle_without_submission") && !(i.reason == "worker_idle_without_submission" && b.submitted.is_some_and(|at| at <= now))) {
             waiting += 1;
             let candidate = (i.opened, i.last);
             if longest.is_none_or(|(o, l)| (candidate.1 - candidate.0, -candidate.0) >= (l - o, -o)) { longest = Some(candidate); }
@@ -512,10 +558,18 @@ fn computed(project: &Path, all: &[Attention], since: Option<i64>) -> Result<BTr
     let t: Vec<&Attention> = all.iter().filter(|(b, _)| terminal.contains(&b.task)).collect();
     let complete = t.iter().filter(|(_, d)| d.as_ref().is_some_and(Derived::complete)).count();
     let not_observed = t.iter().filter(|(_, d)| !d.as_ref().is_some_and(|d| d.observed)).count();
-    let counted: usize = t.iter().filter_map(|(_, d)| d.as_ref()).map(Derived::interventions).sum();
+    let mut counted: usize = t.iter().filter_map(|(_, d)| d.as_ref()).map(Derived::interventions).sum();
+    let mut nudges = 0usize;
+    let canonical = crate::telemetry::read_only(&project.join(".state/state.db"))?;
+    let mut stmt = canonical.prepare("SELECT json_extract(payload,'$.task') FROM events WHERE kind='attempt.worker_nudge' AND json_extract(payload,'$.acknowledged')=1")?;
+    for task in stmt.query_map([], |r| r.get::<_, String>(0))? {
+        if terminal.contains(&task?) { nudges += 1; }
+    }
+    counted += nudges;
     let uncertain: usize = t.iter().filter_map(|(_, d)| d.as_ref()).map(Derived::uncertain).sum();
     let coverage = json!({"attempts": t.len(), "complete": complete, "not_observed": not_observed, "with_gaps": t.len() - complete - not_observed});
-    let base = json!({"reason_type": "blocked_untyped", "source": "controller_observed", "scope": SCOPE, "coverage": coverage});
+    let scope = if nudges > 0 || all.iter().filter_map(|(_, d)| d.as_ref()).any(|d| d.intervals.iter().any(|i| i.reason == "worker_idle_without_submission")) { "human_routed_waits_and_idle_without_submission" } else { SCOPE };
+    let base = json!({"reason_type": "blocked_untyped", "source": "controller_observed", "scope": scope, "coverage": coverage});
     let m31 = if complete < t.len() {
         let mut body = base;
         body["value"] = if accepted == 0 { Value::Null } else {
@@ -537,7 +591,7 @@ fn computed(project: &Path, all: &[Attention], since: Option<i64>) -> Result<BTr
     let spans = observed.iter().flat_map(|d| d.intervals.iter().filter_map(|i| i.duration().map(|n| (i.opened, i.opened + n)))).collect();
     let coverage = json!({"attempts": assigned.len(), "observed": observed.len(), "not_observed": assigned.len() - observed.len(),
         "with_gaps": observed.iter().filter(|d| !d.gaps.is_empty()).count(), "censored_intervals": observed.iter().map(|d| d.censored()).sum::<usize>()});
-    let base = json!({"unit": "ms", "scope": SCOPE, "coverage": coverage, "waiting_union_ms": union_ms(spans)});
+    let base = json!({"unit": "ms", "scope": scope, "coverage": coverage, "waiting_union_ms": union_ms(spans)});
     let m32 = if observed.is_empty() {
         let mut body = base;
         body["value"] = unavailable("not_observed");

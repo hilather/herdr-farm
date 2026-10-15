@@ -592,6 +592,32 @@ headroom) and 47 back at R is `window_regressed`.
 
 ## 6. Human attention intervals (B6b, TM1.8 remainder "S4")
 
+Idle-without-submission attention uses the same retained `attention_samples`
+labels, source and retention/backup classification; no stream or canonical schema
+change. The ticker records exact-owned worker observations on resting passes,
+including unknown-state gaps, only when the telemetry sidecar already exists.
+Idle monitoring never creates a sidecar; canonical notices remain available without
+telemetry. Recording uses the sidecar’s normal bounded five-second busy wait,
+after native probes finish and without a canonical write transaction. Consecutive
+idle/done samples qualify after
+`HERDR_FARM_WORKER_IDLE_SECS` (1–3600 seconds; default 300; invalid values use the
+default), with the test timing floor described in `docs/test-tick-timing.md`.
+An observation gap or working/blocked label resets the idle clock. Submission
+creation or a retained `.state/worker-output/ATTEMPT/report.md` ends eligibility.
+Qualified intervals carry `reason=worker_idle_without_submission`; M31 counts
+these stretches and M32 counts their resolved waiting time after qualification.
+Open and censored intervals retain the ordinary duration rules. Metrics containing
+idle attention or explicit nudges declare scope
+`human_routed_waits_and_idle_without_submission`; blocked-only histories retain
+the previous scope. This is controller policy evidence, not certification of an
+agent's native permission dialog. Acknowledged `attempt.worker_nudge` events also count as explicit M31
+interventions in the terminal task cohort. Each nudge records a request before
+sending and an acknowledgment after success; a request alone preserves ambiguous
+send evidence and does not count as a successful intervention. These metadata-only
+events use existing canonical event backup/retention; message text is never
+retained. CLI metadata additionally uses its existing best-effort retention class.
+
+
 Stream `accounting` version 5 (`0005_attention.sql`). Plan: doc 03
 `HumanAttentionInterval`, doc 07 §5a M31–M33, doc 10 §5a. Replaces the
 central `attention_not_collected` M31–M33 (contracts §6) through the lane
@@ -600,8 +626,8 @@ field (contracts §4) shows this lane's per-attempt summary once any sample
 exists.
 
 **Signal.** Stock Herdr's `agent list` (`result.agents[]`), field
-`agent_status`: the waiting state is `blocked`; `working`, `idle`, `done`
-are not waiting. Certification basis: **`live` for Codex**, `fixture` for
+`agent_status`: the native waiting state is `blocked`; `working` is not waiting.
+`idle` and `done` qualify only through the controller policy above. Certification basis: **`live` for Codex**, `fixture` for
 every other agent kind. In the A4 live run
 ([codex-live-0.154.0-a4.md](codex-live-0.154.0-a4.md) §3; herdr 0.9.1,
 codex 0.154.0), a Codex approval prompt routed to the human showed as

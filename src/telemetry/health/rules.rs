@@ -553,9 +553,13 @@ fn evaluate_rule(ctx: &mut Ctx, rule: &'static Rule) -> Result<Vec<Outcome>> {
             if longest.is_none() && not_observed == open {
                 return Ok(vec![outcome(rule, State::Unknown, vec![code("not_observed")], metric, unbounded(now), evidence(None))]);
             }
+            let idle = crate::telemetry::accounting::attention::open_idle_summary(ctx.project, &db)?;
+            let idle_count = idle.as_ref().map_or(0, |s| s.2);
             let ms = longest.map_or(0, |(o, l)| l - o);
-            let state = grade(rule, |t| longest.is_some() && ms >= t, |_| false);
+            let mut state = grade(rule, |t| longest.is_some() && ms >= t, |_| false);
+            if idle_count > 0 && state == State::Ok { state = State::Warn; }
             let mut reasons = vec![json!({"code": if longest.is_some() { "waiting_on_you" } else { "no_open_wait" }, "longest_wait_ms": longest.map(|_| ms)})];
+            if idle_count > 0 { reasons.push(json!({"code":"worker_idle_without_submission", "summary":"worker idle without submission", "attempts":idle_count})); }
             if not_observed > 0 { reasons.push(json!({"code": "partial_observation", "not_observed": not_observed})); }
             let window = match longest { Some((o, l)) => json!({"from_unix_ms": o, "to_unix_ms": l, "semantics": "open_wait_observed"}), None => unbounded(now) };
             outcome(rule, state, reasons, metric, window, evidence(longest))

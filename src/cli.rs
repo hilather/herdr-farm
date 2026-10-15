@@ -210,6 +210,8 @@ enum LaunchCommand {
     /// remove its socket directory. The ticker does this by itself once the
     /// task's worker has terminated; this is the explicit form.
     View { #[arg(long)] task: String },
+    /// Send one bounded reminder after exact worker and visible idle readiness checks
+    Nudge { #[arg(long)] task: String, #[arg(long)] message: Option<PathBuf> },
     Stop {
         #[arg(long)] task: String,
         /// Stop it even while the task's attempt still holds a worker
@@ -1430,6 +1432,16 @@ pub fn run(#[cfg(feature="state-store")] capture: &mut crate::cli_invocation::Ca
                     serde_json::to_value(herdr_farm::launch_preparation::draft(&project,&load(&selection)?,expected_head,std::time::Duration::from_secs(validity_seconds),deadline,Default::default())?)?,
                 LaunchCommand::Run { task, profile, repository, sign_with, validity_seconds, title, plan_output, review_of, fixes_review, work_item, role, supersedes, fixes, review_kind, review_scope, write, output, accept, no_default_accept, deliverable, prompt_file, contract_file, integration_ref, base, max_active_workers, herdr_socket, prepare_only, budget_seconds } =>
                     crate::launch_run::run(&ctx, &slug, crate::launch_run::Args { task, profile, repository, sign_with, validity_seconds, title, plan_output, review_of, fixes_review, work_item, role, supersedes, fixes, review_kind, review_scope, write, output, accept, no_default_accept, deliverable, prompt_file, contract_file, integration_ref, base, max_active_workers, herdr_socket, prepare_only, budget_seconds })?,
+                LaunchCommand::Nudge { task, message } => {
+                    let text = message.as_deref().map(|path| {
+                        let file = std::fs::File::open(path)?;
+                        let mut bytes = Vec::new();
+                        std::io::Read::read_to_end(&mut std::io::Read::take(file, 8193), &mut bytes)?;
+                        anyhow::ensure!(bytes.len() <= 8192, "nudge message exceeds 8192 bytes");
+                        Ok::<_, anyhow::Error>(String::from_utf8(bytes)?)
+                    }).transpose()?;
+                    herdr_farm::canonical_worker::nudge(&project, &task, text.as_deref())?
+                },
                 LaunchCommand::View { task } => crate::launch_run::view(&ctx, &slug, &task)?,
                 LaunchCommand::Stop { task, force } => crate::launch_run::stop(&ctx, &slug, &task, force)?,
                 LaunchCommand::Reserve { selection, approval_digest, expected_head } => {
@@ -1676,8 +1688,11 @@ pub fn run(#[cfg(feature="state-store")] capture: &mut crate::cli_invocation::Ca
                 },
                 TaskCommand::Show{id}=>{
                     let id=TaskId::new(id).map_err(anyhow::Error::msg)?;
-                    let task=runtime::snapshot(&dir)?.tasks.into_iter().find(|t|t.id==id).context("task not found")?;
-                    let mut shown = serde_json::to_value(&task)?;
+                    let snapshot=runtime::snapshot(&dir)?;
+                    let task=snapshot.tasks.iter().find(|t|t.id==id).context("task not found")?;
+                    let mut shown = serde_json::to_value(task)?;
+                    shown["worker_attention"] = serde_json::to_value(snapshot.inbox.iter().filter(|i| i.content.subject == id.as_str() && i.content.kind == "attempt.worker_idle" && !i.done).collect::<Vec<_>>())?;
+                    shown["operator_interventions"] = serde_json::to_value(snapshot.events.iter().filter(|e| e.kind == "attempt.worker_nudge" && e.payload["task"].as_str() == Some(id.as_str())).collect::<Vec<_>>())?;
                     shown["contract"] = herdr_farm::migration::open_active(&dir)?.task_contract_document(id.as_str())?.unwrap_or(serde_json::Value::Null);
                     println!("{}",serde_json::to_string_pretty(&shown)?);
                 },
