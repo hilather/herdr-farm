@@ -407,6 +407,104 @@ fn render_projections(project: &Path, plan: &MemoryPlan, sequence: u64) -> Resul
     Ok(())
 }
 
+/// Projection health is derived from canonical revisions, never used as brief input.
+#[derive(Debug, Serialize)]
+pub struct ProjectionStatus {
+    pub path: String,
+    pub status: String,
+    pub refreshed: bool,
+}
+
+fn inactive_projection(text: String, status: &str) -> String {
+    text.replacen("\n\n", &format!("\n\n> Memory projection inactive: {status}. This record is retained for reference only.\n\n"), 1)
+}
+
+// A marker alone is not proof that a file is unedited. Reconstruct its complete
+// old revision, including its original sequence, from retained canonical bytes.
+fn clean_projection(memory: &mut MemoryStore, id: &str, bytes: &[u8], cutover: Option<(u64, &str)>) -> Result<bool> {
+    let text = std::str::from_utf8(bytes)?;
+    let Some(marker) = text.lines().next().and_then(|line| line.strip_prefix(
+        "<!-- herdr-projects memory projection; record=")) else { return Ok(false); };
+    let fields: Vec<_> = marker.trim_end_matches(" -->").split("; ").collect();
+    if fields.len() != 4 || fields[0] != id { return Ok(false); }
+    let Some(revision) = fields[1].strip_prefix("revision=").and_then(|v| v.parse::<u64>().ok()) else { return Ok(false); };
+    let Some(sequence) = fields[2].strip_prefix("sequence=").and_then(|v| v.parse::<u64>().ok()) else { return Ok(false); };
+    let Some(rev) = memory.store.memory_revision(id, revision)? else { return Ok(false); };
+    if sequence != rev.promoted_seq && !cutover.is_some_and(|(seq, digest)|
+        sequence == seq && digest == rev.body_hash.as_str()) { return Ok(false); }
+    let body = read_object(&memory.objects, &rev.body_hash)?;
+    let expected = projection_text(id, revision, sequence, rev.body_hash.as_str(), std::str::from_utf8(&body)?);
+    Ok(text == expected || ["revoked", "expired"].iter().any(|status|
+        text == inactive_projection(expected.clone(), status)))
+}
+
+/// Inspect by default; only CLI callers explicitly requesting refresh publish files.
+/// Edited and orphaned files are always preserved, including during revocation.
+pub fn projections(project: &Path, refresh: bool) -> Result<Vec<ProjectionStatus>> {
+    ensure!(migration::read_format(project)?.memory == MEMORY_SQLITE, "projections require SQLite memory ownership");
+    let _guard = if refresh { Some(super::mutation_guard(project)?) } else { None };
+    let mut memory = MemoryStore::from_sqlite(migration::open_active_read_only(project)?, objects_dir(project));
+    let mut statuses = Vec::new();
+    let mut known = std::collections::BTreeSet::new();
+    let now = jiff::Timestamp::now().as_millisecond();
+    let journal = load_journal(project).ok();
+    let cutover_sequence = journal.as_ref().map(|j| memory.store.memory_projection_cutover_sequence(&j.plan.digest)).transpose()?.flatten();
+    let generated_index = journal.as_ref().is_some_and(|journal|
+        journal.plan.version == 1 && journal.plan.sources.iter().any(|s| s.path == "MEMORY.md"));
+    for rec in memory.store.memory_records()? {
+        // Adoption keeps the owner's index. Only a generated MEMORY.md belongs
+        // to this publisher. Other record keys need not denote project files.
+        if rec.record_key == "MEMORY.md" {
+            if !generated_index && !read(&project.join("MEMORY.md")).ok().is_some_and(|b|
+                b.starts_with(b"<!-- herdr-projects memory projection;")) { continue; }
+        } else if !rec.record_key.starts_with("memory/") || !rec.record_key.ends_with(".md") { continue; }
+        known.insert(rec.record_key.clone());
+        let path = match safe_join(project, &rec.record_key) {
+            Ok(path) => path,
+            Err(_) => {
+                statuses.push(ProjectionStatus { path: rec.record_key, status: "edited".into(), refreshed: false });
+                continue;
+            }
+        };
+        let head = memory.store.memory_head(rec.id.as_str())?.context("memory head missing")?;
+        let rev = memory.store.memory_revision(rec.id.as_str(), head.revision)?.context("memory revision missing")?;
+        let body = read_object(&memory.objects, &rev.body_hash)?;
+        let mut rendered = projection_text(rec.id.as_str(), head.revision, rev.promoted_seq,
+            rev.body_hash.as_str(), std::str::from_utf8(&body)?);
+        let expiry = memory.store.memory_projection_expiry(rec.id.as_str(), head.revision)?;
+        if head.status != "active" { rendered = inactive_projection(rendered, "revoked"); }
+        else if expiry.is_some_and(|expiry| now >= expiry) { rendered = inactive_projection(rendered, "expired"); }
+        let existing = if exists(&path) { Some(read(&path)) } else { None };
+        let cutover = cutover_sequence.and_then(|sequence| journal.as_ref()?.plan.sources.iter()
+            .find(|source| source.path == rec.record_key).map(|source| (sequence, source.digest.as_str())));
+        let status = match &existing {
+            None => "missing",
+            Some(Ok(bytes)) if bytes == rendered.as_bytes() => "current",
+            Some(Ok(bytes)) if clean_projection(&mut memory, rec.id.as_str(), bytes, cutover).unwrap_or(false) => "stale",
+            _ => "edited",
+        };
+        let mut refreshed = false;
+        if refresh && matches!(status, "missing" | "stale") {
+            let original = existing.as_ref().and_then(|r| r.as_ref().ok());
+            publish_projection(&path, rendered.as_bytes(), original.map(Vec::as_slice))?;
+            refreshed = true;
+        }
+        statuses.push(ProjectionStatus { path: rec.record_key, status: status.into(), refreshed });
+    }
+    let directory = project.join("memory");
+    if exists(&directory) && fs::symlink_metadata(&directory)?.is_dir() {
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            let path = format!("memory/{}", entry.file_name().to_string_lossy());
+            if !known.contains(&path) && path.ends_with(".md") {
+                statuses.push(ProjectionStatus { path, status: "orphaned".into(), refreshed: false });
+            }
+        }
+    }
+    statuses.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(statuses)
+}
+
 /// Switch `format.memory` to sqlite-v1. Runtime journal remains Active.
 pub fn cutover(project: &Path, plan: &MemoryPlan, policy: &PreparedMemoryPolicy, writers_stopped: bool) -> Result<MemoryJournal> {
     ensure!(writers_stopped, "confirm known writers are stopped with --writers-stopped");

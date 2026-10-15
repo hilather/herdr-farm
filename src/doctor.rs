@@ -332,6 +332,14 @@ fn report(
                     }
                 }
                 if memory == "sqlite-v1" {
+                    match herdr_farm::memory::projections(&dir, false) {
+                        Ok(statuses) => {
+                            let unhealthy = statuses.iter().filter(|s| s.status != "current").count();
+                            if unhealthy > 0 { check(&mut out, None, &label, format!("memory projections: {unhealthy} missing, stale, edited or orphaned; run `memory {slug} projections`")); }
+                        }
+                        Err(error) => check(&mut out, None, &label, format!("memory projection inspection failed: {error:#}")),
+                    }
+
                     // A prohibition ("do not edit MEMORY.md") is correct guidance,
                     // not a mismatch; only an instruction to edit as authority warns.
                     let body = std::fs::read_to_string(dir.join("PROJECT.md")).unwrap_or_default().to_lowercase();

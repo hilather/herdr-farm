@@ -461,6 +461,12 @@ fn cutover_hands_memory_to_the_store_and_never_overwrites_an_edited_projection()
     assert_eq!(p.ok(&["memory-review","demo","show",obligation])["status"],"proposed");
     let projected = fs::read_to_string(p.project.join("MEMORY.md")).unwrap();
     assert!(projected.contains("memory projection") && projected.contains("index body"), "{projected}");
+    // A generated index remains managed even if an edit removes its marker.
+    fs::write(p.project.join("MEMORY.md"), "Edited generated index.").unwrap();
+    let health = p.ok(&["memory", "demo", "projections", "--refresh"]);
+    assert!(health.as_array().unwrap().iter().any(|s| s["path"] == "MEMORY.md" && s["status"] == "edited"));
+    assert_eq!(fs::read_to_string(p.project.join("MEMORY.md")).unwrap(), "Edited generated index.");
+    fs::write(p.project.join("MEMORY.md"), &projected).unwrap();
     // The runtime store still takes work after the owner changed.
     p.add_task("after-cutover");
 }
@@ -725,4 +731,97 @@ fn worker_memory_is_bounded_and_retains_hard_rules_and_summary_revisions() {
     assert!(matches!(&error,MemoryError::Storage(herdr_farm::store::StoreError::PromptTooLarge {part,budget_bytes, ..}) if part=="hard_memory" && *budget_bytes==8192));
     assert!(error.to_string().contains("prompt_too_large"));
     assert!(error.to_string().contains(p.record("huge-hard").unwrap()["id"].as_str().unwrap()));
+}
+
+#[test]
+fn owner_projection_refresh_preserves_edits_and_retained_snapshot_input() {
+    let p = Project::new();
+    let index = fs::read(p.project.join("MEMORY.md")).unwrap();
+    p.ok(&["memory", "demo", "adopt"]);
+    let body = p.path("owner-body.md");
+    fs::write(&body, "First owner fact.").unwrap();
+    let record = || p.cli(&["memory", "demo", "record", "--title", "Projection fact",
+        "--provenance", "owner fixture instruction", "--body-file", body.to_str().unwrap()]);
+    let out = record();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let key = "memory/projection-fact.md";
+    let path = p.project.join(key);
+    let first = fs::read(&path).unwrap();
+    assert!(String::from_utf8_lossy(&first).contains("First owner fact."));
+    assert!(String::from_utf8_lossy(&first).contains("revision=1;"));
+    let snapshot = p.producer("reader");
+    let retained = p.ok(&["memory", "demo", "snapshot-input", "--id", &snapshot]);
+    fs::write(&body, "Revised owner fact.").unwrap();
+    assert!(record().status.success());
+    let revised = fs::read(&path).unwrap();
+    assert!(String::from_utf8_lossy(&revised).contains("Revised owner fact."));
+    assert!(String::from_utf8_lossy(&revised).contains("revision=2;"));
+    let header_edited = String::from_utf8(revised.clone()).unwrap();
+    let (before, after) = header_edited.split_once("; sequence=").unwrap();
+    let (_, after) = after.split_once(';').unwrap();
+    let header_edited = format!("{before}; sequence=18446744073709551615;{after}");
+    fs::write(&path, &header_edited).unwrap();
+    let health = p.ok(&["memory", "demo", "projections", "--refresh"]);
+    assert!(health.as_array().unwrap().iter().any(|s| s["path"] == key && s["status"] == "edited"));
+    assert_eq!(fs::read_to_string(&path).unwrap(), header_edited);
+    fs::write(&path, "Owner edited projection.").unwrap();
+    fs::write(&body, "Third owner fact.").unwrap();
+    let out = record();
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("edited"));
+    assert_eq!(fs::read_to_string(&path).unwrap(), "Owner edited projection.");
+    let health = p.ok(&["memory", "demo", "projections"]);
+    assert!(health.as_array().unwrap().iter().any(|s| s["path"] == key && s["status"] == "edited"));
+    p.ok(&["memory", "demo", "projections", "--refresh"]);
+    assert_eq!(fs::read_to_string(&path).unwrap(), "Owner edited projection.");
+    // Restoring a complete older generated revision permits a safe repair.
+    fs::write(&path, &first).unwrap();
+    fs::write(p.project.join("memory/orphan.md"), "Untracked owner notes.").unwrap();
+    let head = p.head();
+    let health = p.ok(&["memory", "demo", "projections"]);
+    assert!(health.as_array().unwrap().iter().any(|s| s["path"] == key && s["status"] == "stale"));
+    assert!(health.as_array().unwrap().iter().any(|s| s["status"] == "orphaned"));
+    assert_eq!(fs::read(&path).unwrap(), first);
+    assert_eq!(p.head(), head);
+    p.ok(&["memory", "demo", "projections", "--refresh"]);
+    assert!(fs::read_to_string(&path).unwrap().contains("Third owner fact."));
+    fs::remove_file(&path).unwrap();
+    assert!(p.ok(&["memory", "demo", "projections"]).as_array().unwrap().iter().any(|s| s["status"] == "missing"));
+    p.ok(&["memory", "demo", "projections", "--refresh"]);
+    assert!(path.is_file());
+    // Revocation marks clean files, and a subsequent repair still preserves edits.
+    p.policy("revoke_head", key);
+    let revoked = fs::read_to_string(&path).unwrap();
+    assert!(revoked.contains("inactive: revoked"));
+    fs::write(&path, "Edited revoked projection.").unwrap();
+    p.ok(&["memory", "demo", "projections", "--refresh"]);
+    assert_eq!(fs::read_to_string(&path).unwrap(), "Edited revoked projection.");
+    assert_eq!(fs::read(p.project.join("MEMORY.md")).unwrap(), index);
+    assert_eq!(p.ok(&["memory", "demo", "snapshot-input", "--id", &snapshot]), retained);
+    assert!(p.ok(&["memory", "demo", "snapshot-input", "--id", &snapshot]).to_string().contains("First owner fact."));
+}
+
+#[test]
+fn promoted_projections_refresh_and_revocation_preserves_user_edits() {
+    let p = Project::new();
+    p.ok(&["memory", "demo", "adopt"]);
+    let snapshot = p.producer("writer");
+    let key = "memory/promoted.md";
+    let receipt = p.propose("projected-first", "writer", &snapshot, key, &p.ingest(b"First promoted fact."), json!({}));
+    let decision = p.review("projected-first", key, &receipt);
+    assert!(p.promote("projected-first", &decision).status.success());
+    let path = p.project.join(key);
+    assert!(fs::read_to_string(&path).unwrap().contains("First promoted fact."));
+    let receipt = p.propose("projected-next", "writer", &snapshot, key, &p.ingest(b"Replacement promoted fact."), json!({"expected":p.expected(key)}));
+    let decision = p.review("projected-next", key, &receipt);
+    assert!(p.promote("projected-next", &decision).status.success());
+    let generated = fs::read(&path).unwrap();
+    assert!(String::from_utf8_lossy(&generated).contains("Replacement promoted fact."));
+    fs::write(&path, "Edited before revocation.").unwrap();
+    p.policy("revoke_head", key);
+    assert_eq!(fs::read_to_string(&path).unwrap(), "Edited before revocation.");
+    assert!(p.ok(&["memory", "demo", "projections"]).as_array().unwrap().iter().any(|s| s["path"] == key && s["status"] == "edited"));
+    fs::write(&path, generated).unwrap();
+    p.ok(&["memory", "demo", "projections", "--refresh"]);
+    assert!(fs::read_to_string(&path).unwrap().contains("inactive: revoked"));
 }

@@ -46,7 +46,13 @@ dispatch remains disabled describe the tree when they were written.
   fallback. Canonical memory is emitted as one pre-budgeted block to prevent the
   old file packer from dropping mandatory rules. Whole-brief accounting remains.
 - SQLite context and fallback readers no longer consume editable generated Markdown.
-  Edited projections are preserved. Projection refresh/export remains separate work.
+  Edited projections are preserved. CLI head mutations now refresh clean Markdown
+  projections, including owner-memory records and inactive revoked/expired heads.
+  `memory PROJECT projections [--refresh]` inspects/repairs missing and stale files;
+  edited and orphaned files are preserved and reported. Doctor reports projection
+  health. The adopted owner index stays untouched; older generated `MEMORY.md`
+  files follow the same full-file verification rule. Briefs never read projections.
+  General export remains separate work.
 - Import/cutover compares the complete supplied plan with the current inventory.
   Cutover verifies each imported head, body and provenance before changing authority.
   This does **not** implement durable recovery after policy/marker publication.
@@ -99,7 +105,7 @@ pending: neither selective transport nor consumer acknowledgments are claimed.
 | 2, 19 | Certified production profile/launch producer and final external prompt framing/accounting; sealed snapshot reservation, pre-effect checks and retained attempt-input rendering now exist |
 | 3, 4, 12, 15 | Production profile/config authorization, sensitivity semantics and broader scope/dependency tests |
 | 5, 8, 9 | Full process-death fault matrix, bounded indexed retention queries and explicit release/forget policy |
-| 6, 7, 18 | Complete cutover kill/restart matrix, projection refresh/export and broader manual-review conflict fixtures |
+| 6, 7, 18 | Projection refresh/inspection is implemented; remaining: complete cutover kill/restart matrix, general export and broader manual-review conflict fixtures |
 | 10, 11 | Automatic native conversation identity, authenticated caller integration and old-session retirement; explicit route/epoch-bound sessions now exist |
 | 13 | Worker object/evidence CLI staging and typed repository/validation evidence resolution |
 | 14, 20 | Richer semantic review, queued subscription retirement and scheduled expiry notification; source mutation invalidation and read-time expiry checks now exist |
