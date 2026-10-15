@@ -113,6 +113,15 @@ pub fn collection_interval(duration: Duration) -> Duration {
     pass(duration).max(advisory_pass())
 }
 
+/// Owner policy for idle-without-submission attention; invalid values retain
+/// the five-minute default. Keep a finite upper bound on detection latency.
+pub fn worker_idle_policy() -> Duration {
+    let seconds = crate::product_environment::product_var_os("HERDR_FARM_WORKER_IDLE_SECS")
+        .and_then(|v| v.into_string().ok()).and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| (1..=3600).contains(v)).unwrap_or(300);
+    worker_idle_threshold(Duration::from_secs(seconds))
+}
+
 /// A worker idle stretch is sampled on resting passes, so after an advisory
 /// batch it is next sampled only once that quiet window has passed. The notice
 /// threshold must outlive the window and the passes around it, or a restarted

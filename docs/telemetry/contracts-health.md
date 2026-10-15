@@ -68,7 +68,7 @@ A change of a rule, threshold or read path is a new rules version. v7 adds
 | `attempt_cost_shift` | lifecycle | query M07, same windows (≥ 5 accepted each) | ≥ 1.5× prior | ≥ 2× | 6 h |
 | `service_throttled` | services / codex | query M38 | ≥ 0.1 % | ≥ 10 % | 1 h |
 | `quota_headroom` | services / codex | `accounting quota` (current trusted windows) | < 20 % remaining | < 5 % (0 = `window_exhausted`) | 1 h |
-| `waiting_on_you` | attention | `accounting attention` (open waits of open attempts) | ≥ 5 min | ≥ 30 min | 15 min |
+| `waiting_on_you` | attention | `accounting attention` (open waits of open attempts) | ≥ 5 min, or a qualified idle-without-submission stretch | ≥ 30 min | 15 min |
 | `recommendation_stale` | recommendation, per role | TM4.4 `compare` M02 + M50 (§5) | M50 < 1/2 | — | 6 h |
 
 `result_waiting_on_coordinator` reports "result waiting on coordinator for N min"
@@ -426,3 +426,14 @@ Success clears the evidence; no canonical or sidecar schema changes are needed.
 Retry and health intervals honor the isolated-lab test scale; the SQLite admission
 budget remains one second. The owner retry file is operational state, not a
 telemetry retention class; removing a completed spool clears its entry.
+
+The `waiting_on_you` rule includes a `worker_idle_without_submission` reason
+("worker idle without submission") for open idle attention intervals. The idle
+policy qualifies after five minutes by default; qualification warns immediately
+and the ordinary critical waiting threshold still applies. Eligibility excludes
+submissions and retained reports. Canonical `attempt.worker_idle` inbox notices
+name the attempt, observed duration and first-idle activity boundary, and remain
+visible in `context` and `task show` until handled. These advisory notices bypass
+the critical-only health notification filter and deduplicate per ticker idle
+stretch. Missing observation evidence remains unknown; idle is never proof of
+termination. See accounting §6 and `skill/COORDINATOR.md` for the supported nudge.

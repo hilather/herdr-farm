@@ -220,6 +220,9 @@ impl Native<'_> {
             .cloned()
             .context("native worker reply lacks result")
     }
+    fn prompt(&self, id: &str, text: &str, preflight: impl FnOnce() -> Result<()>) -> Result<Value> {
+        self.call_checked(id, "agent.prompt", json!({"target":self.start.agent.name,"text":text}), preflight)
+    }
     fn agent(&self, value: &Value, ready: bool) -> Result<()> {
         validate_native_agent(
             value,
@@ -465,10 +468,9 @@ fn deliver_brief_once(
             + Duration::from_millis(claim.lease_until_ms.saturating_sub(now()).max(0) as u64),
     );
     native.fence()?;
-    let result = native.call_checked(
+    let result = native.prompt(
         operation.as_str(),
-        "agent.prompt",
-        json!({"target":start.agent.name,"text":brief.text}),
+        &brief.text,
         || {
             native.ready(&format!("{}:preflight-ready", operation.as_str()))?;
             executable(&profile.agent, deadline, &cancellation)?;
@@ -492,10 +494,9 @@ fn deliver_brief_once(
             anyhow::bail!("{evidence}");
         }
         delivered += 1;
-        let again = native.call_checked(
+        let again = native.prompt(
             &format!("{}:redeliver-{delivered}", operation.as_str()),
-            "agent.prompt",
-            json!({"target":start.agent.name,"text":brief.text}),
+            &brief.text,
             || {
                 executable(&profile.agent, deadline, &cancellation)?;
                 Ok(db.validate_worker_brief_claim(&claim, now())?)
@@ -882,6 +883,43 @@ fn preserve_terminated_repositories(project:&Path,events:&[Event],record:&Attemp
                 .map(|plan|WorktreeSnapshotReference{plan,digest:String::new(),capture_incomplete:Some(reason.clone())}).collect())
         }
     }
+}
+
+/// One operator-authorized reminder. Reuse the brief's Native gate and exact
+/// readiness fences; never retry a send whose acknowledgment was lost.
+pub fn nudge(project: &Path, task: &str, message: Option<&str>) -> Result<Value> {
+    let text = message.unwrap_or("You are idle without submitting. Continue the assigned task, or write your report and submit the result through the supported workflow. Report any blocker and state your assumptions.");
+    ensure!(!text.trim().is_empty() && text.len() <= 8192, "nudge message must contain 1..8192 bytes");
+    let deadline = Instant::now() + Duration::from_secs(45);
+    let cancellation = Cancellation::default();
+    let guard = crate::execution_guard::RootGuard::operator_by(project.parent().context("project root missing")?, deadline, &cancellation)?;
+    let mut db = crate::migration::open_active(project)?;
+    let snapshot = db.read_snapshot(None)?;
+    let attempts: Vec<_> = snapshot.attempts.iter().filter(|a| a.task.as_str() == task && a.state == AttemptState::Running && !a.termination_observed).collect();
+    let [attempt] = attempts.as_slice() else { anyhow::bail!("nudge requires exactly one running unterminated attempt"); };
+    let input = snapshot.attempt_inputs.iter().find(|i| i.attempt == attempt.id).context("worker inputs missing")?;
+    let profile = input.inputs.effective_profile.as_ref().context("worker frozen profile missing")?;
+    let event = snapshot.events.iter().rev().find(|e| e.kind == "runtime.launch_started" && e.payload["attempt"].as_str() == Some(attempt.id.as_str())).context("worker launch receipt missing")?;
+    let start: LaunchStartedReceipt = serde_json::from_value(event.payload.clone())?;
+    let binding = snapshot.ownership.iter().find(|o| o.attempt.as_ref() == Some(&attempt.id)).context("worker ownership missing")?;
+    let binding = snapshot.runtime_bindings.iter().find(|b| b.id == binding.binding && b.revision == binding.binding_revision).context("worker binding missing")?;
+    inventory::check(project, &binding.id, &start.route, deadline, cancellation.clone())?;
+    executable(&profile.agent, deadline, &cancellation)?;
+    let native = Native { executable: &profile.herdr, start: &start, deadline, cancellation: cancellation.clone(), locks: guard.inherit()? };
+    let id = format!("nudge:{}:{}", attempt.id.as_str(), now());
+    native.ready(&id)?;
+    let _ = crate::telemetry::accounting::attention::record_worker_observation(project, attempt.id.as_str(), Some("idle"), now());
+    let requested_head = db.record_worker_nudge(snapshot.head, &attempt.id, attempt.revision, &id, false, now())?;
+    let result = native.prompt(&id, text, || {
+        native.ready(&format!("{id}:preflight"))?;
+        let current = crate::migration::open_active_read_only(project)?.read_snapshot(None)?;
+        ensure!(current.head == requested_head && current.attempts.iter().any(|a| a.id == attempt.id && a.revision == attempt.revision && a.state == AttemptState::Running && !a.termination_observed), "worker changed before nudge");
+        executable(&profile.agent, deadline, &cancellation)
+    })?;
+    ensure!(result["type"].as_str() == Some("agent_prompted"), "native nudge acknowledgment type mismatch");
+    native.agent(&result["agent"], false)?;
+    db.record_worker_nudge(requested_head, &attempt.id, attempt.revision, &id, true, now())?;
+    Ok(json!({"attempt":attempt.id,"task":task,"prompted":true}))
 }
 
 /// Resolve an uncertain brief from a retained submission, or explicitly permit

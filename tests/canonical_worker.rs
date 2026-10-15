@@ -3338,6 +3338,100 @@ fn attention_mid_run_failure_remains_incomplete_at_termination() {
     assert_eq!(m31["coverage"]["not_observed"], 0);
 }
 
+/// Public coordinator command against the same native fixture as brief recovery.
+#[test]
+fn nudge_sends_once_to_idle_worker_and_refuses_busy_or_terminal_worker() {
+    let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+    let (_, attempt) = lab.reserve("Retained instructions");
+    lab.serve();
+    lab.run_until(100, &|| lab.attempt(&attempt).state == AttemptState::Running);
+    let before = lab.count("agent.prompt");
+    let busy = lab.cli(&["launch", "demo", "nudge", "--task", "work"]);
+    assert!(!busy.status.success());
+    assert_eq!(lab.count("agent.prompt"), before);
+    fs::write(lab.path("lab/agent-status"), "idle").unwrap();
+    let message = lab.path("nudge.txt");
+    fs::write(&message, "Finish your report and submit the result.").unwrap();
+    let sent = lab.ok(&["launch", "demo", "nudge", "--task", "work", "--message", message.to_str().unwrap()]);
+    assert_eq!(sent["attempt"], attempt.as_str());
+    assert_eq!(sent["prompted"], true);
+    let audit = lab.events("attempt.worker_nudge");
+    assert_eq!(audit.len(), 2);
+    assert_eq!(audit[0].payload["acknowledged"], false);
+    assert_eq!(audit[1].payload["acknowledged"], true);
+    assert_eq!(audit[0].payload["request"], audit[1].payload["request"]);
+    assert_eq!(audit[1].payload["attempt"], attempt.as_str());
+    let shown = lab.ok(&["task", "demo", "show", "work"]);
+    assert_eq!(shown["operator_interventions"].as_array().unwrap().len(), 2);
+    assert_eq!(lab.count("agent.prompt"), before + 1);
+    let prompts = lab.requests();
+    let prompt = &prompts.iter().rev().find(|(method, _)| method == "agent.prompt").unwrap().1;
+    assert_eq!(prompt["text"], "Finish your report and submit the result.");
+    fs::write(lab.path("lab/agent-status"), "working").unwrap();
+    assert!(!lab.cli(&["launch", "demo", "nudge", "--task", "work"]).status.success());
+    assert_eq!(lab.count("agent.prompt"), before + 1);
+    let running = lab.attempt(&attempt);
+    lab.ok(&["task", "demo", "cancel-attempt", attempt.as_str(), "--expected-revision", &running.revision.to_string(), "--expected-head", &lab.head().to_string(), "--reason", "done"]);
+    assert!(!lab.cli(&["launch", "demo", "nudge", "--task", "work"]).status.success());
+    assert_eq!(lab.count("agent.prompt"), before + 1);
+}
+
+#[test]
+fn idle_without_submission_surfaces_in_health_context_and_task_show() {
+    let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+    let (_, attempt) = lab.reserve("Retained instructions");
+    lab.serve();
+    lab.run_until(100, &|| lab.attempt(&attempt).state == AttemptState::Running);
+    fs::write(lab.path("lab/agent-status"), "idle").unwrap();
+    let notices = || lab.state().inbox.into_iter().filter(|i| i.content.kind == "attempt.worker_idle").count();
+    let mut ticker = lab.spawn();
+    lab.wait(&mut ticker, 90, &|| notices() == 1);
+    let observed = lab.count("agent.list");
+    lab.wait(&mut ticker, 60, &|| lab.count("agent.list") >= observed + 3);
+    assert_eq!(notices(), 1);
+    lab.stop(ticker);
+    let health = lab.ok(&["telemetry", "demo", "health", "--json"]);
+    let waiting = health["states"].as_array().unwrap().iter().find(|s| s["rule"] == "waiting_on_you").unwrap();
+    assert_eq!(waiting["state"], "warn");
+    assert!(waiting["reasons"].as_array().unwrap().iter().any(|r| r["code"] == "worker_idle_without_submission"));
+    let attention = lab.ok(&["telemetry", "demo", "accounting", "attention", "--json"]);
+    let worker = attention["attempts"].as_array().unwrap().iter().find(|a| a["attempt_id"] == attempt.as_str()).unwrap();
+    assert!(worker["attention"]["intervals"].as_array().unwrap().iter().any(|i| i["reason"] == "worker_idle_without_submission"));
+    let shown = lab.ok(&["task", "demo", "show", "work"]);
+    assert_eq!(shown["worker_attention"].as_array().unwrap().len(), 1);
+    let context = lab.cli(&["context", "demo"]);
+    assert!(context.status.success());
+    assert!(String::from_utf8(context.stdout).unwrap().contains("worker idle without submission"));
+    assert_eq!(lab.attempt(&attempt).state, AttemptState::Running);
+}
+
+#[test]
+fn idle_submitting_worker_never_produces_idle_notice() {
+    let (mut lab, attempt, worktree) = editing_submission_lab("verify_only", WORK_POLICY, false, false);
+    lab.serve();
+    let mut ticker = lab.spawn();
+    lab.wait(&mut ticker, 180, &|| worktree.join("submitted-0").exists());
+    lab.stop(ticker);
+    assert!(lab.ok(&["result", "demo", "show"]).as_array().unwrap().iter().any(|s| s["attempt_id"] == attempt.as_str()));
+    // Submission alone must suppress the notice, even without the report file.
+    fs::remove_file(lab.project.join(".state/worker-output").join(attempt.as_str()).join("report.md")).unwrap();
+    fs::write(lab.path("lab/agent-status"), "idle").unwrap();
+    let since = jiff::Timestamp::now().as_millisecond();
+    let mut ticker = lab.spawn();
+    // Wait for persisted idle observations spanning more than the accelerated
+    // threshold (16.5 s floor); native command budgets remain unscaled.
+    lab.wait(&mut ticker, 90, &|| {
+        let db = rusqlite::Connection::open(lab.project.join(".state/telemetry.db")).unwrap();
+        db.query_row("SELECT coalesce(max(observed_unix_ms)-min(observed_unix_ms),0) FROM attention_samples WHERE attempt_id=?1 AND state='idle' AND observed_unix_ms>=?2",
+            rusqlite::params![attempt.as_str(), since], |r| r.get::<_, i64>(0)).unwrap() > 20_000
+    });
+    lab.stop(ticker);
+    assert!(lab.state().inbox.iter().all(|i| i.content.kind != "attempt.worker_idle"));
+    let attention = lab.ok(&["telemetry", "demo", "accounting", "attention", "--json"]);
+    let worker = attention["attempts"].as_array().unwrap().iter().find(|a| a["attempt_id"] == attempt.as_str()).unwrap();
+    assert!(worker["attention"]["intervals"].as_array().unwrap().iter().all(|i| i["reason"] != "worker_idle_without_submission"));
+}
+
 #[test]
 fn idle_worker_notice_restarts_stretch_and_deduplicates_within_a_ticker() {
     let mut lab = Lab::new("unknown_usage='allow_with_warning'");

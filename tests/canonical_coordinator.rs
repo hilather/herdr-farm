@@ -760,6 +760,10 @@ fn idle_observations_deliver_durable_inbox_advisories_without_stopping_worker() 
     let rows: Value = serde_json::from_str(&lab.ok(&["inbox", "list", "demo"])).unwrap();
     assert_eq!(rows.as_array().unwrap().len(), 1);
     assert_eq!(rows[0]["content"]["summary"], "attempt quiet-attempt: worker idle for 10 min without submitting");
+    assert!(rows[0]["content"]["body"].as_str().unwrap().contains("first observed idle"));
+    let shown: Value = serde_json::from_str(&lab.ok(&["task", "demo", "show", "quiet"])).unwrap();
+    assert_eq!(shown["worker_attention"][0]["content"]["id"], rows[0]["content"]["id"]);
+    assert!(lab.ok(&["context", "demo"]).contains("worker idle without submission"));
     lab.ok(&["inbox", "done", "demo", rows[0]["content"]["id"].as_str().unwrap()]);
     assert_eq!(db.notify_worker_idle(db.current_head().unwrap(), &attempt.id, 1, now, now + 800_000).unwrap(), Some(ReminderOutcome::AlreadyDelivered));
     assert_eq!(db.notify_worker_idle(db.current_head().unwrap(), &attempt.id, 1, now + 1_000_000, now + 1_600_000).unwrap(), Some(ReminderOutcome::Delivered));

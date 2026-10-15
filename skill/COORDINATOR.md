@@ -384,8 +384,20 @@ signed contract revision. See `docs/factory/verified-results.md` for the config
 format and manually prepared policies.
 
 Canonical `attempt.worker_idle` notices mean a worker has remained idle/done for
-ten minutes without submitting; it has not been stopped. Inspect and nudge,
-stop or relaunch as appropriate. `attempt.worker_question` names a worker's
+five minutes without a submission or retained report; it has not been stopped.
+The ticker policy `HERDR_FARM_WORKER_IDLE_SECS` accepts 1–3600 seconds (default
+300; invalid values retain the default). Notices deduplicate within an observed
+idle stretch; working, unknown observations and ticker restarts rearm it.
+Inspect `context PROJECT`, `task PROJECT show TASK` and telemetry health/attention.
+Use `launch PROJECT nudge --task TASK [--message FILE]` to send one reminder
+(default: continue, or report blockers and submit). Messages contain at most
+8192 UTF-8 bytes. This command requires one running unterminated attempt and the
+exact retained worker, socket and supervisor incarnation, plus bundled visible
+idle prompt readiness checked again immediately before sending. Busy, blocked,
+missing or mismatched agents are refused. Sends are never automatically retried;
+a lost acknowledgment requires inspection. Canonical events record request and
+acknowledgment without retaining message text; acknowledged nudges count in M31. CLI telemetry also records the command.
+Stop or relaunch as appropriate. `attempt.worker_question` names a worker's
 user-input tool call, never its private question text. Isolated workers get no
 owner answers: direct them to record assumptions in their report. Handle these
 advisories and mark the inbox items done; neither notice proves termination.
