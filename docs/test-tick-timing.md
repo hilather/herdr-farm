@@ -434,3 +434,16 @@ SQLite contention retries every 30 seconds via `timing::retry`; health warns at
 120 seconds and becomes critical at 600 seconds through the same scaling helper.
 The append-only worker report survives failures. Owner retry evidence persists
 across ticker restarts, so restarting does not reset the log suppression or age.
+
+## Resting worker attention and stop requests
+
+Resting passes query the existing retained-attempt partial index before reading
+worker attention snapshots. Projects with no running, unterminated attempt clear
+their volatile idle stretches and skip the snapshot, including paused projects.
+A running worker still receives the existing advisory observation behavior.
+Ticker project boundaries check the stop file during discovery, canonical
+controller work, advisory admission, attention and telemetry discovery. A stop
+CLI timeout leaves its request in place for the running ticker to observe;
+successful stop or a subsequent start retains the existing cleanup behavior.
+Controller intervals, native observation windows and executor draining are
+unchanged.

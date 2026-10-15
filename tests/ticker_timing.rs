@@ -353,3 +353,94 @@ fn detached_start_publishes_ownership_and_immediate_stop_releases_it() {
         assert!(log.contains("completed 1 passes; draining shared executor"));
     }
 }
+
+#[test]
+fn terminated_launch_history_keeps_resting_passes_flat_and_stops_promptly() {
+    use herdr_farm::{domain::{Attempt, AttemptId, AttemptState, Commit, Mutation, Task, TaskId, TaskState}, migration};
+    let lab = Lab::new();
+    let paused = lab.command(Some(SCALE.trim())).args(["pause", "demo"]).output().unwrap();
+    assert!(paused.status.success(), "{}", String::from_utf8_lossy(&paused.stderr));
+    let project = lab.0.path().join("root/demo");
+    migration::apply(&project, &migration::inspect(&project).unwrap(), true).unwrap();
+    let run = || {
+        let started = Instant::now();
+        let mut ticker = Ticker(lab.command(Some(SCALE.trim()))
+            .args(["ticker", "run", "--passes", "3"])
+            .stdout(Stdio::null()).stderr(Stdio::inherit()).spawn().unwrap());
+        loop {
+            if let Some(status) = ticker.0.try_wait().unwrap() {
+                assert!(status.success());
+                return started.elapsed();
+            }
+            assert!(started.elapsed() < Duration::from_secs(60), "history pass stalled");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    };
+    let baseline = run();
+    let mut store = migration::open_active_unchecked(&project).unwrap();
+    let mut mutations = Vec::new();
+    for n in 0..6_000 {
+        let task = TaskId::new(format!("history-task-{n}")).unwrap();
+        mutations.push(Mutation::Task { expected: None, next: Task {
+            id: task.clone(), revision: 1, state: TaskState::Succeeded,
+            title: "retired launch".into(), active_attempt: None,
+        }});
+        mutations.push(Mutation::Attempt { expected: None, next: Attempt {
+            id: AttemptId::new(format!("history-attempt-{n}")).unwrap(), task,
+            revision: 1, state: AttemptState::Completed, snapshot: Some("x".repeat(2048)),
+            reservation: format!("history-reservation-{n}"), termination_observed: true,
+        }});
+    }
+    // Bulk public-store commits respect its 1,000-mutation batch limit;
+    // twelve transactions build all history without launch subprocesses.
+    let mut pending = mutations.into_iter();
+    loop {
+        let batch: Vec<_> = pending.by_ref().take(1_000).collect();
+        if batch.is_empty() { break; }
+        store.commit(Commit { expected_head: store.current_head().unwrap(), mutations: batch }).unwrap();
+    }
+    assert_eq!(store.read_snapshot(None).unwrap().attempts.len(), 6_000);
+    assert!(!store.has_running_unterminated_attempts().unwrap());
+    drop(store);
+    let history = run();
+    eprintln!("attention history: baseline={baseline:?}, 6000 terminated={history:?}");
+    // Allow 3x baseline plus one second for scheduler/IO noise under low-priority
+    // concurrent builds. The old full-snapshot path grows by many seconds here.
+    assert!(history <= baseline * 3 + Duration::from_secs(1),
+        "terminated history changed pass cost: baseline={baseline:?}, history={history:?}");
+    let previous_metrics = lab.inode();
+    let mut ticker = Ticker(lab.command(Some(SCALE.trim())).args(["ticker", "run"])
+        .stdout(Stdio::null()).stderr(Stdio::inherit()).spawn().unwrap());
+    let ready = Instant::now();
+    loop {
+        if lab.inode().is_some() && lab.inode() != previous_metrics { break; }
+        assert!(ready.elapsed() < Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let stopped = Instant::now();
+    fs::write(lab.0.path().join("root/.ticker.stop"), b"").unwrap();
+    loop {
+        if let Some(status) = ticker.0.try_wait().unwrap() { assert!(status.success()); break; }
+        assert!(stopped.elapsed() < baseline * 3 + Duration::from_secs(2), "history delayed stop");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    eprintln!("attention history stop: {:?}", stopped.elapsed());
+    assert_eq!(migration::open_active_read_only(&project).unwrap().read_snapshot(None).unwrap().attempts.len(), 6_000);
+}
+
+#[test]
+fn stop_timeout_preserves_request_until_lock_holder_releases() {
+    let lab = Lab::new();
+    let root = lab.0.path().join("root");
+    let lock = fs::File::options().read(true).write(true).create(true).truncate(true)
+        .open(root.join(".ticker.lock")).unwrap();
+    lock.lock().unwrap();
+    let stop = lab.command(Some(SCALE.trim())).args(["ticker", "stop"]).output().unwrap();
+    assert!(!stop.status.success());
+    assert!(String::from_utf8_lossy(&stop.stderr).contains("did not exit within"));
+    assert!(root.join(".ticker.stop").is_file(), "timeout erased a pending request");
+    drop(lock);
+    let stop = lab.command(Some(SCALE.trim())).args(["ticker", "stop"]).output().unwrap();
+    assert!(stop.status.success());
+    assert!(!root.join(".ticker.stop").exists());
+}
