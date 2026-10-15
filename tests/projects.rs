@@ -534,3 +534,53 @@ fn worker_uid_is_strict_per_project_owner_policy() {
         assert!(home.refused(&["safety", "show", "demo"]).contains("worker_uid is owner-only"));
     }
 }
+
+/// Canonical owner policy remains readable without store or execution access.
+#[cfg(feature = "state-store")]
+#[test]
+fn canonical_safety_show_is_read_only_and_reports_owner_policy() {
+    let home = Home::new();
+    home.ok(&["new", "demo"]);
+    let project = home.root().join("demo").canonicalize().unwrap();
+    home.ok(&["reconcile", "demo", "--record"]);
+    let runtime: serde_json::Value = serde_json::from_str(&home.ok(&["runtime", "demo", "inspect"])).unwrap();
+    home.ok(&["runtime", "demo", "state", "active", "--expected-head", &runtime["head"].to_string(), "--expected-revision", &runtime["control"]["revision"].to_string()]);
+    let runtime: serde_json::Value = serde_json::from_str(&home.ok(&["runtime", "demo", "inspect"])).unwrap();
+    assert_eq!(runtime["control"]["state"], "active");
+    assert_eq!(runtime["control"]["reconciliation_required"], false);
+    let defaults = home.ok(&["safety", "show", "demo"]);
+    assert!(defaults.contains("worker_uid = \"root\""), "{defaults}");
+    let config = home.0.path().join(".config/herdr-farm/config.toml");
+    fs::write(&config, format!("[safety.{:?}]\nworker_uid='owner'\nthread_network=false\nthread_wall_hours=12\nthread_env=['RUST_BACKTRACE=1']\nthread_allowed_commands=['cargo check:*']\n", project.display().to_string())).unwrap();
+    // An unreadable store and held execution/project locks cannot obstruct a
+    // settings-only read. Preserve the database bytes to check no writes occur.
+    let db = project.join(".state/state.db");
+    let saved_db = fs::read(&db).unwrap();
+    fs::remove_file(&db).unwrap();
+    fs::create_dir(&db).unwrap();
+    let execution = fs::File::create(home.root().join(".execution.lock")).unwrap();
+    execution.lock().unwrap();
+    let lock = fs::File::create(project.join(".state/lock")).unwrap();
+    lock.lock().unwrap();
+    let snapshot = || home.tree().into_iter().filter(|p| p.is_file()).map(|p| {
+        let bytes = fs::read(&p).unwrap();
+        let modified = fs::metadata(&p).unwrap().modified().unwrap();
+        (p, bytes, modified)
+    }).collect::<Vec<_>>();
+    let before = snapshot();
+    let tree = home.tree();
+    let shown = home.ok(&["safety", "show", "demo"]);
+    for expected in ["worker_uid = \"owner\"", "thread_network = false", "thread_wall_hours = 12", "RUST_BACKTRACE=1", "thread_allowed_commands = [\"cargo check:*\"]", "Bash(cargo check:*)"] {
+        assert!(shown.contains(expected), "missing {expected}: {shown}");
+    }
+    assert_eq!(snapshot(), before);
+    assert_eq!(home.tree(), tree);
+    lock.unlock().unwrap();
+    execution.unlock().unwrap();
+    fs::remove_dir(&db).unwrap();
+    fs::write(&db, saved_db).unwrap();
+    // Legacy-only commands still refuse without inventing a control diagnosis.
+    let error = home.refused(&["safety", "requests", "demo"]);
+    assert!(error.contains("legacy runtime is disabled"), "{error}");
+    assert!(!error.contains("reconciliation is required"), "{error}");
+}

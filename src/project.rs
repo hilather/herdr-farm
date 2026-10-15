@@ -369,6 +369,14 @@ impl Drop for ProjectLock {
 impl Project {
     /// An existing project. Validates the slug before building any path.
     pub fn load(root: &Path, slug: &str) -> Result<Project> {
+        let project = Self::load_metadata(root, slug)?;
+        ensure_legacy(&project.dir())?;
+        Ok(project)
+    }
+
+    /// Read-only project identity for owner settings, independent of runtime storage.
+    /// Does not open the store, inspect legacy runtime records, or acquire locks.
+    pub fn load_metadata(root: &Path, slug: &str) -> Result<Project> {
         validate_slug(slug)?;
         let project = Project {
             root: root.to_path_buf(),
@@ -377,7 +385,6 @@ impl Project {
         if !project.project_md().is_file() {
             bail!("no project `{slug}` in {}", root.display());
         }
-        ensure_legacy(&project.dir())?;
         Ok(project)
     }
 
@@ -696,7 +703,7 @@ pub fn ensure_legacy(dir: &Path) -> Result<()> {
         match std::fs::symlink_metadata(dir.join(relative)) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
             Err(e) => return Err(e).with_context(|| format!("cannot inspect ownership marker {relative}")),
-            Ok(_) => bail!("project uses migration/store maintenance; legacy runtime is disabled; use `migration status`, `recover` or `export` with the state-store build; reconciliation is required"),
+            Ok(_) => bail!("project uses migration/store maintenance; legacy runtime is disabled; use `migration status`, `recover` or `export` with the state-store build"),
         }
     }
     Ok(())

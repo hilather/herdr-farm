@@ -2266,7 +2266,7 @@ pub fn run(#[cfg(feature="state-store")] capture: &mut crate::cli_invocation::Ca
             SafetyCommand::Reject { slug, id, reason } => crate::worker_permissions::decide(&ctx, &slug, &id, false, &reason),
             SafetyCommand::Revoke { slug, prefix } => crate::worker_permissions::revoke(&ctx, &slug, &prefix),
             SafetyCommand::Show { slug } => {
-                let project = Project::load(&ctx.root, &slug)?;
+                let project = Project::load_metadata(&ctx.root, &slug)?;
                 let safety = project.safety(&ctx.config_dir)?;
                 println!("Effective safety settings for `{slug}`:");
                 println!("  start_threads = {:?}", safety.start_threads);

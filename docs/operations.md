@@ -1098,8 +1098,10 @@ Only that project opts in. Unknown values and non-string values refuse.
 `PROJECT.md` cannot supply this setting, including through a nested safety
 table. The config must be an external owner-owned file without group or other
 write access; project-local configuration is refused. `safety show PROJECT`
-reports the effective value. Reprepare the worker profile after changing its
-owner configuration, then create a new launch approval. Existing attempts retain
+reports the effective owner safety settings, including `worker_uid`, thread
+settings and allowed commands, for both canonical and legacy projects. This
+read-only check does not open the canonical store or use the legacy runtime.
+Reprepare the worker profile after changing its owner configuration, then create a new launch approval. Existing attempts retain
 the uid/gid captured in their approved launch inputs, including their verification
 and integration checks; a config edit does not change a running attempt.
 No store migration is required: the optional identity uses the existing retained
