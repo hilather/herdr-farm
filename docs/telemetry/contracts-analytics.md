@@ -8,7 +8,7 @@ are [contracts.md](contracts.md) §0. Code: `src/telemetry/analytics/`
 (TM4.3). Telemetry never grants launch, changes budgets or accepts results;
 nothing here writes `state.db`.
 
-## 1. Metric registry (`analytics-registry.v13`)
+## 1. Metric registry (`analytics-registry.v14`)
 
 Version history: v13 adds M104 model generation speed (M104 section below). v12 adds MET-VERIFY-1 M100–M103 (section 13). v11 adds MET-COORD-1 M80–M87 (contracts-accounting.md; M88–M89 reserved) and MET-LAUNCH-1 M90–M95 (section 12; M96–M99 reserved). v10 adds MET-REWORK-1 M65–M69 (section 10) and MET-WORKER-1 M70–M77; M78–M79 are reserved pending definitions. v8 adds bounded lifecycle `role` and M37.lineage-v2 (LINEAGE-1); M37.fleet-v1 remains absent as `definition_superseded`. v1 TM4.1; v2 adds `verification_flip_rate` (DG6, #198); v3 adds M30 `M30.submission-v1` (DG1, #202); v4 adds M10 `M10.v1` (DG2, #204); v5 adds M03 operating throughput (DG3); v6 adds M05 lifecycle tokens and specifies M19’s missing timed history; v7 adds M13 never-running exclusions, M04/M05 partial values and M31 lifecycle sampling, M35 attempt-time concurrency and M40 reported/merged quota windows, plus the bounded lifecycle `profile` dimension (TFIX-4, no definition change). Previous M13.slice-v1, M04.cost-v1, M05.tokens-v1, M31.attention-v1, M35.fanout-v1 and M40.quota-windows-v1 definitions remain only as absent (`definition_superseded`). v9 adds MET-NOW-A `M51.v1`–`M58.v1` and MET-NOW-B `M60`–`M64` (sections 8 and 9).
 
@@ -761,3 +761,17 @@ sidecar backups and deleted/tombstoned with their source. No canonical schema
 change. Certification: synthetic CLI workflows in `telemetry_collect` and
 `telemetry_claude`; no production generation-speed claim is inferred from older
 live token-counter certificates.
+
+### M105 — control epoch churn (`M105.v1`)
+
+Registry v14 adds `control_epoch_churn`: activity-window epoch increment count
+from timestamped canonical control events, at or after `from` (since-only).
+The count includes explicit repeated pauses and invalidations because each seals
+new launches against a new epoch. `numerator` equals `value`; the denominator is
+not applicable. `dominant_invalidation` contains the most frequent cause/binding
+pair (lexical tie break) and its count, never metric labels.
+`legacy_events_without_time` and `excluded.missing_control_time` disclose legacy
+untimestamped events outside the measurable population. Future-dated events are
+excluded. The metric reads retained events without adding storage or migrations.
+Health uses a ten-minute window; report/query without `from` count all retained
+timestamped control events. Existing canonical event retention and backups apply.

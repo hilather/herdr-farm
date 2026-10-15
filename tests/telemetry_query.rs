@@ -126,7 +126,7 @@ fn nd(m: &Value) -> (Value, Value, Value) { (m["numerator"].clone(), m["denomina
 fn registry_declares_every_metric_and_gates_families() {
     let p = Planted::new();
     let registry = p.json(&["metrics", "registry", "--json"]);
-    assert_eq!(registry["registry"], "analytics-registry.v13");
+    assert_eq!(registry["registry"], "analytics-registry.v14");
     assert_eq!(registry["rejected_cohorts"], json!({"completed_task": "ambiguous_cohort"}));
     let metrics = registry["metrics"].as_array().unwrap();
     let ids: Vec<&str> = metrics.iter().map(|m| m["id"].as_str().unwrap()).collect();
@@ -135,7 +135,7 @@ fn registry_declares_every_metric_and_gates_families() {
     expected.extend((70..=77).map(|n| format!("M{n}")));
     expected.extend((80..=87).map(|n| format!("M{n}")));
     expected.extend((90..=95).map(|n| format!("M{n}")));
-    expected.extend((100..=104).map(|n| format!("M{n}")));
+    expected.extend((100..=105).map(|n| format!("M{n}")));
     expected.push("flaky_tests".into());
     expected.push("verification_flip_rate".into());
     // Numeric metric suffixes have no fixed width; named proxies sort after them.

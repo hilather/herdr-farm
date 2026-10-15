@@ -1058,7 +1058,7 @@ fn worker_friction_metrics_cli_fixture_and_unavailable_reasons() {
     let text=f.text(&["report"]);
     assert!(text.contains("by_caller={") && text.contains("top_command_paths=["));
     let registry=f.cli_args(&["metrics","registry","--json"]).0;
-    assert_eq!(registry["registry"],"analytics-registry.v13");
+    assert_eq!(registry["registry"],"analytics-registry.v14");
     state.execute_batch("DROP TRIGGER events_record_time; DROP TABLE event_times").unwrap();
     assert_eq!(f.report()["metrics"]["M77"]["value"],json!({"samples":1,"p50":"1200","p90":"1200","unmatched_notices":0}));
     db.execute("DELETE FROM cli_invocations",[]).unwrap();
