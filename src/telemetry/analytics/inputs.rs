@@ -79,6 +79,7 @@ fn canonical_files(project: &Path) -> Vec<Value> {
 
 pub(crate) fn group(provider: Provider, id: &str) -> &'static str {
     match provider {
+        Provider::Lane("analytics") if id == "M105" => "control_churn",
         Provider::Lane("analytics") if id == "M104" => "generation_speed",
         Provider::Native if id == "M03" => "operating",
         Provider::Native => "native",
@@ -104,7 +105,7 @@ pub(crate) fn group(provider: Provider, id: &str) -> &'static str {
 
 /// These evaluators consult the clock (censoring, active windows or maturity).
 /// Their dependency is time as well as stored inputs, so they never skip.
-pub(crate) fn clock(group: &str) -> bool { matches!(group, "attention" | "fleet" | "review" | "quality" | "operations" | "worker" | "coordinator" | "launch" | "verification") }
+pub(crate) fn clock(group: &str) -> bool { matches!(group, "control_churn" | "attention" | "fleet" | "review" | "quality" | "operations" | "worker" | "coordinator" | "launch" | "verification") }
 
 pub(crate) fn stamp(group: &str, canonical: &Value, generations: &BTreeMap<String, i64>) -> String {
     let relevant = |table: &str| table == "schema" || match group {

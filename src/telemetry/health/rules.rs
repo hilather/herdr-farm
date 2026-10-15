@@ -1,4 +1,4 @@
-//! The declared health-rule table `health-rules.v5`
+//! The declared health-rule table `health-rules.v6`
 //! (docs/telemetry/contracts-health.md §2). Each rule reads only through the
 //! TM4.1 query service (`analytics::query`) or a lane's own read path
 //! (`accounting quota|attention|entries|budget-shadow`, TM4.4 `compare`), and
@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-pub const VERSION: &str = "health-rules.v5";
+pub const VERSION: &str = "health-rules.v6";
 const MINUTE: i64 = 60_000;
 const HOUR: i64 = 60 * MINUTE;
 const DAY: i64 = 24 * HOUR;
@@ -94,6 +94,9 @@ pub struct Rule {
 }
 
 pub const RULES: &[Rule] = &[
+    Rule { name: "control_epoch_churn", family: "runtime", service: None, source: "query:M105", eval: Eval::Count("M105"),
+        direction: Direction::Above, warn: 6, critical: 12, unit: "epoch_increments", window_ms: Some(10 * MINUTE), cooldown_ms: HOUR,
+        detail: "six control epoch increments in ten minutes warn; twelve are critical; dominant invalidation binding is evidence only" },
     Rule { name: "launch_stalled", family: "runtime", service: None, source: "canonical:launch progress", eval: Eval::LaunchStalled,
         direction: Direction::Above, warn: 5 * MINUTE, critical: 15 * MINUTE, unit: "ms", window_ms: None, cooldown_ms: HOUR,
         detail: "open reserved or launching attempt without progress for five minutes, or stopped recovery with retained capacity" },
@@ -306,6 +309,12 @@ pub fn evaluate(project: &Path, now: i64) -> Vec<Outcome> {
     out
 }
 
+/// The doctor's live control check does not read unrelated health lanes or alerts.
+pub(crate) fn evaluate_control_churn(project: &Path, now: i64) -> Result<Outcome> {
+    let rule = find("control_epoch_churn").expect("declared control churn rule");
+    Ok(evaluate_rule(&mut Ctx::new(project, now), rule)?.remove(0))
+}
+
 fn evaluate_rule(ctx: &mut Ctx, rule: &'static Rule) -> Result<Vec<Outcome>> {
     let now = ctx.now;
     Ok(vec![match rule.eval {
@@ -435,8 +444,14 @@ fn evaluate_rule(ctx: &mut Ctx, rule: &'static Rule) -> Result<Vec<Outcome>> {
             if r["status"] == "unavailable" { return Ok(vec![unknown(rule, r["reason"].as_str().unwrap_or("unavailable"), metric, window)]); }
             let Some(n) = r["numerator"].as_i64() else { return Ok(vec![unknown(rule, "numerator_unavailable", metric, window)]) };
             let state = grade(rule, |t| n >= t, |_| false);
-            outcome(rule, state, vec![json!({"code": if n > 0 { format!("{}_observed", rule.unit) } else { "none_observed".to_owned() }, "count": n})], metric, window,
-                json!({"numerator": n, "denominator": r["denominator"], "value": r["value"], "censored": r["detail"]["censored"]}))
+            let mut reason = json!({"code": if n > 0 { format!("{}_observed", rule.unit) } else { "none_observed".to_owned() }, "count": n});
+            let mut evidence = json!({"numerator": n, "denominator": r["denominator"], "value": r["value"], "censored": r["detail"]["censored"]});
+            if id == "M105" {
+                reason["dominant_invalidation"] = r["detail"]["dominant_invalidation"].clone();
+                evidence["dominant_invalidation"] = r["detail"]["dominant_invalidation"].clone();
+                evidence["legacy_events_without_time"] = r["detail"]["legacy_events_without_time"].clone();
+            }
+            outcome(rule, state, vec![reason], metric, window, evidence)
         }
         Eval::Shift(id) => {
             let w = rule.window_ms.unwrap_or(7 * DAY);

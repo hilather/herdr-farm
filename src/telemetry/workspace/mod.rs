@@ -294,6 +294,11 @@ pub fn watch(root: &Path, slug: &str, config_dir: &Path, args: &WatchArgs) -> Re
 pub fn doctor_checks(project: &Path, slug: &str, config_dir: &Path) -> Vec<(Option<bool>, String)> {
     let mut out = Vec::new();
     if !project.join(".state/state.db").is_file() { return out; }
+    if let Ok(churn) = super::health::rules::evaluate_control_churn(project, jiff::Timestamp::now().as_millisecond())
+        && matches!(churn.state, super::health::rules::State::Warn | super::health::rules::State::Critical) {
+        let dominant = &churn.evidence["dominant_invalidation"];
+        out.push((None, format!("control epoch churn: {} ({} increments in ten minutes); dominant invalidation {} for {}", churn.state.as_str(), churn.evidence["numerator"], dominant["cause"].as_str().unwrap_or("unknown"), dominant["binding"].as_str().unwrap_or("unknown"))));
+    }
     match super::views::enabled(config_dir) {
         Ok(true) => {}
         Ok(false) => { out.push((None, "telemetry views: disabled ([telemetry] views = false); the fleet pane and digest section are off".into())); return out; }

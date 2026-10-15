@@ -2,7 +2,7 @@
 //! (docs/telemetry/contracts-health.md), through `herdr-farm telemetry`
 //! on the CLI over planted canonical and sidecar rows. Every expected value is
 //! hand-computed from the planted rows and the declared rule table
-//! (`health-rules.v5`); none is read back from a production aggregate.
+//! (`health-rules.v6`); none is read back from a production aggregate.
 
 #![cfg(all(feature = "state-store", target_os = "linux"))]
 #![allow(clippy::disallowed_methods)] // Test-only spawns outside the library may skip the spawn gate.
@@ -353,7 +353,7 @@ fn ticker_notifies_critical_launch_stalled_episode_once() {
 fn stale_collector_and_missing_sources_are_health_states_never_zero_usage() {
     let p = Planted::new();
     let out = p.health();
-    assert_eq!((&out["contract"], &out["rules_version"], &out["project"]), (&json!("telemetry-health.v1"), &json!("health-rules.v5"), &json!("demo")));
+    assert_eq!((&out["contract"], &out["rules_version"], &out["project"]), (&json!("telemetry-health.v1"), &json!("health-rules.v6"), &json!("demo")));
     for rule in ["collector_stale", "usage_coverage", "cost_coverage", "accounting_conflict", "quota_headroom", "waiting_on_you"] {
         let s = state(&out, rule);
         assert_eq!((&s["state"], codes(s)), (&json!("unknown"), vec!["collection_not_run".to_owned()]), "{rule}: {s}");
@@ -425,7 +425,7 @@ fn coverage_loss_grades_usage_coverage_exactly() {
     assert!(text.contains("attempt t2-a0 finished") && text.contains("usage not bound: not_bound"), "{text}");
 
     assert_eq!(s["metric"]["definition"], "M13.slice-v2");
-    assert_eq!(s["metric"]["registry"], "analytics-registry.v13");
+    assert_eq!(s["metric"]["registry"], "analytics-registry.v14");
 
     p.sidecar().execute_batch("DELETE FROM codex_usage; DELETE FROM rollout_sources;").unwrap();
     let out = p.evaluate();
@@ -733,7 +733,7 @@ fn cooldown_dedup_and_inbox_notice_written_once() {
     let update = again["updated"].as_array().unwrap().iter().find(|a| a["rule"] == "quota_headroom").unwrap();
     assert_eq!((&update["alert_id"], &update["deduplicated"]), (&json!(id), &json!(true)));
     let alert = open_alert(&p.alerts(), "quota_headroom").unwrap().clone();
-    assert_eq!((&alert["occurrences"], &alert["metric"]["read"], &alert["rules_version"]), (&json!(2), &json!("lane:accounting quota"), &json!("health-rules.v5")));
+    assert_eq!((&alert["occurrences"], &alert["metric"]["read"], &alert["rules_version"]), (&json!(2), &json!("lane:accounting quota"), &json!("health-rules.v6")));
 
     // Inbox: one notice for the open alert, never two.
     let before = |p: &Planted| p.db().query_row("SELECT count(*) FROM inbox_items WHERE json_extract(payload,'$.kind')='telemetry-health'", [], |r| r.get::<_, i64>(0)).unwrap();
@@ -952,7 +952,7 @@ fn recommendation_carries_evidence_and_goes_stale_after_a_configuration_change()
     assert_eq!((&rec["contract"], &rec["status"], &rec["role"]), (&json!("telemetry-recommendation.v1"), &json!("recommended"), &json!("code")), "{rec}");
     assert_eq!(rec["advisory"], json!({"advisory": true, "authority": "none", "writes": "none",
         "routing": "advisory only: a person decides; nothing here is read by dispatch or admission, and it changes no authority, profile, model access, spending limit or acceptance check"}));
-    assert_eq!(rec["metric"], json!({"metric_id": "M02", "definition": "M02.cohort-v1", "higher_is_better": true, "registry": "analytics-registry.v13",
+    assert_eq!(rec["metric"], json!({"metric_id": "M02", "definition": "M02.cohort-v1", "higher_is_better": true, "registry": "analytics-registry.v14",
         "comparison": "analytics-comparison.v2", "freshness": "M50.recommendation-v1"}));
     assert_eq!(rec["evidence_window"], json!({"cohort": "terminal_cohort", "from_unix_ms": null, "to_unix_ms": null, "semantics": "half_open", "time_basis": "task_terminal_time"}));
     assert_eq!(rec["recommendation"]["configuration_id"], json!(codex));
@@ -1420,14 +1420,14 @@ fn recommendations_and_notices_change_no_canonical_state_and_no_dispatch() {
 fn rule_table_is_declared_with_bounded_labels() {
     let p = Planted::new();
     let rules = p.json(&["health", "rules"]);
-    assert_eq!((&rules["rules_version"], &rules["labels"]), (&json!("health-rules.v5"), &json!(["project", "family", "rule", "service", "role"])));
+    assert_eq!((&rules["rules_version"], &rules["labels"]), (&json!("health-rules.v6"), &json!(["project", "family", "rule", "service", "role"])));
     let names: Vec<&str> = rules["rules"].as_array().unwrap().iter().map(|r| r["rule"].as_str().unwrap()).collect();
-    assert_eq!(names, ["launch_stalled", "result_waiting_on_coordinator", "test_weakening", "verification_flaky", "usage_after_termination", "collector_stale", "usage_coverage", "cost_coverage", "accounting_conflict", "budget_exposure", "fix_reopened", "integration_reverted",
+    assert_eq!(names, ["control_epoch_churn", "launch_stalled", "result_waiting_on_coordinator", "test_weakening", "verification_flaky", "usage_after_termination", "collector_stale", "usage_coverage", "cost_coverage", "accounting_conflict", "budget_exposure", "fix_reopened", "integration_reverted",
         "latency_shift", "attempt_cost_shift", "service_throttled", "quota_headroom", "waiting_on_you", "recommendation_stale"]);
     let quota = rules["rules"].as_array().unwrap().iter().find(|r| r["rule"] == "quota_headroom").unwrap();
     assert_eq!(quota["thresholds"], json!({"direction": "below", "warn": 20000, "critical": 5000, "unit": "millipercent_remaining", "window_ms": null, "cooldown_ms": HOUR}));
     let text = String::from_utf8(p.raw(&["health"])).unwrap();
-    assert!(text.starts_with("demo · health · health-rules.v5 · live_read_only\n"), "{text}");
+    assert!(text.starts_with("demo · health · health-rules.v6 · live_read_only\n"), "{text}");
     assert!(text.contains("  collector_stale [collection service=codex]: unknown collection_not_run\n"), "{text}");
     assert!(text.ends_with("alerts n/a (collection_not_run)\n"), "{text}");
     assert_eq!(p.json(&["health", "status"]), json!({"stream": "health", "version": {"status": "unavailable", "reason": "collection_not_run"}}));
@@ -1471,4 +1471,59 @@ fn repeated_empty_checks_do_not_hide_a_stuck_due_collector() {
     assert_eq!(s["state"], "critical");
     assert!(s["evidence"]["collection"]["age_ms"].as_i64().unwrap() < MINUTE);
     assert!(s["evidence"]["collection"]["stalled_ms"].as_i64().unwrap() >= 2 * HOUR);
+}
+
+#[test]
+fn stale_ownership_control_churn_is_visible_and_normal_pause_is_quiet() {
+    use herdr_farm::{domain::{ProjectState, RuntimeRoute}, reconcile::RuntimeObservation};
+    let p = Planted::new();
+    p.sidecar_created();
+    let path = p.project.join(".state/state.db");
+    let mut store = SqliteStore::open(&path).unwrap();
+    let now = jiff::Timestamp::now().as_millisecond();
+    let control = store.project_control().unwrap().unwrap();
+    store.set_project_state(store.current_head().unwrap(), control.revision, ProjectState::Paused, now, None).unwrap();
+    let health = p.json(&["health", "--json"]);
+    let state = |v: &Value| v["states"].as_array().unwrap().iter().find(|s| s["rule"] == "control_epoch_churn").unwrap().clone();
+    assert_eq!(state(&health)["state"], "ok");
+    p.db().execute("INSERT INTO tasks(id,revision,state,title) VALUES('W6-03fix',1,'ready','fixture')", []).unwrap();
+    let task = herdr_farm::domain::TaskId::new("W6-03fix").unwrap();
+    let binding = store.create_runtime(Some(&task), Some(1), store.current_head().unwrap(), &RuntimeRoute::default()).unwrap().binding;
+    // Deliberately stale retained ownership: only the fixture bypasses the writer.
+    let owned = json!({"binding":binding.id,"revision":1,"binding_revision":binding.revision+1,
+        "identity_digest":"a".repeat(64),"origin":"adopted","attempt":null,"session":null,"worktree":null,
+        "agent":null,"config_digest":null,"observed_unix_ms":now});
+    let payload = owned.to_string();
+    p.db().execute("INSERT INTO runtime_ownership VALUES(?1,1,?2,NULL,?3,?4)", rusqlite::params![binding.id,binding.revision+1,payload,hex(&payload)]).unwrap();
+    let observation = RuntimeObservation {binding:binding.id.clone(),binding_revision:binding.revision,task_revision:Some(2),observed_unix_ms:now,collector:"herdr-git-v2".into(),..Default::default()};
+    store.record_observations(store.current_head().unwrap(), std::slice::from_ref(&observation)).unwrap();
+    for cycle in 0..6 {
+        let control = store.project_control().unwrap().unwrap();
+        store.set_project_state(store.current_head().unwrap(), control.revision, ProjectState::Active, now, None).unwrap();
+        store.record_observations(store.current_head().unwrap(), std::slice::from_ref(&observation)).unwrap();
+        if cycle == 2 {
+            let warning = state(&p.json(&["health", "--json"]));
+            assert_eq!(warning["state"], "warn");
+            assert_eq!(warning["evidence"]["dominant_invalidation"]["binding"], binding.id);
+        }
+    }
+    let critical = state(&p.json(&["health", "evaluate", "--json"]));
+    assert_eq!(critical["state"], "critical");
+    assert_eq!(critical["evidence"]["dominant_invalidation"], json!({"cause":"ownership mismatch","binding":binding.id,"occurrences":6}));
+    assert!(String::from_utf8(p.raw(&["health"])).unwrap().contains(&format!("ownership mismatch for {}",binding.id)));
+    fs::write(p.project.join("PROJECT.md"), "# demo\n").unwrap();
+    fs::write(p.project.join(".state/format.json"), r#"{"memory":"sqlite-v1","runtime":"sqlite-v1"}"#).unwrap();
+    let doctor = Command::new(BIN).env_clear().env("HERDR_BIN_PATH", "/bin/false").env("HOME",p.tmp.path().join("home")).env("PATH","/usr/bin:/bin")
+        .env("HERDR_FARM_TEST_TIME_SCALE",include_str!("support/time-scale.txt").trim())
+        .args(["--root",p.root.to_str().unwrap(),"doctor"]).output().unwrap();
+    let doctor_text = String::from_utf8(doctor.stdout).unwrap();
+    assert!(doctor_text.contains("control epoch churn: critical"), "{doctor_text}");
+    assert!(doctor_text.contains("ownership mismatch for task:W6-03fix"), "{doctor_text}");
+    let metric = p.json(&["query", "--metric", "M105", "--json"]);
+    assert_eq!(metric["results"][0]["value"], 13);
+    let alerts = p.json(&["health", "alerts", "--json"]);
+    assert!(alerts["open"].as_array().unwrap().iter().any(|a|a["rule"]=="control_epoch_churn" && a["state"]=="critical"));
+    // Expire retained events without waiting ten wall-clock minutes.
+    p.db().execute("UPDATE events SET payload=json_set(payload,'$.control_unix_ms',?1) WHERE json_type(payload,'$.control_unix_ms') IS NOT NULL", [now-600_001]).unwrap();
+    assert_eq!(state(&p.json(&["health", "--json"]))["state"], "ok");
 }

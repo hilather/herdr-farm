@@ -20,6 +20,7 @@ pub mod registry;
 pub mod store;
 mod stored_metrics;
 pub(crate) mod generation_speed;
+pub(crate) mod control_churn;
 mod worker_metrics;
 mod launch_metrics;
 mod verification_metrics;
@@ -142,6 +143,7 @@ pub fn run(project: &Path, command: Command) -> Result<String> {
 pub fn metrics(project: &Path, since: Option<i64>) -> Result<BTreeMap<String, Value>> {
     let mut metrics = stored_metrics::metrics(project, since)?;
     metrics.extend(generation_speed::metrics(project, since)?);
+    metrics.extend(control_churn::metrics(project, since)?);
     metrics.extend(worker_metrics::metrics(project, since)?);
     metrics.extend(crate::telemetry::accounting::coordinator_metrics::metrics(project, since)?);
     metrics.extend(launch_metrics::metrics(project, since)?);

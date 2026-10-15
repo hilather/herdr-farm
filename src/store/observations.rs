@@ -122,25 +122,28 @@ impl SqliteStore {
         let schema:u32=tx.query_row("PRAGMA user_version",[],|r|r.get(0))?;
         if schema>=9&&super::control::read(&tx)?.state==ProjectState::Active {
             let mut changed=false;
+            let mut invalidated_bindings=Vec::new();
             let mut ended=Vec::new();
             for owned in super::ownership::read_all_with_budget(&tx,budget)? {
+                let binding_id=owned.binding.clone();
                 if let Some(proof) = super::launch_failure::proven_lost_launch(&tx, &owned, budget)? {
                     super::ownership::relinquish_ended(&tx, &owned, "dedicated_server_lost", proof)?;
                     continue;
                 }
-                if schema>=41 && !bindings.contains_key(owned.binding.as_str()) {changed=true;continue;}
+                if schema>=41 && !bindings.contains_key(owned.binding.as_str()) {changed=true;invalidated_bindings.push(binding_id);continue;}
                 if let Some(binding)=bindings.get(owned.binding.as_str()).filter(|binding|binding.revision==owned.binding_revision) {
                     let valid=match by_binding.get(binding.id.as_str()) {Some(o)=>super::ownership::observed(binding,binding.task.as_ref().and_then(|id|tasks.get(id).copied()),o,o.observed_unix_ms,o.config_digest.as_deref())&&super::ownership::matches(&owned,binding,o)?,None=>false};
                     if valid {continue;}
                     // A pane and agent gone after their worker's proven end are expected.
                     match by_binding.get(binding.id.as_str()).map(|o|super::worker_termination::proven_end(&tx,&owned,binding,o,budget)).transpose()?.flatten() {
                         Some(receipt)=>ended.push((owned,receipt)),
-                        None=>changed=true,
+                        None=>{changed=true;invalidated_bindings.push(binding_id.clone());},
                     }
                 } else {
                     // A claim from another binding generation cannot certify
                     // the current inventory, even if the endpoint looks live.
                     changed=true;
+                    invalidated_bindings.push(binding_id);
                 }
             }
             // Retire each ended claim as audited relinquishment would, retaining
@@ -148,7 +151,7 @@ impl SqliteStore {
             for (owned,receipt) in ended {
                 super::ownership::relinquish_ended(&tx, &owned, "worker termination proven; its pane and agent are absent", serde_json::to_value(receipt).map_err(|e| StoreError::Invalid(e.to_string()))?)?;
             }
-            if changed {super::control::invalidate_for_worker_resources(&tx)?;}
+            if changed {super::control::invalidate_for_worker_resources(&tx,&invalidated_bindings)?;}
         }
         let result=head(&tx)?;tx.commit()?;Ok(result)
     }

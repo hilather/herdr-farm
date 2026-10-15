@@ -28,7 +28,12 @@ fn schema(db:&Connection)->Result<()> {
 fn increment(n:u64)->Result<u64>{n.checked_add(1).filter(|n|*n<=i64::MAX as u64).ok_or_else(||StoreError::Invalid("control counter exhausted".into()))}
 fn write(db:&Connection,control:&ProjectControl,kind:&str)->Result<()> {
     db.execute("UPDATE project_control SET revision=?1,epoch=?2,state=?3,reconciliation_required=?4,config_digest=?5 WHERE singleton=1",params![integer(control.revision)?,integer(control.epoch)?,control.state.as_str(),control.reconciliation_required,control.config_digest])?;
-    db.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES(?1,'project',?2,1,?3)",params![kind,integer(control.revision)?,serde_json::to_string(control).map_err(|e|StoreError::Invalid(e.to_string()))?])?;Ok(())
+    db.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES(?1,'project',?2,1,?3)",params![kind,integer(control.revision)?,control_event_payload(control)?])?;Ok(())
+}
+fn control_event_payload(control:&ProjectControl)->Result<String> {
+    let mut payload=serde_json::to_value(control).map_err(|e|StoreError::Invalid(e.to_string()))?;
+    payload["control_unix_ms"]=serde_json::json!(jiff::Timestamp::now().as_millisecond());
+    Ok(payload.to_string())
 }
 fn blockers(db:&Connection,now:i64,config:Option<&str>)->Result<Vec<String>> {
     super::delivery::now_check(now)?;
@@ -148,11 +153,11 @@ pub(super) fn invalidate(db:&Connection)->Result<()> {
 /// this pause is lifted automatically once nothing blocks admission.
 pub const WORKER_RESOURCES_CHANGED:&str="worker_resources_changed";
 /// [`invalidate`] from the observation pass, carrying its cause.
-pub(super) fn invalidate_for_worker_resources(db:&Connection)->Result<()> {
-    invalidate_with_cause(db,"project.reconciliation_invalidated",Some(WORKER_RESOURCES_CHANGED))
+pub(super) fn invalidate_for_worker_resources(db:&Connection,bindings:&[String])->Result<()> {
+    invalidate_with_cause(db,"project.reconciliation_invalidated",Some(WORKER_RESOURCES_CHANGED),bindings)
 }
-fn invalidate_by(db:&Connection,kind:&str)->Result<()> {invalidate_with_cause(db,kind,None)}
-fn invalidate_with_cause(db:&Connection,kind:&str,cause:Option<&str>)->Result<()> {
+fn invalidate_by(db:&Connection,kind:&str)->Result<()> {invalidate_with_cause(db,kind,None,&[])}
+fn invalidate_with_cause(db:&Connection,kind:&str,cause:Option<&str>,bindings:&[String])->Result<()> {
     let version:u32=db.query_row("PRAGMA user_version",[],|r|r.get(0))?;
     if version>=7 {
         let mut control=read(db)?;
@@ -164,6 +169,9 @@ fn invalidate_with_cause(db:&Connection,kind:&str,cause:Option<&str>)->Result<()
             Some(cause)=>{
                 db.execute("UPDATE project_control SET revision=?1,epoch=?2,state=?3,reconciliation_required=?4,config_digest=?5 WHERE singleton=1",params![integer(control.revision)?,integer(control.epoch)?,control.state.as_str(),control.reconciliation_required,control.config_digest])?;
                 let mut payload=serde_json::to_value(&control).map_err(|e|StoreError::Invalid(e.to_string()))?;
+                payload["control_unix_ms"]=serde_json::json!(jiff::Timestamp::now().as_millisecond());
+                payload["invalidation_reason"]=serde_json::json!("ownership mismatch");
+                payload["invalidated_bindings"]=serde_json::json!(bindings);
                 payload["cause"]=serde_json::Value::String(cause.into());
                 db.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES(?1,'project',?2,1,?3)",params![kind,integer(control.revision)?,payload.to_string()])?;
             }

@@ -104,6 +104,9 @@ pub fn text(v: &Value) -> String {
         out += &format!("  worker_exit_contention: {}\n",word(&notice["summary"]));
     }
     for s in v["states"].as_array().into_iter().flatten() {
+        if s["rule"] == "control_epoch_churn" && matches!(s["state"].as_str(), Some("warn" | "critical")) {
+            out += &format!("  control epoch churn: {} increments; dominant invalidation {} for {}\n", word(&s["evidence"]["numerator"]), word(&s["evidence"]["dominant_invalidation"]["cause"]), word(&s["evidence"]["dominant_invalidation"]["binding"]));
+        }
         let waiting=if s["rule"]=="result_waiting_on_coordinator" && s["evidence"]["waiting_items"].as_u64().is_some_and(|n|n>0) {
             format!("; result waiting on coordinator for {} min",word(&s["evidence"]["waiting_minutes"]))
         } else {String::new()};

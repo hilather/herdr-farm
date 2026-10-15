@@ -41,14 +41,16 @@ warn, critical, unknown}, states[], alerts {open[], last_evaluated_unix_ms}
 | `evidence` | the numbers the state rests on (numerator/denominator, age, remaining, longest wait, counts by reason); unavailable values stay `{status: unavailable, reason}` |
 | `thresholds` | `{direction, warn, critical, unit, window_ms, cooldown_ms}` from the rule table |
 
-## 2. Rule table (`health-rules.v5`, `rules.rs` `RULES`)
+## 2. Rule table (`health-rules.v6`, `rules.rs` `RULES`)
 
-A change of a rule, threshold or read path is a new rules version. v5 adds
+A change of a rule, threshold or read path is a new rules version. v6 adds
+`control_epoch_churn` (M105); v5 adds
 `result_waiting_on_coordinator`; v4 added
 `test_weakening` (MET-NOW-A; fixture evidence `tests/telemetry_stored_metrics.rs`).
 
 | rule | family / service | read path | warn | critical | cooldown |
 |---|---|---|---|---|---|
+| `control_epoch_churn` | runtime | query M105, last 10 minutes | ≥ 6 epoch increments | ≥ 12 epoch increments | 1 h |
 | `result_waiting_on_coordinator` | attention | canonical unfinished worker-result inbox rows, independent of SEEN | age ≥ 1 min | ≥ 10 min | 1 h |
 | `test_weakening` | proxy | quality `tests-net-removal.v1` observation counts, last 24 hours | ≥ 1 flagged submission | — | 1 h |
 | `verification_flaky` | proxy | `quality flaky`, last 30 days | ≥ 1 flipped tree/policy pair | — | 1 h |
@@ -391,3 +393,17 @@ Only due work with no progress reaches the 15-minute warning / one-hour critical
 thresholds. An empty check is recorded but cannot hide a continuously stuck due
 collector. Existing false alerts resolve on the next evaluation when idle.
 Evidence includes receipt age, due status, progress time and stalled duration.
+
+Control churn counts timestamped canonical control events (`project.control_changed`,
+`project.reconciliation_invalidated`, `project.launch_run_paused`), including
+repeated explicit pauses that increment the fence. Six increments in ten minutes
+warn; continued churn reaching twelve is critical and uses the normal automatic
+critical notification episode/cooldown path. Counts use wall time, independent of
+test timing acceleration. The dominant invalidation cause and binding, with its
+occurrence count, remain evidence rather than labels and appear in live health
+and doctor output. Observation invalidations retain `invalidated_bindings` and
+`control_unix_ms` in existing event payloads. Legacy control events without a
+timestamp are explicitly excluded and counted as `legacy_events_without_time`;
+the detector cannot reconstruct historical windows before this instrumentation.
+No canonical or sidecar schema changes are required; canonical event retention
+and backup classification remain unchanged.
