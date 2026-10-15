@@ -1,4 +1,4 @@
-//! The declared health-rule table `health-rules.v8`
+//! The declared health-rule table `health-rules.v9`
 //! (docs/telemetry/contracts-health.md §2). Each rule reads only through the
 //! TM4.1 query service (`analytics::query`) or a lane's own read path
 //! (`accounting quota|attention|entries|budget-shadow`, TM4.4 `compare`), and
@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-pub const VERSION: &str = "health-rules.v8";
+pub const VERSION: &str = "health-rules.v9";
 const MINUTE: i64 = 60_000;
 const HOUR: i64 = 60 * MINUTE;
 const DAY: i64 = 24 * HOUR;
@@ -516,11 +516,18 @@ fn evaluate_rule(ctx: &mut Ctx, rule: &'static Rule) -> Result<Vec<Outcome>> {
                 FROM quota_windows w WHERE {current_window} ORDER BY account,limit_id,window_kind,resets_unix_ms"))?;
             let mut rows = stmt.query([now])?;
             let (mut current, mut below_warn, mut lowest) = (0usize, 0usize, None::<(Value, i64, i64)>);
+            let (mut stale_windows, mut oldest_stale_age) = (0usize, None::<i64>);
             while let Some(row) = rows.next()? {
                 let remaining_text: String = row.get(0)?;
                 let Some(remaining) = milli(&remaining_text) else { continue };
                 let resets: i64 = row.get(6)?;
                 current += 1;
+                let age = now.saturating_sub(row.get::<_, i64>(7)?).max(0);
+                if age > crate::telemetry::accounting::quota::CURRENT_STALE_AFTER_MS {
+                    stale_windows += 1;
+                    oldest_stale_age = Some(oldest_stale_age.unwrap_or(0).max(age));
+                    continue;
+                }
                 below_warn += usize::from(remaining < rule.warn);
                 if lowest.as_ref().is_none_or(|(_, m, r)| (remaining, resets) < (*m, *r)) {
                     lowest = Some((json!({"remaining": remaining_text, "used": row.get::<_, String>(1)?, "unit": row.get::<_, String>(2)?,
@@ -529,6 +536,12 @@ fn evaluate_rule(ctx: &mut Ctx, rule: &'static Rule) -> Result<Vec<Outcome>> {
                 }
             }
             let Some((lowest, remaining, _)) = lowest else {
+                if let Some(age) = oldest_stale_age {
+                    return Ok(vec![outcome(rule, State::Unknown,
+                        vec![json!({"code": "stale_quota_reading", "message": format!("stale quota reading (age {age} ms)"), "age_ms": age, "severity": "info"})],
+                        metric, unbounded(now), json!({"current_windows": current, "stale_windows": stale_windows,
+                            "stale_after_ms": crate::telemetry::accounting::quota::CURRENT_STALE_AFTER_MS, "semantics": "not_certified"}))]);
+                }
                 return Ok(vec![outcome(rule, State::Unknown, vec![code("no_current_window")], metric, unbounded(now),
                     json!({"windows": windows, "latest_reset_unix_ms": latest_reset, "detail": "every observed window has reset: the new window's headroom is unknown"}))]);
             };
@@ -537,7 +550,7 @@ fn evaluate_rule(ctx: &mut Ctx, rule: &'static Rule) -> Result<Vec<Outcome>> {
             let last = lowest["last_observed_unix_ms"].as_i64().unwrap_or(now);
             outcome(rule, state, vec![json!({"code": reason, "remaining": lowest["remaining"]})], metric,
                 json!({"from_unix_ms": lowest["window_start_unix_ms"], "to_unix_ms": lowest["resets_unix_ms"], "semantics": "quota_window", "observed_unix_ms": last}),
-                json!({"current_windows": current, "below_warn": below_warn, "account_basis": crate::telemetry::accounting::quota::ACCOUNT_BASIS,
+                json!({"current_windows": current, "stale_windows": stale_windows, "below_warn": below_warn, "account_basis": crate::telemetry::accounting::quota::ACCOUNT_BASIS,
                     "lowest": {"remaining": lowest["remaining"], "used": lowest["used"], "unit": lowest["unit"], "window_kind": lowest["window_kind"],
                         "window_minutes": lowest["window_minutes"], "resets_unix_ms": lowest["resets_unix_ms"], "last_observed_unix_ms": last, "age_ms": now - last},
                     "semantics": "not_certified"}))

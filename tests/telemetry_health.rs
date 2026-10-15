@@ -2,7 +2,7 @@
 //! (docs/telemetry/contracts-health.md), through `herdr-farm telemetry`
 //! on the CLI over planted canonical and sidecar rows. Every expected value is
 //! hand-computed from the planted rows and the declared rule table
-//! (`health-rules.v8`); none is read back from a production aggregate.
+//! (`health-rules.v9`); none is read back from a production aggregate.
 
 #![cfg(all(feature = "state-store", target_os = "linux"))]
 #![allow(clippy::disallowed_methods)] // Test-only spawns outside the library may skip the spawn gate.
@@ -410,7 +410,7 @@ fn ticker_notifies_critical_launch_stalled_episode_once() {
 fn stale_collector_and_missing_sources_are_health_states_never_zero_usage() {
     let p = Planted::new();
     let out = p.health();
-    assert_eq!((&out["contract"], &out["rules_version"], &out["project"]), (&json!("telemetry-health.v1"), &json!("health-rules.v8"), &json!("demo")));
+    assert_eq!((&out["contract"], &out["rules_version"], &out["project"]), (&json!("telemetry-health.v1"), &json!("health-rules.v9"), &json!("demo")));
     for rule in ["collector_stale", "usage_coverage", "cost_coverage", "accounting_conflict", "quota_headroom", "waiting_on_you"] {
         let s = state(&out, rule);
         assert_eq!((&s["state"], codes(s)), (&json!("unknown"), vec!["collection_not_run".to_owned()]), "{rule}: {s}");
@@ -624,6 +624,47 @@ fn early_quota_reset_supersedes_old_window_and_preserves_history() {
     assert_eq!(s["evidence"]["lowest"]["remaining"], "95");
 }
 
+/// Stale project-local evidence cannot page, even when a sibling saw a reset.
+#[test]
+fn stale_quota_is_informational_and_fresh_accounts_still_alert() {
+    let p = Planted::new();
+    p.sidecar_created();
+    let now = unix_ms();
+    quota_window(&p.sidecar(), "0", now + 4 * HOUR, now);
+    assert_eq!(state(&p.evaluate(), "quota_headroom")["state"], "critical");
+    assert!(open_alert(&p.alerts(), "quota_headroom").is_some());
+    p.sidecar().execute("UPDATE quota_windows SET first_observed_unix_ms=?1,last_observed_unix_ms=?1", [now - 48 * HOUR]).unwrap();
+    let sibling = p.root.join("sibling/.state");
+    fs::create_dir_all(&sibling).unwrap();
+    fs::copy(p.project.join(".state/telemetry.db"), sibling.join("telemetry.db")).unwrap();
+    let db = rusqlite::Connection::open(sibling.join("telemetry.db")).unwrap();
+    db.execute("UPDATE quota_windows SET window_start_unix_ms=?1,last_observed_unix_ms=?1,remaining='97',used='3'", [now]).unwrap();
+    let out = p.evaluate();
+    let s = state(&out, "quota_headroom");
+    assert_eq!(s["state"], "unknown");
+    assert_eq!(codes(s), ["stale_quota_reading"]);
+    assert_eq!(s["reasons"][0]["severity"], "info");
+    assert!(String::from_utf8(p.raw(&["health"])).unwrap().contains("info: stale quota reading (age "));
+    assert!(s["reasons"][0]["age_ms"].as_i64().unwrap() >= 48 * HOUR);
+    assert_eq!(s["evidence"]["semantics"], "not_certified");
+    assert_eq!(open_alert(&p.alerts(), "quota_headroom").unwrap()["state"], "unknown");
+    let history = p.json(&["accounting", "quota", "--json"]);
+    assert_eq!(history["current_windows"][0]["remaining"], "0");
+    assert_eq!(history["current_windows"][0]["last_observed_unix_ms"], now - 48 * HOUR);
+    drop(db);
+    fs::write(sibling.join("telemetry.db"), b"unreadable sqlite fixture").unwrap();
+    assert_eq!(state(&p.evaluate(), "quota_headroom")["state"], "unknown");
+    p.sidecar().execute("INSERT INTO quota_windows SELECT 'fresh-account',service,'sha256:fresh',limit_id,window_kind,unit,window_minutes,
+        window_start_unix_ms,resets_unix_ms,start_evidence,?1,?1,'90','90','10',observed_increase,plan_type,1,0 FROM quota_windows LIMIT 1", [now]).unwrap();
+    let out = p.evaluate();
+    let s = state(&out, "quota_headroom");
+    assert_eq!(s["state"], "warn");
+    assert_eq!(codes(s), ["headroom_low"]);
+    assert_eq!(s["evidence"]["stale_windows"], 1);
+    assert_eq!(s["evidence"]["lowest"]["remaining"], "10");
+    assert!(open_alert(&p.alerts(), "quota_headroom").is_some());
+}
+
 /// A running attempt launched at T−8m10s, sampled `blocked` every 30 s from
 /// T−8m to T−30s: one open wait of 450000 ms (≥ 5 min: warn, < 30 min).
 #[test]
@@ -790,7 +831,7 @@ fn cooldown_dedup_and_inbox_notice_written_once() {
     let update = again["updated"].as_array().unwrap().iter().find(|a| a["rule"] == "quota_headroom").unwrap();
     assert_eq!((&update["alert_id"], &update["deduplicated"]), (&json!(id), &json!(true)));
     let alert = open_alert(&p.alerts(), "quota_headroom").unwrap().clone();
-    assert_eq!((&alert["occurrences"], &alert["metric"]["read"], &alert["rules_version"]), (&json!(2), &json!("lane:accounting quota"), &json!("health-rules.v8")));
+    assert_eq!((&alert["occurrences"], &alert["metric"]["read"], &alert["rules_version"]), (&json!(2), &json!("lane:accounting quota"), &json!("health-rules.v9")));
 
     // Inbox: one notice for the open alert, never two.
     let before = |p: &Planted| p.db().query_row("SELECT count(*) FROM inbox_items WHERE json_extract(payload,'$.kind')='telemetry-health'", [], |r| r.get::<_, i64>(0)).unwrap();
@@ -1477,14 +1518,14 @@ fn recommendations_and_notices_change_no_canonical_state_and_no_dispatch() {
 fn rule_table_is_declared_with_bounded_labels() {
     let p = Planted::new();
     let rules = p.json(&["health", "rules"]);
-    assert_eq!((&rules["rules_version"], &rules["labels"]), (&json!("health-rules.v8"), &json!(["project", "family", "rule", "service", "role"])));
+    assert_eq!((&rules["rules_version"], &rules["labels"]), (&json!("health-rules.v9"), &json!(["project", "family", "rule", "service", "role"])));
     let names: Vec<&str> = rules["rules"].as_array().unwrap().iter().map(|r| r["rule"].as_str().unwrap()).collect();
     assert_eq!(names, ["spool_contention", "control_epoch_churn", "launch_stalled", "result_waiting_on_coordinator", "test_weakening", "verification_flaky", "usage_after_termination", "collector_stale", "usage_coverage", "cost_coverage", "accounting_conflict", "budget_exposure", "fix_reopened", "integration_reverted",
         "latency_shift", "attempt_cost_shift", "service_throttled", "quota_headroom", "waiting_on_you", "recommendation_stale"]);
     let quota = rules["rules"].as_array().unwrap().iter().find(|r| r["rule"] == "quota_headroom").unwrap();
     assert_eq!(quota["thresholds"], json!({"direction": "below", "warn": 20000, "critical": 5000, "unit": "millipercent_remaining", "window_ms": null, "cooldown_ms": HOUR}));
     let text = String::from_utf8(p.raw(&["health"])).unwrap();
-    assert!(text.starts_with("demo · health · health-rules.v8 · live_read_only\n"), "{text}");
+    assert!(text.starts_with("demo · health · health-rules.v9 · live_read_only\n"), "{text}");
     assert!(text.contains("  collector_stale [collection service=codex]: unknown collection_not_run\n"), "{text}");
     assert!(text.ends_with("alerts n/a (collection_not_run)\n"), "{text}");
     assert_eq!(p.json(&["health", "status"]), json!({"stream": "health", "version": {"status": "unavailable", "reason": "collection_not_run"}}));

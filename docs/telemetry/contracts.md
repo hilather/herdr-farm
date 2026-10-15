@@ -649,6 +649,14 @@ S6 refinements:
   Provider early resets supersede older windows before their nominal reset;
   history remains available in `accounting quota`, alongside a per-account
   `current_windows` list.
+  Current windows retain their value and last-observed timestamp;
+  health considers a reading stale when last observed more than 24 hours ago. Health excludes stale
+  readings from headroom grading: stale-only evidence is `unknown`, with
+  `stale_quota_reading`, an age-bearing message and informational severity,
+  never warn/critical. Fresh accounts remain independently eligible to alert.
+  This is project-local: sibling sidecars are not consulted, copied or opened;
+  unreadable siblings cannot affect evaluation. Historical windows are retained.
+  M40's decision-time 15-minute freshness policy is unchanged.
   Health exposes the selected reading's age and retains `not_certified`
   semantics. See contracts-accounting.md §5.
 - M40 is the extended form of `accounting quota` (contracts-accounting.md

@@ -41,7 +41,7 @@ warn, critical, unknown}, states[], alerts {open[], last_evaluated_unix_ms}
 | `evidence` | the numbers the state rests on (numerator/denominator, age, remaining, longest wait, counts by reason); unavailable values stay `{status: unavailable, reason}` |
 | `thresholds` | `{direction, warn, critical, unit, window_ms, cooldown_ms}` from the rule table |
 
-## 2. Rule table (`health-rules.v8`, `rules.rs` `RULES`)
+## 2. Rule table (`health-rules.v9`, `rules.rs` `RULES`)
 
 A change of a rule, threshold or read path is a new rules version. v7 adds
 `spool_contention`; v6 adds
@@ -445,3 +445,9 @@ visible in `context` and `task show` until handled. These advisory notices bypas
 the critical-only health notification filter and deduplicate per ticker idle
 stretch. Missing observation evidence remains unknown; idle is never proof of
 termination. See accounting §6 and `skill/COORDINATOR.md` for the supported nudge.
+
+Quota health v9 excludes current readings older than 24 hours. Stale-only
+evidence is unknown with `stale_quota_reading`, age and info severity; fresh
+accounts still grade normally. Sibling projects are not consulted. Values and
+history remain available with last-observed timestamps; M40 retains its age
+and freshness fields; semantics stay `not_certified`.
