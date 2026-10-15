@@ -1546,6 +1546,11 @@ fn tick_slow(ctx: &Ctx, project: &Project, seen: &Seen, memory: &mut Memory) -> 
 pub(crate) fn executor_failure(identity:&crate::executor::Identity,error:&anyhow::Error) {
     let project=Path::new(&identity.project);
     if !project.is_absolute() {return;}
+    if (identity.operation.starts_with("canonical-worker:") || identity.operation.starts_with("canonical-launch:"))
+        && let Ok(mut store) = herdr_farm::migration::open_active(project)
+    {
+        let _ = store.record_launch_job_error(&identity.operation, &format!("{error:#}"), jiff::Timestamp::now().as_millisecond());
+    }
     if let Some(root)=project.parent() {
         Log{path:root.join(".ticker.log")}.error(&format!("{} {}: executor completion: {error:#}",identity.project,identity.operation));
     }

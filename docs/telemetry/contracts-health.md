@@ -41,7 +41,7 @@ warn, critical, unknown}, states[], alerts {open[], last_evaluated_unix_ms}
 | `evidence` | the numbers the state rests on (numerator/denominator, age, remaining, longest wait, counts by reason); unavailable values stay `{status: unavailable, reason}` |
 | `thresholds` | `{direction, warn, critical, unit, window_ms, cooldown_ms}` from the rule table |
 
-## 2. Rule table (`health-rules.v7`, `rules.rs` `RULES`)
+## 2. Rule table (`health-rules.v8`, `rules.rs` `RULES`)
 
 A change of a rule, threshold or read path is a new rules version. v7 adds
 `spool_contention`; v6 adds
@@ -317,7 +317,10 @@ rule uses the existing health alert stream and adds no tables or migrations.
 
 Worktree readiness and the launch creation boundary append progress timestamps
 in the existing canonical event journal; older attempts without these timestamps
-fall back to their reservation time. Error observations never refresh progress.
+fall back to their reservation time. Error observations never refresh progress. After the first launch-start receipt, later
+launch events cannot renew the clock: a confirmed `runtime.worker_brief` delivery
+or running attempt ends the stalled launch. Evidence includes retained background
+job names, failure counts and their latest diagnostic and observation time.
 
 ### Worker exit recording contention
 

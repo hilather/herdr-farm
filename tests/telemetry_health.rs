@@ -2,7 +2,7 @@
 //! (docs/telemetry/contracts-health.md), through `herdr-farm telemetry`
 //! on the CLI over planted canonical and sidecar rows. Every expected value is
 //! hand-computed from the planted rows and the declared rule table
-//! (`health-rules.v7`); none is read back from a production aggregate.
+//! (`health-rules.v8`); none is read back from a production aggregate.
 
 #![cfg(all(feature = "state-store", target_os = "linux"))]
 #![allow(clippy::disallowed_methods)] // Test-only spawns outside the library may skip the spawn gate.
@@ -239,6 +239,61 @@ fn ticker_health_evaluates_by_default_obeys_interval_and_never_notifies() {
     assert_eq!(inbox(), before_inbox);
 }
 
+/// Started launches remain stalled until the separate brief obligation confirms.
+#[test]
+fn started_launch_waits_for_brief_and_reports_repeating_job_errors() {
+    let p = Planted::new();
+    // Publish a real paused canonical project so launch health uses its public reader.
+    fs::remove_dir_all(&p.project).unwrap();
+    fs::create_dir_all(p.config_dir()).unwrap();
+    let config = p.config_dir().join("config.toml");
+    fs::write(&config, "").unwrap();
+    for args in [["new", "--legacy", "demo"].as_slice(), ["pause", "demo"].as_slice()] {
+        let output = Command::new(BIN).env_clear().env("HERDR_FARM_TEST_TIME_SCALE", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/time-scale.txt")).trim()).env("HOME", p.tmp.path().join("home")).env("PATH", "/usr/bin:/bin")
+            .args(["--root", p.root.to_str().unwrap()]).args(args).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    }
+    herdr_farm::migration::apply(&p.project, &herdr_farm::migration::inspect_with_config(&p.project, &config).unwrap(), true).unwrap();
+    p.sidecar_created();
+    let db = p.db();
+    db.execute("INSERT INTO tasks(id,revision,state,title) VALUES('stalled',1,'running','stalled')", []).unwrap();
+    db.execute("INSERT INTO attempts(id,task_id,revision,state,reservation,termination_observed) VALUES('stalled-a','stalled',1,'launching','stalled-a',0)", []).unwrap();
+    db.execute("INSERT INTO operations(id,task_id,kind,target,payload_version,payload,payload_hash,expected_revision,due_unix_ms,idempotency_key) VALUES('stalled-op','stalled','worker.launch','worker',1,'{}',?1,1,?2,'stalled-op')", rusqlite::params![hex("{}"), unix_ms()-HOUR]).unwrap();
+    let inputs = json!({"inputs":{"version":2,"effective_profile":{"name":"worker","kind":"codex"}}}).to_string();
+    db.execute("INSERT INTO attempt_inputs(attempt_id,operation_id,payload,payload_hash) VALUES('stalled-a','stalled-op',?1,?2)", rusqlite::params![inputs, hex(&inputs)]).unwrap();
+    let event = |kind: &str, at: i64| {
+        db.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES(?1,'stalled-op',1,1,?2)", rusqlite::params![kind,json!({"observed_unix_ms":at}).to_string()]).unwrap();
+    };
+    event("runtime.launch_started", unix_ms()-6*MINUTE);
+    event("runtime.launch_name", unix_ms());
+    let mut store = SqliteStore::open(&p.project.join(".state/state.db")).unwrap();
+    for _ in 0..3 {
+        store.record_launch_job_error("canonical-worker:prepare-brief-stalled-a", "Conflict", unix_ms()).unwrap();
+    }
+    p.evaluate();
+    let alerts = p.alerts();
+    let alert = open_alert(&alerts, "launch_stalled").unwrap();
+    assert_eq!(alert["state"], "warn");
+    assert_eq!(alert["evidence"]["attempts"][0]["background_job_errors"][0]["job"], "canonical-worker:prepare-brief-stalled-a");
+    assert_eq!(alert["evidence"]["attempts"][0]["background_job_errors"][0]["count"], 3);
+    assert_eq!(alert["evidence"]["attempts"][0]["background_job_errors"][0]["error"], "Conflict");
+    db.execute("UPDATE events SET payload=?1 WHERE kind='runtime.launch_started'", [json!({"observed_unix_ms":unix_ms()-16*MINUTE}).to_string()]).unwrap();
+    event("runtime.launch_started", unix_ms());
+    event("runtime.launch_progress", unix_ms());
+    p.evaluate();
+    assert_eq!(open_alert(&p.alerts(), "launch_stalled").unwrap()["state"], "critical");
+    db.execute("INSERT INTO operations(id,task_id,kind,target,payload_version,payload,payload_hash,expected_revision,due_unix_ms,idempotency_key) VALUES('brief-op','stalled','runtime.worker_brief','worker',1,?1,?2,1,0,'brief-op')", rusqlite::params![json!({"attempt":"stalled-a"}).to_string(),hex("brief")]).unwrap();
+    // Confirm the independent delivery while the attempt still says launching.
+    db.execute("UPDATE operation_delivery SET state='confirmed' WHERE operation_id='brief-op'", []).unwrap();
+    p.evaluate();
+    assert!(open_alert(&p.alerts(), "launch_stalled").is_none());
+    assert!(p.json(&["health", "alerts", "--since", "0", "--json"])["recent"].as_array().unwrap().iter().any(|a| a["rule"]=="launch_stalled" && a["resolved_unix_ms"].is_i64()));
+    db.execute("UPDATE operation_delivery SET state='pending' WHERE operation_id='brief-op'", []).unwrap();
+    db.execute("UPDATE attempts SET state='running' WHERE id='stalled-a'", []).unwrap();
+    p.evaluate();
+    assert!(open_alert(&p.alerts(), "launch_stalled").is_none());
+}
+
 /// Automatic notification episodes through a paused canonical project and ticker.
 #[test]
 fn ticker_notifies_critical_launch_stalled_episode_once() {
@@ -353,7 +408,7 @@ fn ticker_notifies_critical_launch_stalled_episode_once() {
 fn stale_collector_and_missing_sources_are_health_states_never_zero_usage() {
     let p = Planted::new();
     let out = p.health();
-    assert_eq!((&out["contract"], &out["rules_version"], &out["project"]), (&json!("telemetry-health.v1"), &json!("health-rules.v7"), &json!("demo")));
+    assert_eq!((&out["contract"], &out["rules_version"], &out["project"]), (&json!("telemetry-health.v1"), &json!("health-rules.v8"), &json!("demo")));
     for rule in ["collector_stale", "usage_coverage", "cost_coverage", "accounting_conflict", "quota_headroom", "waiting_on_you"] {
         let s = state(&out, rule);
         assert_eq!((&s["state"], codes(s)), (&json!("unknown"), vec!["collection_not_run".to_owned()]), "{rule}: {s}");
@@ -733,7 +788,7 @@ fn cooldown_dedup_and_inbox_notice_written_once() {
     let update = again["updated"].as_array().unwrap().iter().find(|a| a["rule"] == "quota_headroom").unwrap();
     assert_eq!((&update["alert_id"], &update["deduplicated"]), (&json!(id), &json!(true)));
     let alert = open_alert(&p.alerts(), "quota_headroom").unwrap().clone();
-    assert_eq!((&alert["occurrences"], &alert["metric"]["read"], &alert["rules_version"]), (&json!(2), &json!("lane:accounting quota"), &json!("health-rules.v7")));
+    assert_eq!((&alert["occurrences"], &alert["metric"]["read"], &alert["rules_version"]), (&json!(2), &json!("lane:accounting quota"), &json!("health-rules.v8")));
 
     // Inbox: one notice for the open alert, never two.
     let before = |p: &Planted| p.db().query_row("SELECT count(*) FROM inbox_items WHERE json_extract(payload,'$.kind')='telemetry-health'", [], |r| r.get::<_, i64>(0)).unwrap();
@@ -1420,14 +1475,14 @@ fn recommendations_and_notices_change_no_canonical_state_and_no_dispatch() {
 fn rule_table_is_declared_with_bounded_labels() {
     let p = Planted::new();
     let rules = p.json(&["health", "rules"]);
-    assert_eq!((&rules["rules_version"], &rules["labels"]), (&json!("health-rules.v7"), &json!(["project", "family", "rule", "service", "role"])));
+    assert_eq!((&rules["rules_version"], &rules["labels"]), (&json!("health-rules.v8"), &json!(["project", "family", "rule", "service", "role"])));
     let names: Vec<&str> = rules["rules"].as_array().unwrap().iter().map(|r| r["rule"].as_str().unwrap()).collect();
     assert_eq!(names, ["spool_contention", "control_epoch_churn", "launch_stalled", "result_waiting_on_coordinator", "test_weakening", "verification_flaky", "usage_after_termination", "collector_stale", "usage_coverage", "cost_coverage", "accounting_conflict", "budget_exposure", "fix_reopened", "integration_reverted",
         "latency_shift", "attempt_cost_shift", "service_throttled", "quota_headroom", "waiting_on_you", "recommendation_stale"]);
     let quota = rules["rules"].as_array().unwrap().iter().find(|r| r["rule"] == "quota_headroom").unwrap();
     assert_eq!(quota["thresholds"], json!({"direction": "below", "warn": 20000, "critical": 5000, "unit": "millipercent_remaining", "window_ms": null, "cooldown_ms": HOUR}));
     let text = String::from_utf8(p.raw(&["health"])).unwrap();
-    assert!(text.starts_with("demo · health · health-rules.v7 · live_read_only\n"), "{text}");
+    assert!(text.starts_with("demo · health · health-rules.v8 · live_read_only\n"), "{text}");
     assert!(text.contains("  collector_stale [collection service=codex]: unknown collection_not_run\n"), "{text}");
     assert!(text.ends_with("alerts n/a (collection_not_run)\n"), "{text}");
     assert_eq!(p.json(&["health", "status"]), json!({"stream": "health", "version": {"status": "unavailable", "reason": "collection_not_run"}}));
