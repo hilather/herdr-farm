@@ -16,6 +16,8 @@ use super::unavailable;
 
 /// An observation older than this at a dispatch decision is labeled `stale` (its value is still shown).
 pub const STALE_AFTER_MS: i64 = 900_000;
+/// Current headroom is advisory only after a day without an observation.
+pub const CURRENT_STALE_AFTER_MS: i64 = 24 * 60 * 60_000;
 /// What `account` identifies: the execution home's digest, not the provider
 /// login (credentials are never read). Trusted matching provider windows
 /// merge homes for headroom, retaining their separate observation evidence.

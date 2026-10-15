@@ -116,6 +116,8 @@ pub fn text(v: &Value) -> String {
             format!("; result waiting on coordinator for {} min",word(&s["evidence"]["waiting_minutes"]))
         } else if s["rule"] == "waiting_on_you" && s["reasons"].as_array().into_iter().flatten().any(|r| r["code"] == "worker_idle_without_submission") {
             "; worker idle without submission".into()
+        } else if let Some(reason) = s["reasons"].as_array().into_iter().flatten().find(|r| r["code"] == "stale_quota_reading") {
+            format!("; info: {}", word(&reason["message"]))
         } else {String::new()};
         out += &format!("  {} [{}]: {} {}{waiting}\n", word(&s["rule"]), scope(&s["labels"]), word(&s["state"]), codes(&s["reasons"]));
     }
