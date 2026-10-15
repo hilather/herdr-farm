@@ -3354,11 +3354,12 @@ fn idle_worker_notice_restarts_stretch_and_deduplicates_within_a_ticker() {
     lab.ok(&["inbox", "done", "demo", &notices()[0].content.id]);
     // Observe another 30 completed passes without rearming.
     let metrics = lab.path("root/.ticker-metrics.json");
-    let mut last = fs::metadata(&metrics).unwrap().ino();
+    let tick = || serde_json::from_slice::<Value>(&fs::read(&metrics).unwrap()).unwrap()["tick"].as_u64().unwrap();
+    let mut last_tick = tick();
     for i in 1..=30 {
-        let stage = format!("dedup pass {i}/30 (current inode {}, last inode {last}, notices {})", fs::metadata(&metrics).unwrap().ino(), notices().len());
-        lab.wait_for(&mut ticker, &stage, &attempt, 60, &|| fs::metadata(&metrics).unwrap().ino() != last);
-        last = fs::metadata(&metrics).unwrap().ino();
+        let stage = format!("dedup pass {i}/30 (current tick {}, last tick {last_tick}, notices {})", tick(), notices().len());
+        lab.wait_for(&mut ticker, &stage, &attempt, 60, &|| tick() > last_tick);
+        last_tick = tick();
         assert_eq!(notices().len(), 1);
     }
     lab.stop(ticker);
@@ -3378,11 +3379,11 @@ fn idle_worker_notice_restarts_stretch_and_deduplicates_within_a_ticker() {
     });
     fs::write(lab.path("lab/agent-status"), "idle").unwrap();
     lab.wait_for(&mut ticker, "third idle notice after rearm", &attempt, 60, &|| notices().len() == 3);
-    // Keep the post-rearm quiet check in this ticker, preserving its dedup memory.
-    last = fs::metadata(&metrics).unwrap().ino();
+    // Re-read this ticker's counter after restart and rearm, preserving its dedup memory.
+    last_tick = tick();
     for i in 1..=3 {
-        lab.wait_for(&mut ticker, &format!("quiet pass {i}/3"), &attempt, 60, &|| fs::metadata(&metrics).unwrap().ino() != last);
-        last = fs::metadata(&metrics).unwrap().ino();
+        lab.wait_for(&mut ticker, &format!("quiet pass {i}/3"), &attempt, 60, &|| tick() > last_tick);
+        last_tick = tick();
         assert_eq!(notices().len(), 3);
     }
     lab.stop(ticker);
