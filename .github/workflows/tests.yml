@@ -203,7 +203,7 @@ jobs:
           --extract-overwrite
           --partition hash:${{ matrix.partition }}/8
       - name: Run nightly profile
-        if: github.event_name == 'schedule' && matrix.partition == 1
+        if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && matrix.partition == 1
         run: >
           cargo nextest run --profile nightly
           --archive-file nextest-archive.tar.zst
