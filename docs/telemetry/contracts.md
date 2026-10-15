@@ -33,7 +33,9 @@ needs a new reviewed revision, not a silent reinterpretation.
   `review`,
   `analytics` (TM4.1 aggregate revisions; 0005 adds bounded M104 model timing,
   native-session retention and sidecar backup; contracts-analytics.md M104), `health` (TM4.5 alert
-  state), `otlp` (DG4a sanitized native records, migration 0001;
+  state; v2 adds bounded per-attempt launch job error summaries via
+  `migrations/telemetry/health/0002_launch_job_errors.sql`, retained in full
+  sidecar backups with producer retention of the latest 1024 attempts), `otlp` (DG4a sanitized native records, migration 0001;
   DG4c Gemini SDK file cursors, migration 0002;
   DG4h hashed per-attempt tokens and revocations, migration 0003;
   contracts-collection.md DG4a/DG4c/DG4h). A reader refuses only a

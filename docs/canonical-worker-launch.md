@@ -1319,7 +1319,8 @@ the recorded effects and cancel the attempt rather than create another worker.
 Started launches awaiting a confirmed `runtime.worker_brief` remain subject to
 `launch_stalled` (warning after five minutes, critical after fifteen). Later launch
 events do not refresh the first start timestamp. Background brief job failures
-are retained in the existing event journal and included in health evidence.
+are summarized in the telemetry sidecar and included in health evidence without
+changing the canonical head.
 
 `insufficient transfer cleanup budget` remains the typed `BudgetExhausted` path
 from LAUNCH-BUDGET-1: draft and reserve have three fresh bounded step budgets and

@@ -158,3 +158,32 @@ pub fn tick(project: &Path) -> Result<()> {
         Ok(())
     }
 }
+
+
+// Producer bounds the whole project to 1024 attempt summaries. Full sidecar
+// backups retain these diagnostics; they never participate in launch decisions.
+pub(crate) fn record_launch_job_error(project: &Path, attempt: &str, job: &str, diagnostic: &str, now: i64) -> Result<()> {
+    let Some(mut db) = crate::telemetry::sidecar::open(project, true)? else { return Ok(()) };
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let diagnostic: String = diagnostic.chars().filter(|c| !c.is_control()).take(2000).collect();
+    let job: String = job.chars().filter(|c| !c.is_control()).take(512).collect();
+    tx.execute("INSERT INTO launch_job_errors VALUES(?1,?2,1,?3,?3,?4)
+        ON CONFLICT(attempt) DO UPDATE SET job=excluded.job,count=CASE WHEN count<9223372036854775807 THEN count+1 ELSE count END,
+        last_error_unix_ms=excluded.last_error_unix_ms,error=excluded.error",
+        params![attempt, job, now, diagnostic])?;
+    tx.execute("DELETE FROM launch_job_errors WHERE attempt IN
+        (SELECT attempt FROM launch_job_errors ORDER BY last_error_unix_ms DESC,attempt LIMIT -1 OFFSET 1024)", [])?;
+    tx.commit()?;
+    Ok(())
+}
+
+pub(crate) fn launch_job_errors(project: &Path, attempt: &str) -> Result<Value> {
+    let Some(db) = crate::telemetry::sidecar::read(project)? else { return Ok(json!([])) };
+    let exists: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='launch_job_errors')", [], |r| r.get(0))?;
+    if !exists { return Ok(json!([])); }
+    let rows = db.prepare("SELECT job,count,first_error_unix_ms,last_error_unix_ms,error FROM launch_job_errors WHERE attempt=?1")?
+        .query_map([attempt], |r| Ok(json!({"job":r.get::<_,String>(0)?,"count":r.get::<_,i64>(1)?,
+            "first_error_unix_ms":r.get::<_,i64>(2)?,"last_error_unix_ms":r.get::<_,i64>(3)?,"error":r.get::<_,String>(4)?})))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(json!(rows))
+}

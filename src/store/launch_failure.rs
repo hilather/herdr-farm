@@ -228,7 +228,7 @@ impl SqliteStore {
         .collect()
     }
 
-    /// Retain background failures for a known attempt without changing progress.
+    /// Retain background failures in the sidecar without changing canonical state or progress.
     pub fn record_launch_job_error(&mut self, job: &str, diagnostic: &str, now: i64) -> Result<()> {
         super::delivery::now_check(now)?;
         let Some(operation) = job.strip_prefix("canonical-worker:").or_else(|| job.strip_prefix("canonical-launch:")) else {
@@ -250,24 +250,20 @@ impl SqliteStore {
                 .flatten()
         };
         if let Some(attempt) = attempt {
-            let diagnostic: String = diagnostic
-                .chars()
-                .filter(|c| !c.is_control())
-                .take(2000)
-                .collect();
-            self.connection.execute("INSERT INTO events(kind,entity,revision,payload_version,payload) VALUES('runtime.launch_job_error',?1,1,1,?2)",
-                params![attempt, serde_json::json!({"job":job,"error":diagnostic,"observed_unix_ms":now}).to_string()])?;
+            let project = self.connection.path().and_then(|p| std::path::Path::new(p).parent()).and_then(|p| p.parent())
+                .ok_or_else(|| StoreError::Invalid("launch evidence requires a project database".into()))?;
+            crate::telemetry::health::store::record_launch_job_error(project, &attempt, job, diagnostic, now)
+                .map_err(|error| StoreError::Invalid(format!("launch evidence: {error:#}")))?;
         }
         Ok(())
     }
 
-    /// Per-job retry evidence for one retained attempt; identity stays out of labels.
+    /// Bounded sidecar retry evidence; never reads or writes canonical events.
     pub fn launch_job_errors(&self, attempt: &AttemptId) -> Result<serde_json::Value> {
-        let mut statement = self.connection.prepare("SELECT json_extract(payload,'$.job'),count(*),max(json_extract(payload,'$.observed_unix_ms')),json_extract(payload,'$.error') FROM events WHERE entity=?1 AND kind='runtime.launch_job_error' GROUP BY json_extract(payload,'$.job') ORDER BY 1 LIMIT 100")?;
-        let rows = statement.query_map([attempt.as_str()], |r| Ok(serde_json::json!({"job":r.get::<_,String>(0)?,"count":r.get::<_,i64>(1)?,"last_error_unix_ms":r.get::<_,i64>(2)?,"error":r.get::<_,String>(3)?})))?;
-        Ok(serde_json::Value::Array(
-            rows.collect::<rusqlite::Result<Vec<_>>>()?,
-        ))
+        let project = self.connection.path().and_then(|p| std::path::Path::new(p).parent()).and_then(|p| p.parent())
+            .ok_or_else(|| StoreError::Invalid("launch evidence requires a project database".into()))?;
+        crate::telemetry::health::store::launch_job_errors(project, attempt.as_str())
+            .map_err(|error| StoreError::Invalid(format!("launch evidence: {error:#}")))
     }
 
     /// A refused atomic reservation has no attempt to close, but its task still

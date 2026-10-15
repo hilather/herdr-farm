@@ -266,10 +266,12 @@ fn started_launch_waits_for_brief_and_reports_repeating_job_errors() {
     };
     event("runtime.launch_started", unix_ms()-6*MINUTE);
     event("runtime.launch_name", unix_ms());
+    let canonical_events: i64 = db.query_row("SELECT count(*) FROM events", [], |r| r.get(0)).unwrap();
     let mut store = SqliteStore::open(&p.project.join(".state/state.db")).unwrap();
     for _ in 0..3 {
         store.record_launch_job_error("canonical-worker:prepare-brief-stalled-a", "Conflict", unix_ms()).unwrap();
     }
+    assert_eq!(db.query_row("SELECT count(*) FROM events", [], |r| r.get::<_, i64>(0)).unwrap(), canonical_events);
     p.evaluate();
     let alerts = p.alerts();
     let alert = open_alert(&alerts, "launch_stalled").unwrap();
@@ -1487,7 +1489,7 @@ fn rule_table_is_declared_with_bounded_labels() {
     assert!(text.ends_with("alerts n/a (collection_not_run)\n"), "{text}");
     assert_eq!(p.json(&["health", "status"]), json!({"stream": "health", "version": {"status": "unavailable", "reason": "collection_not_run"}}));
     p.sidecar_created();
-    assert_eq!(p.json(&["health", "status"]), json!({"stream": "health", "version": 1}));
+    assert_eq!(p.json(&["health", "status"]), json!({"stream": "health", "version": 2}));
 }
 
 /// Empty collections have a durable receipt; idle age cannot page the owner,

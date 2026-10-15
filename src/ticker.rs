@@ -1547,7 +1547,7 @@ pub(crate) fn executor_failure(identity:&crate::executor::Identity,error:&anyhow
     let project=Path::new(&identity.project);
     if !project.is_absolute() {return;}
     if (identity.operation.starts_with("canonical-worker:") || identity.operation.starts_with("canonical-launch:"))
-        && let Ok(mut store) = herdr_farm::migration::open_active(project)
+        && let Ok(mut store) = herdr_farm::migration::open_active_read_only(project)
     {
         let _ = store.record_launch_job_error(&identity.operation, &format!("{error:#}"), jiff::Timestamp::now().as_millisecond());
     }
