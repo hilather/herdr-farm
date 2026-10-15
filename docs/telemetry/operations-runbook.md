@@ -120,6 +120,7 @@ may only be shortened.
 ```text
 $ herdr-farm telemetry demo maintenance classes
 retention.v1
+sidecar.launch_job_errors retain - source_of_truth destructive
 sidecar.collection_check retain - source_of_truth destructive
 sidecar.native_probe_failures retain - source_of_truth destructive
 sidecar.launch_load retain - source_of_truth destructive
@@ -462,6 +463,7 @@ $ herdr-farm telemetry demo backup restore --from <tmp>/backup-2026-09-30 --forc
     "gemini_file_cursors": 0,
     "health_evaluations": 0,
     "host_checks": 0,
+    "launch_job_errors": 0,
     "muse_events": 0,
     "muse_parents": 0,
     "native_probe_failures": 0,

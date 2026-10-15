@@ -41,7 +41,7 @@ warn, critical, unknown}, states[], alerts {open[], last_evaluated_unix_ms}
 | `evidence` | the numbers the state rests on (numerator/denominator, age, remaining, longest wait, counts by reason); unavailable values stay `{status: unavailable, reason}` |
 | `thresholds` | `{direction, warn, critical, unit, window_ms, cooldown_ms}` from the rule table |
 
-## 2. Rule table (`health-rules.v7`, `rules.rs` `RULES`)
+## 2. Rule table (`health-rules.v8`, `rules.rs` `RULES`)
 
 A change of a rule, threshold or read path is a new rules version. v7 adds
 `spool_contention`; v6 adds
@@ -313,11 +313,19 @@ attempts without progress warn at 5 minutes and become critical at
 15 minutes. A bounded recovery failure with retained capacity is immediately
 critical. Recovery-error observations do not count as progress. Evidence names
 the attempt and supports relaunch after release or `task cancel-attempt`. This
-rule uses the existing health alert stream and adds no tables or migrations.
+rule uses the existing health alert stream; retry evidence uses its bounded
+sidecar summary table described below.
 
 Worktree readiness and the launch creation boundary append progress timestamps
 in the existing canonical event journal; older attempts without these timestamps
-fall back to their reservation time. Error observations never refresh progress.
+fall back to their reservation time. Error observations never refresh progress. After the first launch-start receipt, later
+launch events cannot renew the clock: a confirmed `runtime.worker_brief` delivery
+or running attempt ends the stalled launch. Evidence includes retained background
+latest job name, total failure count, first/last observation times and latest
+diagnostic per attempt. Health stream migration 0002 stores one summary per
+attempt, capped at the latest 1024 attempts per project and retained in full
+sidecar backups (maintenance class `sidecar.launch_job_errors`). Error recording
+never writes canonical rows or events.
 
 ### Worker exit recording contention
 

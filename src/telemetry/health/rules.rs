@@ -1,4 +1,4 @@
-//! The declared health-rule table `health-rules.v7`
+//! The declared health-rule table `health-rules.v8`
 //! (docs/telemetry/contracts-health.md §2). Each rule reads only through the
 //! TM4.1 query service (`analytics::query`) or a lane's own read path
 //! (`accounting quota|attention|entries|budget-shadow`, TM4.4 `compare`), and
@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-pub const VERSION: &str = "health-rules.v7";
+pub const VERSION: &str = "health-rules.v8";
 const MINUTE: i64 = 60_000;
 const HOUR: i64 = 60 * MINUTE;
 const DAY: i64 = 24 * HOUR;
@@ -103,7 +103,7 @@ pub const RULES: &[Rule] = &[
         detail: "six control epoch increments in ten minutes warn; twelve are critical; dominant invalidation binding is evidence only" },
     Rule { name: "launch_stalled", family: "runtime", service: None, source: "canonical:launch progress", eval: Eval::LaunchStalled,
         direction: Direction::Above, warn: 5 * MINUTE, critical: 15 * MINUTE, unit: "ms", window_ms: None, cooldown_ms: HOUR,
-        detail: "open reserved or launching attempt without progress for five minutes, or stopped recovery with retained capacity" },
+        detail: "retained launch without progress or started worker without confirmed brief for five minutes; stopped recovery is critical" },
     Rule { name: "result_waiting_on_coordinator", family: "attention", service: None, source: "canonical:unfinished_worker_results", eval: Eval::CoordinatorResult,
         direction: Direction::Above, warn: MINUTE, critical: 10 * MINUTE, unit: "ms", window_ms: None, cooldown_ms: HOUR,
         detail: "result waiting on coordinator for N min; oldest worker-result inbox item not DONE, including SEEN items" },
@@ -330,14 +330,15 @@ fn evaluate_rule(ctx: &mut Ctx, rule: &'static Rule) -> Result<Vec<Outcome>> {
             outcome(rule, state, vec![json!({"code":"spool_database_busy","age_ms":age,"attempts":evidence})], lane_metric(rule.source), unbounded(now), json!({"attempts":evidence}))
         }
         Eval::LaunchStalled => {
-            let launches=crate::migration::open_active_read_only(ctx.project)?.launch_progress_health()?;
+            let store=crate::migration::open_active_read_only(ctx.project)?;
+            let launches=store.launch_progress_health()?;
             let mut evidence = Vec::new();
             let mut age = 0;
             let mut escalated = false;
             for (attempt,last,stopped) in launches {
                 age = age.max(now.saturating_sub(last));
                 escalated |= stopped;
-                evidence.push(json!({"attempt":attempt,"last_progress_unix_ms":last,"recovery_stopped":stopped,"recovery":"relaunch / cancel-attempt"}));
+                evidence.push(json!({"attempt":attempt,"last_progress_unix_ms":last,"recovery_stopped":stopped,"background_job_errors":store.launch_job_errors(&attempt)?,"recovery":"relaunch / cancel-attempt"}));
             }
             let state = if escalated { State::Critical } else { grade(rule, |t| age >= t, |_| false) };
             outcome(rule, state, vec![json!({"code":"launch_progress","age_ms":age})], lane_metric(rule.source), unbounded(now), json!({"attempts":evidence}))

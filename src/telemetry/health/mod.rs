@@ -20,7 +20,7 @@ pub mod store;
 
 pub const STREAM: &str = "health";
 /// `include_str!` of `migrations/telemetry/health/`, in order; index + 1 is the stream version.
-pub const MIGRATIONS: &[&str] = &[include_str!("../../../migrations/telemetry/health/0001_health_alerts.sql")];
+pub const MIGRATIONS: &[&str] = &[include_str!("../../../migrations/telemetry/health/0001_health_alerts.sql"), include_str!("../../../migrations/telemetry/health/0002_launch_job_errors.sql")];
 pub const CONTRACT: &str = "telemetry-health.v1";
 
 /// `herdr-farm telemetry <slug> health [...]`
