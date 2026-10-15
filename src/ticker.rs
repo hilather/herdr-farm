@@ -294,7 +294,7 @@ pub fn stop(root: &Path) -> Result<()> {
         }
         std::thread::sleep(crate::timing::stop_poll());
     }
-    let _ = std::fs::remove_file(stop_path(root));
+    // The running ticker must still observe this request after our wait expires.
     bail!("the ticker did not exit within {} seconds", crate::timing::stop_wait().as_secs())
 }
 
@@ -457,6 +457,7 @@ pub fn run_passes(ctx: &Ctx, passes: Option<u64>) -> Result<()> {
             // A worker waits on its spooled submission: answer it now.
             #[cfg(all(feature="state-store",target_os="linux"))]
             for slug in project::list_slugs(root) {
+                if stop_path(root).exists() { break; }
                 let dir=root.join(&slug);
                 if !herdr_farm::submission_spool::pending(&dir) {continue;}
                 match herdr_farm::submission_spool::ingest_with_cli_paths(&dir, crate::cli_invocation::paths()) {
@@ -541,6 +542,7 @@ pub fn tick(ctx: &Ctx, log: &Log, memory: &mut Memory) -> bool {
         log.error(&format!("{error:#}"));
         #[cfg(feature="state-store")]
         for slug in project::list_slugs(&ctx.root) {
+            if stop_path(&ctx.root).exists() { return false; }
             let project = ctx.root.join(&slug);
             if !project.join(".state/state.db").is_file() { continue; }
             let notice = (|| -> Result<()> {
@@ -574,6 +576,7 @@ pub fn tick(ctx: &Ctx, log: &Log, memory: &mut Memory) -> bool {
     #[cfg(feature="state-store")]
     let mut canonical = Vec::new();
     for slug in project::list_slugs(&ctx.root) {
+        if stop_path(&ctx.root).exists() { return false; }
         #[cfg(feature="state-store")]
         if project::ensure_legacy(&ctx.root.join(&slug)).is_err() {
             canonical.push(slug);continue;
@@ -635,6 +638,7 @@ pub fn tick(ctx: &Ctx, log: &Log, memory: &mut Memory) -> bool {
         reachable.rotate_left(first);
     }
     for (project, seen) in &reachable {
+        if stop_path(&ctx.root).exists() { return !reachable.is_empty(); }
         for error in tick_slow(ctx, project, seen, memory) {
             log.error(&format!("{}: {error:#}", project.slug));
         }
@@ -646,6 +650,7 @@ pub fn tick(ctx: &Ctx, log: &Log, memory: &mut Memory) -> bool {
         if !canonical.is_empty() {let first=(memory.tick.saturating_sub(1)%canonical.len() as u64) as usize;canonical.rotate_left(first);}
         memory.service_contention_logs.retain(|(slug,_),_|canonical.contains(slug));
         for slug in &canonical {
+            if stop_path(&ctx.root).exists() { return any_reachable; }
             let result=if let Some(reads)=memory.canonical_observations.as_mut(){crate::canonical_controller::poll_queued_effects(ctx,&ctx.root.join(slug),memory.tick.saturating_sub(1),reads,memory.copy_jobs.as_mut())}else{crate::canonical_controller::poll(ctx,&ctx.root.join(slug),memory.tick.saturating_sub(1))};
             match result {
                 Ok(result)=>{
@@ -723,6 +728,7 @@ pub fn tick(ctx: &Ctx, log: &Log, memory: &mut Memory) -> bool {
             }
             integrity_pass(ctx,log,slug);
         }
+        if stop_path(&ctx.root).exists() { return any_reachable; }
         admit_background(ctx,log,memory,canonical.iter().map(|slug|ctx.root.join(slug)).collect());
         if let Some(reads)=memory.local_reports.as_mut(){for error in reads.admit(){log.error(&error);}}
         if let Some(reads)=memory.local_observations.as_mut(){for error in reads.admit(){log.error(&error);}}
@@ -731,7 +737,7 @@ pub fn tick(ctx: &Ctx, log: &Log, memory: &mut Memory) -> bool {
             // an exclusive worker effect, and do not replenish under that effect.
             // A completed exclusive effect gives maintenance the next batch.
             let blocked=memory.copy_jobs.as_ref().is_some_and(|q|q.pending_exclusive_root()||(!memory.canonical_maintenance_turn&&q.offered_exclusive_root()));
-            for error in reads.admit_where(|project|!blocked&&!memory.copy_jobs.as_ref().is_some_and(|q|q.pending_project(project))&&!memory.routine_jobs.as_ref().is_some_and(|q|q.pending_project(project))){log.error(&error);}
+            for error in reads.admit_where(|project|!stop_path(&ctx.root).exists()&&!blocked&&!memory.copy_jobs.as_ref().is_some_and(|q|q.pending_project(project))&&!memory.routine_jobs.as_ref().is_some_and(|q|q.pending_project(project))){log.error(&error);}
         }
         // Advisory tickets never occupy an effect/observation turn. The executor
         // holds them until the just-admitted canonical batch has fully drained.
@@ -758,6 +764,7 @@ pub fn tick(ctx: &Ctx, log: &Log, memory: &mut Memory) -> bool {
             && !memory.routine_jobs.as_ref().is_some_and(|q|q.pending())
             && memory.attempt_token_tickets.is_empty() {
             for slug in &canonical {
+                if stop_path(&ctx.root).exists() { return any_reachable; }
                 let control=crate::source_tree::Control{deadline:Instant::now()+Duration::from_secs(5),cancellation:Default::default()};
                 match crate::attempt_token_jobs::requests(&ctx.root.join(slug),&control,&memory.attempt_tokens) {
                     Ok(requests)=>if let Some(queue)=memory.copy_jobs.as_ref() {for request in requests {
@@ -778,6 +785,7 @@ pub fn tick(ctx: &Ctx, log: &Log, memory: &mut Memory) -> bool {
         // ever published.
         if !memory.copy_jobs.as_ref().is_some_and(|q|q.canonical_work_pending()) {
             for slug in &canonical {
+                if stop_path(&ctx.root).exists() { return any_reachable; }
                 if let Err(error) = crate::reconcile_live::worker_attention(ctx, &ctx.root.join(slug), memory.worker_idle.entry(slug.clone()).or_default()) {
                     log.error(&format!("{slug}: worker attention: {error:#}"));
                 }
@@ -793,6 +801,7 @@ pub fn tick(ctx: &Ctx, log: &Log, memory: &mut Memory) -> bool {
         if collect_secs > 0 {
             let at = jiff::Timestamp::now().as_millisecond();
             for slug in project::list_slugs(&ctx.root) {
+                if stop_path(&ctx.root).exists() { return any_reachable; }
                 let _ = herdr_farm::telemetry::operations::launch::ticker_errors(&ctx.root.join(slug), &session, memory.tick, at, counts);
             }
         }
@@ -878,6 +887,7 @@ fn telemetry_pass(ctx:&Ctx,log:&Log,session:&str) {
     let mut observations=Vec::new();
     let mut collections=Vec::new();
     for slug in project::list_slugs(&ctx.root) {
+        if stop_path(&ctx.root).exists() { return; }
         let project=ctx.root.join(&slug);
         if !project.join(".state/state.db").is_file() {continue;}
         let existing=sidecar::path(&project).is_file();
@@ -988,7 +998,7 @@ fn admit_background(_ctx:&Ctx,log:&Log,memory:&mut Memory,canonical:Vec<PathBuf>
     #[cfg(all(feature="state-store",target_os="linux"))]
     if let Some(queue)=memory.copy_jobs.as_mut() {
         let reads=memory.canonical_observations.as_ref();
-        for error in queue.admit_verifier(|project|!reads.is_some_and(|reads|reads.pending_project(project))&&herdr_farm::watchdog::effects_paused(Path::new(project)).is_none()){log.error(&error);}
+        for error in queue.admit_verifier(|project|!stop_path(&_ctx.root).exists()&&!reads.is_some_and(|reads|reads.pending_project(project))&&herdr_farm::watchdog::effects_paused(Path::new(project)).is_none()){log.error(&error);}
     }
     // The exclusive slot is still one ticket. Declared transfers may already be
     // running; top those up without admitting a launch or a routine beside them.
@@ -1000,7 +1010,7 @@ fn admit_background(_ctx:&Ctx,log:&Log,memory:&mut Memory,canonical:Vec<PathBuf>
         if admit_effects(log,memory){memory.prefer_copy=false;return;}
     }
     #[cfg(feature="state-store")]
-    if let Some(queue)=memory.routine_jobs.as_mut(){for error in queue.admit_projects_where(canonical,|project|!memory.canonical_observations.as_ref().is_some_and(|reads|reads.pending_project(&project.display().to_string()))){log.error(&error);}for passed in queue.take_passed(){log.line(&passed);}if queue.pending(){memory.prefer_copy=true;return;}}
+    if let Some(queue)=memory.routine_jobs.as_mut(){for error in queue.admit_projects_where(canonical,|project|!stop_path(&_ctx.root).exists()&&!memory.canonical_observations.as_ref().is_some_and(|reads|reads.pending_project(&project.display().to_string()))){log.error(&error);}for passed in queue.take_passed(){log.line(&passed);}if queue.pending(){memory.prefer_copy=true;return;}}
     #[cfg(not(feature="state-store"))]
     let _=canonical;
     if admit_effects(log,memory){memory.prefer_copy=false;}

@@ -166,7 +166,12 @@ pub struct IdleStretch {
 /// Idle is advisory, never termination evidence. Verify the exact route and
 /// retained socket incarnation before starting an idle stretch.
 pub fn worker_attention(ctx: &Ctx, project: &Path, stretches: &mut BTreeMap<(String, u64), IdleStretch>) -> Result<()> {
-    let snapshot = migration::open_active_read_only(project)?.read_snapshot(None)?;
+    let mut store = migration::open_active_read_only(project)?;
+    if !store.has_running_unterminated_attempts()? {
+        stretches.clear();
+        return Ok(());
+    }
+    let snapshot = store.read_snapshot(None)?;
     stretches.retain(|(id, revision), _| snapshot.attempts.iter().any(|a| a.id.as_str() == id && a.revision == *revision && a.state == herdr_farm::domain::AttemptState::Running && !a.termination_observed));
     let mut sessions = BTreeMap::new();
     for attempt in snapshot.attempts.iter().filter(|a| a.retains_capacity() && a.state == herdr_farm::domain::AttemptState::Running) {

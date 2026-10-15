@@ -243,6 +243,14 @@ impl SqliteStore {
         if stmt.query([])?.next()?.is_some() { return Err(StoreError::Corrupt("foreign key violation".into())); }
         Ok(())
     }
+    /// Whether advisory worker monitoring has any retained running work.
+    /// The existing partial index excludes all terminated launch history.
+    pub fn has_running_unterminated_attempts(&self) -> Result<bool> {
+        Ok(self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM attempts INDEXED BY attempts_retained_by_id WHERE termination_observed=0 AND state='running')",
+            [], |row| row.get(0),
+        )?)
+    }
     /// Current consistent snapshot. Earlier heads fail explicitly: history
     /// reconstruction is not implemented by schema v1.
     pub fn read_snapshot(&mut self, at: Option<u64>) -> Result<Snapshot> {
