@@ -29,6 +29,26 @@ their referenced bytes. Release/forget policy remains unfinished.
 For existing projects with legacy memory, Markdown remains authoritative until
 signed cutover changes `format.memory` to
 `sqlite-v1`. Afterward it is an export/projection, never fallback authority.
+CLI memory head changes (owner recording/revision, approval/promotion and signed
+supersession/revocation) refresh generated Markdown at each record's
+`memory/<slug>.md` key. Revoked or expired heads retain a generated projection
+marked `inactive: revoked` or `inactive: expired`; refresh evaluates elapsed expiry.
+A file is clean only if its entire contents reconstruct a retained generated
+revision, not merely because it has a projection marker. Edited files are
+preserved and reported, even when their record is revoked. A committed memory
+change remains committed if projection publication fails; repair it separately.
+
+`memory PROJECT projections` inspects without publishing and lists `missing`,
+`stale`, `edited`, `orphaned` and `current` paths. Add `--refresh` to regenerate
+missing or stale clean projections. Edited and orphaned files remain untouched.
+Doctor reports projection health problems. Refresh is safe while workers run:
+briefs and snapshots consume canonical retained memory, never these files.
+Only CLI write paths publish projections; the ticker does not write them.
+
+`MEMORY.md` retained at adoption is the owner's index and is never refreshed.
+An older cutover's generated `MEMORY.md` is refreshed under the same full-file
+verification rule as other generated projections.
+
 `memory PROJECT inspect` reports records and ownership. Hard-rule, import-ack and
 revocation policy still use owner-signed `memory@herdr-projects` documents.
 

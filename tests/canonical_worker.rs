@@ -5253,3 +5253,31 @@ fn revoked_started_brief_fails_once_and_releases_exact_worker_ownership() {
     assert_eq!(lab.count("agent.prompt"), 0);
     assert_eq!(lab.state().control.unwrap().state, herdr_farm::domain::ProjectState::Active);
 }
+
+/// Projection inspection and publication cannot change an approved worker brief.
+#[test]
+fn projection_refresh_leaves_the_reserved_worker_brief_unchanged() {
+    let mut lab = Lab::new("unknown_usage='allow_with_warning'\n");
+    let signer = lab.path(".config/herdr-farm/owner-signer");
+    fs::copy(&lab.key, &signer).unwrap();
+    fs::copy(lab.key.with_extension("pub"), signer.with_extension("pub")).unwrap();
+    lab.ok(&["memory", "demo", "adopt"]);
+    let body = lab.path("owner-fact.md");
+    fs::write(&body, "Retained canonical owner fact.").unwrap();
+    lab.ok(&["memory", "demo", "record", "--title", "Brief fact", "--provenance", "owner fixture instruction", "--body-file", body.to_str().unwrap()]);
+    let (_, attempt) = lab.reserve("Retained worker instructions.");
+    let brief = lab.ok(&["memory", "demo", "attempt-brief", "--attempt", attempt.as_str()]);
+    assert!(brief["text"].as_str().unwrap().contains("Retained canonical owner fact."));
+    let path = lab.project.join("memory/brief-fact.md");
+    fs::write(&path, "Edited projection must never enter the brief.").unwrap();
+    lab.ok(&["memory", "demo", "projections", "--refresh"]);
+    assert_eq!(lab.ok(&["memory", "demo", "attempt-brief", "--attempt", attempt.as_str()]), brief);
+    fs::remove_file(&path).unwrap();
+    let head = lab.head();
+    let health = lab.cli(&["doctor"]);
+    assert!(String::from_utf8_lossy(&health.stdout).contains("memory projections:"));
+    assert_eq!(lab.head(), head);
+    lab.ok(&["memory", "demo", "projections", "--refresh"]);
+    assert!(fs::read_to_string(path).unwrap().contains("Retained canonical owner fact."));
+    assert_eq!(lab.ok(&["memory", "demo", "attempt-brief", "--attempt", attempt.as_str()]), brief);
+}

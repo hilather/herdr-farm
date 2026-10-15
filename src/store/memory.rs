@@ -420,6 +420,15 @@ impl SqliteStore {
             None=>None,
         })
     }
+    pub(crate) fn memory_projection_cutover_sequence(&self, digest: &str) -> Result<Option<u64>> {
+        Ok(super::memory_policy::read_all(&self.connection)?.iter()
+            .find(|policy| policy.op == MemoryPolicyOp::Cutover && policy.memory_plan_digest.as_deref() == Some(digest))
+            .and_then(|policy| policy.expected_head.checked_add(1)))
+    }
+    pub(crate) fn memory_projection_expiry(&self, id: &str, revision: u64) -> Result<Option<i64>> {
+        Ok(self.connection.query_row("SELECT expiry_unix_ms FROM memory_validity WHERE record_id=?1 AND revision=?2",
+            params![id, integer(revision)?], |row| row.get(0))?)
+    }
     pub fn memory_head(&mut self,id:&str)->Result<Option<MemoryHead>> {
         let tx=self.connection.transaction()?;schema(&tx)?;
         let row:Option<(String,u64,String,u64)>=tx.query_row("SELECT record_id,revision,status,row_revision FROM memory_heads WHERE record_id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;

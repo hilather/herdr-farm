@@ -229,6 +229,8 @@ enum BudgetCommand {
 #[derive(Subcommand)]
 enum MemoryCommand {
     Inspect,
+    /// Inspect Markdown projection health; optionally refresh clean files
+    Projections { #[arg(long)] refresh:bool },
     /// Record an explicit owner decision using the automatic owner signer
     Record { #[arg(long)] title:String, #[arg(long)] provenance:String, #[arg(long)] body_file:PathBuf },
     /// Adopt existing Markdown memory (new SQLite projects set this up when a signer is available)
@@ -1254,10 +1256,14 @@ pub fn run(#[cfg(feature="state-store")] capture: &mut crate::cli_invocation::Ca
                 if matches!(&command, MemoryCommand::Record { .. }) { bail!("legacy-markdown memory: use `memory-review {slug} record` to record owner decisions"); }
                 bail!("project `{slug}` uses legacy-markdown memory; `memory` requires a migrated SQLite store. Use `memory-review {slug} list/show/ingest/propose/reject/defer` for Remember candidates, or `migration {slug} plan/apply` for an explicit migration");
             }
+            let refresh_projections = matches!(&command, MemoryCommand::Record{..} | MemoryCommand::Approve{..}
+                | MemoryCommand::Import{..} | MemoryCommand::ReviewImport{..} | MemoryCommand::Reconcile{..}
+                | MemoryCommand::Promote{..} | MemoryCommand::Review{..});
             let cli_memory_action=match &command {MemoryCommand::Approve{..}=>Some(true),MemoryCommand::Reject{..}=>Some(false),_=>None};
             let value=match command {
                 MemoryCommand::Record{title,provenance,body_file}=>crate::launch_run::record_memory(&ctx,&dir,&title,&provenance,&body_file)?,
                 MemoryCommand::Adopt{dry_run,sign_with}=>crate::launch_run::adopt_memory(&ctx,&dir,dry_run,sign_with)?,
+                MemoryCommand::Projections{refresh}=>serde_json::to_value(herdr_farm::memory::projections(&dir,refresh)?)?,
                 MemoryCommand::Inspect=>{
                     let s=herdr_farm::runtime::snapshot(&dir)?;
                     let mut db=herdr_farm::migration::open_active(&dir)?;
@@ -1377,7 +1383,18 @@ pub fn run(#[cfg(feature="state-store")] capture: &mut crate::cli_invocation::Ca
                     serde_json::to_value(herdr_farm::authority::review_memory_proposal(&dir,&proposal,&decision_file,&signature,expected_head)?)?,
                 MemoryCommand::Promote{proposal,decision}=>
                     serde_json::to_value(herdr_farm::authority::promote_memory_proposal(&dir,&proposal,&decision)?)?,
-            };println!("{}",serde_json::to_string_pretty(&value)?);Ok(())
+            };
+            if refresh_projections && herdr_farm::migration::read_format(&dir)?.memory == "sqlite-v1" {
+                match herdr_farm::memory::projections(&dir,true) {
+                    Ok(statuses)=>for status in statuses {
+                        if matches!(status.status.as_str(),"edited"|"orphaned") {
+                            eprintln!("memory projection {} preserved: {}",status.status,status.path);
+                        }
+                    },
+                    Err(error)=>eprintln!("memory change committed; projection refresh failed: {error:#}; run `memory {slug} projections --refresh`"),
+                }
+            }
+            println!("{}",serde_json::to_string_pretty(&value)?);Ok(())
         },
         #[cfg(feature="state-store")]
         Command::RoutineStore{slug,command}=>{
