@@ -786,8 +786,9 @@ pub fn tick(ctx: &Ctx, log: &Log, memory: &mut Memory) -> bool {
         if !memory.copy_jobs.as_ref().is_some_and(|q|q.canonical_work_pending()) {
             for slug in &canonical {
                 if stop_path(&ctx.root).exists() { return any_reachable; }
-                if let Err(error) = crate::reconcile_live::worker_attention(ctx, &ctx.root.join(slug), memory.worker_idle.entry(slug.clone()).or_default()) {
-                    log.error(&format!("{slug}: worker attention: {error:#}"));
+                match crate::reconcile_live::worker_attention(ctx, &ctx.root.join(slug), memory.worker_idle.entry(slug.clone()).or_default()) {
+                    Ok(lines) => for line in lines { log.line(&format!("{slug}: worker attention: {line}")); },
+                    Err(error) => log.error(&format!("{slug}: worker attention: {error:#}")),
                 }
             }
         }

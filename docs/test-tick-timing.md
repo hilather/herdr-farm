@@ -244,7 +244,10 @@ typed expiry outcome, then stops the gated worker in the same reconciliation;
 it never renews or reclaims the expired launch.
 
 The idle-worker multi-stretch E2E workflow runs in nextest's `nightly` profile
-rather than `ci` because its owner-host runtime is about seven minutes. Run it
+rather than `ci` because its owner-host runtime can reach about 13 minutes
+(~50 resting passes at the unscaled 15.5 s advisory window). Its isolated worker
+uses a 3600 s wall budget so the default 600 s limit cannot end it mid-workflow.
+The working-to-idle rearm waits for the idle monitor’s logged reset transition. Run it
 with `cargo nextest run --features state-store --profile nightly`. Its dedup
 window observes 30 completed passes in one ticker. Additional quiet tickers must
 not be inserted before the one-notice assertion: a restart intentionally starts

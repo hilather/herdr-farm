@@ -165,11 +165,12 @@ pub struct IdleStretch {
 
 /// Idle is advisory, never termination evidence. Verify the exact route and
 /// retained socket incarnation before starting an idle stretch.
-pub fn worker_attention(ctx: &Ctx, project: &Path, stretches: &mut BTreeMap<(String, u64), IdleStretch>) -> Result<()> {
+pub fn worker_attention(ctx: &Ctx, project: &Path, stretches: &mut BTreeMap<(String, u64), IdleStretch>) -> Result<Vec<String>> {
+    let mut lines = Vec::new();
     let mut store = migration::open_active_read_only(project)?;
     if !store.has_running_unterminated_attempts()? {
         stretches.clear();
-        return Ok(());
+        return Ok(lines);
     }
     let snapshot = store.read_snapshot(None)?;
     stretches.retain(|(id, revision), _| snapshot.attempts.iter().any(|a| a.id.as_str() == id && a.revision == *revision && a.state == herdr_farm::domain::AttemptState::Running && !a.termination_observed));
@@ -210,9 +211,13 @@ pub fn worker_attention(ctx: &Ctx, project: &Path, stretches: &mut BTreeMap<(Str
         let now = jiff::Timestamp::now().as_millisecond();
         let stretch = stretches.entry((attempt.id.as_str().into(), attempt.revision)).or_default();
         if idle == Some(false) {
+            if stretch.since.is_some() {
+                lines.push(format!("attempt {} working; idle stretch reset", attempt.id.as_str()));
+            }
             stretch.since = None;
             stretch.notified = false;
         } else if idle == Some(true) && stretch.since.is_none() {
+            lines.push(format!("attempt {} idle stretch started", attempt.id.as_str()));
             stretch.generation = stretch.generation.saturating_add(1);
             stretch.since = Some(now);
         }
@@ -222,5 +227,5 @@ pub fn worker_attention(ctx: &Ctx, project: &Path, stretches: &mut BTreeMap<(Str
             stretch.notified = true;
         }
     }
-    Ok(())
+    Ok(lines)
 }
