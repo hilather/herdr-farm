@@ -464,3 +464,13 @@ CLI timeout leaves its request in place for the running ticker to observe;
 successful stop or a subsequent start retains the existing cleanup behavior.
 Controller intervals, native observation windows and executor draining are
 unchanged.
+
+The telemetry workspace live-fleet fixture keeps its synthetic attention lane
+fresh with a one-day sample interval. Its samples remain 30 seconds apart and
+the open wait remains exactly 360 seconds, measured between sample timestamps.
+Workspace reads do not extrapolate that duration to wall time, but attention
+reads censor the open interval once the last sample is older than twice its
+recorded interval. The production 30-second interval left only 50 seconds for
+all surface comparisons and could remove the expected wait under host load.
+The larger fixture interval avoids that unrelated freshness deadline without
+weakening any duration or surface assertions or changing production timing.
