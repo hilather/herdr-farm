@@ -3341,20 +3341,26 @@ fn attention_mid_run_failure_remains_incomplete_at_termination() {
 #[test]
 fn idle_worker_notice_restarts_stretch_and_deduplicates_within_a_ticker() {
     let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+    // ~50 resting passes at the unscaled 15.5 s advisory window need ~13 min (docs/test-tick-timing.md), beyond the default 600 s budget.
+    let config = lab.path(".config/herdr-farm/config.toml");
+    fs::write(&config, fs::read_to_string(&config).unwrap().replace("max_wall_seconds=600", "max_wall_seconds=3600")).unwrap();
+    lab.resume();
     let (_, attempt) = lab.reserve("Retained instructions");
     lab.serve();
     lab.run_until(100, &|| lab.attempt(&attempt).state == AttemptState::Running);
     fs::write(lab.path("lab/agent-status"), "done").unwrap();
     let notices = || lab.state().inbox.into_iter().filter(|i| i.content.kind == "attempt.worker_idle").collect::<Vec<_>>();
     let mut ticker = lab.spawn();
-    lab.wait(&mut ticker, 60, &|| notices().len() == 1);
+    lab.wait_for(&mut ticker, "first idle notice", &attempt, 60, &|| notices().len() == 1);
     lab.ok(&["inbox", "done", "demo", &notices()[0].content.id]);
-    // Observe another 30 completed passes (15 scaled seconds) without rearming.
+    // Observe another 30 completed passes without rearming.
     let metrics = lab.path("root/.ticker-metrics.json");
-    let mut last = fs::metadata(&metrics).unwrap().ino();
-    for _ in 0..30 {
-        lab.wait(&mut ticker, 60, &|| fs::metadata(&metrics).unwrap().ino() != last);
-        last = fs::metadata(&metrics).unwrap().ino();
+    let tick = || serde_json::from_slice::<Value>(&fs::read(&metrics).unwrap()).unwrap()["tick"].as_u64().unwrap();
+    let mut last_tick = tick();
+    for i in 1..=30 {
+        let stage = format!("dedup pass {i}/30 (current tick {}, last tick {last_tick}, notices {})", tick(), notices().len());
+        lab.wait_for(&mut ticker, &stage, &attempt, 60, &|| tick() > last_tick);
+        last_tick = tick();
         assert_eq!(notices().len(), 1);
     }
     lab.stop(ticker);
@@ -3366,17 +3372,19 @@ fn idle_worker_notice_restarts_stretch_and_deduplicates_within_a_ticker() {
     assert_eq!(lab.attempt(&attempt).state, AttemptState::Running);
     // A restart begins a new stretch even though the worker stayed idle.
     let mut ticker = lab.spawn();
-    lab.wait(&mut ticker, 60, &|| notices().len() == 2);
+    lab.wait_for(&mut ticker, "second idle notice after restart", &attempt, 60, &|| notices().len() == 2);
     fs::write(lab.path("lab/agent-status"), "working").unwrap();
-    let observed = lab.count("agent.list");
-    lab.wait(&mut ticker, 60, &|| lab.count("agent.list") >= observed + 3);
+    lab.wait_for(&mut ticker, "idle stretch reset after working", &attempt, 60, &|| {
+        fs::read_to_string(lab.path("root/.ticker.log")).unwrap_or_default()
+            .contains(&format!("attempt {} working; idle stretch reset", attempt.as_str()))
+    });
     fs::write(lab.path("lab/agent-status"), "idle").unwrap();
-    lab.wait(&mut ticker, 60, &|| notices().len() == 3);
-    // Keep the post-rearm quiet check in this ticker, preserving its dedup memory.
-    last = fs::metadata(&metrics).unwrap().ino();
-    for _ in 0..3 {
-        lab.wait(&mut ticker, 60, &|| fs::metadata(&metrics).unwrap().ino() != last);
-        last = fs::metadata(&metrics).unwrap().ino();
+    lab.wait_for(&mut ticker, "third idle notice after rearm", &attempt, 60, &|| notices().len() == 3);
+    // Re-read this ticker's counter after restart and rearm, preserving its dedup memory.
+    last_tick = tick();
+    for i in 1..=3 {
+        lab.wait_for(&mut ticker, &format!("quiet pass {i}/3"), &attempt, 60, &|| tick() > last_tick);
+        last_tick = tick();
         assert_eq!(notices().len(), 3);
     }
     lab.stop(ticker);

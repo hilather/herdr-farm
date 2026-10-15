@@ -244,12 +244,29 @@ typed expiry outcome, then stops the gated worker in the same reconciliation;
 it never renews or reclaims the expired launch.
 
 The idle-worker multi-stretch E2E workflow runs in nextest's `nightly` profile
-rather than `ci` because its owner-host runtime is about seven minutes. Run it
+rather than `ci` because its owner-host runtime can reach about 13 minutes
+(~50 resting passes at the unscaled 15.5 s advisory window). Its isolated worker
+uses a 3600 s wall budget so the default 600 s limit cannot end it mid-workflow.
+The working-to-idle rearm waits for the idle monitor’s logged reset transition. Run it
 with `cargo nextest run --features state-store --profile nightly`. Its dedup
-window observes 30 completed passes in one ticker. Additional quiet tickers must
-not be inserted before the one-notice assertion: a restart intentionally starts
+window observes 30 completed passes in one ticker via the published metrics `tick`
+counter, avoiding rename-publication inode reuse and missed bursts. The counter
+increases within each ticker process; the test reads a fresh baseline after a
+restart. Older metrics files without `tick` deserialize with zero. Nightly allows
+20 × 60 seconds rather than 15 × 60: the ~13-minute slow-pass workflow otherwise
+has only ~2 minutes of margin, despite its worker's 3600-second budget.
+Additional quiet tickers must not be inserted before the one-notice assertion: a restart intentionally starts
 a new idle stretch, so enough elapsed native observation time can emit a second
 notice. The explicit restart and working-to-idle rearming assertions remain.
+
+TEST-FLAKE-10b sandbox validation: lib 529 passed, 84 Unix-socket permission
+failures, 13 ignored; clippy completed with no warnings on changed lines. The
+focused workflow (both cargo test and the nextest nightly profile) stops at
+`launch demo draft` with `state store: Conflict` on
+both this follow-up and its unchanged parent f9b54ed. Main e240dc8 instead
+reaches the sandbox-denied socket bind, including with the same scratch
+location. The conflict therefore predates the pass-counter change, but is not
+confirmed sandbox-only; the complete nightly workflow still needs validation.
 
 The canonical notification owner-death fixture retains a present pane and matching
 working agent, adopts the coordinator through the public CLI, then records fresh

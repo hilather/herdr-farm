@@ -50,6 +50,8 @@ pub struct LaneMetrics {
 /// Redacted root-wide executor counters. No argv, secrets, payloads or project names.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ExecutorMetrics {
+    #[serde(default)]
+    pub tick: u64,
     pub control: LaneMetrics,
     pub transfer: LaneMetrics,
     pub max_queue_delay_ms: u64,
@@ -72,8 +74,9 @@ fn lane_metrics(metrics: &crate::executor::Metrics, lane: usize) -> LaneMetrics 
     }
 }
 
-fn snapshot_metrics(metrics: &crate::executor::Metrics) -> ExecutorMetrics {
+fn snapshot_metrics(metrics: &crate::executor::Metrics, tick: u64) -> ExecutorMetrics {
     ExecutorMetrics {
+        tick,
         control: lane_metrics(metrics, 0),
         transfer: lane_metrics(metrics, 1),
         max_queue_delay_ms: u64::try_from(metrics.max_queue_delay.as_millis()).unwrap_or(u64::MAX),
@@ -83,7 +86,7 @@ fn snapshot_metrics(metrics: &crate::executor::Metrics) -> ExecutorMetrics {
 
 fn publish_executor_metrics(root: &Path, log: &Log, memory: &Memory) {
     let Some(reads) = memory.pr_reads.as_ref() else { return };
-    if let Err(error) = write_metrics_file(root, &snapshot_metrics(&reads.metrics())) {
+    if let Err(error) = write_metrics_file(root, &snapshot_metrics(&reads.metrics(), memory.tick)) {
         log.error(&format!("executor metrics: {error:#}"));
     }
 }
@@ -786,8 +789,9 @@ pub fn tick(ctx: &Ctx, log: &Log, memory: &mut Memory) -> bool {
         if !memory.copy_jobs.as_ref().is_some_and(|q|q.canonical_work_pending()) {
             for slug in &canonical {
                 if stop_path(&ctx.root).exists() { return any_reachable; }
-                if let Err(error) = crate::reconcile_live::worker_attention(ctx, &ctx.root.join(slug), memory.worker_idle.entry(slug.clone()).or_default()) {
-                    log.error(&format!("{slug}: worker attention: {error:#}"));
+                match crate::reconcile_live::worker_attention(ctx, &ctx.root.join(slug), memory.worker_idle.entry(slug.clone()).or_default()) {
+                    Ok(lines) => for line in lines { log.line(&format!("{slug}: worker attention: {line}")); },
+                    Err(error) => log.error(&format!("{slug}: worker attention: {error:#}")),
                 }
             }
         }
@@ -1561,6 +1565,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let root = tempfile::tempdir().unwrap();
         let metrics = ExecutorMetrics {
+            tick: 0,
             control: LaneMetrics { queued: 1, running: 2, high_water: 3, completed: 4 },
             transfer: LaneMetrics { queued: 0, running: 0, high_water: 1, completed: 9 },
             max_queue_delay_ms: 15,
