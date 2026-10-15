@@ -163,7 +163,7 @@ pub fn tick(project: &Path) -> Result<()> {
 // Producer bounds the whole project to 1024 attempt summaries. Full sidecar
 // backups retain these diagnostics; they never participate in launch decisions.
 pub(crate) fn record_launch_job_error(project: &Path, attempt: &str, job: &str, diagnostic: &str, now: i64) -> Result<()> {
-    let Some(mut db) = crate::telemetry::sidecar::open(project, true)? else { return Ok(()) };
+    let Some(mut db) = crate::telemetry::sidecar::open(project, false)? else { return Ok(()) };
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let diagnostic: String = diagnostic.chars().filter(|c| !c.is_control()).take(2000).collect();
     let job: String = job.chars().filter(|c| !c.is_control()).take(512).collect();
