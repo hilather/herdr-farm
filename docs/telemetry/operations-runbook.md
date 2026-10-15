@@ -463,6 +463,7 @@ $ herdr-farm telemetry demo backup restore --from <tmp>/backup-2026-09-30 --forc
     "gemini_file_cursors": 0,
     "health_evaluations": 0,
     "host_checks": 0,
+    "launch_job_errors": 0,
     "muse_events": 0,
     "muse_parents": 0,
     "native_probe_failures": 0,
