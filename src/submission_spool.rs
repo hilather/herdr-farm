@@ -165,7 +165,7 @@ fn ingest_cli(project: &Path, dir: &Dir, allowed_paths: &[String]) -> Result<()>
         row.trust = "worker_reported".into();
         rows.push(row);
     }
-    if !rows.is_empty() { cli_invocations::write(project, &rows)?; }
+    if !rows.is_empty() { cli_invocations::write_spool(project, &rows).context("blocking database: .state/telemetry.db (CLI invocation replay)")?; }
     Ok(())
 }
 
@@ -453,18 +453,17 @@ fn foreign(db: &rusqlite::Connection, attempt: &str, request: &Request) -> Resul
 
 /// Run the command a request stands for, exactly as the CLI runs it outside
 /// a sandbox; its stdout, or its error as the CLI prints it.
-fn run(at: &At<'_>, request: &Request) -> std::result::Result<String, String> {
-    let document = || request.document.as_deref().map(str::as_bytes).ok_or_else(|| "the request carries no document".to_owned());
-    let argument = || request.argument.as_deref().ok_or_else(|| "the request carries no argument".to_owned());
-    let result = match request.kind {
+fn run(at: &At<'_>, request: &Request) -> Result<String> {
+    let document = || request.document.as_deref().map(str::as_bytes).ok_or_else(|| anyhow!("the request carries no document"));
+    let argument = || request.argument.as_deref().ok_or_else(|| anyhow!("the request carries no argument"));
+    match request.kind {
         Kind::ResultSubmit => crate::store::submit_untrusted_result_bytes(at.held, at.project, document()?)
             .map_err(anyhow::Error::from)
             .and_then(|receipt| Ok(serde_json::to_string_pretty(&receipt)? + "\n")),
         Kind::ReviewSubmit => crate::telemetry::review::worker_submit(at.project, document()?),
         Kind::ReviewSession => crate::telemetry::review::worker_session(at.project, argument()?),
         Kind::ReviewPresent => crate::telemetry::review::worker_present(at.project, argument()?),
-    };
-    result.map_err(|error| format!("{error:#}"))
+    }
 }
 
 /// Budget for importing one submission's candidate from its Git quarantine.
@@ -526,15 +525,57 @@ pub fn ingest_with_cli_paths(project: &Path, allowed_paths: &[String]) -> Result
     let root = Dir::open(&root_path)?;
     let attempts: Vec<String> = root.names()?.into_iter().filter_map(|n| n.into_string().ok()).filter(|n| valid_attempt(n)).collect();
     let mut lines = Vec::new();
-    if attempts.is_empty() {
-        return Ok(lines);
-    }
+    let state_dir = Dir::open(&project.join(".state"))?;
+    let mut contention = spool_contention(project)?;
+    let previous = serde_json::to_vec(&contention)?;
+    contention.retain(|attempt, _| attempts.contains(attempt));
     for attempt in attempts {
+        let now = crate::telemetry::maintenance::store::now();
+        if contention.get(&attempt).is_some_and(|state| now < state.next_retry) { continue; }
         if let Err(error) = ingest_attempt(project, &root, &attempt, &mut lines, allowed_paths) {
-            lines.push(format!("spool {attempt}: {error:#}"));
+            if database_busy(&error) {
+                let state = contention.entry(attempt.clone()).or_insert_with(|| {
+                    lines.push(format!("spool {attempt}: {error:#}; retained for retry"));
+                    SpoolContention { first_failure: now, next_retry: now, database: format!("{error:#}") }
+                });
+                state.database = format!("{error:#}");
+                state.next_retry = crate::telemetry::maintenance::store::now()
+                    + crate::timing::retry(Duration::from_secs(30)).as_millis() as i64;
+            } else {
+                contention.remove(&attempt);
+                lines.push(format!("spool {attempt}: {error:#}"));
+            }
+        } else {
+            contention.remove(&attempt);
         }
     }
+    let updated = serde_json::to_vec(&contention)?;
+    if updated != previous { state_dir.replace("spool-contention.json", &updated)?; }
     Ok(lines)
+}
+
+fn database_busy(error: &anyhow::Error) -> bool {
+    crate::telemetry::writer::busy(error) || error.chain().any(|cause| {
+        matches!(cause.downcast_ref::<crate::store::StoreError>(), Some(crate::store::StoreError::Busy))
+            || cause.downcast_ref::<io::Error>().is_some_and(|error|
+                matches!(error.raw_os_error(), Some(libc::EAGAIN) | Some(libc::EACCES)))
+    })
+}
+
+/// Owner-side retry evidence, outside worker-writable attempt directories.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct SpoolContention {
+    pub first_failure: i64,
+    next_retry: i64,
+    pub database: String,
+}
+
+pub(crate) fn spool_contention(project: &Path) -> Result<std::collections::BTreeMap<String, SpoolContention>> {
+    let dir = Dir::open(&project.join(".state"))?;
+    match dir.kind("spool-contention.json")? {
+        None => Ok(Default::default()),
+        Some(_) => Ok(serde_json::from_slice(&dir.read("spool-contention.json", 4 * 1024 * 1024).map_err(anyhow::Error::msg)?)?),
+    }
 }
 
 /// A short read-only view of the store (no side files, no writer blocked);
@@ -557,7 +598,7 @@ fn ingest_attempt(project: &Path, root: &Dir, attempt: &str, lines: &mut Vec<Str
         return Ok(());
     }
     let dir = root.child(attempt)?;
-    let status = read(project, |db| liveness(db, attempt))?;
+    let status = read(project, |db| liveness(db, attempt)).context("blocking database: .state/state.db (attempt liveness)")?;
     let names: Option<Vec<String>> = dir
         .names()
         .ok()
@@ -581,7 +622,7 @@ fn ingest_attempt(project: &Path, root: &Dir, attempt: &str, lines: &mut Vec<Str
             deny(&at, &dir, attempt, None, None, &format!("the spool holds more than {ENTRY_LIMIT} entries"), lines);
         }
         for digest in &pending {
-            handle(&at, &dir, attempt, &status, digest, lines);
+            handle(&at, &dir, attempt, &status, digest, lines)?;
         }
     }
     if names.is_some() && !matches!(status, Liveness::Missing) {
@@ -604,32 +645,34 @@ fn ingest_attempt(project: &Path, root: &Dir, attempt: &str, lines: &mut Vec<Str
     Ok(())
 }
 
-fn handle(at: &At<'_>, dir: &Dir, attempt: &str, status: &Liveness, digest: &str, lines: &mut Vec<String>) {
+fn handle(at: &At<'_>, dir: &Dir, attempt: &str, status: &Liveness, digest: &str, lines: &mut Vec<String>) -> Result<()> {
     let receipt = format!("{digest}.receipt");
     let request_name = format!("{digest}.request");
     let bytes = match dir.read(&request_name, REQUEST_LIMIT) {
         Ok(bytes) => bytes,
-        Err(reason) => return deny(at, dir, attempt, Some(digest), None, &reason, lines),
+        Err(reason) => { deny(at, dir, attempt, Some(digest), None, &reason, lines); return Ok(()); },
     };
     if sha256_hex(&bytes) != digest {
-        return deny(at, dir, attempt, Some(digest), None, "the request name is not the SHA-256 of its content", lines);
+        deny(at, dir, attempt, Some(digest), None, "the request name is not the SHA-256 of its content", lines);
+        return Ok(());
     }
     let request = match serde_json::from_slice::<Request>(&bytes) {
         Ok(request) if serde_json::to_vec(&request).is_ok_and(|canonical| canonical == bytes) && request.version == 1 => request,
-        _ => return deny(at, dir, attempt, Some(digest), None, "the request is not a canonical spool request", lines),
+        _ => { deny(at, dir, attempt, Some(digest), None, "the request is not a canonical spool request", lines); return Ok(()); },
     };
     let kind = Some(request.kind.name());
     if request.attempt_id != attempt {
-        return deny(at, dir, attempt, Some(digest), kind, "the request names another attempt than its spool", lines);
+        deny(at, dir, attempt, Some(digest), kind, "the request names another attempt than its spool", lines);
+        return Ok(());
     }
     match status {
         Liveness::Live => {}
-        _ => return deny(at, dir, attempt, Some(digest), kind, "the attempt is not live", lines),
+        _ => { deny(at, dir, attempt, Some(digest), kind, "the attempt is not live", lines); return Ok(()); },
     }
     match read(at.project, |db| foreign(db, attempt, &request)) {
         Ok(None) => {}
-        Ok(Some(reason)) => return deny(at, dir, attempt, Some(digest), kind, &reason, lines),
-        Err(error) => return lines.push(format!("spool {attempt}: {digest}: {error:#}; retried next pass")),
+        Ok(Some(reason)) => { deny(at, dir, attempt, Some(digest), kind, &reason, lines); return Ok(()); },
+        Err(error) => return Err(error.context("blocking database: .state/state.db (request validation)")),
     }
     if let Some((mode, _)) = dir.kind(&receipt).ok().flatten() {
         // Only the ticker writes receipts; a planted entry is removed first
@@ -637,7 +680,7 @@ fn handle(at: &At<'_>, dir: &Dir, attempt: &str, status: &Liveness, digest: &str
         if mode != libc::S_IFREG {
             record(at, attempt, Some(digest), kind, "the receipt name held an entry the ticker did not write", lines);
             if mode == libc::S_IFDIR && dir.unlink(&receipt, true).is_err() {
-                return;
+                return Ok(());
             }
         }
     }
@@ -647,21 +690,26 @@ fn handle(at: &At<'_>, dir: &Dir, attempt: &str, status: &Liveness, digest: &str
         // the shared repository.
         match import_candidate(at, attempt, &request) {
             Ok(None) => {}
-            Ok(Some(reason)) => return deny(at, dir, attempt, Some(digest), kind, &reason, lines),
-            Err(error) => return lines.push(format!("spool {attempt}: {digest}: Git quarantine import: {error:#}; retried next pass")),
+            Ok(Some(reason)) => { deny(at, dir, attempt, Some(digest), kind, &reason, lines); return Ok(()); },
+            Err(error) if database_busy(&error) => return Err(error.context("blocking database: .state/state.db (candidate metadata)")),
+            Err(error) => { lines.push(format!("spool {attempt}: {digest}: Git quarantine import: {error:#}; retried next pass")); return Ok(()); },
         }
     }
     let answer = run(at, &request);
+    if let Err(error) = &answer && database_busy(error) {
+        return Err(answer.unwrap_err().context("blocking database: .state/state.db (submission)"));
+    }
     let outcome = match &answer {
         Ok(_) => "answered".to_owned(),
-        Err(error) => format!("refused by the store: {error}"),
+        Err(error) => format!("refused by the store: {error:#}"),
     };
     let (stdout, error) = match answer {
         Ok(stdout) => (Some(stdout), None),
-        Err(error) => (None, Some(error)),
+        Err(error) => (None, Some(format!("{error:#}"))),
     };
     write_receipt(dir, attempt, digest, Receipt { version: 1, request_sha256: digest.into(), stdout, error }, lines);
     lines.push(format!("spool {attempt}: {} {digest} {outcome}", request.kind.name()));
+    Ok(())
 }
 
 fn write_receipt(dir: &Dir, attempt: &str, digest: &str, receipt: Receipt, lines: &mut Vec<String>) {

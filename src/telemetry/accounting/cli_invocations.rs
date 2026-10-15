@@ -1,5 +1,5 @@
 //! Best-effort product CLI metadata, never command arguments or diagnostics.
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -79,14 +79,32 @@ pub fn open_current(project: &Path) -> Result<Option<Connection>> {
 
 /// One atomic zero-wait batch. Worker replay is idempotent by invocation ID.
 pub fn write(project: &Path, rows: &[Invocation]) -> Result<bool> {
+    write_with_wait(project, rows, Duration::ZERO)
+}
+
+/// Retained spool rows can afford bounded admission; foreground recording cannot.
+pub(crate) fn write_spool(project: &Path, rows: &[Invocation]) -> Result<bool> {
+    let started = std::time::Instant::now();
+    loop {
+        match write_with_wait(project, rows, Duration::ZERO) {
+            Err(error) if crate::telemetry::writer::busy(&error) && started.elapsed() < Duration::from_secs(1) => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            result => return result,
+        }
+    }
+}
+
+fn write_with_wait(project: &Path, rows: &[Invocation], wait: Duration) -> Result<bool> {
     let Some(mut db) = open_current(project)? else {
         return Ok(false);
     };
+    db.busy_timeout(wait)?;
     // A shortened retention policy must not be undone by replaying an old
     // append-only worker report. Read only the class cutoff, without waiting.
     let ops_path = super::super::maintenance::store::path(project);
     let before: Option<i64> = if ops_path.try_exists()? {
-        let ops = super::super::read_only_nowait(&ops_path)?;
+        let ops = super::super::read_only_nowait(&ops_path).context("blocking database: .state/telemetry-ops.db (retention cutoff)")?;
         ops.query_row(
             "SELECT max(before_unix_ms) FROM tombstones WHERE class=?1 AND key_digest IS NULL",
             [super::super::maintenance::CLI],

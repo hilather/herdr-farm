@@ -2409,6 +2409,76 @@ fn rendered_memory_commands_read_the_reserved_attempt() {
     assert_eq!(successes, 3);
 }
 
+/// Real ticker replay tolerates short sidecar writers, retains persistent failures,
+/// and routes one health notice for the episode before replaying after release.
+#[test]
+fn spool_cli_contention_is_bounded_retained_and_noticed_once() {
+    let mut lab = Lab::new("unknown_usage='allow_with_warning'");
+    let config = lab.path(".config/herdr-farm/config.toml");
+    fs::write(&config, fs::read_to_string(&config).unwrap().replace("health_notify='off'", "health_notify='critical'")).unwrap();
+    lab.resume();
+    let (_, attempt) = lab.reserve("Spool contention");
+    herdr_farm::submission_spool::prepare(&lab.project, &attempt).unwrap();
+    let control = lab.state().control.unwrap().revision.to_string();
+    lab.ok(&["runtime", "demo", "state", "paused", "--expected-revision", &control, "--expected-head", &lab.head().to_string()]);
+    lab.ok(&["telemetry", "demo", "collect"]);
+    let spool = lab.project.join(".state/spool").join(attempt.as_str()).join("cli-invocations.jsonl");
+    let row = |id: &str| serde_json::json!({
+        "invocation_id":id,"command_path":"memory attempt-brief","outcome":"ok",
+        "exit_code":0,"duration_ms":1,"project_slug":"demo","caller":"worker",
+        "trust":"worker_reported","recorded_unix_ms":jiff::Timestamp::now().as_millisecond()
+    }).to_string() + "\n";
+    let db_path = herdr_farm::telemetry::sidecar::path(&lab.project);
+    let db = rusqlite::Connection::open(&db_path).unwrap();
+    let count = || db.query_row("SELECT count(*) FROM cli_invocations WHERE caller='worker'", [], |r| r.get::<_, i64>(0)).unwrap();
+    let first = "a".repeat(64);
+    fs::write(&spool, row(&first)).unwrap();
+    db.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let mut ticker = lab.spawn();
+    // A deterministic local writer releases within the one-second admission budget.
+    let release = Instant::now() + Duration::from_millis(200);
+    while Instant::now() < release { std::thread::sleep(Duration::from_millis(10)); }
+    db.execute_batch("COMMIT").unwrap();
+    lab.wait(&mut ticker, 60, &|| count() == 1);
+    lab.stop(ticker);
+    assert!(fs::read_to_string(&spool).unwrap().contains(&first));
+
+    let second = "b".repeat(64);
+    fs::write(&spool, row(&second)).unwrap();
+    db.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let canonical = rusqlite::Connection::open(lab.project.join(".state/state.db")).unwrap();
+    let notices = || canonical.query_row("SELECT count(*) FROM inbox_items WHERE json_extract(payload,'$.kind')='telemetry-health' AND json_extract(payload,'$.subject')='spool_contention'", [], |r| r.get::<_, i64>(0)).unwrap();
+    let mut ticker = lab.spawn();
+    let evidence_path = lab.project.join(".state/spool-contention.json");
+    lab.wait(&mut ticker, 60, &|| {
+        let value: Value = fs::read(&evidence_path).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or(Value::Null);
+        value[attempt.as_str()]["first_failure"].as_i64().is_some_and(|first|
+            jiff::Timestamp::now().as_millisecond() - first >= 12_100)
+    });
+    lab.wait(&mut ticker, 60, &|| notices() == 1);
+    let health = lab.ok(&["telemetry", "demo", "health", "--json"]);
+    assert!(health.to_string().contains(attempt.as_str()) && health.to_string().contains("telemetry.db"), "{health}");
+    lab.stop(ticker);
+    assert_eq!(notices(), 1);
+    assert_eq!(count(), 1);
+    assert!(fs::read_to_string(&spool).unwrap().contains(&second));
+    let log = fs::read_to_string(lab.path("root/.ticker.log")).unwrap();
+    assert_eq!(log.lines().filter(|line| line.contains(attempt.as_str()) && line.contains("retained for retry")).count(), 1, "{log}");
+    db.execute_batch("COMMIT").unwrap();
+    let health = lab.ok(&["telemetry", "demo", "health", "evaluate", "--json"]);
+    let state = health["states"].as_array().unwrap().iter().find(|state| state["rule"] == "spool_contention").unwrap();
+    assert_eq!(state["state"], "critical", "{health}");
+    assert!(state.to_string().contains(attempt.as_str()) && state.to_string().contains("telemetry.db"));
+    let noticed = lab.ok(&["telemetry", "demo", "health", "notify"]);
+    assert_eq!(noticed["delivered"].as_array().unwrap().iter().filter(|notice| notice["summary"].as_str().unwrap_or_default().contains("spool_contention")).count(), 0, "{noticed}");
+    assert_eq!(notices(), 1);
+    assert!(lab.ok(&["telemetry", "demo", "health", "notify"])["delivered"].as_array().unwrap().is_empty());
+    lab.run_until(100, &|| count() == 2);
+    assert_eq!(count(), 2);
+    let health = lab.ok(&["telemetry", "demo", "health", "evaluate", "--json"]);
+    assert_eq!(health["states"].as_array().unwrap().iter().find(|state| state["rule"] == "spool_contention").unwrap()["state"], "ok");
+}
+
 /// Probe for the submission spool: reports which `.state` paths it can
 /// write, copies the host's planted requests (and links) into its own spool
 /// as `plan.txt` lists them, then runs `result submit` twice.

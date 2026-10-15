@@ -131,6 +131,12 @@ pub fn evaluate(project: &Path, source: &str, now: i64) -> Result<Value> {
 
 /// Ticker: evaluate at most once per `TICK_INTERVAL_MS`, enabled by default.
 pub fn tick(project: &Path) -> Result<()> {
+    if let Some(home) = std::env::var_os("HOME") {
+        let config_dir = crate::product_environment::config_dir_for_home(Path::new(&home));
+        if crate::telemetry::views::telemetry_switch(&config_dir, "health_evaluation")? {
+            super::notify::spool_tick(project, &config_dir)?;
+        }
+    }
     let Some(db) = crate::telemetry::sidecar::read(project)? else { return Ok(()) };
     if !tables(&db)? { return Ok(()); }
     if let Some(home) = std::env::var_os("HOME") {
