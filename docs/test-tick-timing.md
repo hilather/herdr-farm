@@ -474,3 +474,15 @@ recorded interval. The production 30-second interval left only 50 seconds for
 all surface comparisons and could remove the expected wait under host load.
 The larger fixture interval avoids that unrelated freshness deadline without
 weakening any duration or surface assertions or changing production timing.
+
+The `heavy` nextest group (one test at a time) includes the lib tests
+`admission::tests::admission_resumes_after_a_full_page_of_unsigned_candidates`,
+`memory::regression_tests::concurrent_revision_reference_and_collection_never_lose_committed_bytes`,
+and `canonical_worker::tests::launch_advancement_recovers_each_boundary_then_delivers_brief_and_stops`
+in default, fast and ci to reduce contention under parallel load. Admission retains
+its test-only 30-second setup helpers and product 2-second admission deadline
+(`src/admission.rs`); the 20-iteration memory race has no test deadline and retains
+the product 250 ms SQLite busy bound (`src/store/mod.rs::BUSY_RETRY_BOUND`).
+Launch recovery raises its test-only shared deadline from 30 to 45 seconds, matching
+the controller operation budget (`src/canonical_controller.rs`, also documented
+in `docs/canonical-worker-launch.md`); all assertions and product timing remain.

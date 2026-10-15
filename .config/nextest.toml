@@ -23,7 +23,7 @@ filter = "binary(canonical_worker) | binary(operator_launch) | binary(worker_log
 test-group = "sandbox"
 
 [[profile.default.overrides]]
-filter = "binary(telemetry_scale)"
+filter = "binary(telemetry_scale) | (binary(herdr_farm) & test(=admission::tests::admission_resumes_after_a_full_page_of_unsigned_candidates)) | (binary(herdr_farm) & test(=memory::regression_tests::concurrent_revision_reference_and_collection_never_lose_committed_bytes)) | (binary(herdr_farm) & test(=canonical_worker::tests::launch_advancement_recovers_each_boundary_then_delivers_brief_and_stops))"
 test-group = "heavy"
 
 # Quick inner loop: everything except the ticker-driven end-to-end groups.
@@ -36,7 +36,7 @@ filter = "binary(canonical_worker) | binary(operator_launch) | binary(worker_log
 test-group = "sandbox"
 
 [[profile.fast.overrides]]
-filter = "binary(telemetry_scale)"
+filter = "binary(telemetry_scale) | (binary(herdr_farm) & test(=admission::tests::admission_resumes_after_a_full_page_of_unsigned_candidates)) | (binary(herdr_farm) & test(=memory::regression_tests::concurrent_revision_reference_and_collection_never_lose_committed_bytes)) | (binary(herdr_farm) & test(=canonical_worker::tests::launch_advancement_recovers_each_boundary_then_delivers_brief_and_stops))"
 test-group = "heavy"
 
 # GitHub Actions: JUnit output, partitioned across runners with
@@ -63,7 +63,7 @@ filter = "binary(canonical_worker) | binary(operator_launch) | binary(worker_log
 test-group = "sandbox"
 
 [[profile.ci.overrides]]
-filter = "binary(telemetry_scale)"
+filter = "binary(telemetry_scale) | (binary(herdr_farm) & test(=admission::tests::admission_resumes_after_a_full_page_of_unsigned_candidates)) | (binary(herdr_farm) & test(=memory::regression_tests::concurrent_revision_reference_and_collection_never_lose_committed_bytes)) | (binary(herdr_farm) & test(=canonical_worker::tests::launch_advancement_recovers_each_boundary_then_delivers_brief_and_stops))"
 test-group = "heavy"
 
 # Run explicitly with --profile nightly; the steward schedules this workflow.
